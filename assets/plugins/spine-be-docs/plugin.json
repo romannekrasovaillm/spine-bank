@@ -1,0 +1,13 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "spine-be-docs",
+  "version": "1.0.0",
+  "description": "Справка по самому Spine-BE: ответы на вопросы о харнesse arch-be (команды, слэш-команды, инструменты, конфигурация, модели, плагины, контур контроля, SDK, архитектура, ADR) строго по документации репозитория, а не по памяти.",
+  "keywords": [
+    "spine-be",
+    "arch-be",
+    "documentation",
+    "self-docs",
+    "help"
+  ]
+}

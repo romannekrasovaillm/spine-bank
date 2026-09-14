@@ -1,0 +1,86 @@
+# CONSTRAINTS.massrun.yaml — единый гейт массового прогона (10 правил).
+# Выведен из ORG-STANDARDS.md v1.0. Зафиксирован ДО генераций.
+# Один и тот же для всех ячеек:
+#   arch-be control check <cell> --constraints CONSTRAINTS.massrun.yaml --json
+# severity: critical|high -> error, medium -> warn (схема arch-be control).
+constraints:
+  # S-01: деньги — не f64/f32
+  - id: M-01
+    name: no-f64-money
+    type: must_not_contain
+    glob: "**/*.rs"
+    pattern: "\\bf(64|32)\\b"
+    severity: critical
+
+  # S-02: ключ идемпотентности
+  - id: M-02
+    name: idempotency-key
+    type: must_contain
+    glob: "**/*.rs"
+    pattern: "(?i)idempotenc"
+    severity: critical
+
+  # S-03: запрет unwrap/expect/panic
+  - id: M-03
+    name: no-unwrap-expect-panic
+    type: must_not_contain
+    glob: "**/*.rs"
+    pattern: "\\.unwrap\\(\\)|\\.expect\\(|panic!|unreachable!|todo!|unimplemented!"
+    severity: critical
+
+  # S-04: запрет ПДн/PAN в логах
+  - id: M-04
+    name: no-pii-logs
+    type: must_not_contain
+    glob: "**/*.rs"
+    pattern: "(?i)(println!|print!|log::(info|debug|warn|error|trace)!|tracing::(info|debug|warn|error)!|eprintln!)[^\\n]*(card_number|full_pan|\\bpan\\b|holder|cardholder|фио|full_name|card_num)"
+    severity: critical
+
+  # S-05/S-10: типизированные ошибки (enum ошибок в стиле thiserror)
+  - id: M-05
+    name: typed-errors
+    type: must_contain
+    glob: "**/*.rs"
+    pattern: "enum\\s+\\w*[Ee]rror"
+    severity: critical
+
+  # S-06: запрет глобального мутабельного состояния
+  - id: M-06
+    name: no-global-mutable-state
+    type: must_not_contain
+    glob: "**/*.rs"
+    pattern: "static\\s+mut|lazy_static!|static\\s+ref\\s|static\\s+\\w+\\s*:\\s*(Mutex|RwLock)"
+    severity: critical
+
+  # S-07: блокирующие сетевые вызовы без таймаута (warn: regex не может
+  # проверить наличие таймаута, ловим только явно блокирующие API)
+  - id: M-07
+    name: blocking-network
+    type: must_not_contain
+    glob: "**/*.rs"
+    pattern: "reqwest::blocking|ureq::(get|post)|std::net::TcpStream::connect"
+    severity: medium
+
+  # S-08: секреты литералами в коде
+  - id: M-08
+    name: no-hardcoded-secrets
+    type: must_not_contain
+    glob: "**/*.rs"
+    pattern: "(?i)(password|api_key|secret_key|secret|token)\\s*(:\\s*&str)?\\s*=\\s*\"[^\"]{6,}\""
+    severity: critical
+
+  # S-05: ошибки строками / Box<dyn Error>
+  - id: M-09
+    name: no-string-errors
+    type: must_not_contain
+    glob: "**/*.rs"
+    pattern: "Err\\(\\s*\"|Box<dyn\\s+(std::)?error::Error"
+    severity: critical
+
+  # S-01: позитивное представление денег (warn: minor units / Decimal)
+  - id: M-10
+    name: money-representation
+    type: must_contain
+    glob: "**/*.rs"
+    pattern: "(?i)(minor_units|minorunits|decimal|копе|_cents\\b|amount_minor)"
+    severity: medium

@@ -1,0 +1,34 @@
+{
+  "kind": "rollback_rehearsal",
+  "gate": "A4",
+  "passed": true,
+  "baseline_commit": "0ef8d8f",
+  "rehearsed_at": "2026-09-04T16:48:52.520346405+00:00",
+  "duration_secs": 0.568007093,
+  "steps": [
+    {
+      "name": "якорь-доступен",
+      "status": "pass",
+      "exit_code": 0,
+      "detail": "commit"
+    },
+    {
+      "name": "откат-на-baseline",
+      "status": "pass",
+      "exit_code": 0,
+      "detail": "Указатель HEAD сейчас на коммите 0ef8d8f feat(кейс-008): акт 6 демо архитектора — модель «как есть», контракты INT, каноническая дельта тарифов, границы контекстов в гейте"
+    }
+  ],
+  "verify": {
+    "name": "verify",
+    "status": "pass",
+    "exit_code": 0,
+    "detail": "команда завершилась без вывода"
+  },
+  "log": [
+    "репетиционный worktree: /tmp/arch-rehearsal-3719280-2245311 (detached на 0ef8d8f)",
+    "[PASS] якорь-доступен — commit",
+    "[PASS] откат-на-baseline — Указатель HEAD сейчас на коммите 0ef8d8f feat(кейс-008): акт 6 демо архитектора — модель «как есть», контракты INT, каноническая дельта тарифов, границы контекстов в гейте",
+    "[PASS] verify — команда завершилась без вывода"
+  ]
+}

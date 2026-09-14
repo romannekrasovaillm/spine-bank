@@ -1,0 +1,159 @@
+{
+  "cells_total": 180,
+  "gated": 180,
+  "failed": 0,
+  "failed_cells": [],
+  "errors_by_variant": {
+    "A": 367,
+    "B": 32,
+    "C": 24
+  },
+  "errors_by_variant_solver": {
+    "ds": {
+      "A": 231,
+      "B": 17,
+      "C": 18
+    },
+    "glm": {
+      "A": 136,
+      "B": 15,
+      "C": 6
+    }
+  },
+  "clean_share": {
+    "A": 0.0,
+    "B": 0.7333,
+    "C": 0.8333
+  },
+  "clean_share_solver": {
+    "ds": {
+      "A": 0.0,
+      "B": 0.7667,
+      "C": 0.8
+    },
+    "glm": {
+      "A": 0.0,
+      "B": 0.7,
+      "C": 0.8667
+    }
+  },
+  "counts": {
+    "A": 60,
+    "B": 60,
+    "C": 60
+  },
+  "per_rule_errors": {
+    "A": {
+      "no-f64-money": 115,
+      "idempotency-key": 60,
+      "no-unwrap-expect-panic": 114,
+      "no-pii-logs": 0,
+      "typed-errors": 49,
+      "no-global-mutable-state": 0,
+      "blocking-network": 0,
+      "no-hardcoded-secrets": 0,
+      "no-string-errors": 29,
+      "money-representation": 0
+    },
+    "B": {
+      "no-f64-money": 6,
+      "idempotency-key": 5,
+      "no-unwrap-expect-panic": 21,
+      "no-pii-logs": 0,
+      "typed-errors": 0,
+      "no-global-mutable-state": 0,
+      "blocking-network": 0,
+      "no-hardcoded-secrets": 0,
+      "no-string-errors": 0,
+      "money-representation": 0
+    },
+    "C": {
+      "no-f64-money": 2,
+      "idempotency-key": 2,
+      "no-unwrap-expect-panic": 18,
+      "no-pii-logs": 1,
+      "typed-errors": 0,
+      "no-global-mutable-state": 0,
+      "blocking-network": 0,
+      "no-hardcoded-secrets": 0,
+      "no-string-errors": 1,
+      "money-representation": 0
+    }
+  },
+  "table_task_variant": {
+    "T01": {
+      "A": 56,
+      "B": 0,
+      "C": 0
+    },
+    "T02": {
+      "A": 56,
+      "B": 7,
+      "C": 0
+    },
+    "T03": {
+      "A": 43,
+      "B": 1,
+      "C": 0
+    },
+    "T04": {
+      "A": 39,
+      "B": 2,
+      "C": 0
+    },
+    "T05": {
+      "A": 35,
+      "B": 3,
+      "C": 0
+    },
+    "T06": {
+      "A": 30,
+      "B": 8,
+      "C": 6
+    },
+    "T07": {
+      "A": 31,
+      "B": 0,
+      "C": 2
+    },
+    "T08": {
+      "A": 24,
+      "B": 4,
+      "C": 14
+    },
+    "T09": {
+      "A": 20,
+      "B": 2,
+      "C": 1
+    },
+    "T10": {
+      "A": 33,
+      "B": 5,
+      "C": 1
+    }
+  },
+  "bootstrap_mean_errors_per_cell": {
+    "A": {
+      "mean": 6.116666666666666,
+      "ci_lo": 5.25,
+      "ci_hi": 7.033333333333333,
+      "n": 60
+    },
+    "B": {
+      "mean": 0.5333333333333333,
+      "ci_lo": 0.2833333333333333,
+      "ci_hi": 0.8333333333333334,
+      "n": 60
+    },
+    "C": {
+      "mean": 0.4,
+      "ci_lo": 0.1,
+      "ci_hi": 0.8166666666666667,
+      "n": 60
+    }
+  },
+  "effect": {
+    "A_to_C": 0.9346,
+    "B_to_C": 0.25
+  }
+}

@@ -1,0 +1,16 @@
+# План отката handoff-пакета (машиночитаемый) — репетируется на гейте A4:
+# `arch control gate A4 <repo> --rehearse`. Файл НЕ затирается повторной
+# генерацией: перед передачей перепишите шаги под фактический план отката
+# эпика (должен соответствовать разделу «План отката» TASK.md). Шаги с
+# внешними/деструктивными эффектами репетиция отклоняет — docs/control.md.
+#
+# Кейс 002 (walking skeleton H0, маршрут Critical): skeleton не затрагивает
+# продакшн — откат исполнителя = удаление namespace в Kubernetes; откат
+# пакетных артефактов кейса = возврат к baseline-коммиту репозитория.
+baseline_commit: "0ef8d8f"
+steps:
+  - name: якорь-доступен
+    run: git cat-file -t 0ef8d8f
+  - name: откат-на-baseline
+    run: git reset --hard 0ef8d8f
+verify: test -z "$(git status --porcelain --untracked-files=no)"

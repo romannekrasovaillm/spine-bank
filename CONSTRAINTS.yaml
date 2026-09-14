@@ -1,0 +1,521 @@
+# CONSTRAINTS.yaml — fitness-функции собственного репозитория Spine (dogfood, AD-9).
+#
+# Прогон:  arch-be control check . --constraints CONSTRAINTS.yaml
+# CI:      джоба dogfood (.github/workflows/ci.yml).
+# Схема:   src/control.rs (FitnessRule); корни rules:|constraints:;
+#          severity critical|high → error (ломает итог, exit 1), medium → warn.
+# Обход пропускает .git, target, node_modules, dist, __pycache__, .next,
+# .pytest_cache, .arch-handoff (src/control.rs, collect_files).
+constraints:
+  # --- AD-6: безопасный Rust -----------------------------------------------
+  - id: C-01
+    name: no_unsafe_code
+    type: must_not_contain
+    glob: "src/**/*.rs"
+    pattern: "unsafe\\s*(\\{|fn|impl)"
+    severity: critical
+
+  - id: C-02
+    name: unsafe_forbidden_in_lints
+    type: must_contain
+    glob: "Cargo.toml"
+    pattern: "unsafe_code = \"forbid\""
+    severity: critical
+
+  - id: C-03
+    name: msrv_pinned
+    type: must_contain
+    glob: "Cargo.toml"
+    pattern: "rust-version = \"1\\.85\""
+    severity: critical
+
+  # --- AD-9/AD-2: гейты CI существуют и запускают механику харнесса ---------
+  - id: C-04
+    name: ci_audit_job
+    type: must_contain
+    glob: ".github/workflows/*.yml"
+    pattern: "cargo audit"
+    severity: critical
+
+  # --- AD-3: секреты не живут в коде и конфигах -----------------------------
+  # Длина {30,} отсекает учебные фейки юнит-тестов secrets.rs/agent.rs;
+  # реальные ключи провайдеров длиннее.
+  - id: C-05
+    name: no_secret_literals_code
+    type: must_not_contain
+    glob: "src/**/*.rs"
+    pattern: "sk-[A-Za-z0-9]{30,}|ghp_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}"
+    severity: critical
+
+  - id: C-06
+    name: no_secret_literals_configs
+    type: must_not_contain
+    glob: "**/*.toml"
+    pattern: "sk-[A-Za-z0-9]{30,}"
+    severity: critical
+
+  # --- AD-2: политика автономии применяется в dispatch ----------------------
+  - id: C-07
+    name: policy_enforced_in_dispatch
+    type: must_contain
+    glob: "src/tool.rs"
+    pattern: "self\\.policy\\.check"
+    severity: critical
+
+  # --- AD-5: сессионный журнал JSONL ----------------------------------------
+  - id: C-08
+    name: session_journal_jsonl
+    type: must_contain
+    glob: "src/**/*.rs"
+    pattern: "jsonl"
+    severity: high
+
+  # --- AD-1/AD-10: библиотека плагинов в репозитории ------------------------
+  - id: C-09
+    name: plugin_library_present
+    type: file_exists
+    path: "assets/plugins"
+    severity: high
+
+  # --- AD-4: единый провайдерный трейт --------------------------------------
+  - id: C-10
+    name: single_provider_trait
+    type: must_contain
+    glob: "src/llm.rs"
+    pattern: "trait LlmProvider"
+    severity: high
+
+  # --- AD-8: headless JSON-контракт результата handoff ----------------------
+  - id: C-11
+    name: handoff_json_contract
+    type: must_contain
+    glob: "src/**/*.rs"
+    pattern: "open_questions"
+    severity: high
+
+  # --- AD-9: джоба dogfood прогоняет этот же гейт в CI ----------------------
+  - id: C-12
+    name: dogfood_ci_job
+    type: must_contain
+    glob: ".github/workflows/*.yml"
+    pattern: "control check"
+    severity: critical
+
+  # --- Конвенции репозитория -------------------------------------------------
+  - id: C-13
+    name: readme_bilingual
+    type: must_contain
+    glob: "README.md"
+    pattern: "🇬🇧 English"
+    severity: medium
+
+  - id: C-14
+    name: license_present
+    type: file_exists
+    path: "LICENSE"
+    severity: critical
+
+  - id: C-15
+    name: agents_md_present
+    type: file_exists
+    path: "AGENTS.md"
+    severity: critical
+
+  - id: C-16
+    name: architecture_doc_present
+    type: file_exists
+    path: "docs/architecture.md"
+    severity: high
+
+  - id: C-17
+    name: adr_practice
+    type: must_contain
+    glob: "docs/adr/*.md"
+    pattern: "(?m)^# ADR-[0-9]+"
+    severity: high
+
+  # --- Гейты качества (полный прогон = качественный гейт репозитория) -------
+  - id: C-18
+    name: rustfmt_gate
+    type: command_succeeds
+    command: "cargo fmt --all -- --check"
+    timeout_secs: 120
+    severity: critical
+
+  - id: C-19
+    name: tests_pass
+    type: command_succeeds
+    command: "cargo test --quiet"
+    timeout_secs: 900
+    severity: critical
+
+  # --- AD-6/AD-9: clippy-гейт в строгом режиме (P2-4 закрыта) ----------------
+  - id: C-20
+    name: ci_clippy_deny_warnings
+    type: must_contain
+    glob: ".github/workflows/*.yml"
+    pattern: "clippy --all-targets -- -D warnings"
+    severity: high
+
+  # --- Continuous evals конфигурации харнесса (docs/evals.md) ----------------
+  - id: C-21
+    name: eval_suite_present
+    type: file_exists
+    path: "assets/evals/agent-config"
+    severity: high
+
+  - id: C-22
+    name: eval_ci_job
+    type: must_contain
+    glob: ".github/workflows/*.yml"
+    pattern: "arch eval run"
+    severity: high
+
+  # --- AD-BE1..BE4: продуктовые инварианты Spine Banking Edition ------------
+  # (ARCHITECTURE-SPINE-BE.md; ADR-010…014). Глоб-движок без брейсов {a,b} —
+  # поэтому каждое правило с узким glob; ADR/спайны вне scope: там запрет
+  # обсуждается легитимно.
+  - id: BE-01a
+    name: banking_zone_license_header_md
+    type: must_contain
+    glob: "banking/**/*.md"
+    pattern: "SPINE BANKING EDITION — BANKING ZONE \\(proprietary\\)"
+    severity: critical
+
+  - id: BE-01b
+    name: banking_zone_license_header_yaml
+    type: must_contain
+    glob: "banking/**/*.yaml"
+    pattern: "SPINE BANKING EDITION — BANKING ZONE \\(proprietary\\)"
+    severity: critical
+
+  - id: BE-02a
+    name: no_yandexgpt_in_code
+    type: must_not_contain
+    glob: "src/**/*.rs"
+    pattern: "(?i)yandexgpt"
+    severity: critical
+
+  - id: BE-02b
+    name: no_yandexgpt_in_configs
+    type: must_not_contain
+    glob: "*.toml"
+    pattern: "(?i)yandexgpt"
+    severity: critical
+
+  - id: BE-02c
+    name: no_yandexgpt_in_presets
+    type: must_not_contain
+    glob: "banking/presets/**"
+    pattern: "(?i)yandexgpt"
+    severity: critical
+
+  - id: BE-03
+    name: no_external_llm_urls_in_banking_presets
+    type: must_not_contain
+    glob: "banking/presets/**"
+    pattern: "api\\.deepseek\\.com|api\\.z\\.ai|api\\.kimi\\.com|api\\.openai\\.com"
+    severity: critical
+
+  - id: BE-04a
+    name: no_research_framing_readme
+    type: must_not_contain
+    glob: "README.md"
+    pattern: "not for production|research project|не для промышленной|исследовательский проект"
+    severity: critical
+
+  - id: BE-04b
+    name: no_research_framing_agents
+    type: must_not_contain
+    glob: "AGENTS*.md"
+    pattern: "not for production|research project|не для промышленной|исследовательский проект"
+    severity: critical
+
+  - id: BE-04c
+    name: no_research_framing_banking
+    type: must_not_contain
+    glob: "banking/**/*.md"
+    pattern: "not for production|research project|не для промышленной|исследовательский проект"
+    severity: critical
+
+  - id: BE-05
+    name: product_spine_present
+    type: file_exists
+    path: "ARCHITECTURE-SPINE-BE.md"
+    severity: critical
+
+  - id: BE-06
+    name: notice_present
+    type: file_exists
+    path: "NOTICE.md"
+    severity: critical
+
+  # --- AD-BE5: egress-дисциплина (ADR-016) ------------------------------------
+  - id: BE-07
+    name: bank_profile_no_external_egress
+    type: must_not_contain
+    glob: "banking/presets/bank-profile/*"
+    pattern: "duckduckgo\\.com|api\\.deepseek\\.com|api\\.z\\.ai|api\\.kimi\\.com|api\\.openai\\.com|api\\.moonshot\\.ai"
+    severity: critical
+
+  - id: BE-08
+    name: no_public_registries_in_presets
+    type: must_not_contain
+    glob: "banking/presets/**/*.json"
+    pattern: "\\bnpx\\b|\\buvx\\b|\\bpipx\\b"
+    severity: critical
+
+  - id: BE-09
+    name: bank_profile_present
+    type: file_exists
+    path: "banking/presets/bank-profile/config.toml"
+    severity: critical
+
+  - id: BE-10
+    name: reg_map_present
+    type: file_exists
+    path: "banking/compliance/reg-map.md"
+    severity: high
+
+  # --- ADR-017: надзорный контур 719-П ----------------------------------------
+  - id: BE-11
+    name: cbr_719p_map_present
+    type: file_exists
+    path: "banking/compliance/cbr-719p.md"
+    severity: critical
+
+  - id: BE-12
+    name: pay27_supervision_block_in_preset
+    type: must_contain
+    glob: "banking/presets/payments/SPINE-PAYMENTS.md"
+    pattern: "### PAY-27: Надзорный контур НПС"
+    severity: critical
+
+  - id: BE-13
+    name: cbr_683p_map_present
+    type: file_exists
+    path: "banking/compliance/cbr-683p.md"
+    severity: critical
+
+  - id: BE-14
+    name: no_telemetry_beacons_in_src
+    type: must_not_contain
+    glob: "src/**/*.rs"
+    pattern: "(?i)sentry|posthog|amplitude|mixpanel|segment\\.io|telemetry_sdk|telemetry::init"
+    severity: critical
+
+  - id: BE-15
+    name: evidence_bundle_present
+    type: file_exists
+    path: "banking/compliance/evidence/SHA256SUMS"
+    severity: high
+
+  # --- AD-BE6: библиотека правил (ADR-019) -------------------------------------
+  - id: BE-16a
+    name: rules_library_readme_present
+    type: file_exists
+    path: "banking/library/README.md"
+    severity: critical
+
+  - id: BE-16b
+    name: wave1_rules_present
+    type: file_exists
+    path: "banking/library/fitness/wave1-mechanizable.yaml"
+    severity: critical
+
+  - id: BE-17a
+    name: wave1_cards_have_expiry
+    type: must_contain
+    glob: "banking/library/fitness/wave1-mechanizable.yaml"
+    pattern: "Owner / Expiry"
+    severity: critical
+
+  - id: BE-17b
+    name: waves_cards_have_check
+    type: must_contain
+    glob: "banking/library/fitness/wave2-mandated.yaml"
+    pattern: "Check:"
+    severity: critical
+
+  - id: BE-18
+    name: sources_catalog_present
+    type: file_exists
+    path: "banking/library/sources.md"
+    severity: high
+
+
+
+
+
+
+  # AD-BE7: бинарь продукта — arch-be (ADR-026); коллизия с апстримным arch запрещена
+  - id: BE-19
+    name: binary_named_arch_be
+    type: must_contain
+    glob: "Cargo.toml"
+    pattern: 'name = "arch-be"'
+    severity: critical
+    owner: "solution-архитектор BE"
+    expiry: "2027-09-02"
+
+  # ADR-027: интеграция Archify — модуль, регистрация, доки, тесты (AD-9)
+  - id: BE-20a
+    name: archify_module_exists
+    type: must_contain
+    glob: "src/archify.rs"
+    pattern: "ArchifyValidateTool"
+    severity: error
+    owner: "solution-архитектор BE"
+    expiry: "2027-09-03"
+
+  - id: BE-20b
+    name: archify_tool_registered
+    type: must_contain
+    glob: "src/tools.rs"
+    pattern: "archify::tools"
+    severity: error
+    owner: "solution-архитектор BE"
+    expiry: "2027-09-03"
+
+  - id: BE-20c
+    name: archify_registry_test_updated
+    type: must_contain
+    glob: "src/tools.rs"
+    pattern: "archify_validate"
+    severity: error
+    owner: "solution-архитектор BE"
+    expiry: "2027-09-03"
+
+  - id: BE-20d
+    name: archify_docs_tools_row
+    type: must_contain
+    glob: "docs/tools.md"
+    pattern: "archify_validate"
+    severity: error
+    owner: "solution-архитектор BE"
+    expiry: "2027-09-03"
+
+  - id: BE-20e
+    name: archify_tests_present
+    type: must_contain
+    glob: "src/archify.rs"
+    pattern: "#\\[test\\]|#\\[tokio::test\\]"
+    severity: error
+    owner: "solution-архитектор BE"
+    expiry: "2027-09-03"
+
+  - id: BE-20f
+    name: archify_plugin_present
+    type: file_exists
+    path: "banking/plugins/ru-archify/skills/archify-diagrams/SKILL.md"
+    severity: high
+    owner: "solution-архитектор BE"
+    expiry: "2027-09-03"
+
+  # ADR-027 / монорепозиторий: вендоренный движок Archify на месте
+  - id: BE-20g
+    name: archify_vendor_present
+    type: file_exists
+    path: "vendor/archify/bin/archify.mjs"
+    severity: high
+    owner: "solution-архитектор BE"
+    expiry: "2027-09-03"
+
+  # --- ADR-029: структурные fitness — направление зависимостей и слои ------
+  # Dogfood карточки GEN-16 (ArchUnit-класс проверок). Слоистость — по карте
+  # AGENTS.md («Architecture map»); все правила ЗЕЛЁНЫ на коде введения
+  # (неретроактивность, ADR-019): гейт блокирует эрозию слоёв, а не требует
+  # рефакторинга задним числом. Координаты — сегменты модульного пути
+  # после `crate::`; учитываются и `use crate::…`, и инлайн-пути.
+  - id: C-23
+    name: llm_provider_isolation
+    type: dependency_direction
+    glob: ["src/llm.rs", "src/llm/**"]
+    allow: [config, error, llm, net, retry]
+    severity: critical
+    owner: "solution-архитектор BE"
+    expiry: "2027-09-04"
+
+  # export.rs — задокументированное исключение (переиспользует
+  # tui::app::ChatBlock для экспорта чата, ADR-029); кандидат на
+  # вынесение ChatBlock из tui при следующем касании.
+  - id: C-24
+    name: no_tui_below_ui
+    type: dependency_direction
+    glob: "src/**/*.rs"
+    exclude_glob: ["src/tui.rs", "src/tui/**", "src/export.rs"]
+    forbid: [tui]
+    severity: critical
+    owner: "solution-архитектор BE"
+    expiry: "2027-09-04"
+
+  - id: C-25
+    name: tools_layer_no_agent_tui
+    type: dependency_direction
+    glob: ["src/tool.rs", "src/tools.rs", "src/tools/**"]
+    forbid: [agent, tui]
+    severity: critical
+    owner: "solution-архитектор BE"
+    expiry: "2027-09-04"
+
+  - id: C-26
+    name: leaf_modules_stay_leaf
+    type: dependency_direction
+    glob: ["src/error.rs", "src/secrets.rs", "src/retry.rs"]
+    allow: []
+    severity: critical
+    owner: "solution-архитектор BE"
+    expiry: "2027-09-04"
+
+  - id: C-27
+    name: no_banking_in_core_structural
+    type: dependency_direction
+    glob: "src/**/*.rs"
+    forbid: [banking]
+    severity: critical
+    owner: "solution-архитектор BE"
+    expiry: "2027-09-04"
+
+  # Паттерн внешнего инструмента GEN-16 (скрипт — переносимый эталон для
+  # проектов ДИТ: та же семантика, что у нативного dependency_direction).
+  - id: C-28
+    name: deps_check_script
+    type: command_succeeds
+    command: "python3 scripts/deps-check.py"
+    timeout_secs: 120
+    severity: critical
+    owner: "solution-архитектор BE"
+    expiry: "2027-09-04"
+
+  # Покрытие доменов ADF маппингом (замечание ревью №12): каждый domains_id
+  # снапшота обязан иметь строку в adf-mapping.md — регресс ломает сборку.
+  - id: BE-21
+    name: adf_domain_coverage
+    type: command_succeeds
+    command: "python3 scripts/adf-coverage.py"
+    timeout_secs: 60
+    severity: critical
+    owner: "solution-архитектор BE"
+    expiry: "2027-09-04"
+
+  # ADR-031 / модель угроз T5: целостность вендоренного Archify пиннута
+  # хэшами; подмена файла ломает гейт (раньше BE-20g проверяло лишь наличие).
+  - id: BE-22
+    name: archify_vendor_integrity
+    type: command_succeeds
+    command: "cd vendor/archify && sha256sum -c SHA256SUMS --quiet"
+    timeout_secs: 60
+    severity: critical
+    owner: "solution-архитектор BE"
+    expiry: "2027-09-04"
+
+  # Поставка (GEN-18 к самому продукту, docs/supply-chain.md): CI-джоба
+  # supply-chain формирует SBOM + хэши релизных артефактов.
+  - id: BE-23
+    name: supply_chain_ci_job
+    type: must_contain
+    glob: ".github/workflows/*.yml"
+    pattern: "cargo sbom"
+    severity: critical
+    owner: "solution-архитектор BE"
+    expiry: "2027-09-04"
