@@ -46,6 +46,18 @@
 > define your own invariants and fitness rules: the artifacts are a working
 > methodology, not a ready-made guarantee for your context.
 
+> [!IMPORTANT]
+> **🇷🇺 Публичный снапшот:** это публичное зеркало ядра — снимок дерева без
+> истории коммитов. Директория `banking/` (Banking Zone, `LICENSE.banking`)
+> здесь отсутствует: зона поставляется по договору и не публикуется. Поэтому
+> ссылки на `banking/...` в документации и ADR в этом репозитории не
+> разрешаются.
+> **🇬🇧 Public snapshot:** this is the public mirror of the core — a tree
+> snapshot without commit history. The `banking/` directory (Banking Zone,
+> `LICENSE.banking`) is not present here: the zone ships under contract and is
+> not published. References to `banking/...` in the documentation and ADRs
+> therefore do not resolve in this repository.
+
 ---
 
 <a id="русский"></a>
