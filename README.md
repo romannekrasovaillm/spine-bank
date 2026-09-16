@@ -5,7 +5,7 @@
 <p align="center">
   <b>Доменный харнесс solution-архитектора банковского корпоративного контура</b><br>
   <sub>spine-инварианты · ADR · fitness-гейты · рубрики с LLM-судьёй · handoff кодовым харнессам · флоты субагентов<br>
-  A domain agent harness for banking solution architects — one Rust binary: TUI + CLI + library. Research project, not for production.</sub>
+  A domain agent harness for banking solution architects — one Rust binary: TUI + CLI + library.</sub>
 </p>
 
 <p align="center">
