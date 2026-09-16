@@ -172,7 +172,7 @@ constraints:
     name: eval_ci_job
     type: must_contain
     glob: ".github/workflows/*.yml"
-    pattern: "arch eval run"
+    pattern: "arch-be eval run"
     severity: high
 
   - id: BE-02a
