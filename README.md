@@ -1,62 +1,81 @@
-# Spine
-
 <p align="center">
-  <b>🇷🇺 <a href="#русский">Русский</a></b> | <b>🇬🇧 <a href="#english">English</a></b>
+  <img src="docs/screenshots/00-banner.png" alt="Spine Banking Edition — доменный харнесс solution-архитектора банковского контура" width="100%">
 </p>
 
 <p align="center">
-  <a href="https://github.com/romannekrasovaillm/spine/actions/workflows/ci.yml"><img src="https://github.com/romannekrasovaillm/spine/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <b>Доменный харнесс solution-архитектора банковского корпоративного контура</b><br>
+  <sub>spine-инварианты · ADR · fitness-гейты · рубрики с LLM-судьёй · handoff кодовым харнессам · флоты субагентов<br>
+  A domain agent harness for banking solution architects — one Rust binary: TUI + CLI + library. Research project, not for production.</sub>
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/02-chat-mermaid.png" alt="Spine: архитектурный ход — скиллы, база знаний, скоринг, живой mermaid-арт, индикатор контекста и фоновые субагенты · architecture turn: skills, KB, scoring, live mermaid, context gauge, background subagents" width="88%">
+  <a href="https://github.com/romannekrasovaillm/spine-bank/actions/workflows/ci.yml"><img src="https://github.com/romannekrasovaillm/spine-bank/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <img src="https://img.shields.io/badge/rust-edition_2024-e43717?logo=rust&logoColor=white" alt="Rust edition 2024">
+  <img src="https://img.shields.io/badge/license-MIT-green" alt="License MIT">
+  <img src="https://img.shields.io/badge/cases-10-blueviolet" alt="10 cases">
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/01-splash.svg" alt="Заставка Tokyo Night · splash: SPINE · Banking Edition" width="32%">
-  <img src="docs/screenshots/03-model-picker.png" alt="Пикер моделей · model picker" width="32%">
-  <img src="docs/screenshots/04-rubric.png" alt="Якорная рубрика, бенчмарк и индикатор контекста за порогом L1 · anchor rubric, benchmark and the context gauge past L1" width="32%">
+  <b>🇷🇺 <a href="#русский">Русский</a></b> · <b>🇬🇧 <a href="#english">English</a></b> · <b>🧪 <a href="#кейсы">Кейсы</a></b> · <b>📦 <a href="docs/handoff_walkthrough.md">Handoff walkthrough</a></b>
+</p>
+
+---
+
+<p align="center">
+  <img src="docs/screenshots/02-chat-mermaid.png" alt="Spine: архитектурный ход — скиллы, база знаний, скоринг, живой mermaid-арт, индикатор контекста и фоновые субагенты · architecture turn: skills, KB, scoring, live mermaid, context gauge, background subagents" width="92%">
 </p>
 
 <p align="center">
-  <a href="docs/handoff_walkthrough.md"><img src="docs/screenshots/05-handoff.png" alt="Handoff кодовому харнессу: handoff_create собирает пакет .arch-handoff/, harness_run прогоняет Claude Code с умными таймаутами, контракт результата в сводке, control_check подтверждает целостность · handoff walkthrough" width="88%"></a>
+  <img src="docs/screenshots/01-splash.png" alt="Заставка Tokyo Night · splash: ARCH SPINE · Banking Edition" width="30%">
+  <img src="docs/screenshots/03-model-picker.png" alt="Пикер моделей · model picker" width="30%">
+  <img src="docs/screenshots/04-rubric.png" alt="Якорная рубрика, бенчмарк и индикатор контекста за порогом L1 · anchor rubric, benchmark and the context gauge past L1" width="30%">
 </p>
 
 <p align="center">
+  <sub>Кадры — снимки реальных экранов TUI (рендерятся из кода тестом, не макеты) ·
+  Real TUI renders, generated from code — not mockups.</sub>
+</p>
+
+<h2 id="кейсы">🧪 Кейсы — сквозные прогоны, а не обещания</h2>
+
+Каждый кейс — самодостаточный пример работы архитектора с харнессом: от
+spine-инвариантов до пакета передачи кодовому харнессу. Эталон полного набора —
+[`sbp-gateway`](кейсы/sbp-gateway/), реестр и конвенции — [`кейсы/AGENTS.md`](кейсы/AGENTS.md).
+
+| Кейс | Модель | Что показывает |
+|------|--------|----------------|
+| [sbp-gateway](кейсы/sbp-gateway/) | DeepSeek V4 Flash | Полный цикл: spine → solutioning → ADR → контракты/NFR → handoff кодовому харнессу |
+| [payment-processing-platform](кейсы/payment-processing-platform/) | GLM-5.2 | Greenfield маршрута Critical за одну сессию: 27 инвариантов, 16 ADR, fitness-правила уже под код |
+| [govproc-platform](кейсы/govproc-platform/) | Kimi K3 | Компактный комплект: 7 AD, 5 ADR, OpenAPI-контракт как первоклассный артефакт |
+| [parallel-epics](кейсы/parallel-epics/) | Claude Code ×3 | Параллельный флот по worktree: стыки сошлись с первой сборки (15/15 тестов) |
+| [fleet-of-ten](кейсы/fleet-of-ten/) | Claude Code ×10 | Десять эпиков за ~3,2 мин стены: 10/10 complete, флот **сам** закоммитил работу |
+| [drift-control](кейсы/drift-control/) | Claude Code (A/B) | Голая задача → гейт FAIL 2/6; та же задача + handoff-пакет → PASS 6/6 |
+| [fleet-spine-drift](кейсы/fleet-spine-drift/) | — (механический) | Аудит флота: дубли 66.7% и дрейф `CONSTRAINTS.yaml` как exit-код; delta guard запрещает правки спайна мимо дельты |
+| [legacy-survey](кейсы/legacy-survey/) | — (механический) | Reverse discovery legacy-монолита: скрытые связи с `[confirmed]` и честные `[gap]` |
+| [jvm-archunit-gate](кейсы/jvm-archunit-gate/) | — (механический) | Один `CONSTRAINTS.yaml` — два исполнителя: нативный гейт и настоящий ArchUnit по байткоду |
+| [fleet-patterns](кейсы/fleet-patterns/) | — (механический) | Движок оркестрации флотов: fanout / pipeline / map_reduce / tournament / dag с механическими гейтами узлов |
+
+<p align="center">
+  <a href="docs/handoff_walkthrough.md"><img src="docs/screenshots/05-handoff.png" alt="Handoff кодовому харнессу: handoff_create собирает пакет .arch-handoff/, harness_run прогоняет Claude Code с умными таймаутами, контракт результата в сводке, control_check подтверждает целостность · handoff walkthrough" width="92%"></a><br>
   <sub>Передача контекста кодовому харнессу — пошагово: <a href="docs/handoff_walkthrough.md">docs/handoff_walkthrough.md</a> ·
   Handing context to a coding harness, step by step.</sub>
-</p>
-
-<p align="center">
-  <sub>Кадры — снимки реальных экранов TUI (рендерятся из кода тестом, не макеты); внизу каждого —
-  живой индикатор контекстного окна · Screenshots are renders of the real TUI (generated from code,
-  not mockups); note the live context-window gauge in each status bar.</sub>
 </p>
 
 > [!NOTE]
 > **🇷🇺 Продукт:** Spine Banking Edition — продуктовый форк Spine (AD-BE4,
 > ADR-010…014). Ядро — MIT (`LICENSE`), банковская надстройка `banking/` —
-> proprietary (`LICENSE.banking`). Прежде чем строить на этом коде
+> proprietary (`LICENSE.banking`). **Это публичный снапшот ядра: зона
+> `banking/` в репозиторий не входит.** Прежде чем строить на этом коде
 > промышленное решение, зафиксируйте собственные инварианты и fitness-правила:
 > артефакты (`docs/adr/`, `ARCHITECTURE-SPINE.md`) — рабочая методика, а не
 > готовая гарантия под ваш контур.
 > **🇬🇧 Product:** Spine Banking Edition — a product fork of Spine. Core is
 > MIT-licensed (`LICENSE`); the banking layer `banking/` is proprietary
-> (`LICENSE.banking`). Before building a production solution on this code,
-> define your own invariants and fitness rules: the artifacts are a working
-> methodology, not a ready-made guarantee for your context.
-
-> [!IMPORTANT]
-> **🇷🇺 Публичный снапшот:** это публичное зеркало ядра — снимок дерева без
-> истории коммитов. Директория `banking/` (Banking Zone, `LICENSE.banking`)
-> здесь отсутствует: зона поставляется по договору и не публикуется. Поэтому
-> ссылки на `banking/...` в документации и ADR в этом репозитории не
-> разрешаются.
-> **🇬🇧 Public snapshot:** this is the public mirror of the core — a tree
-> snapshot without commit history. The `banking/` directory (Banking Zone,
-> `LICENSE.banking`) is not present here: the zone ships under contract and is
-> not published. References to `banking/...` in the documentation and ADRs
-> therefore do not resolve in this repository.
+> (`LICENSE.banking`). **This is a public snapshot of the core — the
+> proprietary `banking/` layer is not included.** Before building a
+> production solution on this code, define your own invariants and fitness
+> rules: the artifacts are a working methodology, not a ready-made guarantee
+> for your context.
 
 ---
 

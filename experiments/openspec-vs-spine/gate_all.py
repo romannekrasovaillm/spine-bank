@@ -13,7 +13,7 @@ from pathlib import Path
 
 BASE = Path(__file__).resolve().parent
 CONSTRAINTS = BASE / "CONSTRAINTS.massrun.yaml"
-ARCH_BE = "/home/roman/.local/bin/arch-be"
+ARCH_BE = "/home/user/.local/bin/arch-be"
 RULES = ["no-f64-money", "idempotency-key", "no-unwrap-expect-panic",
          "no-pii-logs", "typed-errors", "no-global-mutable-state",
          "blocking-network", "no-hardcoded-secrets", "no-string-errors",

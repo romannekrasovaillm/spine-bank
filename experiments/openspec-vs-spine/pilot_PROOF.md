@@ -7,7 +7,7 @@
 | Компонент | Версия / факт |
 |---|---|
 | OpenSpec CLI (`@fission-ai/openspec`, npx) | 1.12.0 |
-| arch-be (Spine BE-харнесс) | 0.1.0 (`~/.local/bin/arch-be` → `/home/roman/spine-bank/target/release/arch-be`) |
+| arch-be (Spine BE-харнесс) | 0.1.0 (`~/.local/bin/arch-be` → `/home/user/spine-bank/target/release/arch-be`) |
 | Python | 3.11.8 (скрипты — только stdlib) |
 | LLM для части 7 | endpoint `https://api.deepseek.com`, запрошенный id `deepseek-chat`, фактический (echo в ответе) — `deepseek-v4-flash`, температура 0 |
 | Фикстура | `/tmp/openspec_spine_proof/p2p-core` (Rust-скелет, git) |

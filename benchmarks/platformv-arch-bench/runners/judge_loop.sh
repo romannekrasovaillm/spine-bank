@@ -4,8 +4,8 @@
 # answer.md >= 500B и нет judge.json. Выход — когда неосуждённых 0 И
 # glm-драйвер мёртв (больше новых ответов не будет).
 set -u
-BENCH=/home/roman/spine-bank/benchmarks/platformv-arch-bench
-RUNS=/home/roman/experiments/0909-platformv-arch-benchmark
+BENCH=/home/user/spine-bank/benchmarks/platformv-arch-bench
+RUNS=/home/user/experiments/0909-platformv-arch-benchmark
 LOG=$RUNS/logs/judge_loop.log
 export PVBENCH_RUNS=$RUNS
 export PVBENCH_JUDGE_URL=https://api.deepseek.com/v1/chat/completions
