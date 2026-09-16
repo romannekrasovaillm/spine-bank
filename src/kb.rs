@@ -481,8 +481,10 @@ fn parse_file(path: &Path, mtime: Option<SystemTime>, len: u64) -> Option<Cached
         let line = raw.trim_end_matches(['\n', '\r']);
         let tokens = tokenize(line);
         doc_tokens += tokens.len();
-        if markdown && let Some(title) = heading_title(line) {
-            headings.push((idx, title));
+        if markdown {
+            if let Some(title) = heading_title(line) {
+                headings.push((idx, title));
+            }
         }
         lines.push(LineIndex {
             start: offset,
