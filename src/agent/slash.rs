@@ -36,6 +36,8 @@ pub enum SlashOutcome {
     NewSession,
     /// Выход из приложения.
     Quit,
+    /// `/intro`: реиграция стартовой заставки (TUI проигрывает демо-сессию).
+    PlayIntro,
     /// Неизвестная команда.
     Unknown(String),
     /// Ввод не является слэш-командой — передать модели.
@@ -85,6 +87,7 @@ pub async fn execute(
         "/tools" => Ok(SlashOutcome::Handled(tools_text(session))),
         "/prompts" => cmd_prompts(rest, ctx),
         "/mermaid" => cmd_mermaid(rest, ctx),
+        "/intro" => Ok(SlashOutcome::PlayIntro),
         "/adr" => cmd_adr(rest, ctx),
         "/spine" => cmd_spine(rest, ctx),
         "/rubric" => cmd_rubric(rest, ctx).await,
@@ -133,6 +136,7 @@ pub fn catalog() -> Vec<(&'static str, &'static str)> {
         ("/tools", "список инструментов"),
         ("/prompts [name]", "библиотека промптов / показать шаблон"),
         ("/mermaid <file|код>", "рендер mermaid в ASCII"),
+        ("/intro", "реиграция стартовой заставки (демо-сессия)"),
         ("/adr new <title>", "новый ADR по шаблону"),
         ("/spine lint <file>", "линтер ARCHITECTURE-SPINE.md"),
         ("/rubric list|run", "рубрики: список / оценка файла"),

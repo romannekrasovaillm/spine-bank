@@ -37,6 +37,7 @@ use crate::config::Config;
 use crate::error::{HarnessError, Result};
 
 pub(crate) mod app;
+mod intro;
 mod render;
 #[cfg(test)]
 pub(crate) mod shot;
@@ -64,6 +65,8 @@ pub async fn run(cfg: Arc<Config>) -> Result<()> {
         .map_err(|e| HarnessError::Tui(format!("очистка экрана: {e}")))?;
 
     let mut app = App::build(cfg).await;
+    // Стартовая заставка-интро: «живая сессия» поверх экрана Splash.
+    app.start_intro();
     let (msg_tx, mut msg_rx) = mpsc::channel::<AppMessage>(APP_CHANNEL_CAP);
     app.attach(msg_tx);
 

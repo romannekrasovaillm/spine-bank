@@ -73,6 +73,7 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App) {
     let theme = app.theme;
     f.render_widget(Block::default().style(theme.base()), f.area());
     match &app.screen {
+        Screen::Splash | Screen::Chat if app.intro.is_some() => super::intro::draw(f, app),
         Screen::Splash => draw_splash(f, f.area(), &theme),
         Screen::Fatal(error) => {
             let error = error.clone();
