@@ -22,6 +22,14 @@
 ---
 
 <p align="center">
+  <img src="docs/screenshots/00-demo.svg" alt="Живая сессия Spine Banking Edition (анимация): платёжный шлюз СБП (C2B), вызовы инструментов, ответ архитектора, mermaid-рендер, control_score · live session (animated)" width="92%">
+</p>
+
+<p align="center">
+  <sub>Живая сессия — анимированный цикл 14 с, проигрывается прямо здесь · Live session — a 14-second animated loop, plays inline.</sub>
+</p>
+
+<p align="center">
   <img src="docs/screenshots/02-chat-mermaid.png" alt="Spine: архитектурный ход — скиллы, база знаний, скоринг, живой mermaid-арт, индикатор контекста и фоновые субагенты · architecture turn: skills, KB, scoring, live mermaid, context gauge, background subagents" width="92%">
 </p>
 
@@ -60,6 +68,19 @@ spine-инвариантов до пакета передачи кодовому
   <sub>Передача контекста кодовому харнессу — пошагово: <a href="docs/handoff_walkthrough.md">docs/handoff_walkthrough.md</a> ·
   Handing context to a coding harness, step by step.</sub>
 </p>
+
+### 🏗 Архитектура за 10 секунд
+
+```mermaid
+flowchart TD
+  U["🏦 Solution-архитектор банковского контура"] --> T["arch-be — один бинарь: TUI + CLI + library"]
+  T --> A["Агентный цикл: turn loop · компакция L1/prune/L3 · журнал JSONL"]
+  A --> TL["Инструменты архитектора: kb · rubric · control · trace · mermaid · handoff …"]
+  A --> P["Единый OpenAI-слой: GigaChat · DeepSeek · GLM · Kimi · self-hosted в периметре"]
+  TL --> PL["Плагины и скиллы: библиотека архитектурных скиллов · fitness-библиотека"]
+  A --> G["Детерминированный контроль: fitness-гейты и спайн-гейт — без LLM"]
+  A --> H["handoff → кодовые харнессы: пакет .arch-handoff + контракт результата"]
+```
 
 > [!NOTE]
 > **🇷🇺 Продукт:** Spine Banking Edition — продуктовый форк Spine (AD-BE4,
