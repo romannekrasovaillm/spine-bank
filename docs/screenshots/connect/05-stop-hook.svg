@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="714" height="217" viewBox="0 0 714 217">
+<rect x="0.5" y="0.5" width="713" height="216" rx="10" fill="#1a1b26" stroke="#3b4261"/>
+<circle cx="20" cy="14" r="5" fill="#f7768e"/>
+<circle cx="38" cy="14" r="5" fill="#e0af68"/>
+<circle cx="56" cy="14" r="5" fill="#9ece6a"/>
+<text x="357.0" y="18" text-anchor="middle" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="12" fill="#565f89">claude -p (Stop-хук блокирует завершение) — реальный трейс</text>
+<text x="14.0" y="49.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#9ece6a">$</text>
+<text x="32.06" y="49.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#c0caf5">claude -p "Ответь одним словом: Готово. Ничего не изменяй."</text>
+<text x="14.0" y="68.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#565f89">Claude пытается завершить ход — срабатывает Stop-хук spine:</text>
+<text x="14.0" y="87.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#e0af68">Stop hook feedback: arch-be control check .</text>
+<text x="14.0" y="106.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#f7768e">Правил: 2, нарушений: 2 (error: 2, warn: 0)</text>
+<text x="14.0" y="125.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#f7768e">  [error] src/main.rs:2 no_float_for_money — запрещённый паттерн '\bf64\b'</text>
+<text x="14.0" y="144.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#f7768e">  [error] src/**/*.rs:0 tests_present — паттерн '#\[test\]' не найден</text>
+<text x="14.0" y="163.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#f7768e">spine-connect: fitness-гейт FAIL — исправьте находки error перед завершением</text>
+<text x="14.0" y="182.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#565f89">exit 2 → завершение ЗАБЛОКИРОВАНО, находки уходят агенту как feedback</text>
+<text x="14.0" y="201.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#565f89">(в трейсе: 4 попытки остановки — 4 блокировки, пока нарушения не исправлены)</text>
+</svg>

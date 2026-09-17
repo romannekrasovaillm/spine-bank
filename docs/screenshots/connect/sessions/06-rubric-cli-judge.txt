@@ -1,0 +1,17 @@
+arch-be rubric run adr_quality — судья: подписка Claude Code (kind="cli")
+$ cat ~/.config/arch-harness/config.toml
+default_model = "claude-cli"
+[models.claude-cli]
+kind = "cli"          # LLM = чужой CLI, API-ключи НЕ нужны
+command = "claude"
+args = ["-p"]
+$ arch-be rubric run adr_quality adr.md
+# Оценка по рубрике «adr_quality» (дословный вывод, сокращён)
+  context                2.00  3  Цитата: "Платёжный сервис хранит суммы в f64..."
+  alternatives           3.00  3  Цитата: "1. f64 + округление — отвергнуто..."
+  negative_consequences  2.00  3  Цитата: "Минус: миграция существующих колонок БД."
+  reversibility          2.00  3  Цитата: "Обратимость: обратная миграция..."
+  status_discipline      1.00  3  Цитата: "## Статус Accepted (2026-09-17)"
++ Взвешенный итог: 3.00/5
++ Судья: claude-code (подписка) (сэмплов на критерий: 3)
+! Отчёт сохранён: reports/rubric-adr_quality-20260917-144723.md

@@ -1,0 +1,21 @@
+Шаг 2. Что записалось в проект
+$ cat .mcp.json
+{
+  "mcpServers": {
+    "spine": {
+      "args": [
+        "mcp",
+        "serve"
+      ],
+      "command": "arch-be"
+    }
+  }
+}
+$ ls .claude/skills | wc -l
+55
+$ head -5 CLAUDE.md
+# CLAUDE.md
+
+Контекст для Claude Code. Точка входа в инструкции репозитория — AGENTS.md.
+
+<!-- SPINE:BEGIN -->

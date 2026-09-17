@@ -1,0 +1,11 @@
+Шаг 4. Агент проверяет проект через spine и чинит нарушения (реальный прогон)
+$ claude -p "Вызови mcp__spine__fitness_check. Если FAIL — исправь и перепроверь."
+# fitness_check → FAIL:
+Правил: 2, нарушений: 2 (error: 2, warn: 0)
+  [error] src/**/*.rs:0 tests_present — must_contain: паттерн '#\[test\]' не найден ни в одном файле по glob 'src/**/*.rs'
+  [error] src/main.rs:2 no_float_for_money — must_not_contain: запрещённый паттерн '\bf64\b': let price: f64 = 19.99;
+Итог: FAIL
+# Claude Code: заменил f64 на Money(i64, копейки), добавил #[test]-тесты,
+# повторный fitness_check → PASS. Дословный финал сессии:
++ "Fixed both violations: no_float_for_money — replaced f64 with Money struct
++  holding i64 cents; tests_present — added #[cfg(test)] mod. Verified: 3 passed."

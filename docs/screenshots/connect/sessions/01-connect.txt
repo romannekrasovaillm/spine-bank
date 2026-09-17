@@ -1,0 +1,21 @@
+Шаг 1. Установка и подключение (каталог проекта)
+$ curl -L -o arch-be https://github.com/romannekrasovaillm/spine-bank/releases/latest/download/arch-be-linux-x86_64
++ chmod +x arch-be && mv arch-be ~/.local/bin/
+$ cd ~/projects/payment-svc && arch-be connect claude
+Подключение Spine к хосту «claude» — ~/projects/payment-svc
+
+Записано:
+  + ~/projects/payment-svc/.mcp.json
+  + ~/projects/payment-svc/.claude/settings.json
+  + ~/projects/payment-svc/CLAUDE.md
+Скиллы (55):
+Заметки:
+  - хуки добавлены: Stop (маркер «spine-connect» — повторный connect дублей не плодит)
+  - семантика хуков: fail-soft на инфраструктуру (нет arch-be или .arch-handoff/CONSTRAINTS.yaml — молча пропуск), блок (exit 2) — только при вердикте «Итог: FAIL»; PostToolUse-гейт на каждую правку — через --strict-hooks (дорого на репозиториях с command_succeeds-правилами)
+  - субагенты плагинов (agents/*.md) не разворачиваются — при необходимости скопируйте вручную из ~/.arch-harness/plugins после `arch-be init`
+
+Следующие шаги:
+  1. перезапустите Claude Code (`claude`) в этом каталоге
+  2. проверьте подключение: `claude mcp list` — в списке сервер «spine»
+  3. инструменты видны агенту как `mcp__spine__*`; режим сервера: read-only
+  ... (55 скиллов скопировано в .claude/skills/ — список в docs/CONNECT.md)

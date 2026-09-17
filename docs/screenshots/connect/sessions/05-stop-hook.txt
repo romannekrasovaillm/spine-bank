@@ -1,0 +1,10 @@
+claude -p (Stop-хук блокирует завершение) — реальный трейс
+$ claude -p "Ответь одним словом: Готово. Ничего не изменяй."
+# Claude пытается завершить ход — срабатывает Stop-хук spine:
+! Stop hook feedback: arch-be control check .
+- Правил: 2, нарушений: 2 (error: 2, warn: 0)
+-   [error] src/main.rs:2 no_float_for_money — запрещённый паттерн '\bf64\b'
+-   [error] src/**/*.rs:0 tests_present — паттерн '#\[test\]' не найден
+- spine-connect: fitness-гейт FAIL — исправьте находки error перед завершением
+# exit 2 → завершение ЗАБЛОКИРОВАНО, находки уходят агенту как feedback
+# (в трейсе: 4 попытки остановки — 4 блокировки, пока нарушения не исправлены)

@@ -1,0 +1,7 @@
+Шаг 3. Claude Code видит spine; рукопожатие MCP вручную
+$ claude mcp list
+spine: arch-be mcp serve - ✔ Connected
+$ echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | arch-be mcp serve
++ инструментов: 20
+  spine_lint, fitness_check, significance_score, trace_check, model_query, rubric_run, kb_search, skill_search, skill_load, mermaid_render, rubric_prompt, rubric_verify
+  agentsmd_lint, archify_validate, asyncapi_lint, contract_diff, fleet_audit, openapi_lint, plugin_list, rubric_list

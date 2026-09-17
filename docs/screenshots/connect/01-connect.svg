@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="483" viewBox="0 0 1120 483">
+<rect x="0.5" y="0.5" width="1119" height="482" rx="10" fill="#1a1b26" stroke="#3b4261"/>
+<circle cx="20" cy="14" r="5" fill="#f7768e"/>
+<circle cx="38" cy="14" r="5" fill="#e0af68"/>
+<circle cx="56" cy="14" r="5" fill="#9ece6a"/>
+<text x="560.0" y="18" text-anchor="middle" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="12" fill="#565f89">Шаг 1. Установка и подключение (каталог проекта)</text>
+<text x="14.0" y="49.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#9ece6a">$</text>
+<text x="32.06" y="49.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#c0caf5">curl -L -o arch-be https://github.com/romannekrasovaillm/spine-bank/releases/latest/download/arch-be-linux-x86_64</text>
+<text x="14.0" y="68.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#9ece6a">chmod +x arch-be &amp;&amp; mv arch-be ~/.local/bin/</text>
+<text x="14.0" y="87.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#9ece6a">$</text>
+<text x="32.06" y="87.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#c0caf5">cd ~/projects/payment-svc &amp;&amp; arch-be connect claude</text>
+<text x="14.0" y="106.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#c0caf5">Подключение Spine к хосту «claude» — ~/projects/payment-svc</text>
+<text x="14.0" y="125.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#c0caf5"></text>
+<text x="14.0" y="144.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#c0caf5">Записано:</text>
+<text x="14.0" y="163.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#c0caf5">  + ~/projects/payment-svc/.mcp.json</text>
+<text x="14.0" y="182.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#c0caf5">  + ~/projects/payment-svc/.claude/settings.json</text>
+<text x="14.0" y="201.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#c0caf5">  + ~/projects/payment-svc/CLAUDE.md</text>
+<text x="14.0" y="220.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#c0caf5">Скиллы (55):</text>
+<text x="14.0" y="239.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#c0caf5">Заметки:</text>
+<text x="14.0" y="258.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#c0caf5">  - хуки добавлены: Stop (маркер «spine-connect» — повторный connect дублей не плодит)</text>
+<text x="14.0" y="277.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#c0caf5">  - семантика хуков: fail-soft на инфраструктуру (нет arch-be или .arch-handoff/CONSTRAINTS.yaml — молча пропуск),</text>
+<text x="14.0" y="296.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#c0caf5">    блок (exit 2) — только при вердикте «Итог: FAIL»; PostToolUse-гейт на каждую правку — через --strict-hooks (дорого на</text>
+<text x="14.0" y="315.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#c0caf5">    репозиториях с command_succeeds-правилами)</text>
+<text x="14.0" y="334.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#c0caf5">  - субагенты плагинов (agents/*.md) не разворачиваются — при необходимости скопируйте вручную из</text>
+<text x="14.0" y="353.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#c0caf5">    ~/.arch-harness/plugins после `arch-be init`</text>
+<text x="14.0" y="372.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#c0caf5"></text>
+<text x="14.0" y="391.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#c0caf5">Следующие шаги:</text>
+<text x="14.0" y="410.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#c0caf5">  1. перезапустите Claude Code (`claude`) в этом каталоге</text>
+<text x="14.0" y="429.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#c0caf5">  2. проверьте подключение: `claude mcp list` — в списке сервер «spine»</text>
+<text x="14.0" y="448.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#c0caf5">  3. инструменты видны агенту как `mcp__spine__*`; режим сервера: read-only</text>
+<text x="14.0" y="467.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#c0caf5">  ... (55 скиллов скопировано в .claude/skills/ — список в docs/CONNECT.md)</text>
+</svg>

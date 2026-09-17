@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="786" height="350" viewBox="0 0 786 350">
+<rect x="0.5" y="0.5" width="785" height="349" rx="10" fill="#1a1b26" stroke="#3b4261"/>
+<circle cx="20" cy="14" r="5" fill="#f7768e"/>
+<circle cx="38" cy="14" r="5" fill="#e0af68"/>
+<circle cx="56" cy="14" r="5" fill="#9ece6a"/>
+<text x="393.0" y="18" text-anchor="middle" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="12" fill="#565f89">arch-be rubric run adr_quality — судья: подписка Claude Code (kind="cli")</text>
+<text x="14.0" y="49.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#9ece6a">$</text>
+<text x="32.06" y="49.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#c0caf5">cat ~/.config/arch-harness/config.toml</text>
+<text x="14.0" y="68.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#c0caf5">default_model = "claude-cli"</text>
+<text x="14.0" y="87.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#c0caf5">[models.claude-cli]</text>
+<text x="14.0" y="106.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#c0caf5">kind = "cli"          # LLM = чужой CLI, API-ключи НЕ нужны</text>
+<text x="14.0" y="125.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#c0caf5">command = "claude"</text>
+<text x="14.0" y="144.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#c0caf5">args = ["-p"]</text>
+<text x="14.0" y="163.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#9ece6a">$</text>
+<text x="32.06" y="163.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#c0caf5">arch-be rubric run adr_quality adr.md</text>
+<text x="14.0" y="182.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#565f89">Оценка по рубрике «adr_quality» (дословный вывод, сокращён)</text>
+<text x="14.0" y="201.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#c0caf5">  context                2.00  3  Цитата: "Платёжный сервис хранит суммы в f64..."</text>
+<text x="14.0" y="220.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#c0caf5">  alternatives           3.00  3  Цитата: "1. f64 + округление — отвергнуто..."</text>
+<text x="14.0" y="239.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#c0caf5">  negative_consequences  2.00  3  Цитата: "Минус: миграция существующих колонок БД."</text>
+<text x="14.0" y="258.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#c0caf5">  reversibility          2.00  3  Цитата: "Обратимость: обратная миграция..."</text>
+<text x="14.0" y="277.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#c0caf5">  status_discipline      1.00  3  Цитата: "## Статус Accepted (2026-09-17)"</text>
+<text x="14.0" y="296.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#9ece6a">Взвешенный итог: 3.00/5</text>
+<text x="14.0" y="315.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#9ece6a">Судья: claude-code (подписка) (сэмплов на критерий: 3)</text>
+<text x="14.0" y="334.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#e0af68">Отчёт сохранён: reports/rubric-adr_quality-20260917-144723.md</text>
+</svg>
