@@ -905,8 +905,9 @@ fn global_config_path(opts: &ConnectOptions, rel: &str) -> Result<PathBuf> {
 }
 
 /// `arch-be connect qwen`: мердж mcpServers в `.qwen/settings.json`
-/// (Qwen Code — форк gemini-cli, ключ подтверждён); скиллы и хуки не
-/// пишутся (layout не подтверждён) — сниппеты как у generic.
+/// (Qwen Code — форк gemini-cli, ключ подтверждён) + скиллы в
+/// `.qwen/skills/` (подтверждено на qwen-code 0.24.0 — нативный project-scope);
+/// хуки не пишутся (headless-файринг не подтверждён) — сниппет-референс.
 fn connect_qwen(opts: &ConnectOptions, report: &mut ConnectReport) -> Result<()> {
     merge_mcp_servers_json(
         &opts.dir.join(".qwen/settings.json"),
@@ -916,18 +917,21 @@ fn connect_qwen(opts: &ConnectOptions, report: &mut ConnectReport) -> Result<()>
         report,
     )?;
     if opts.skills {
-        report.notes.push(
-            "скиллы не записаны: каталог скиллов Qwen Code не подтверждён — при \
-             необходимости скопируйте вручную (см. сниппет ниже)"
-                .into(),
-        );
-        report.snippets.push((
-            "Скиллы (ручная установка)".to_string(),
-            "встроенные скиллы раскладываются в ~/.arch-harness/plugins командой \
-             `arch-be init` — скопируйте нужные `skills/<имя>/SKILL.md` в каталог \
-             скиллов вашего хоста"
-                .to_string(),
-        ));
+        let skills_root = opts.dir.join(".qwen/skills");
+        if skills_root.exists() {
+            report.notes.push(format!(
+                "{} уже существует — встроенные скиллы НЕ раскладываются (чужую \
+                 библиотеку не перетираем)",
+                skills_root.display()
+            ));
+        } else {
+            install_skills(&skills_root, opts.dry_run, report)?;
+            report.notes.push(
+                "скиллы разложены в .qwen/skills/ — Qwen Code ≥ 0.24 читает этот \
+                 каталог нативно (project scope)"
+                    .into(),
+            );
+        }
     }
     if opts.hooks {
         report.notes.push(
@@ -1567,8 +1571,8 @@ mod tests {
         );
     }
 
-    /// qwen: пишется только .qwen/settings.json (мердж mcpServers);
-    /// скиллы/хуки — сниппеты и заметки.
+    /// qwen: .qwen/settings.json (мердж mcpServers) + скиллы в
+    /// .qwen/skills/ (0.24+); хуки — сниппет-референс.
     #[test]
     fn qwen_writes_settings_json_only() {
         let tmp = tempfile::tempdir().expect("tmp");
@@ -1579,11 +1583,13 @@ mod tests {
         assert_eq!(settings["mcpServers"]["spine"]["command"], "arch-be");
         assert!(!dir.join(".claude").exists(), "каталога .claude нет");
         assert!(
-            report.notes.iter().any(|n| n.contains("не подтверждён")),
-            "заметки: {:?}",
+            report
+                .notes
+                .iter()
+                .any(|n| n.contains(".qwen/skills")),
+            "заметка про скиллы .qwen/skills: {:?}",
             report.notes
         );
-        assert!(!report.snippets.is_empty(), "печатаются сниппеты");
         // Идемпотентность.
         connect(&ConnectOptions::new(Host::Qwen, dir.clone())).expect("повтор");
         let again: Value =
@@ -1939,6 +1945,40 @@ mod tests {
         };
         let report = connect(&opts).expect("dry-run");
         assert!(!report.created.is_empty(), "план непустой");
+        assert!(!report.skills.is_empty(), "план по скиллам непустой");
+        assert!(!dir3.exists(), "dry-run ничего не записал");
+    }
+
+    /// qwen: `.qwen/settings.json` + скиллы в `.qwen/skills/` (0.24+);
+    /// существующий каталог скиллов не перетирается; dry-run пустой.
+    #[test]
+    fn qwen_writes_settings_and_qwen_skills() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path().join("proj");
+        let report = connect(&ConnectOptions::new(Host::Qwen, dir.clone())).expect("connect");
+
+        let settings: Value =
+            serde_json::from_str(&read(&dir.join(".qwen/settings.json"))).expect("json");
+        assert_eq!(settings["mcpServers"]["spine"]["command"], "arch-be");
+        assert!(
+            dir.join(".qwen/skills/adr-authoring/SKILL.md").is_file(),
+            "скиллы разложены в .qwen/skills"
+        );
+
+        // Существующий (даже пустой) .qwen/skills не наполняется.
+        let dir2 = tmp.path().join("proj2");
+        std::fs::create_dir_all(dir2.join(".qwen/skills")).expect("mkdir");
+        let report = connect(&ConnectOptions::new(Host::Qwen, dir2.clone())).expect("connect");
+        assert!(report.skills.is_empty(), "скиллы не раскладывались");
+        assert!(dir2.join(".qwen/settings.json").is_file());
+
+        // --dry-run: ничего не пишется.
+        let dir3 = tmp.path().join("proj3");
+        let opts = ConnectOptions {
+            dry_run: true,
+            ..ConnectOptions::new(Host::Qwen, dir3.clone())
+        };
+        let report = connect(&opts).expect("dry-run");
         assert!(!report.skills.is_empty(), "план по скиллам непустой");
         assert!(!dir3.exists(), "dry-run ничего не записал");
     }

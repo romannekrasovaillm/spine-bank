@@ -127,8 +127,10 @@ jobs:
         # AD-7: персональные пути не живут в репозитории; допустимы только
         # плейсхолдеры /home/user/ (сцены скриншотов) и /home/.../ (доки).
         # Сам workflow исключён: в нём литерально записана эта команда.
+        # NB: допускается и «голый» /home/user без слэша — TUI-сцены режут
+        # путь по ширине панели (напр. «/home/user/sbp-gateway» → «/home/user»).
         run: |
-          leaks=$(git grep -nI "/home/" -- . ":(exclude).github/workflows/ci.yml" | grep -vE "/home/(user/|\.\.\.)" || true)
+          leaks=$(git grep -nI "/home/" -- . ":(exclude).github/workflows/ci.yml" | grep -vE "/home/(user([^/a-zA-Z0-9_.-]|$)|user/|\.\.\./)" || true)
           if [ -n "$leaks" ]; then echo "$leaks"; exit 1; fi
           echo "personal paths: чисто"
 
