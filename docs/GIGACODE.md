@@ -12,9 +12,11 @@ MCP-сервер, скиллы, хуки-гейты. GigaCode CLI — форк Q
 ## Часть 1. Для архитектора (что происходит)
 
 1. GigaCode ставит/собирает бинарь `arch-be` (из релиза или из вашего клона).
-2. Регистрирует MCP-сервер `spine` в проекте (`.qwen/settings.json`).
-3. Раскладывает 62 скилла Spine в `.qwen/skills/` проекта.
-4. Включает хук-гейт (SessionEnd → `arch-be control check .`).
+2. `arch-be connect qwen`: MCP-сервер `spine` в `.qwen/settings.json` +
+   62 скилла в `.qwen/skills/` — одной командой.
+3. Одобряет сервер (`qwen mcp approve spine`).
+4. Опционально включает информационный хук гейта (SessionEnd; в headless
+   не файрит — блокирующие гейты есть у Claude Code/Kimi/omp/OpenClaw).
 5. Проверяет: вызывает `fitness_check` и докладывает вердикт.
 
 Всё это делает сам агент — вы только выдаёте ему промпт из части 2.
@@ -25,6 +27,7 @@ MCP-сервер, скиллы, хуки-гейты. GigaCode CLI — форк Q
 
 ```text
 Разверни Spine (arch-be) в этом проекте по следующей инструкции.
+(проверено прогоном этого же промпта на qwen-code 0.24.0)
 Репозиторий Spine уже склонирован локально: <ПУТЬ_К_КЛОНУ, напр. ~/spine-bank>
 
 1. Бинарь:
@@ -38,31 +41,31 @@ MCP-сервер, скиллы, хуки-гейты. GigaCode CLI — форк Q
      target/release/arch-be в ~/.local/bin/.
    - Проверь: `arch-be --version` (ожидается 0.2.x).
 
-2. MCP-сервер (project-level, НЕ затирай существующие ключи файла — мердж):
-   - Предпочтительно: выполни `arch-be connect qwen` в корне проекта.
-   - Или вручную в .qwen/settings.json добавь:
-     {"mcpServers": {"spine": {"command": "arch-be", "args": ["mcp", "serve"]}}}
+2. MCP-сервер + скиллы (project-level, НЕ затирай существующее — мердж):
+   - Выполни `arch-be connect qwen` в корне проекта — это запишет
+     `.qwen/settings.json` (mcpServers.spine) И раскладывает 62 скилла в
+     `.qwen/skills/` (нативный project scope в qwen-code ≥ 0.24).
+     Если каталог `.qwen/skills/` уже существовал — connect его не трогает;
+     тогда скопируй скиллы вручную из клона: assets/plugins/*/skills/*/.
    - Одобри сервер: `qwen mcp approve spine` (в 0.24 project-серверы требуют
      одобрения) — или подтверди диалог при следующем интерактивном запуске.
 
-3. Скиллы (62 шт.): скопируй из клона каталоги
-   assets/plugins/*/skills/*/  в  .qwen/skills/<имя>/SKILL.md
-   (структура: .qwen/skills/saga-transactions/SKILL.md и т.д.).
-   Не копируй файлы больше 200 КБ — доложи о пропущенных.
-
-4. Хук-гейт (если поддерживается версией): в .qwen/settings.json добавь
+3. Хук-гейт (информационный): в .qwen/settings.json можно добавить
    "hooks": {"SessionEnd": [{"hooks": [{"type": "command", "command":
    "arch-be control check . 2>&1 | tail -3"}]}]}
-   Если ключ hooks не поддерживается твоей версией — пропусти и доложи это.
+   ВНИМАНИЕ: в qwen-code 0.24 хуки управляются через `qwen hooks` (UI) и
+   в headless-режиме не файрят — этот хук показывает вердикт гейта, но НЕ
+   блокирует завершение. Если hooks не поддерживаются твоей версией —
+   пропусти и доложи. Блокирующие гейты есть у Claude Code/Kimi/omp/OpenClaw.
 
-5. Проверка (обязательна):
+4. Проверка (обязательна):
    - Вызови MCP-инструмент spine fitness_check с {"repo": "."} и доложи
      вердикт (passed true/false, число находок).
    - Вызови skill_search с {"query": "saga"} и перечисли 3 найденных скилла.
    - Вызови model_query с {"dir": "model"} (если каталога model/ нет —
      скажи об этом, это не ошибка).
 
-6. Финал: доложи одной сводкой — версия arch-be, статус MCP (Connected),
+5. Финал: доложи одной сводкой — версия arch-be, статус MCP (Connected),
    число разложенных скиллов, статус хука, вердикт fitness_check.
    Ничего не коммить в git. Секреты/ключи не выводи.
 ```
@@ -126,8 +129,7 @@ knowledge-документ; `fitness_check` сразу начал ловить �
 3. Дальше агент сам: пишет JSON IR (`diagrams/*.architecture.json`),
    валидирует через `archify_validate` (9 проверок + supportedFixes для
    точечного ремонта), показывает через `archify_show` — интерактивный HTML
-   (guided views, легенда, карточки потоков). Пример результата:
-   `docs/screenshots/harnesses/qwen-archify-html.png`.
+   (guided views, легенда, карточки потоков). Пример результата: [qwen-archify-html.png](screenshots/harnesses/qwen-archify-html.png).
 
 Полная матрица проверенных харнессов и ограничения — в
 [docs/HARNESSES.md](HARNESSES.md). Подробное подключение всех хостов —
@@ -139,5 +141,6 @@ knowledge-документ; `fitness_check` сразу начал ловить �
 |---|---|
 | `spine` в статусе Pending approval | `qwen mcp approve spine` (или интерактивный запуск и одобрение) |
 | Агент «не видит» инструменты | `qwen mcp list` → должен быть `Connected`; проверьте `command -v arch-be` |
+| Сервер одобрен, но в текущей сессии инструменты не привязались | `approve` действует со СЛЕДУЮЩЕЙ сессии — перезапустите GigaCode (в headless — это просто следующий вызов) |
 | 404 по модели | Для openai-совместимого бэкенда модель задаётся через `OPENAI_MODEL`, не флагом `-m` |
 | Хук не срабатывает | Версия GigaCode может не иметь hooks — проверьте `qwen hooks` / документацию своей сборки |
