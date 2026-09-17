@@ -242,7 +242,7 @@ arch-be mcp serve --rw    # + handoff_create, adr_new, agentsmd_generate, …
 | [drift-control](кейсы/drift-control/) | Голая задача → FAIL 2/6; с handoff-пакетом → PASS 6/6 |
 | [fleet-spine-drift](кейсы/fleet-spine-drift/) | Аудит флота: дрейф `CONSTRAINTS.yaml` как exit-код — без LLM |
 | [parallel-epics](кейсы/parallel-epics/) · [fleet-of-ten](кейсы/fleet-of-ten/) | Спайн как клей флота Claude Code |
-| [legacy-survey](кейсы/legacy-survey/) · [jvm-archunit-gate](кейсы/jvm-archunit-gate/) · [fleet-patterns](кейсы/fleet-patterns/) | Reverse discovery, гейт по байткоду, оркестрация флотов |
+| [legacy-survey](кейсы/legacy-survey/) · [jvm-archunit-gate](кейсы/jvm-archunit-gate/) | Reverse discovery, гейт по байткоду |
 
 Реестр — [`кейсы/AGENTS.md`](кейсы/AGENTS.md); ещё шесть кейсов —
 в [README-full.md](README-full.md).
