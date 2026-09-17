@@ -336,7 +336,17 @@ impl Tool for WriteFileTool {
                 .open(&path)
                 .await
             {
-                Ok(mut f) => f.write_all(content.as_bytes()).await,
+                Ok(mut f) => match f.write_all(content.as_bytes()).await {
+                    Ok(()) => {
+                        // `poll_write` у tokio `File` возвращает Ready сразу после
+                        // постановки blocking-задачи — `write_all` НЕ гарантирует,
+                        // что байты уже в ядре; `flush` дожидается inflight-записи
+                        // и возвращает её результат (иначе «успех» расходился бы
+                        // с содержимым файла при немедленном чтении следом).
+                        f.flush().await
+                    }
+                    Err(e) => Err(e),
+                },
                 Err(e) => Err(e),
             }
         } else {
