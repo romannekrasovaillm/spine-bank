@@ -10,15 +10,31 @@
 
 Stdio-сервер JSON-RPC 2.0 (NDJSON, как у клиента): кодовый агент получает
 architectural verdict (`passed` + находки) **в момент написания кода**, а не
-на приёмке handoff-пакета. Сервер строго read-only: ничего не пишет в
-репозиторий клиента, все цели — аргументами вызова; write/exec-инструменты
-агента (`bash`, `write_file`, `harness_run`, …) наружу не отдаются.
+на приёмке handoff-пакета. По умолчанию сервер строго read-only: ничего не
+пишет в репозиторий клиента, все цели — аргументами вызова; write/exec-
+инструменты агента (`bash`, `write_file`, `harness_run`, `subagent_*`,
+`web_*`, …) наружу не отдаются **ни в одном режиме** — это принадлежность
+хоста. Флаг `--rw` дополнительно открывает белый список аддитивных записей
+в рабочий каталог клиента: `handoff_create`, `adr_new`, `agentsmd_generate`,
+`skill_distill`, `archify_deliver`/`archify_show`/`archify_compare`,
+`reverse_survey`.
 
 Поверх контрольного контура (ADR-008) сервер отдаёт **чтение знаний**
 (транш T4, ADR-015): поиск по базе знаний архитектора и библиотеке скиллов
 arch-be + рендер mermaid-диаграмм — это read-only-инструменты поверх локальных
 каталогов конфига arch-be (`knowledge.dirs`, `plugins.dirs`), не репозитория
 клиента.
+
+Помимо ручных инструментов работает **мост в реестр** (`tools::full_registry`):
+белый список read-only доменных инструментов (`openapi_lint`, `asyncapi_lint`,
+`contract_diff`, `fleet_audit`, `agentsmd_lint`, `archify_validate`,
+`rubric_list`, `plugin_list`) маршрутизируется в `ToolRegistry::dispatch`
+с политикой R-уровней из конфига. Спеки этих инструментов генерируются из
+`Tool::spec()`; каждый принимает дополнительный аргумент `cwd` — рабочий
+каталог клиента для резолва относительных путей (по умолчанию — cwd процесса
+сервера). Решение политики `Deny`/`RequireConfirm` возвращается как
+`isError` с текстом причины (подтверждение в неинтерактивном MCP невозможно —
+`RequireConfirm` трактуется как отказ).
 
 ### Подключение (Claude Code)
 
@@ -53,7 +69,17 @@ claude mcp add arch-spine -- arch-be mcp serve
 | `significance_score` | `triggers` | маршрут значимости Fast/Standard/Critical по 15 триггерам (информационный, без `passed`) |
 | `trace_check` | `case` | позвенная трассируемость `REQ → NFR → AD/ADR → CMP → правило`: AD без правила и без `unverifiable` — error; verdict + `report_markdown` для evidence bundle |
 | `model_query` | `dir?`, `id?`, `type?` | список сущностей модели (фильтр по типу) или карточка сущности со связями и обратными ссылками |
-| `rubric_run` | `rubric`, `target` \| `target_text`, `model?` | оценка документа рубрикой LLM-судьёй (ADR-004; нужен API-ключ из конфига arch-be) |
+| `rubric_run` | `rubric`, `target` \| `target_text`, `model?` | оценка документа рубрикой LLM-судьёй (ADR-004; нужен API-ключ из конфига arch-be; для моделей `kind = "cli"` ключ не нужен — судья — внешний CLI-харнесс) |
+| `rubric_prompt` | `rubric`, `target` \| `target_text` | split-judge, фаза 1 (без ключа): system+user промпты судьи + JSON-схема ответа + `judge_config` (число сэмплов k). Промпт исполняет модель хоста, ответы идут в `rubric_verify` |
+| `rubric_verify` | `rubric`, `target` \| `target_text`, `answers`, `model?` | split-judge, фаза 2: отчёт рубрики из сырых ответов хоста (медиана, `unstable`, `evidence_not_found`) тем же кодом, что у `rubric_run`; битые ответы отбрасываются со счётчиком `answers.dropped` |
+
+Мостовые read-only инструменты реестра (спеки — из `Tool::spec()`, плюс
+опциональный `cwd`): `openapi_lint` (`path`), `asyncapi_lint` (`path`),
+`contract_diff`, `fleet_audit`, `agentsmd_lint` (`repo`),
+`archify_validate` (`type`, `path`), `rubric_list`, `plugin_list`.
+Под `--rw` добавляются: `handoff_create`, `adr_new`, `agentsmd_generate`,
+`skill_distill`, `archify_deliver`, `archify_show`, `archify_compare`,
+`reverse_survey` (у mutating-инструментов `readOnlyHint: false`).
 
 Чтение знаний (транш T4, ADR-015; все — read-only, без verdict `passed`):
 
@@ -90,6 +116,8 @@ claude mcp add arch-spine -- arch-be mcp serve
   `result` с `isError: true` и текстом причины (не protocol error).
 - `rubric_run` без API-ключа провайдера — понятная JSON-RPC ошибка
   `-32603` (какой env/файл настроить; содержимое ключа не читается).
+  Исключение — модели `kind = "cli"`: предпроверка ключа пропускается,
+  модель вызывается через авторизованный на машине CLI-харнесс.
 
 ### Проверка без клиента
 

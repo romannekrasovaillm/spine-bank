@@ -13,6 +13,11 @@
 //!   усечение; текст в промпте изолирован маркерами от prompt injection;
 //!   структурированный разбор → [`RubricReport`] (баллы, веса, метки,
 //!   markdown-отчёт). Решения и пороги — ADR-004.
+//! - split-judge (MCP-режим без LLM у сервера): швы [`judge_system_prompt`],
+//!   [`judge_user_prompt`], [`parse_judge_response`], [`build_report`]
+//!   видны как `pub(crate)` для `mcp_server` (`rubric_prompt`/`rubric_verify`) —
+//!   промпт собирается сервером, отвечает модель хоста, сборка отчёта
+//!   механическая и идёт тем же кодом, что у встроенного судьи.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -485,8 +490,8 @@ fn is_yaml_file(path: &Path) -> bool {
 
 /// Системный промпт судьи: независимый рецензент, обязательная цитата-
 /// свидетельство в проверяемом формате, изоляция оцениваемого текста,
-/// строгий JSON на выходе (ADR-004).
-fn judge_system_prompt(rubric: &Rubric) -> String {
+/// строгий JSON на выходе (ADR-004). `pub(crate)` — split-judge `mcp_server`.
+pub(crate) fn judge_system_prompt(rubric: &Rubric) -> String {
     format!(
         "Ты — независимый архитектурный судья. Ты не проектировал эту систему — твоя работа \
          найти, что сломается. Оцени присланный текст по каждому критерию рубрики.\n\
@@ -511,7 +516,8 @@ fn judge_system_prompt(rubric: &Rubric) -> String {
 
 /// Пользовательский промпт судье: рубрика (критерии + якоря) и изолированный
 /// маркерами целевой текст (ADR-004: текст — данные из ненадёжного источника).
-fn judge_user_prompt(rubric: &Rubric, target: &str) -> String {
+/// `pub(crate)` — split-judge `mcp_server`.
+pub(crate) fn judge_user_prompt(rubric: &Rubric, target: &str) -> String {
     let mut out = format!(
         "## Рубрика «{}»\n{}\nШкала: 1..={}\n\n## Критерии\n",
         rubric.name, rubric.description, rubric.scale_max
@@ -534,9 +540,11 @@ fn judge_user_prompt(rubric: &Rubric, target: &str) -> String {
     out
 }
 
-/// Сырой ответ судьи (JSON).
+/// Сырой ответ судьи (JSON). `pub(crate)` — разбор ответов хоста в
+/// split-judge (`mcp_server::rubric_verify`); поля закрыты, сборка отчёта —
+/// только через [`build_report`].
 #[derive(Debug, Deserialize)]
-struct JudgeResponse {
+pub(crate) struct JudgeResponse {
     /// Оценки по критериям (могут покрывать не все).
     #[serde(default)]
     scores: Vec<JudgeScore>,
@@ -584,7 +592,9 @@ fn extract_json_object(text: &str) -> Option<&str> {
 }
 
 /// Разбирает JSON-ответ судьи (с извлечением объекта из обёртки).
-fn parse_judge_response(text: &str) -> Result<JudgeResponse> {
+/// `pub(crate)` — split-judge `mcp_server` разбирает ответы хоста тем же
+/// парсером, что и встроенный судья.
+pub(crate) fn parse_judge_response(text: &str) -> Result<JudgeResponse> {
     let json = extract_json_object(text).ok_or_else(|| {
         HarnessError::Rubric(format!(
             "в ответе судьи нет JSON-объекта: {}",
@@ -626,7 +636,10 @@ fn extract_yaml_payload(text: &str) -> &str {
 /// # Errors
 /// Ни один критерий не засчитан (все без подтверждённых свидетельств) или
 /// сумма весов засчитанных не положительна.
-fn build_report(
+///
+/// `pub(crate)` — split-judge `mcp_server::rubric_verify` собирает отчёт из
+/// ответов хоста тем же кодом.
+pub(crate) fn build_report(
     rubric: &Rubric,
     judge_model: &str,
     runs: &[JudgeResponse],

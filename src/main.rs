@@ -600,7 +600,14 @@ enum McpCmd {
     /// MCP-сервер (stdio JSON-RPC, NDJSON): архитектурный контроль кодовым
     /// агентам (Claude Code и др.) — `spine_lint`, `fitness_check`,
     /// `significance_score`, `trace_check`, `model_query`, `rubric_run` (ADR-008).
-    Serve,
+    Serve {
+        /// Открыть rw-контур моста (аддитивные записи в рабочий каталог
+        /// клиента: `handoff_create`, `adr_new`, `agentsmd_generate`,
+        /// `skill_distill`, `archify_*`, `reverse_survey`). По умолчанию
+        /// сервер строго read-only.
+        #[arg(long)]
+        rw: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2126,8 +2133,13 @@ async fn cmd_web(cfg: &Config, cmd: WebCmd) -> Result<()> {
 async fn cmd_mcp(cfg: &Arc<Config>, cmd: McpCmd) -> Result<()> {
     // Серверный режим (P1-2, ADR-008) обслуживает клиентов и не подключается
     // к серверам: mcp.json для него не требуется, уходим до его загрузки.
-    if matches!(cmd, McpCmd::Serve) {
-        return arch_harness::mcp_server::serve(Arc::clone(cfg))
+    if let McpCmd::Serve { rw } = &cmd {
+        let mode = if *rw {
+            arch_harness::mcp_server::ServeMode::ReadWrite
+        } else {
+            arch_harness::mcp_server::ServeMode::ReadOnly
+        };
+        return arch_harness::mcp_server::serve_with_mode(Arc::clone(cfg), mode)
             .await
             .context("MCP-сервер (stdio)");
     }
@@ -2154,7 +2166,7 @@ async fn cmd_mcp(cfg: &Arc<Config>, cmd: McpCmd) -> Result<()> {
             println!("{}", out.content);
         }
         // Недостижимо: Serve обработан выше возвратом до подключения к серверам.
-        McpCmd::Serve => {}
+        McpCmd::Serve { .. } => {}
     }
     manager.shutdown().await;
     Ok(())

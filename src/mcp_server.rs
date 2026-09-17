@@ -10,24 +10,45 @@
 //!   `tools/list`, `tools/call`, `ping`; `notifications/*` — игнор без
 //!   ответа; неизвестный метод → `-32601`, битый JSON → `-32700`,
 //!   отсутствует `method` → `-32600`, битые аргументы/инструмент → `-32602`;
-//! - инструменты (все `readOnlyHint`): контрольные `spine_lint`,
-//!   `fitness_check`, `significance_score`, `trace_check`, `model_query`,
-//!   `rubric_run` и чтение знаний (T4, ADR-015): `kb_search`,
-//!   `skill_search`, `skill_load`, `mermaid_render`; наружу НЕ отдаются
-//!   write/exec-инструменты агента (`bash`, `write_file`, `edit_file`,
-//!   `harness_run`, `subagent_run`, …) — сервер строго read-only
-//!   (проверяется тестом реестра); пути — только аргументами вызова,
-//!   глобального «текущего кейса» нет;
+//! - режимы запуска ([`ServeMode`]): дефолт — строго read-only; флаг
+//!   `--rw` (`arch-be mcp serve --rw`) дополнительно открывает белый список
+//!   аддитивных записей ([`BRIDGE_READ_WRITE`]: `handoff_create`, `adr_new`,
+//!   `agentsmd_generate`, `archify_deliver/show/compare`, `reverse_survey`,
+//!   `skill_distill`);
+//! - инструменты — два слоя. РУЧНЫЕ (оттестированная поверхность ADR-008):
+//!   контрольные `spine_lint`, `fitness_check`, `significance_score`,
+//!   `trace_check`, `model_query`, `rubric_run` и чтение знаний (T4,
+//!   ADR-015): `kb_search`, `skill_search`, `skill_load`, `mermaid_render`;
+//!   плюс split-judge без LLM у сервера: `rubric_prompt` (промпты судьи +
+//!   JSON-схема ответа) и `rubric_verify` (механическая сборка отчёта из
+//!   сырых ответов хоста — медиана, `unstable`, `evidence_not_found`).
+//!   МОСТ: имена из белых списков [`BRIDGE_READ_ONLY`] (+ [`BRIDGE_READ_WRITE`]
+//!   под `--rw`), не пересекающиеся с ручными, маршрутизируются в
+//!   [`crate::tools::full_registry`] (`dispatch` — с политикой R-уровней;
+//!   контекст БЕЗ LLM); спеки генерируются из `Tool::spec()`, annotations —
+//!   из членства в списке + [`crate::policy::classify_tool`];
+//! - НИКОГДА не отдаются (даже под `--rw`) — [`BRIDGE_NEVER`]: write/exec/
+//!   веб/субагенты (`bash`, `read_file`/`write_file`/`edit_file`, `glob`,
+//!   `grep`, `propose_options`, `screenshot*`, `harness_run`, `subagent_*`,
+//!   `ralph_run`, `worktree_new`, `web_*`) — это принадлежность хоста;
+//!   `rubric_evaluate`/`rubric_generate` требуют LLM у сервера — вместо них
+//!   split-judge. Решение политики Deny/RequireConfirm из `dispatch`
+//!   возвращается как isError с текстом причины (подтверждение в
+//!   неинтерактивном MCP невозможно → `RequireConfirm` трактуется как отказ);
 //! - успешный вызов: `structuredContent` (машиночитаемый verdict) + тот же
-//!   объект pretty-JSON в `content[0].text`; контрольные verdict'ы несут
-//!   `passed: bool` — `false` означает блокирующую находку, клиентский агент
-//!   обязан отказать изменению, нарушающему `AD-*`;
+//!   объект pretty-JSON в `content[0].text` (мостовые: text — сырой вывод
+//!   инструмента, structuredContent — обёртка `{tool, output}`);
+//!   контрольные verdict'ы несут `passed: bool` — `false` означает
+//!   блокирующую находку, клиентский агент обязан отказать изменению,
+//!   нарушающему `AD-*`;
 //! - доменный сбой выполнения (файл не читается, сущность не найдена) —
 //!   `result` с `isError: true`, не protocol error; сервер не падает ни на
 //!   каком вводе, цикл живёт до EOF stdin;
 //! - `rubric_run` требует LLM-ключ из конфига: предпроверка доступности
 //!   ключа (env задана / файл ключа существует; содержимое не печатается)
-//!   → без ключа понятная JSON-RPC ошибка `-32603`.
+//!   → без ключа понятная JSON-RPC ошибка `-32603`; для моделей с
+//!   `kind = "cli"` (внешний CLI-харнесс как LLM) ключ не нужен —
+//!   предпроверка пропускается.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -40,6 +61,7 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader
 
 use crate::config::{Config, ModelConfig};
 use crate::error::Result;
+use crate::tool::{ToolContext, ToolRegistry};
 use crate::{control, kb, mcp, mermaid, model, plugin, rubric, trace};
 
 /// Код JSON-RPC «разбор запроса не удался» (невалидный JSON).
@@ -67,6 +89,110 @@ const KNOWLEDGE_MAX_HITS: usize = 20;
 /// Потолок символов тела скилла в ответе `skill_load` (как у агентного
 /// инструмента: `ToolOutput::truncated(16_000)` — защита контекста клиента).
 const SKILL_TEXT_MAX_CHARS: usize = 16_000;
+
+/// Потолок текстового вывода мостовых инструментов реестра (защита контекста
+/// хоста; тот же прецедент 16k, что у `skill_load` и агентных инструментов).
+const BRIDGE_OUTPUT_MAX_CHARS: usize = 16_000;
+
+/// Потолок числа ответов хоста в `rubric_verify` (k сэмплов судьи из
+/// `[judge]` — единицы; лимит отсекает ошибочные гигантские пачки).
+const MAX_VERIFY_ANSWERS: usize = 32;
+
+/// Белый список read-only моста в реестр инструментов ([`crate::tools::full_registry`]):
+/// детерминированный контур контроля и чтения, не покрытый ручными
+/// инструментами. Все перечисленные — без записи в рабочий каталог клиента
+/// и без LLM. Доступны в обоих режимах [`ServeMode`].
+const BRIDGE_READ_ONLY: &[&str] = &[
+    "agentsmd_lint",
+    "archify_validate",
+    "asyncapi_lint",
+    "contract_diff",
+    "fleet_audit",
+    "openapi_lint",
+    "plugin_list",
+    "rubric_list",
+];
+
+/// Дополнительный белый список режима `--rw` ([`ServeMode::ReadWrite`]):
+/// аддитивные записи в рабочий каталог клиента (handoff-пакет, новый ADR,
+/// AGENTS.md, HTML-артефакты Archify, карта обследования, дистиллированный
+/// скилл). `archify_*`/`skill_distill`/`reverse_survey` классифицируются
+/// политикой как `ReadOnly`, но пишут файлы — поэтому только под `--rw`.
+const BRIDGE_READ_WRITE: &[&str] = &[
+    "adr_new",
+    "agentsmd_generate",
+    "archify_compare",
+    "archify_deliver",
+    "archify_show",
+    "handoff_create",
+    "reverse_survey",
+    "skill_distill",
+];
+
+/// Инструменты реестра, которые НЕ отдаются наружу ни в одном режиме:
+/// exec/write/веб/субагенты — принадлежность хоста (у Claude Code и др.
+/// они свои); `rubric_evaluate`/`rubric_generate` требуют LLM на стороне
+/// сервера — в MCP-инверсии её нет, вместо них split-judge
+/// (`rubric_prompt`/`rubric_verify`). Охраняется тестом реестра.
+const BRIDGE_NEVER: &[&str] = &[
+    "bash",
+    "read_file",
+    "write_file",
+    "edit_file",
+    "glob",
+    "grep",
+    "propose_options",
+    "screenshot",
+    "read_image",
+    "harness_run",
+    "ralph_run",
+    "subagent_run",
+    "subagent_list",
+    "subagent_result",
+    "worktree_new",
+    "web_search",
+    "web_fetch",
+    "web_arch_sites",
+    "rubric_evaluate",
+    "rubric_generate",
+];
+
+/// Имена ручных инструментов (нижний слой диспетчера) — мост их не дублирует
+/// даже при наличии одноимённых реализаций в реестре (`spine_lint` и др.).
+const MANUAL_TOOLS: &[&str] = &[
+    "spine_lint",
+    "fitness_check",
+    "significance_score",
+    "trace_check",
+    "model_query",
+    "rubric_run",
+    "rubric_prompt",
+    "rubric_verify",
+    "kb_search",
+    "skill_search",
+    "skill_load",
+    "mermaid_render",
+];
+
+/// Режим MCP-сервера: какой срез инструментов отдаётся хосту.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ServeMode {
+    /// Только чтение (дефолт, поведение до флага `--rw`): ручные инструменты
+    /// + read-only мост [`BRIDGE_READ_ONLY`].
+    #[default]
+    ReadOnly,
+    /// `arch-be mcp serve --rw`: дополнительно [`BRIDGE_READ_WRITE`]
+    /// (аддитивные записи в рабочий каталог клиента). [`BRIDGE_NEVER`]
+    /// остаётся закрытым и в этом режиме.
+    ReadWrite,
+}
+
+impl ServeMode {
+    /// Открыт ли контур записи (режим `--rw`).
+    fn allows_write(self) -> bool {
+        matches!(self, Self::ReadWrite)
+    }
+}
 
 /// Ошибка вызова инструмента: на каком уровне протокола отвечать.
 #[derive(Debug)]
@@ -98,11 +224,30 @@ impl CallError {
     }
 }
 
-/// Состояние сервера: только конфигурация (нужна `rubric_run` для резолва
-/// рубрик и LLM-судьи). Путей/«текущего кейса» сервер не хранит — все цели
-/// приходят аргументами вызова (read-only по отношению к репозиторию клиента).
+/// Состояние сервера: конфигурация (нужна `rubric_run` для резолва рубрик
+/// и LLM-судьи), режим [`ServeMode`] и один раз построенный полный реестр
+/// инструментов (мост белых списков; реестр несёт политику R-уровней из
+/// конфига). Путей/«текущего кейса» сервер не хранит — все цели приходят
+/// аргументами вызова.
 pub struct McpServe {
     cfg: Arc<Config>,
+    mode: ServeMode,
+    registry: ToolRegistry,
+}
+
+/// Исход успешного вызова инструмента: чем заполнить `content`/`structuredContent`.
+enum DispatchOutcome {
+    /// Машиночитаемый verdict (ручные инструменты): text-дубль — pretty JSON.
+    Structured(Value),
+    /// Текстовый вывод доменного инструмента реестра (мост): `text` идёт в
+    /// `content` как есть (его читает клиент [`crate::mcp`]), structured —
+    /// обёртка `{tool, output}` для машиночитаемого контура.
+    Text {
+        /// Обёртка `{tool, output}` для `structuredContent`.
+        structured: Value,
+        /// Сырой текстовый вывод инструмента (уже усечённый до лимита).
+        text: String,
+    },
 }
 
 /// Ответ-успех JSON-RPC.
@@ -146,10 +291,36 @@ where
 }
 
 impl McpServe {
-    /// Сервер поверх конфигурации харнесса.
+    /// Сервер поверх конфигурации харнесса в режиме read-only (дефолт).
     #[must_use]
     pub fn new(cfg: Arc<Config>) -> Self {
-        Self { cfg }
+        Self::with_mode(cfg, ServeMode::ReadOnly)
+    }
+
+    /// Сервер поверх конфигурации харнесса с явным режимом [`ServeMode`].
+    /// Реестр инструментов строится один раз здесь: `dispatch` запросов
+    /// моста идёт в разделяемый реестр (политика R-уровней внутри него).
+    #[must_use]
+    pub fn with_mode(cfg: Arc<Config>, mode: ServeMode) -> Self {
+        let registry = crate::tools::full_registry(&cfg);
+        Self {
+            cfg,
+            mode,
+            registry,
+        }
+    }
+
+    /// Имя разрешено мосту в текущем режиме: только белые списки режима,
+    /// с защитным отсечением [`BRIDGE_NEVER`] и ручных имён [`MANUAL_TOOLS`]
+    /// (технически списки не пересекаются — проверяется тестом реестра;
+    /// отсечение здесь — страховка на будущую правку списков: never-имя
+    /// не уйдёт наружу даже при ошибочном добавлении в белый список).
+    fn bridge_allowed(&self, name: &str) -> bool {
+        if BRIDGE_NEVER.contains(&name) || MANUAL_TOOLS.contains(&name) {
+            return false;
+        }
+        BRIDGE_READ_ONLY.contains(&name)
+            || (self.mode.allows_write() && BRIDGE_READ_WRITE.contains(&name))
     }
 
     /// Обрабатывает одну строку транспорта; `None` — отвечать не нужно
@@ -223,7 +394,15 @@ impl McpServe {
                                          перечислив находки. significance_score — маршрут \
                                          значимости (fast/standard/critical). model_query — \
                                          карточки и связи сущностей модели. rubric_run — \
-                                         LLM-оценка документа рубрикой (нужен API-ключ). \
+                                         LLM-оценка документа рубрикой (нужен API-ключ); \
+                                         без ключа — split-judge: rubric_prompt выдаёт промпты \
+                                         судьи и JSON-схему ответа, rubric_verify механически \
+                                         собирает отчёт из сырых ответов вашей модели. \
+                                         Детерминированный контур реестра (openapi_lint, \
+                                         asyncapi_lint, contract_diff, fleet_audit, \
+                                         agentsmd_lint, archify_validate, rubric_list, \
+                                         plugin_list) доступен напрямую; аргумент `cwd` — \
+                                         рабочий каталог клиента для относительных путей. \
                                          Чтение знаний (read-only): kb_search — поиск по \
                                          базе знаний архитектора; skill_search/skill_load — \
                                          библиотека скиллов; mermaid_render — диаграмма \
@@ -232,7 +411,7 @@ impl McpServe {
                 )
             }
             "ping" => ok_response(id, &json!({})),
-            "tools/list" => ok_response(id, &json!({"tools": tool_specs()})),
+            "tools/list" => ok_response(id, &json!({"tools": self.all_tool_specs()})),
             "tools/call" => self.handle_tool_call(id, &params).await,
             other => error_response(id, METHOD_NOT_FOUND, format!("неизвестный метод '{other}'")),
         }
@@ -256,7 +435,7 @@ impl McpServe {
             );
         }
         match self.dispatch_tool(name, args).await {
-            Ok(structured) => {
+            Ok(DispatchOutcome::Structured(structured)) => {
                 // Клиент нашего же mcp.rs читает только text-части — дублируем
                 // verdict pretty-JSON; structuredContent — для MCP-клиентов.
                 let text = serde_json::to_string_pretty(&structured)
@@ -270,6 +449,14 @@ impl McpServe {
                     }),
                 )
             }
+            Ok(DispatchOutcome::Text { structured, text }) => ok_response(
+                id,
+                &json!({
+                    "content": [{"type": "text", "text": text}],
+                    "structuredContent": structured,
+                    "isError": false,
+                }),
+            ),
             Err(CallError::Execution(message)) => ok_response(
                 id,
                 &json!({
@@ -281,30 +468,106 @@ impl McpServe {
         }
     }
 
-    /// Маршрутизация вызова по имени инструмента.
+    /// Маршрутизация вызова по имени инструмента: сначала ручные
+    /// реализации (оттестированная поверхность ADR-008), затем мост в
+    /// реестр по белым спискам режима, иначе — `-32602`.
     async fn dispatch_tool(
         &self,
         name: &str,
         args: Value,
-    ) -> std::result::Result<Value, CallError> {
+    ) -> std::result::Result<DispatchOutcome, CallError> {
         match name {
-            "spine_lint" => self.tool_spine_lint(args).await,
-            "fitness_check" => self.tool_fitness_check(args).await,
-            "significance_score" => Self::tool_significance_score(args),
-            "trace_check" => self.tool_trace_check(args).await,
-            "model_query" => self.tool_model_query(args).await,
-            "rubric_run" => self.tool_rubric_run(args).await,
+            "spine_lint" => self
+                .tool_spine_lint(args)
+                .await
+                .map(DispatchOutcome::Structured),
+            "fitness_check" => self
+                .tool_fitness_check(args)
+                .await
+                .map(DispatchOutcome::Structured),
+            "significance_score" => {
+                Self::tool_significance_score(args).map(DispatchOutcome::Structured)
+            }
+            "trace_check" => self
+                .tool_trace_check(args)
+                .await
+                .map(DispatchOutcome::Structured),
+            "model_query" => self
+                .tool_model_query(args)
+                .await
+                .map(DispatchOutcome::Structured),
+            "rubric_run" => self
+                .tool_rubric_run(args)
+                .await
+                .map(DispatchOutcome::Structured),
+            // Split-judge без LLM у сервера: промпты судьи наружу,
+            // механическая сборка отчёта из ответов хоста.
+            "rubric_prompt" => self
+                .tool_rubric_prompt(args)
+                .await
+                .map(DispatchOutcome::Structured),
+            "rubric_verify" => self
+                .tool_rubric_verify(args)
+                .await
+                .map(DispatchOutcome::Structured),
             // T4 (ADR-015): чтение знаний наружу; тонкие адаптеры к ядру
             // агентных инструментов kb.rs/plugin.rs/mermaid.rs (общая логика
             // живёт там — MCP-слой только парсит аргументы и формирует JSON).
-            "kb_search" => self.tool_kb_search(args).await,
-            "skill_search" => self.tool_skill_search(args).await,
-            "skill_load" => self.tool_skill_load(args).await,
-            "mermaid_render" => self.tool_mermaid_render(args).await,
+            "kb_search" => self
+                .tool_kb_search(args)
+                .await
+                .map(DispatchOutcome::Structured),
+            "skill_search" => self
+                .tool_skill_search(args)
+                .await
+                .map(DispatchOutcome::Structured),
+            "skill_load" => self
+                .tool_skill_load(args)
+                .await
+                .map(DispatchOutcome::Structured),
+            "mermaid_render" => self
+                .tool_mermaid_render(args)
+                .await
+                .map(DispatchOutcome::Structured),
+            // Мост в реестр инструментов харнесса (белые списки режима).
+            other if self.bridge_allowed(other) => self.bridge_dispatch(other, args).await,
             other => Err(CallError::invalid_params(format!(
                 "неизвестный инструмент '{other}' (список — tools/list)"
             ))),
         }
+    }
+
+    /// Мостовой вызов: маршрутизация в [`ToolRegistry::dispatch`] с
+    /// [`ToolContext`] БЕЗ LLM (инструменты, требующие модель, в белые
+    /// списки не входят). `cwd` — дополнительный аргумент моста: рабочий
+    /// каталог клиента, от которого резолвятся относительные пути
+    /// (по умолчанию — cwd процесса сервера, поведение ручных инструментов).
+    /// Решение политики R-уровней (Deny/RequireConfirm) приходит из
+    /// `dispatch` как `ToolOutput::err` и отдаётся доменным isError
+    /// с текстом причины: подтверждение в неинтерактивном MCP невозможно,
+    /// `RequireConfirm` трактуется как отказ.
+    async fn bridge_dispatch(
+        &self,
+        name: &str,
+        args: Value,
+    ) -> std::result::Result<DispatchOutcome, CallError> {
+        if self.registry.get(name).is_none() {
+            return Err(CallError::invalid_params(format!(
+                "{name}: инструмент отключён конфигом сервера (см. [archify]/[web] enabled)"
+            )));
+        }
+        let cwd = args
+            .get("cwd")
+            .and_then(Value::as_str)
+            .map_or_else(|| PathBuf::from("."), PathBuf::from);
+        let ctx = ToolContext::new(cwd, Arc::clone(&self.cfg));
+        let out = self.registry.dispatch(name, args, &ctx).await;
+        if out.is_error {
+            return Err(CallError::Execution(out.content));
+        }
+        let text = out.truncated(BRIDGE_OUTPUT_MAX_CHARS).content;
+        let structured = json!({"tool": name, "output": text.clone()});
+        Ok(DispatchOutcome::Text { structured, text })
     }
 
     /// `spine_lint`: линтер ARCHITECTURE-SPINE.md → verdict
@@ -529,7 +792,11 @@ impl McpServe {
                 "rubric_run: модель '{model_name}' не настроена в [models] конфига"
             ))
         })?;
-        if !api_key_available(model_cfg) {
+        // kind="cli": судья — внешний CLI-харнесс (Claude Code, Codex, …),
+        // уже авторизованный на машине пользователя: собственный API-ключ
+        // Spine не нужен, предпроверка пропускается.
+        let cli_backed = model_cfg.kind.as_deref() == Some("cli");
+        if !cli_backed && !api_key_available(model_cfg) {
             return Err(CallError::Protocol {
                 code: INTERNAL_ERROR,
                 message: format!(
@@ -564,6 +831,151 @@ impl McpServe {
                 report.rubric_name, report.weighted_total, report.judge_model
             ),
         }))
+    }
+
+    /// `rubric_prompt`: split-judge, фаза 1 (без LLM у сервера): промпты
+    /// судьи (system+user, те же что у `rubric_run`), JSON-схема ответа,
+    /// которую ждёт парсер [`rubric::parse_judge_response`], и параметры
+    /// прогона из `[judge]` (k сэмплов). Хост исполняет промпт k раз своей
+    /// моделью и возвращает сырые ответы в `rubric_verify`.
+    async fn tool_rubric_prompt(&self, args: Value) -> std::result::Result<Value, CallError> {
+        #[derive(Deserialize)]
+        struct Args {
+            /// Рубрика: имя в каталоге рубрик (`paths.rubrics_dir`) или путь к YAML.
+            rubric: String,
+            /// Путь к оцениваемому документу (md/txt).
+            target: Option<String>,
+            /// Текст документа inline (альтернатива `target`).
+            target_text: Option<String>,
+            /// В MCP-режиме не поддерживается: генерация динамической
+            /// рубрики требует LLM на стороне сервера.
+            dynamic_subject: Option<String>,
+        }
+        let args: Args = parse_args(args, "rubric_prompt")?;
+        if args.dynamic_subject.is_some() {
+            return Err(CallError::Execution(
+                "rubric_prompt: dynamic_subject требует LLM на стороне сервера — в MCP-режиме \
+                 её нет; сгенерируйте динамическую рубрику моделью хоста и передайте путь \
+                 к её YAML в аргументе 'rubric'"
+                    .into(),
+            ));
+        }
+        let text = rubric_target_text("rubric_prompt", args.target, args.target_text).await?;
+        rubric::check_target_len(&text).map_err(|e| CallError::execution("rubric_prompt", e))?;
+        let rubric_path = resolve_rubric(&self.cfg.paths.rubrics_dir(), &args.rubric);
+        let rub = blocking("rubric_prompt", move || rubric::load(&rubric_path)).await?;
+        let samples = self.cfg.judge.samples.max(1);
+        Ok(json!({
+            "rubric": rub.name,
+            "criteria": rub.criteria.len(),
+            "system_prompt": rubric::judge_system_prompt(&rub),
+            "user_prompt": rubric::judge_user_prompt(&rub, &text),
+            "response_json_schema": judge_response_schema(&rub),
+            "judge_config": {
+                "samples": samples,
+                "thinking": self.cfg.judge.thinking,
+                "unstable_stdev": self.cfg.judge.unstable_stdev,
+                "evidence_min_similarity": self.cfg.judge.evidence_min_similarity,
+            },
+            "instructions": "Исполните system+user промпт samples раз независимыми запросами \
+                             своей модели; сырые ответы (как есть, без правок) передайте массивом \
+                             'answers' в rubric_verify с ТЕМИ ЖЕ rubric и target/target_text.",
+            "summary": format!(
+                "Промпт судьи по рубрике '{}' собран ({} критериев; нужно независимых ответов: {samples})",
+                rub.name,
+                rub.criteria.len(),
+            ),
+        }))
+    }
+
+    /// `rubric_verify`: split-judge, фаза 2 (без LLM у сервера): разбор
+    /// сырых ответов хоста тем же парсером, что у встроенного судьи, и
+    /// сборка отчёта существующим [`rubric::build_report`] — медиана
+    /// сэмплов, σ → `unstable`, цитата → `evidence_not_found` (для проверки
+    /// цитат нужен тот же target). Битые ответы вызов не роняют: они
+    /// считаются в `answers.dropped`; ноль валидных — доменный isError.
+    async fn tool_rubric_verify(&self, args: Value) -> std::result::Result<Value, CallError> {
+        #[derive(Deserialize)]
+        struct Args {
+            /// Рубрика: имя в каталоге рубрик или путь к YAML (та же, что судилась).
+            rubric: String,
+            /// Путь к оцениваемому документу (тот же, что судился).
+            target: Option<String>,
+            /// Текст документа inline (альтернатива `target`; тот же, что судился).
+            target_text: Option<String>,
+            /// Сырые ответы модели хоста на промпт `rubric_prompt` (JSON судьи).
+            answers: Vec<String>,
+            /// Метка судьи для отчёта (имя модели хоста; дефолт — external).
+            model: Option<String>,
+        }
+        let args: Args = parse_args(args, "rubric_verify")?;
+        if args.answers.is_empty() {
+            return Err(CallError::invalid_params(
+                "rubric_verify: массив 'answers' пуст — нужны сырые ответы модели хоста".into(),
+            ));
+        }
+        if args.answers.len() > MAX_VERIFY_ANSWERS {
+            return Err(CallError::invalid_params(format!(
+                "rubric_verify: ответов {} при лимите {MAX_VERIFY_ANSWERS} — \
+                 судье достаточно k сэмплов из judge_config",
+                args.answers.len()
+            )));
+        }
+        let text = rubric_target_text("rubric_verify", args.target, args.target_text).await?;
+        rubric::check_target_len(&text).map_err(|e| CallError::execution("rubric_verify", e))?;
+        let rubric_path = resolve_rubric(&self.cfg.paths.rubrics_dir(), &args.rubric);
+        let rub = blocking("rubric_verify", move || rubric::load(&rubric_path)).await?;
+        let total = args.answers.len();
+        let mut runs = Vec::with_capacity(total);
+        let mut dropped = 0usize;
+        for raw in &args.answers {
+            match rubric::parse_judge_response(raw) {
+                Ok(parsed) => runs.push(parsed),
+                Err(_) => dropped += 1,
+            }
+        }
+        if runs.is_empty() {
+            return Err(CallError::Execution(format!(
+                "rubric_verify: ни один из {total} ответов не разобран как JSON судьи \
+                 ({{\"scores\": [{{\"criterion_id\": \"...\", \"score\": 1, \"rationale\": \
+                 \"Цитата: \\\"...\\\". ...\"}}], \"verdict\": \"...\"}}) — передайте сырые \
+                 ответы модели как есть, без правок"
+            )));
+        }
+        let judge_model = args
+            .model
+            .unwrap_or_else(|| "external (split-judge)".into());
+        let report = rubric::build_report(&rub, &judge_model, &runs, &text, &self.cfg.judge)
+            .map_err(|e| CallError::execution("rubric_verify", e))?;
+        let mut out = json!({
+            "rubric": report.rubric_name,
+            "judge_model": report.judge_model,
+            "judge_samples": report.judge_samples,
+            "weighted_total": report.weighted_total,
+            "verdict": report.verdict,
+            "scores": report.scores,
+            "report_markdown": report.to_markdown(),
+            "answers": {
+                "total": total,
+                "valid": runs.len(),
+                "dropped": dropped,
+            },
+            "summary": format!(
+                "Рубрика '{}': {:.2}/5 (судья {}, валидных ответов {}/{total})",
+                report.rubric_name,
+                report.weighted_total,
+                report.judge_model,
+                runs.len(),
+            ),
+        });
+        if dropped > 0 {
+            out["warning"] = json!(format!(
+                "{dropped} из {total} ответов не разобраны как JSON судьи и отброшены; \
+                 отчёт построен по {} валидным",
+                runs.len()
+            ));
+        }
+        Ok(out)
     }
 
     /// `kb_search`: поиск по локальной базе знаний харнесса
@@ -825,6 +1237,61 @@ fn resolve_rubric(dir: &Path, name: &str) -> PathBuf {
     dir.join(format!("{name}.yaml"))
 }
 
+/// Разбор пары `target`/`target_text` инструментов рубрик (подход
+/// `rubric_run`): ровно один из двух; путь читается на blocking-пуле.
+async fn rubric_target_text(
+    tool: &str,
+    target: Option<String>,
+    target_text: Option<String>,
+) -> std::result::Result<String, CallError> {
+    match (target, target_text) {
+        (Some(path), None) => {
+            let path = PathBuf::from(path);
+            blocking(tool, move || {
+                std::fs::read_to_string(&path).map_err(|e| crate::error::HarnessError::io(&path, e))
+            })
+            .await
+        }
+        (None, Some(text)) => Ok(text),
+        _ => Err(CallError::invalid_params(format!(
+            "{tool}: укажите ровно один из аргументов 'target' / 'target_text'"
+        ))),
+    }
+}
+
+/// JSON-схема ответа судьи, как её ждёт [`rubric::parse_judge_response`]
+/// (split-judge: хост подставляет её в структурированный вывод своей модели;
+/// парсер терпимо принимает балл и строкой — схема фиксирует канону).
+fn judge_response_schema(rubric: &rubric::Rubric) -> Value {
+    let ids: Vec<&str> = rubric.criteria.iter().map(|c| c.id.as_str()).collect();
+    json!({
+        "type": "object",
+        "properties": {
+            "scores": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "criterion_id": {"type": "string", "enum": ids},
+                        "score": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": rubric.scale_max,
+                        },
+                        "rationale": {
+                            "type": "string",
+                            "description": "При балле ≥ 2 начинается с «Цитата: \"<дословный фрагмент текста>\"» — цитата проверяется механически",
+                        },
+                    },
+                    "required": ["criterion_id", "score", "rationale"],
+                },
+            },
+            "verdict": {"type": "string"},
+        },
+        "required": ["scores", "verdict"],
+    })
+}
+
 /// Доступен ли API-ключ провайдера (та же семантика, что у резолва ключа
 /// в `llm::openai_compat`: env непустая после trim; файл с `~`-раскрытием
 /// читается и непуст). Содержимое ключа в ответы/логи не попадает.
@@ -848,7 +1315,8 @@ fn api_key_available(mc: &ModelConfig) -> bool {
     false
 }
 
-/// Спецификации инструментов для `tools/list` (имена и аргументы — ADR-008).
+/// Спецификации ручных инструментов для `tools/list` (имена и аргументы —
+/// ADR-008; порядок первых десяти зафиксирован тестами).
 // Декларативная таблица: дробление на fn-по-инструменту ухудшит обзорность.
 #[expect(clippy::too_many_lines, reason = "декларативная таблица спецификаций")]
 fn tool_specs() -> Vec<Value> {
@@ -1030,7 +1498,122 @@ fn tool_specs() -> Vec<Value> {
             },
             "annotations": read_only,
         }),
+        // Split-judge (механический судья без LLM у сервера): хост исполняет
+        // промпт своей моделью, сервер собирает отчёт тем же кодом, что
+        // у встроенного судьи rubric_run (медиана, unstable, evidence_not_found).
+        json!({
+            "name": "rubric_prompt",
+            "description": "Split-judge, фаза 1 (без API-ключа): собирает system+user промпты \
+                            архитектурного судьи по рубрике и целевому документу + JSON-схему \
+                            ответа + judge_config (число сэмплов k). Выполните промпт k раз \
+                            СВОЕЙ моделью и передайте сырые ответы массивом 'answers' в \
+                            rubric_verify с теми же rubric и target/target_text",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "rubric": {"type": "string", "description": "Рубрика: имя в каталоге рубрик arch или путь к YAML"},
+                    "target": {"type": "string", "description": "Путь к оцениваемому документу (md/txt)"},
+                    "target_text": {"type": "string", "description": "Текст документа inline (альтернатива target)"},
+                    "dynamic_subject": {"type": "string", "description": "НЕ поддерживается в MCP-режиме (нужен LLM у сервера): сгенерируйте рубрику своей моделью и передайте путь в rubric"},
+                },
+                "required": ["rubric"],
+            },
+            "annotations": read_only,
+        }),
+        json!({
+            "name": "rubric_verify",
+            "description": "Split-judge, фаза 2 (без API-ключа): принимает сырые ответы вашей \
+                            модели на промпт rubric_prompt (массив строк 'answers') и строит \
+                            отчёт рубрики: медиана баллов по сэмплам, метки unstable (разброс) \
+                            и evidence_not_found (цитата не подтверждена target'ом). Битые \
+                            ответы отбрасываются со счётчиком в answers.dropped",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "rubric": {"type": "string", "description": "Та же рубрика, что в rubric_prompt"},
+                    "target": {"type": "string", "description": "Тот же документ (путь), что судился — для проверки цитат"},
+                    "target_text": {"type": "string", "description": "Тот же текст inline (альтернатива target)"},
+                    "answers": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Сырые ответы модели хоста (каждый — JSON судьи по response_json_schema)",
+                    },
+                    "model": {"type": "string", "description": "Опц.: метка судьи для отчёта (имя модели хоста)"},
+                },
+                "required": ["rubric", "answers"],
+            },
+            "annotations": read_only,
+        }),
     ]
+}
+
+/// Полный список спецификаций `tools/list`: ручные инструменты (см.
+/// [`tool_specs`]) + мостовые по белым спискам текущего режима.
+impl McpServe {
+    /// `tools/list` текущего режима: ручные + мостовые (сортированы по имени).
+    fn all_tool_specs(&self) -> Vec<Value> {
+        let mut specs = tool_specs();
+        specs.extend(self.bridge_tool_specs());
+        specs
+    }
+
+    /// MCP-спеки мостовых инструментов: генерируются из `Tool::spec()`
+    /// реестра (name/description/parameters) + annotations по членству в
+    /// списках и классу риска [`crate::policy::classify_tool`]. В схему
+    /// каждого добавляется опциональный аргумент `cwd` моста. Инструменты,
+    /// отключённые конфигом (напр. `[archify].enabled = false`), пропускаются.
+    fn bridge_tool_specs(&self) -> Vec<Value> {
+        let mut names: Vec<&str> = Vec::new();
+        names.extend_from_slice(BRIDGE_READ_ONLY);
+        if self.mode.allows_write() {
+            names.extend_from_slice(BRIDGE_READ_WRITE);
+        }
+        names.sort_unstable();
+        let mut out = Vec::with_capacity(names.len());
+        for name in names {
+            let Some(tool) = self.registry.get(name) else {
+                continue;
+            };
+            let spec = tool.spec();
+            let mut parameters = spec.parameters;
+            if let Some(props) = parameters
+                .get_mut("properties")
+                .and_then(Value::as_object_mut)
+            {
+                props.insert(
+                    "cwd".into(),
+                    json!({
+                        "type": "string",
+                        "description": "Рабочий каталог клиента: относительные пути вызова \
+                                        резолвятся от него (по умолчанию — cwd процесса сервера)",
+                    }),
+                );
+            }
+            out.push(json!({
+                "name": spec.name,
+                "description": spec.description,
+                "inputSchema": parameters,
+                "annotations": bridge_annotations(&spec.name),
+            }));
+        }
+        out
+    }
+}
+
+/// Аннотации MCP для мостового инструмента: `readOnlyHint` — по членству в
+/// rw-списке (честно о записи: rw-инструменты пишут в рабочий каталог
+/// клиента, даже если политика считает их `ReadOnly`), `destructiveHint` — по
+/// классу риска из [`crate::policy::classify_tool`] (`Mutating`+ → true;
+/// аддитивные записи вроде `skill_distill`/`archify_*` — false).
+fn bridge_annotations(name: &str) -> Value {
+    let class = crate::policy::classify_tool(name, &Value::Null);
+    let mutating = !BRIDGE_READ_ONLY.contains(&name);
+    json!({
+        "readOnlyHint": !mutating,
+        "destructiveHint": class != crate::policy::RiskClass::ReadOnly,
+        "idempotentHint": !mutating,
+        "openWorldHint": false,
+    })
 }
 
 /// Цикл сервера поверх произвольных AsyncRead/AsyncWrite: строка → ответ
@@ -1075,13 +1658,24 @@ where
     Ok(())
 }
 
-/// Точка входа `arch-be mcp serve`: цикл на stdin/stdout процесса.
+/// Точка входа `arch-be mcp serve`: цикл на stdin/stdout процесса,
+/// read-only режим (поведение по умолчанию).
 ///
 /// # Errors
 /// Запись в stdout оборвалась (клиент умер) — сервер завершается с ошибкой
 /// транспорта; входной мусор ошибкой не является (ответ `-32700` и дальше).
 pub async fn serve(cfg: Arc<Config>) -> Result<()> {
-    let server = McpServe::new(cfg);
+    serve_with_mode(cfg, ServeMode::ReadOnly).await
+}
+
+/// Точка входа `arch-be mcp serve [--rw]`: цикл на stdin/stdout процесса
+/// в явном режиме [`ServeMode`].
+///
+/// # Errors
+/// Запись в stdout оборвалась (клиент умер) — сервер завершается с ошибкой
+/// транспорта; входной мусор ошибкой не является (ответ `-32700` и дальше).
+pub async fn serve_with_mode(cfg: Arc<Config>, mode: ServeMode) -> Result<()> {
+    let server = McpServe::with_mode(cfg, mode);
     run_loop(&server, tokio::io::stdin(), tokio::io::stdout()).await
 }
 
@@ -1188,7 +1782,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tools_list_has_ten_read_only_tools() {
+    async fn tools_list_read_only_mode_manual_first_then_bridge() {
         let responses =
             run_lines(&[r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"#]).await;
         let tools = responses[0]["result"]["tools"].as_array().expect("tools");
@@ -1196,9 +1790,11 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().expect("имя"))
             .collect();
+        // Первые 10 — ручные инструменты в зафиксированном порядке (ADR-008);
+        // далее — split-judge (ручные) и мостовые read-only.
         assert_eq!(
-            names,
-            vec![
+            names[..10],
+            [
                 "spine_lint",
                 "fitness_check",
                 "significance_score",
@@ -1211,10 +1807,35 @@ mod tests {
                 "mermaid_render"
             ]
         );
+        assert_eq!(names[10..12], ["rubric_prompt", "rubric_verify"]);
+        for bridged in BRIDGE_READ_ONLY {
+            assert!(
+                names.contains(bridged),
+                "мостовой read-only '{bridged}' обязан быть в tools/list: {names:?}"
+            );
+        }
+        assert_eq!(
+            names.len(),
+            MANUAL_TOOLS.len() + BRIDGE_READ_ONLY.len(),
+            "ro-режим: ручные + split-judge + read-only мост"
+        );
         for t in tools {
             assert_eq!(t["annotations"]["readOnlyHint"], true, "{}", t["name"]);
             assert!(t["inputSchema"].is_object(), "{}", t["name"]);
         }
+        // У мостовых спек есть дополнительный аргумент моста `cwd`.
+        let openapi = tools
+            .iter()
+            .find(|t| t["name"] == "openapi_lint")
+            .expect("openapi_lint");
+        assert!(
+            openapi["inputSchema"]["properties"]["cwd"].is_object(),
+            "аргумент cwd в мостовой спеке: {openapi}"
+        );
+        assert!(
+            openapi["inputSchema"]["properties"]["path"].is_object(),
+            "схема инструмента из Tool::spec(): {openapi}"
+        );
     }
 
     #[tokio::test]
@@ -1229,23 +1850,17 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().expect("имя"))
             .collect();
-        for forbidden in [
-            "bash",
-            "write_file",
-            "edit_file",
-            "harness_run",
-            "ralph_run",
-            "subagent_run",
-            "subagent_list",
-            "worktree_new",
-            "handoff_create",
-            "agentsmd_generate",
-            "web_fetch",
-            "web_search",
-        ] {
+        for forbidden in BRIDGE_NEVER {
             assert!(
-                !names.contains(&forbidden),
+                !names.contains(forbidden),
                 "write/exec-инструмент '{forbidden}' не должен отдаваться наружу: {names:?}"
+            );
+        }
+        // rw-контур в read-only режиме закрыт: ни в списке, ни вызовом.
+        for rw in BRIDGE_READ_WRITE {
+            assert!(
+                !names.contains(rw),
+                "rw-инструмент '{rw}' не должен отдаваться без --rw: {names:?}"
             );
         }
     }
@@ -1605,6 +2220,415 @@ mod tests {
         assert!(
             art.contains("│ A │") && art.contains("│ B │") && art.contains('▼'),
             "TD-цепочка из файла:\n{art}"
+        );
+    }
+
+    /// Сервер в режиме `--rw` на дефолтном конфиге.
+    fn rw_server() -> McpServe {
+        McpServe::with_mode(Arc::new(Config::default()), ServeMode::ReadWrite)
+    }
+
+    /// Мини-репозиторий для `agentsmd_generate` (по образцу фикстуры
+    /// `agentsmd::tests`): манифест, спайн, каталог ADR, `.arch-handoff/`.
+    fn agentsmd_repo(root: &Path) -> PathBuf {
+        let repo = root.join("repo");
+        std::fs::create_dir_all(repo.join("docs/adr")).expect("adr");
+        std::fs::create_dir_all(repo.join(".arch-handoff")).expect("handoff");
+        std::fs::write(repo.join("Cargo.toml"), "[package]\nname=\"r\"\n").expect("cargo");
+        std::fs::write(
+            repo.join("docs/ARCHITECTURE-SPINE.md"),
+            "# Spine\n\n## AD-1. Формат id\nBinds: все\nPrevents: рассинхрон\nRule: правило\n",
+        )
+        .expect("spine");
+        repo
+    }
+
+    /// YAML-фикстура рубрики из двух критериев (context вес 1, alternatives вес 3).
+    fn rubric_fixture(root: &Path) -> PathBuf {
+        let path = root.join("adr-quality.yaml");
+        std::fs::write(
+            &path,
+            "name: adr-quality\n\
+             description: Качество ADR\n\
+             scale_max: 5\n\
+             origin: anchor\n\
+             criteria:\n  \
+             - id: context\n    \
+             name: Контекст\n    \
+             description: Описан контекст и проблема\n    \
+             weight: 1.0\n  \
+             - id: alternatives\n    \
+             name: Альтернативы\n    \
+             description: Рассмотрены альтернативы\n    \
+             weight: 3.0\n",
+        )
+        .expect("рубрика");
+        path
+    }
+
+    #[test]
+    fn bridge_lists_partition_registry() {
+        // Белые списки, ручные имена и never-список попарно не пересекаются.
+        for name in BRIDGE_READ_ONLY.iter().chain(BRIDGE_READ_WRITE) {
+            assert!(
+                !BRIDGE_NEVER.contains(name),
+                "{name} и в белом списке, и в never"
+            );
+            assert!(
+                !MANUAL_TOOLS.contains(name),
+                "{name} — ручной и мостовой одновременно"
+            );
+        }
+        for name in BRIDGE_NEVER {
+            assert!(!MANUAL_TOOLS.contains(name), "{name} — ручной и в never");
+        }
+        // Все имена списков — реальные члены полного реестра дефолтного
+        // конфига (страховка от переименований инструментов доменов).
+        let registry = crate::tools::full_registry(&Config::default());
+        for name in BRIDGE_READ_ONLY.iter().chain(BRIDGE_READ_WRITE) {
+            assert!(
+                registry.get(name).is_some(),
+                "{name} из белого списка отсутствует в full_registry"
+            );
+        }
+        for name in BRIDGE_NEVER {
+            assert!(
+                registry.get(name).is_some(),
+                "{name} из never-списка отсутствует в full_registry — список протух?"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn rw_mode_lists_bridge_write_tools_but_never_never() {
+        let responses = run_lines_on(
+            rw_server(),
+            &[r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"#],
+        )
+        .await;
+        let tools = responses[0]["result"]["tools"].as_array().expect("tools");
+        let names: Vec<&str> = tools
+            .iter()
+            .map(|t| t["name"].as_str().expect("имя"))
+            .collect();
+        for rw in BRIDGE_READ_WRITE {
+            assert!(
+                names.contains(rw),
+                "rw-инструмент '{rw}' нужен в --rw: {names:?}"
+            );
+        }
+        for forbidden in BRIDGE_NEVER {
+            assert!(
+                !names.contains(forbidden),
+                "never-инструмент '{forbidden}' закрыт и под --rw: {names:?}"
+            );
+        }
+        assert_eq!(
+            names.len(),
+            MANUAL_TOOLS.len() + BRIDGE_READ_ONLY.len() + BRIDGE_READ_WRITE.len(),
+            "rw-режим: ручные + оба белых списка"
+        );
+        // Аннотации: mutating по классификации политики → destructiveHint.
+        let handoff = tools
+            .iter()
+            .find(|t| t["name"] == "handoff_create")
+            .expect("handoff_create");
+        assert_eq!(handoff["annotations"]["readOnlyHint"], false);
+        assert_eq!(handoff["annotations"]["destructiveHint"], true);
+        // Аддитивная запись (политика — ReadOnly): readOnlyHint=false по
+        // членству в rw-списке, destructiveHint=false по классу риска.
+        let distill = tools
+            .iter()
+            .find(|t| t["name"] == "skill_distill")
+            .expect("skill_distill");
+        assert_eq!(distill["annotations"]["readOnlyHint"], false);
+        assert_eq!(distill["annotations"]["destructiveHint"], false);
+    }
+
+    #[tokio::test]
+    async fn rw_tools_callable_only_in_rw_mode() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = agentsmd_repo(tmp.path());
+        let repo_str = repo.display().to_string();
+        let call = |id: u64| {
+            format!(
+                r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"agentsmd_generate","arguments":{{"repo":"{repo_str}"}}}}}}"#
+            )
+        };
+        // ro-режим: rw-инструмент недоступен совсем (-32602), запись не идёт.
+        let responses = run_lines(&[&call(1)]).await;
+        assert_eq!(responses[0]["error"]["code"], INVALID_PARAMS);
+        assert!(
+            !repo.join("AGENTS.md").exists(),
+            "в ro-режиме ничего не создаётся"
+        );
+        // rw-режим: вызов проходит через реестр, AGENTS.md создан.
+        let responses = run_lines_on(rw_server(), &[&call(1)]).await;
+        let result = &responses[0]["result"];
+        assert_eq!(result["isError"], false, "{result}");
+        assert_eq!(result["structuredContent"]["tool"], "agentsmd_generate");
+        assert!(
+            repo.join("AGENTS.md").is_file(),
+            "AGENTS.md создан мостовым вызовом"
+        );
+    }
+
+    #[tokio::test]
+    async fn bridge_openapi_lint_runs_via_registry_with_cwd() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        std::fs::write(
+            tmp.path().join("api.yaml"),
+            "openapi: 3.0.3\n\
+             info:\n  \
+             title: Pet Store API\n  \
+             version: 1.0.0\n\
+             paths:\n  \
+             /v1/pets:\n    \
+             get:\n      \
+             operationId: listPets\n      \
+             responses:\n        \
+             '200':\n          \
+             description: ok\n",
+        )
+        .expect("контракт");
+        // Относительный путь резолвится от аргумента моста `cwd`.
+        let call = format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"openapi_lint","arguments":{{"path":"api.yaml","cwd":"{}"}}}}}}"#,
+            tmp.path().display()
+        );
+        let responses = run_lines(&[&call]).await;
+        let result = &responses[0]["result"];
+        assert_eq!(result["isError"], false, "{result}");
+        let sc = &result["structuredContent"];
+        assert_eq!(sc["tool"], "openapi_lint");
+        let output = sc["output"].as_str().expect("output");
+        assert!(output.contains("openapi:"), "отчёт инструмента: {output}");
+        // content[0].text моста — сырой вывод инструмента, не JSON-обёртка.
+        let text = result["content"][0]["text"].as_str().expect("text");
+        assert_eq!(text, output);
+    }
+
+    #[tokio::test]
+    async fn bridge_policy_require_confirm_becomes_is_error() {
+        // Политика R1: agentsmd_generate классифицируется Mutating →
+        // RequireConfirm; в неинтерактивном MCP это отказ с пояснением
+        // (isError), файл не создаётся.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = agentsmd_repo(tmp.path());
+        let mut cfg = Config::default();
+        cfg.policy.autonomy = "R1".into();
+        let server = McpServe::with_mode(Arc::new(cfg), ServeMode::ReadWrite);
+        let call = format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"agentsmd_generate","arguments":{{"repo":"{}"}}}}}}"#,
+            repo.display()
+        );
+        let responses = run_lines_on(server, &[&call]).await;
+        let result = &responses[0]["result"];
+        assert_eq!(result["isError"], true, "{result}");
+        let text = result["content"][0]["text"].as_str().expect("text");
+        assert!(
+            text.contains("ТРЕБУЕТСЯ ПОДТВЕРЖДЕНИЕ"),
+            "причина отказа политики: {text}"
+        );
+        assert!(
+            !repo.join("AGENTS.md").exists(),
+            "при RequireConfirm запись не идёт"
+        );
+    }
+
+    #[tokio::test]
+    async fn rubric_prompt_emits_prompts_schema_and_judge_config() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let rub = rubric_fixture(tmp.path());
+        let server = server();
+        let prompt_call = format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"rubric_prompt","arguments":{{"rubric":"{}","target_text":"контекст описан подробно"}}}}}}"#,
+            rub.display()
+        );
+        let dyn_call = format!(
+            r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"rubric_prompt","arguments":{{"rubric":"{}","target_text":"текст","dynamic_subject":"ADR миграции"}}}}}}"#,
+            rub.display()
+        );
+        let responses = run_lines_on(server, &[&prompt_call, &dyn_call]).await;
+        let result = &responses[0]["result"];
+        assert_eq!(result["isError"], false, "{result}");
+        let sc = &result["structuredContent"];
+        assert_eq!(sc["rubric"], "adr-quality");
+        assert_eq!(sc["criteria"], 2);
+        let system = sc["system_prompt"].as_str().expect("system");
+        assert!(
+            system.contains("НАЧАЛО ОЦЕНИВАЕМОГО ТЕКСТА"),
+            "маркеры изоляции в системном промпте: {system}"
+        );
+        let user = sc["user_prompt"].as_str().expect("user");
+        assert!(
+            user.contains("контекст описан подробно"),
+            "целевой текст в user-промпте: {user}"
+        );
+        let schema = &sc["response_json_schema"];
+        assert_eq!(
+            schema["properties"]["scores"]["items"]["properties"]["score"]["maximum"],
+            5
+        );
+        assert_eq!(sc["judge_config"]["samples"], 3, "k сэмплов из [judge]");
+        // dynamic_subject требует LLM у сервера — вежливая доменная ошибка.
+        let dyn_result = &responses[1]["result"];
+        assert_eq!(dyn_result["isError"], true, "{dyn_result}");
+        let text = dyn_result["content"][0]["text"].as_str().expect("text");
+        assert!(text.contains("dynamic_subject"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn rubric_verify_builds_report_and_counts_dropped() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let rub = rubric_fixture(tmp.path());
+        let answers = [
+            r#"{"scores":[{"criterion_id":"context","score":4,"rationale":"Цитата: \"контекст описан подробно\" — да"},{"criterion_id":"alternatives","score":2,"rationale":"Цитата: \"контекст описан подробно\" — альтернативы слабо"}],"verdict":"v1"}"#,
+            r#"{"scores":[{"criterion_id":"context","score":2,"rationale":"Цитата: \"контекст описан подробно\" — слабо"}],"verdict":"v2"}"#,
+            "это вообще не json судьи",
+        ];
+        let answers_json = serde_json::to_string(&answers).expect("json");
+        let call = format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"rubric_verify","arguments":{{"rubric":"{}","target_text":"контекст описан подробно","answers":{answers_json},"model":"host-model-x"}}}}}}"#,
+            rub.display()
+        );
+        let responses = run_lines(&[&call]).await;
+        let result = &responses[0]["result"];
+        assert_eq!(result["isError"], false, "{result}");
+        let sc = &result["structuredContent"];
+        assert_eq!(sc["judge_model"], "host-model-x");
+        assert_eq!(sc["judge_samples"], 2, "битый ответ отброшен");
+        assert_eq!(sc["answers"], json!({"total": 3, "valid": 2, "dropped": 1}));
+        assert!(
+            sc["warning"]
+                .as_str()
+                .expect("warning")
+                .contains("отброшены"),
+            "предупреждение о доле отброшенных: {sc}"
+        );
+        // context: сэмплы [4,2] → медиана 3.0 → балл 3, цитата из текста →
+        // без флагов; alternatives: оценён один раз (2), пропуск = 1 →
+        // сэмплы [2,1] → медиана 1.5 → балл 2 (round half away from zero),
+        // цитата подтверждена → засчитан.
+        let scores = sc["scores"].as_array().expect("scores");
+        let context = &scores[0];
+        assert_eq!(context["criterion_id"], "context");
+        assert_eq!(context["score"], 3, "медиана [4,2]: {context}");
+        assert_eq!(context["samples"], json!([4, 2]));
+        assert_eq!(context["flags"], json!([]), "цитата подтверждена");
+        let alternatives = &scores[1];
+        assert_eq!(alternatives["samples"], json!([2, 1]));
+        // Итог: (3*1 + 2*3) / (1+3) = 2.25.
+        assert!(
+            (sc["weighted_total"].as_f64().expect("итог") - 2.25).abs() < 1e-9,
+            "{}",
+            sc["weighted_total"]
+        );
+        assert_eq!(
+            sc["verdict"], "v2",
+            "вердикт — из последнего валидного сэмпла"
+        );
+        assert!(
+            sc["report_markdown"]
+                .as_str()
+                .expect("markdown")
+                .contains("# Оценка по рубрике «adr-quality»"),
+            "markdown-отчёт как у rubric_run"
+        );
+    }
+
+    #[tokio::test]
+    async fn rubric_verify_flags_fabricated_quote_and_survives_partial_evidence() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let rub = rubric_fixture(tmp.path());
+        // context: балл 5 с выдуманной цитатой (в обоих сэмплах) →
+        // evidence_not_found и исключение из итога; alternatives: балл 1
+        // («свидетельство отсутствует», цитата не нужна) → засчитан.
+        let answer = r#"{"scores":[{"criterion_id":"context","score":5,"rationale":"Цитата: \"выдуманная фраза вне текста\" — якобы есть"},{"criterion_id":"alternatives","score":1,"rationale":"свидетельство отсутствует"}],"verdict":"спорно"}"#;
+        let answers = [answer, answer];
+        let answers_json = serde_json::to_string(&answers).expect("json");
+        let call = format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"rubric_verify","arguments":{{"rubric":"{}","target_text":"контекст описан кратко","answers":{answers_json}}}}}}}"#,
+            rub.display()
+        );
+        let responses = run_lines(&[&call]).await;
+        let result = &responses[0]["result"];
+        assert_eq!(result["isError"], false, "{result}");
+        let sc = &result["structuredContent"];
+        let context = &sc["scores"][0];
+        assert_eq!(context["flags"], json!(["evidence_not_found"]), "{context}");
+        // Из итога context исключён: только alternatives (1*3/3 = 1.0).
+        assert!(
+            (sc["weighted_total"].as_f64().expect("итог") - 1.0).abs() < 1e-9,
+            "{}",
+            sc["weighted_total"]
+        );
+    }
+
+    #[tokio::test]
+    async fn rubric_verify_all_broken_or_empty_answers_is_error() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let rub = rubric_fixture(tmp.path());
+        let all_broken = format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"rubric_verify","arguments":{{"rubric":"{}","target_text":"текст","answers":["мусор","ещё мусор"]}}}}}}"#,
+            rub.display()
+        );
+        let empty = format!(
+            r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"rubric_verify","arguments":{{"rubric":"{}","target_text":"текст","answers":[]}}}}}}"#,
+            rub.display()
+        );
+        let too_many = format!(
+            r#"{{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{{"name":"rubric_verify","arguments":{{"rubric":"{}","target_text":"текст","answers":{}}}}}}}"#,
+            rub.display(),
+            serde_json::to_string(&vec!["x"; MAX_VERIFY_ANSWERS + 1]).expect("json")
+        );
+        let responses = run_lines(&[&all_broken, &empty, &too_many]).await;
+        // Все ответы битые — доменная ошибка isError (не protocol error).
+        let broken = &responses[0]["result"];
+        assert_eq!(broken["isError"], true, "{broken}");
+        let text = broken["content"][0]["text"].as_str().expect("text");
+        assert!(text.contains("ни один из 2 ответов"), "{text}");
+        // Пустой массив и превышение лимита — ошибки параметров -32602.
+        assert_eq!(responses[1]["error"]["code"], INVALID_PARAMS);
+        assert_eq!(responses[2]["error"]["code"], INVALID_PARAMS);
+    }
+
+    #[tokio::test]
+    async fn rubric_run_cli_model_skips_api_key_precheck() {
+        // kind="cli": судья — внешний CLI-харнесс, уже авторизованный на
+        // машине, — собственный API-ключ Spine не нужен, предпроверка ключа
+        // пропускается. Провайдер cli здесь не настроен → вызов доходит до
+        // исполнения и падает доменной ошибкой (isError), а НЕ protocol
+        // error -32603 про отсутствующий ключ.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let rub = rubric_fixture(tmp.path());
+        let mut cfg = Config::default();
+        cfg.models.insert(
+            "cli-judge".into(),
+            ModelConfig {
+                base_url: "http://127.0.0.1:9".into(),
+                model: "stub".into(),
+                kind: Some("cli".into()),
+                command: Some("definitely-missing-cli-harness-binary".into()),
+                api_key_env: "ARCH_HARNESS_TEST_MISSING_KEY_XYZ".into(),
+                api_key_file: None,
+                ..ModelConfig::default()
+            },
+        );
+        cfg.default_model = "cli-judge".into();
+        let server = McpServe::new(Arc::new(cfg));
+        let call = format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"rubric_run","arguments":{{"rubric":"{}","target_text":"текст"}}}}}}"#,
+            rub.display()
+        );
+        let response = server.handle_line(&call).await.expect("ответ");
+        assert!(
+            response.get("error").is_none(),
+            "предпроверка ключа (-32603) должна быть пропущена для kind=cli: {response}"
+        );
+        assert_eq!(
+            response["result"]["isError"], true,
+            "исполнение без настроенного cli-провайдера — доменная ошибка: {response}"
         );
     }
 }

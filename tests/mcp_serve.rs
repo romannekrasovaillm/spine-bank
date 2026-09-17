@@ -16,8 +16,15 @@ use common::arch_cmd;
 /// (stdin закрывается после записи — сервер завершается по EOF) и
 /// возвращает разобранные ответы в порядке выдачи.
 fn mcp_serve(home: &Path, requests: &str) -> Vec<Value> {
-    let output = arch_cmd(home)
-        .args(["mcp", "serve"])
+    mcp_serve_with_args(home, &[], requests)
+}
+
+/// [`mcp_serve`] с дополнительными аргументами командной строки
+/// (например, `--rw` для rw-режима моста).
+fn mcp_serve_with_args(home: &Path, extra_args: &[&str], requests: &str) -> Vec<Value> {
+    let mut cmd = arch_cmd(home);
+    cmd.arg("mcp").arg("serve").args(extra_args);
+    let output = cmd
         .write_stdin(requests)
         .output()
         .expect("запуск arch-be mcp serve");
@@ -176,11 +183,42 @@ fn handshake_then_tools_list_over_stdio() {
     ] {
         assert!(names.contains(&want), "нет инструмента {want}: {names:?}");
     }
+    // Split-judge (механический судья без LLM) и read-only мост реестра
+    // (детерминированный контур) тоже в списке read-only режима.
+    for want in [
+        "rubric_prompt",
+        "rubric_verify",
+        "openapi_lint",
+        "asyncapi_lint",
+        "contract_diff",
+        "fleet_audit",
+        "agentsmd_lint",
+        "archify_validate",
+        "rubric_list",
+        "plugin_list",
+    ] {
+        assert!(names.contains(&want), "нет инструмента {want}: {names:?}");
+    }
     assert_eq!(
         tools.len(),
-        10,
-        "ровно 10 инструментов (6 контрольных + 4 чтения знаний, T4)"
+        20,
+        "ровно 20 инструментов в ro-режиме (12 ручных + 8 read-only моста)"
     );
+    // rw-контур и write/exec-принадлежность хоста закрыты в ro-режиме.
+    for banned in [
+        "handoff_create",
+        "adr_new",
+        "agentsmd_generate",
+        "skill_distill",
+        "bash",
+        "write_file",
+        "harness_run",
+    ] {
+        assert!(
+            !names.contains(&banned),
+            "инструмент {banned} не должен отдаваться в ro-режиме: {names:?}"
+        );
+    }
 }
 
 #[test]
@@ -434,4 +472,145 @@ fn rubric_run_live_with_key() {
     let verdict = &result["structuredContent"];
     assert!(verdict["weighted_total"].as_f64().expect("балл") > 0.0);
     assert!(!verdict["scores"].as_array().expect("оценки").is_empty());
+}
+
+#[test]
+fn rw_mode_lists_bridge_write_tools_over_stdio() {
+    let home = tempfile::tempdir().expect("tmp");
+    let responses = mcp_serve_with_args(
+        home.path(),
+        &["--rw"],
+        &batch(&[json!({"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}).to_string()]),
+    );
+    let tools = responses[0]["result"]["tools"].as_array().expect("tools");
+    let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+    for want in [
+        "handoff_create",
+        "adr_new",
+        "agentsmd_generate",
+        "skill_distill",
+        "reverse_survey",
+        "archify_deliver",
+        // read-only мост остаётся доступен и под --rw:
+        "openapi_lint",
+        "rubric_prompt",
+    ] {
+        assert!(
+            names.contains(&want),
+            "нет инструмента {want} в --rw: {names:?}"
+        );
+    }
+    // Принадлежность хоста не отдаётся ни в одном режиме.
+    for banned in [
+        "bash",
+        "read_file",
+        "write_file",
+        "edit_file",
+        "glob",
+        "grep",
+        "harness_run",
+        "subagent_run",
+        "ralph_run",
+        "worktree_new",
+        "web_search",
+        "web_fetch",
+        "rubric_evaluate",
+        "rubric_generate",
+    ] {
+        assert!(
+            !names.contains(&banned),
+            "never-инструмент {banned} не должен отдаваться и под --rw: {names:?}"
+        );
+    }
+    let handoff = tools
+        .iter()
+        .find(|t| t["name"] == "handoff_create")
+        .expect("handoff_create");
+    assert_eq!(handoff["annotations"]["readOnlyHint"], false);
+    assert_eq!(handoff["annotations"]["destructiveHint"], true);
+}
+
+#[test]
+fn bridge_openapi_lint_call_over_stdio() {
+    let home = tempfile::tempdir().expect("tmp");
+    std::fs::write(
+        home.path().join("api.yaml"),
+        "openapi: 3.0.3\ninfo:\n  title: T\n  version: 1.0.0\npaths:\n  /v1/x:\n    get:\n      operationId: getX\n      responses:\n        '200':\n          description: ok\n",
+    )
+    .expect("контракт");
+    let responses = mcp_serve(
+        home.path(),
+        &batch(&[call(
+            1,
+            "openapi_lint",
+            &json!({"path": home.path().join("api.yaml")}),
+        )]),
+    );
+    let result = &responses[0]["result"];
+    assert_eq!(result["isError"], false, "{result}");
+    let verdict = structured(&responses[0], 1);
+    assert_eq!(verdict["tool"], "openapi_lint");
+    let output = verdict["output"].as_str().expect("output");
+    assert!(
+        output.contains("openapi:"),
+        "отчёт мостового инструмента: {output}"
+    );
+    // text-часть моста — сырой вывод инструмента (не JSON-обёртка).
+    assert_eq!(result["content"][0]["text"].as_str().expect("text"), output);
+}
+
+#[test]
+fn split_judge_prompt_then_verify_over_stdio() {
+    let home = tempfile::tempdir().expect("tmp");
+    std::fs::write(
+        home.path().join("r.yaml"),
+        "name: t-rubric\ndescription: тестовая\nscale_max: 5\norigin: anchor\ncriteria:\n  - id: context\n    name: Контекст\n    description: Описан контекст\n    weight: 1.0\n",
+    )
+    .expect("рубрика");
+    let prompt = call(
+        1,
+        "rubric_prompt",
+        &json!({"rubric": home.path().join("r.yaml"), "target_text": "контекст описан явно"}),
+    );
+    let verify = call(
+        2,
+        "rubric_verify",
+        &json!({
+            "rubric": home.path().join("r.yaml"),
+            "target_text": "контекст описан явно",
+            "answers": [
+                "{\"scores\":[{\"criterion_id\":\"context\",\"score\":4,\"rationale\":\"Цитата: \\\"контекст описан явно\\\" — да\"}],\"verdict\":\"годно\"}",
+                "битый ответ хоста"
+            ],
+        }),
+    );
+    let responses = mcp_serve(home.path(), &batch(&[prompt, verify]));
+    // Фаза 1: промпты + схема + k из judge-конфига.
+    let prompt_out = structured(&responses[0], 1);
+    assert!(
+        prompt_out["system_prompt"]
+            .as_str()
+            .expect("system")
+            .contains("НАЧАЛО ОЦЕНИВАЕМОГО ТЕКСТА")
+    );
+    assert!(prompt_out["response_json_schema"]["properties"]["scores"].is_object());
+    assert_eq!(prompt_out["judge_config"]["samples"], 3);
+    // Фаза 2: отчёт по одному валидному ответу, битый посчитан в dropped.
+    let verdict = structured(&responses[1], 2);
+    assert_eq!(verdict["judge_samples"], 1);
+    assert_eq!(
+        verdict["answers"],
+        json!({"total": 2, "valid": 1, "dropped": 1})
+    );
+    assert_eq!(verdict["scores"][0]["score"], 4);
+    assert_eq!(verdict["scores"][0]["flags"], json!([]));
+    assert!(
+        (verdict["weighted_total"].as_f64().expect("итог") - 4.0).abs() < 1e-9,
+        "{}",
+        verdict["weighted_total"]
+    );
+    assert!(
+        verdict["warning"].is_string(),
+        "доля отброшенных: {verdict}"
+    );
 }
