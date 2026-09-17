@@ -60,6 +60,33 @@ claude mcp add arch-spine -- arch-be mcp serve
 (`model`, `model/` для `model_query` по умолчанию) резолвятся от cwd
 процесса сервера, который задаёт клиент.
 
+### Подключение одной командой: `arch-be connect <host>`
+
+`arch-be connect` раскладывает всё, что нужно хосту: конфиг MCP-сервера
+(ключ `spine` → `arch-be mcp serve`, `--rw` добавляет флаг), пакет скиллов
+из встроенных плагинов и хуки жизненного цикла. Повторный запуск
+идемпотентен: JSON мержится ключ-в-ключ (чужие серверы и хуки
+сохраняются — об этом заметка в выводе), наши хуки помечены маркером
+`# spine-connect:*` и не дублируются; `--dry-run` печатает план без записи.
+Флаги: `--dir <путь>` (дефолт — текущий каталог), `--no-skills`,
+`--no-hooks`, `--no-agents-md`, `--strict-hooks`, `--apply-global`.
+
+| Хост | Что пишется | Что печатается |
+|---|---|---|
+| `claude` | `.mcp.json` (мердж `mcpServers.spine`), `.claude/settings.json` (мердж хуков), `.claude/skills/<имя>/`, `CLAUDE.md` (блок между `<!-- SPINE:BEGIN/END -->`) | следующие шаги (`claude mcp list`) |
+| `qwen` | `.qwen/settings.json` (мердж `mcpServers`) | скиллы и хуки — сниппеты (layout Qwen Code не подтверждён) |
+| `codex` | только с `--apply-global`: `~/.codex/config.toml` (мердж `[mcp_servers.spine]`, бэкап `*.bak-spine-connect`) | TOML-блок; рекомендация `arch-be agents-md refresh .` |
+| `kimi` | только с `--apply-global`: `~/.kimi-code/mcp.json` (мердж, бэкап) | JSON-блок (проектный layout не подтверждён) |
+| `generic` | ничего | все сниппеты для ручной установки |
+
+Хуки Claude Code: `Stop` → `arch-be control check .` (гард: только если
+`arch-be` в PATH и есть `.arch-handoff/CONSTRAINTS.yaml`). Дефолт —
+fail-soft на инфраструктуру (нет бинаря/правил, ошибка запуска — молча
+exit 0) и fail-hard на вердикт («Итог: FAIL» → exit 2, stderr уходит
+агенту). `PostToolUse` (matcher `Edit|Write|MultiEdit`) — только под
+`--strict-hooks`: на репозиториях с правилами `command_succeeds`
+`control check` может гонять сборки — для каждой правки это дорого.
+
 ### Инструменты
 
 | Инструмент | Аргументы | Verdict |

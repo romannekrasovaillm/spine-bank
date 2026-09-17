@@ -466,7 +466,9 @@ CI-джобой `dogfood` (`arch-be control spine` + `arch-be control check .` +
 - **MCP-сервер** `arch-be mcp serve` (ADR-008): инструменты `spine_lint`, `fitness_check`,
   `significance_score`, `trace_check`, `model_query`, `rubric_run` наружу кодовым агентам
   (Claude Code и др.) — структурированный verdict (`passed` + находки) в момент написания
-  кода; read-only, пути аргументами вызова (`docs/mcp.md`).
+  кода; read-only, пути аргументами вызова (`docs/mcp.md`). Подключение одной командой:
+  `arch-be connect <claude|qwen|codex|kimi|generic>` — MCP-конфиг (мердж, чужие ключи
+  сохраняются), пакет скиллов, хуки (`Stop` → `control check`, fail-soft на инфраструктуру).
 - **Планировщик md-задач** «md + cron + LLM + баш-пайпы» (`docs/cron_and_md_pipes.md`).
 - **Библиотека промптов** (`assets/prompts/`, `arch-be prompts`).
 - **Глобальная md-память** (`MEMORY.md` в `~/.arch-harness`, в стиле Kimi Code):
@@ -600,6 +602,7 @@ arch-be [--config <path>] <command>   # без команды — TUI
 | `web search <query> [--arch]` / `web fetch <url>` / `web sites` | Веб: поиск, фетч, кураторские сайты |
 | `mcp list` / `mcp call <server__tool>` | MCP-серверы и вызовы инструментов |
 | `mcp serve` | MCP-сервер (stdio): архитектурный контроль кодовым агентам — verdict в момент написания кода (ADR-008, `docs/mcp.md`) |
+| `connect <claude\|qwen\|codex\|kimi\|generic> [--dir] [--rw] [--no-skills] [--no-hooks] [--no-agents-md] [--strict-hooks] [--apply-global] [--dry-run]` | Подключение Spine к внешнему CLI-агенту: MCP-конфиг (мердж, чужое сохраняется), скиллы, хуки; `--dry-run` — только план (`docs/mcp.md`) |
 | `handoff <harness> --repo <path> --task <text>` | Handoff-пакет `.arch-handoff/` |
 | `harness-run <harness> --repo <path> [--task]` | Прогнать кодовый харнесс по пакету |
 | `harnesses` | Известные кодовые харнессы и их доступность |
@@ -818,7 +821,9 @@ Live mini-case: [`кейсы/fleet-spine-drift`](кейсы/fleet-spine-drift/) 
 - **MCP server** `arch-be mcp serve` (ADR-008): exposes `spine_lint`, `fitness_check`,
   `significance_score`, `trace_check`, `model_query`, `rubric_run` to coding agents
   (Claude Code etc.) — structured verdict (`passed` + findings) at code-writing
-  time; read-only, all targets passed as call arguments (`docs/mcp.md`).
+  time; read-only, all targets passed as call arguments (`docs/mcp.md`). One-command
+  onboarding: `arch-be connect <claude|qwen|codex|kimi|generic>` lays down the MCP
+  config (merged, foreign keys preserved), the skills pack and lifecycle hooks.
 
 **Switching the autonomy level (R0–R5).** The level lives in the config:
 

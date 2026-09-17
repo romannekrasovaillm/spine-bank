@@ -584,3 +584,80 @@ fn eval_gate_below_pass_rate_exits_1() {
         .arg("50");
     cmd.assert().success().stdout(contains("гейт 50.0% — PASS"));
 }
+
+/// `arch-be connect claude --dir <проект>` одной командой раскладывает
+/// MCP-конфиг (.mcp.json), хуки (.claude/settings.json), скиллы
+/// (.claude/skills/) и CLAUDE.md; повторный запуск идемпотентен
+/// («Без изменений», без дублей хуков).
+#[test]
+fn connect_claude_scaffolds_host_integration() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let proj = tmp.path().join("proj");
+    std::fs::create_dir_all(&proj).expect("mkdir proj");
+
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("connect")
+        .arg("claude")
+        .arg("--dir")
+        .arg(proj.as_os_str());
+    cmd.assert()
+        .success()
+        .stdout(contains("Подключение Spine к хосту «claude»"))
+        .stdout(contains("claude mcp list"));
+
+    assert!(proj.join(".mcp.json").is_file(), ".mcp.json создан");
+    assert!(
+        proj.join(".claude/settings.json").is_file(),
+        "settings.json с хуками создан"
+    );
+    assert!(proj.join("CLAUDE.md").is_file(), "CLAUDE.md создан");
+    assert!(
+        proj.join(".claude/skills/adr-authoring/SKILL.md").is_file(),
+        "скиллы разложены"
+    );
+
+    let mut again = arch_cmd(tmp.path());
+    again
+        .arg("connect")
+        .arg("claude")
+        .arg("--dir")
+        .arg(proj.as_os_str());
+    again.assert().success().stdout(contains("Без изменений"));
+}
+
+/// `arch-be connect generic --dry-run` — только печать сниппетов: ни одного
+/// файла в проекте не появляется.
+#[test]
+fn connect_generic_dry_run_writes_nothing() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let proj = tmp.path().join("proj");
+    std::fs::create_dir_all(&proj).expect("mkdir proj");
+
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("connect")
+        .arg("generic")
+        .arg("--dir")
+        .arg(proj.as_os_str())
+        .arg("--dry-run");
+    cmd.assert()
+        .success()
+        .stdout(contains("dry-run"))
+        .stdout(contains("mcpServers"));
+    assert_eq!(
+        std::fs::read_dir(&proj).expect("read dir").count(),
+        0,
+        "dry-run ничего не записал"
+    );
+}
+
+/// Неизвестный хост — понятная ошибка (список допустимых в stderr).
+#[test]
+fn connect_unknown_host_errors() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("connect").arg("cursor");
+    cmd.assert()
+        .failure()
+        .stderr(contains("неизвестный хост"))
+        .stderr(contains("claude"));
+}

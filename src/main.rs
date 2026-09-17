@@ -264,6 +264,39 @@ enum Cmd {
         #[command(subcommand)]
         cmd: ArchunitCmd,
     },
+    /// Подключить Spine к внешнему CLI-агенту (MCP-сервер + скиллы + хуки):
+    /// claude | qwen | codex | kimi | generic. (Инверсия харнесса, шаг 3;
+    /// называется `connect`, т.к. `export` занят экспортом журнала.)
+    Connect {
+        /// Хост: claude | qwen | codex | kimi | generic.
+        host: String,
+        /// Каталог проекта (по умолчанию — текущий).
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        /// Открыть rw-контур MCP-сервера (`arch-be mcp serve --rw`).
+        #[arg(long)]
+        rw: bool,
+        /// Не раскладывать скиллы.
+        #[arg(long)]
+        no_skills: bool,
+        /// Не встраивать хуки.
+        #[arg(long)]
+        no_hooks: bool,
+        /// Не трогать CLAUDE.md / рекомендацию AGENTS.md.
+        #[arg(long)]
+        no_agents_md: bool,
+        /// Добавить PostToolUse-гейт на каждую правку (только claude;
+        /// дорого на репозиториях с command_succeeds-правилами).
+        #[arg(long)]
+        strict_hooks: bool,
+        /// Писать в пользовательский конфиг хоста (~/.codex/config.toml,
+        /// ~/.kimi-code/mcp.json) с мерджем и бэкапом вместо печати сниппета.
+        #[arg(long)]
+        apply_global: bool,
+        /// Только показать план, ничего не записывать.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 /// Подкоманды `arch-be archunit` (ADR-039).
@@ -1352,6 +1385,37 @@ async fn main() -> Result<()> {
         Some(Cmd::Fleet { cmd }) => cmd_fleet(&cfg, cmd).await?,
         Some(Cmd::Survey { repo, out }) => cmd_survey(&repo, out.as_deref())?,
         Some(Cmd::Archunit { cmd }) => cmd_archunit(cmd).await?,
+        Some(Cmd::Connect {
+            host,
+            dir,
+            rw,
+            no_skills,
+            no_hooks,
+            no_agents_md,
+            strict_hooks,
+            apply_global,
+            dry_run,
+        }) => {
+            let host = arch_harness::connect::Host::parse(&host).map_err(anyhow::Error::msg)?;
+            let dir = match dir {
+                Some(d) => d,
+                None => std::env::current_dir().context("cwd")?,
+            };
+            let opts = arch_harness::connect::ConnectOptions {
+                host,
+                dir,
+                rw,
+                skills: !no_skills,
+                hooks: !no_hooks,
+                agents_md: !no_agents_md,
+                strict_hooks,
+                apply_global,
+                dry_run,
+                home: dirs::home_dir(),
+            };
+            let report = arch_harness::connect::connect(&opts)?;
+            print!("{}", arch_harness::connect::render_report(&opts, &report));
+        }
     }
     Ok(())
 }

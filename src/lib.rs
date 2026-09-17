@@ -26,6 +26,7 @@ pub mod asyncapi;
 pub mod bench;
 pub mod clipboard;
 pub mod config;
+pub mod connect;
 pub mod contract_diff;
 pub mod control;
 pub mod cron;

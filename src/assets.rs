@@ -722,6 +722,15 @@ const DEFAULT_FILES: &[(&str, &str)] = &[
     ("cron/agents_md_drift.md", CRON_TASK_AGENTS_MD_DRIFT_MD),
 ];
 
+/// Программный доступ к встроенным файлам плагинов (`assets/plugins/**`):
+/// «относительный путь в домашнем каталоге → содержимое». Используется
+/// `connect` для раскладки скиллов хостам из релизного бинаря — без
+/// предварительного `arch-be init`.
+#[must_use]
+pub fn embedded_plugin_files() -> &'static [(&'static str, &'static str)] {
+    PLUGIN_FILES
+}
+
 /// Пишет дефолтные ассеты в домашний каталог (`~/.arch-harness`).
 ///
 /// Существующие файлы не затираются (пользователь мог их отредактировать);
