@@ -540,6 +540,19 @@ arch-be models                    # проверить настроенные м
 `arch-be control score --trigger new_component=true`,
 `arch-be control spine examples/specs/ARCHITECTURE-SPINE.example.md`.
 
+Слим-сборка без сети и TUI (фича `core`; план «Spine без собственной LLM»):
+
+```bash
+cargo build --release --no-default-features --features core  # MCP-сервер + CLI контроля
+arch-be mcp serve                 # «орган» внешнего CLI-агента (Claude Code, Codex, …)
+arch-be connect claude            # раскладывает .mcp.json, скиллы, хуки, CLAUDE.md
+```
+
+В core-сборке нет TUI, агентного цикла и сетевых LLM-провайдеров (без
+reqwest/ratatui/crossterm/arboard/scraper в дереве зависимостей); LLM-судья
+рубрик работает через внешний CLI (`[models.*] kind = "cli"`). Полная сборка
+остаётся дефолтной (фича `harness`).
+
 ### Монорепозиторий: вендоренный Archify
 
 Движок диаграмм Archify (JSON IR → HTML/SVG, MIT) вендорен в
@@ -1044,6 +1057,20 @@ arch-be models                    # list configured models
 
 No-LLM smoke: `arch-be mermaid examples/mermaid/flow.mmd`,
 `arch-be control score --trigger new_component=true`, `arch-be doctor`.
+
+Slim build without network or TUI (feature `core`; the "Spine without its own
+LLM" inversion — the binary serves as an *organ* of an external CLI agent):
+
+```bash
+cargo build --release --no-default-features --features core  # MCP server + control CLI
+arch-be mcp serve                 # MCP server for the host (Claude Code, Codex, …)
+arch-be connect claude            # installs .mcp.json, skills, hooks, CLAUDE.md
+```
+
+The core build ships no TUI, no agent loop and no network LLM providers
+(reqwest/ratatui/crossterm/arboard/scraper leave the dependency tree); the
+rubric LLM judge works through an external CLI (`[models.*] kind = "cli"`).
+The full build stays the default (feature `harness`).
 
 ### Configuring personal paths
 

@@ -26,7 +26,9 @@ pub enum HarnessError {
     /// I/O-ошибка без привязки к пути.
     #[error(transparent)]
     IoBare(#[from] std::io::Error),
-    /// Сетевая ошибка HTTP-клиента.
+    /// Сетевая ошибка HTTP-клиента. Вариант существует только в сборке
+    /// с фичей `harness` (в core-сборке сетевого стека нет).
+    #[cfg(feature = "harness")]
     #[error(transparent)]
     Http(#[from] reqwest::Error),
     /// Ошибка JSON-сериализации.

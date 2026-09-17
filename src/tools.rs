@@ -6,9 +6,10 @@
 //! - [`ask`] — интерактивный выбор вариантов пользователем (`propose_options`);
 //! - [`core_registry`] — реестр ядерных инструментов;
 //! - [`full_registry`] — ядро + доменные инструменты (`mermaid::tools()`,
-//!   `rubric::tools()`, `web::tools()`, `kb::tools()`, `control::tools()`,
-//!   `openapi::tools()`, `model::tools()`, `trace::tools()`, `harness::tools()`,
-//!   `fleet`).
+//!   `rubric::tools()`, `kb::tools()`, `control::tools()`,
+//!   `openapi::tools()`, `model::tools()`, `trace::tools()` и др.;
+//!   под фичей `harness` дополнительно `web::tools()`, `harness::tools()`,
+//!   `subagent`, `ralph`, `worktree`, `distill`).
 
 use std::sync::Arc;
 
@@ -62,6 +63,8 @@ fn domain_tools(cfg: &Config) -> Vec<Arc<dyn Tool>> {
     // Egress-дисциплина (AD-BE5, GAP-C1): при `[web].enabled = false` веб-канал
     // выключен конфигом — инструменты не регистрируются, агент их не видит.
     // Гейт живёт на уровне регистрации, сами web-инструменты о нём не знают (AD-4).
+    // Модуль `web` собирается только под фичей `harness` (тащит reqwest/scraper).
+    #[cfg(feature = "harness")]
     if cfg.web.enabled {
         out.extend(crate::web::tools());
     }
@@ -72,14 +75,21 @@ fn domain_tools(cfg: &Config) -> Vec<Arc<dyn Tool>> {
     out.extend(crate::contract_diff::tools());
     out.extend(crate::model::tools());
     out.extend(crate::trace::tools());
+    // Домены агентного цикла — только в сборке `harness` (инверсия, шаг 4):
+    // кодовые харнессы, субагенты, ralph, worktree, дистилляция скиллов.
+    #[cfg(feature = "harness")]
     out.extend(crate::harness::tools(cfg));
     out.extend(crate::plugin::tools(cfg));
     out.extend(crate::agentsmd::tools(cfg));
+    #[cfg(feature = "harness")]
     out.extend(crate::subagent::tools(cfg));
+    #[cfg(feature = "harness")]
     out.extend(crate::ralph::tools(cfg));
+    #[cfg(feature = "harness")]
     out.push(Arc::new(crate::worktree::WorktreeNewTool));
     out.push(Arc::new(crate::fleet::FleetAuditTool));
     out.extend(crate::survey::tools());
+    #[cfg(feature = "harness")]
     out.extend(crate::distill::tools(cfg));
     out
 }
@@ -92,18 +102,13 @@ mod tests {
     fn full_registry_contains_core_interaction_and_domain_tools() {
         let cfg = Config::default();
         let names = full_registry(&cfg).names();
+        // Ядро и детерминированный контур — в обеих сборках (core и harness).
         for expected in [
             "bash",
             "read_file",
             "propose_options",
-            "subagent_run",
-            "subagent_list",
-            "subagent_result",
-            "ralph_run",
-            "worktree_new",
             "fleet_audit",
             "reverse_survey",
-            "skill_distill",
             "skill_search",
             "mermaid_render",
             "archify_validate",
@@ -121,9 +126,43 @@ mod tests {
                 "нет инструмента {expected}"
             );
         }
+        // Домены агентного цикла — только в сборке `harness`.
+        #[cfg(feature = "harness")]
+        for expected in [
+            "subagent_run",
+            "subagent_list",
+            "subagent_result",
+            "ralph_run",
+            "worktree_new",
+            "skill_distill",
+        ] {
+            assert!(
+                names.iter().any(|n| n == expected),
+                "нет инструмента {expected}"
+            );
+        }
+        // В core-сборке harness-инструментов нет (защита от протечки).
+        #[cfg(not(feature = "harness"))]
+        for banned in [
+            "subagent_run",
+            "subagent_list",
+            "subagent_result",
+            "ralph_run",
+            "worktree_new",
+            "skill_distill",
+            "harness_run",
+            "web_search",
+            "web_fetch",
+        ] {
+            assert!(
+                !names.iter().any(|n| n == banned),
+                "инструмент {banned} не должен собираться в core"
+            );
+        }
     }
 
     #[test]
+    #[cfg(feature = "harness")]
     fn full_registry_omits_web_tools_when_web_disabled() {
         // GAP-C1: при `[web].enabled = false` веб-инструменты отсутствуют в
         // инструментарии сессии — агент их не видит (egress-дисциплина, AD-BE5).
@@ -139,6 +178,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "harness")]
     fn full_registry_keeps_web_tools_by_default() {
         // Поведение по умолчанию не меняется: без ключа enabled веб-инструменты
         // регистрируются как раньше.

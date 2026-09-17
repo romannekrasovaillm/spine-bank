@@ -45,6 +45,20 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test
 
+  core-build:
+    # Инверсия, шаг 4: слим-сборка «орган чужого CLI-агента» — core без
+    # сетевых LLM-провайдеров (reqwest), TUI (ratatui/crossterm/arboard) и
+    # веба (scraper). Гейт от протечки harness-стека в core; текстовый
+    # tripwire на исходниках — правило C-29 в CONSTRAINTS.yaml.
+    name: core build (--no-default-features --features core)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --no-default-features --features core
+      - run: cargo test --no-default-features --features core
+
   msrv:
     name: MSRV 1.85 (cargo check)
     runs-on: ubuntu-latest

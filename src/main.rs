@@ -1,16 +1,21 @@
 //! Тонкая точка входа: парсинг аргументов → вызов lib → код возврата.
 
-use std::io::{IsTerminal, Read, Write as _};
+use std::io::Read as _;
+#[cfg(feature = "harness")]
+use std::io::{IsTerminal, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+#[cfg(feature = "harness")]
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
+#[cfg(feature = "harness")]
 use arch_harness::agent::AgentSession;
 use arch_harness::config::Config;
 use arch_harness::llm::LlmRegistry;
+#[cfg(feature = "harness")]
 use arch_harness::tool::ToolContext;
 
 /// Доменный харнесс solution-архитектора.
@@ -27,11 +32,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Интерактивный TUI (действие по умолчанию).
+    /// Интерактивный TUI (действие по умолчанию; только сборка `harness`).
+    #[cfg(feature = "harness")]
     Tui,
     /// Инициализация ~/.arch-harness: конфиг, ассеты, примеры.
     Init,
     /// Headless-прогон агента: `arch-be run "задача"` или `cat spec.md | arch-be run -`.
+    /// Только сборка `harness` (агентный цикл).
+    #[cfg(feature = "harness")]
     Run {
         /// Промпт; `-` или отсутствие значения при пайпе — читать stdin.
         prompt: Option<String>,
@@ -63,6 +71,8 @@ enum Cmd {
     /// Список настроенных моделей.
     Models,
     /// Библиотека промптов: список или показ шаблона.
+    /// Только сборка `harness` (библиотека живёт в модуле агентного цикла).
+    #[cfg(feature = "harness")]
     Prompts {
         /// Имя шаблона (без — список).
         name: Option<String>,
@@ -87,7 +97,8 @@ enum Cmd {
         #[command(subcommand)]
         cmd: RubricCmd,
     },
-    /// Архитектурные бенчмарки.
+    /// Архитектурные бенчмарки. Только сборка `harness`.
+    #[cfg(feature = "harness")]
     Bench {
         #[command(subcommand)]
         cmd: BenchCmd,
@@ -100,7 +111,9 @@ enum Cmd {
         #[arg(long, default_value_t = 8)]
         limit: usize,
     },
-    /// Веб: поиск и фетч по архитектурным сайтам.
+    /// Веб: поиск и фетч по архитектурным сайтам. Только сборка `harness`
+    /// (сетевой стек reqwest + scraper).
+    #[cfg(feature = "harness")]
     Web {
         #[command(subcommand)]
         cmd: WebCmd,
@@ -111,6 +124,8 @@ enum Cmd {
         cmd: McpCmd,
     },
     /// Сформировать handoff-пакет для кодового харнесса.
+    /// Только сборка `harness` (адаптеры кодовых харнессов).
+    #[cfg(feature = "harness")]
     Handoff {
         /// Имя харнесса (claude-code, qwen-code, openclaw, hermes, theseus, codewhale, kimi-code).
         harness: String,
@@ -130,7 +145,8 @@ enum Cmd {
         #[arg(long, default_value = "standard")]
         route: String,
     },
-    /// Прогнать кодовый харнесс по handoff-пакету.
+    /// Прогнать кодовый харнесс по handoff-пакету. Только сборка `harness`.
+    #[cfg(feature = "harness")]
     HarnessRun {
         /// Имя харнесса.
         harness: String,
@@ -141,7 +157,8 @@ enum Cmd {
         #[arg(long)]
         task: Option<String>,
     },
-    /// Список известных кодовых харнессов.
+    /// Список известных кодовых харнессов. Только сборка `harness`.
+    #[cfg(feature = "harness")]
     Harnesses,
     /// Архитектурный контроль.
     Control {
@@ -229,17 +246,22 @@ enum Cmd {
         #[command(subcommand)]
         cmd: AgentsMdCmd,
     },
-    /// Планировщик md-задач.
+    /// Планировщик md-задач. Только сборка `harness`.
+    #[cfg(feature = "harness")]
     Cron {
         #[command(subcommand)]
         cmd: CronCmd,
     },
     /// Регрессионные eval-сьюты конфигурации харнесса (continuous evals).
+    /// Только сборка `harness`.
+    #[cfg(feature = "harness")]
     Eval {
         #[command(subcommand)]
         cmd: EvalCmd,
     },
     /// Worktree-фабрика: изоляция агентной работы в git worktree (review/accept/drop).
+    /// Только сборка `harness`.
+    #[cfg(feature = "harness")]
     Worktree {
         #[command(subcommand)]
         cmd: WorktreeCmd,
@@ -350,7 +372,8 @@ enum ArchunitCmd {
         json: bool,
     },
     /// Скачать пиннутые jar'ы `ArchUnit` (archunit + slf4j) с Maven Central в
-    /// кэш с проверкой SHA-256.
+    /// кэш с проверкой SHA-256. Только сборка `harness` (сетевой стек).
+    #[cfg(feature = "harness")]
     Fetch {
         /// Каталог назначения (по умолчанию ~/.arch-harness/archunit/lib).
         #[arg(long)]
@@ -452,7 +475,8 @@ enum FleetCmd {
     /// владелец. Без --owner-approve печатает сводку прогона (diff stat,
     /// коммиты ветки, статус контракта из лога-evidence) и ОТКАЗЫВАЕТ мержить
     /// (exit 1). Режим гейта — [fleet] `merge_gate` ("owner" по умолчанию,
-    /// "none" — без гейта).
+    /// "none" — без гейта). Только сборка `harness` (worktree-фабрика).
+    #[cfg(feature = "harness")]
     Merge {
         /// Run-id прогона (имя worktree без префикса arch/, напр.
         /// claude-code-20260825103000 — его сообщает `harness_run` при
@@ -467,7 +491,8 @@ enum FleetCmd {
     },
 }
 
-/// Подкоманды `arch-be worktree`.
+/// Подкоманды `arch-be worktree` (только сборка `harness`).
+#[cfg(feature = "harness")]
 #[derive(Subcommand)]
 enum WorktreeCmd {
     /// Создать изолированный worktree (ветка arch/<name>).
@@ -562,6 +587,8 @@ enum RubricCmd {
     },
 }
 
+/// Подкоманды `arch-be bench` (только сборка `harness`).
+#[cfg(feature = "harness")]
 #[derive(Subcommand)]
 enum BenchCmd {
     /// Список бенчмарков.
@@ -599,6 +626,8 @@ enum BenchCmd {
     },
 }
 
+/// Подкоманды `arch-be web` (только сборка `harness`).
+#[cfg(feature = "harness")]
 #[derive(Subcommand)]
 enum WebCmd {
     /// Поиск в вебе.
@@ -1031,6 +1060,8 @@ enum AgentsMdCmd {
     },
 }
 
+/// Подкоманды `arch-be cron` (только сборка `harness`).
+#[cfg(feature = "harness")]
 #[derive(Subcommand)]
 enum CronCmd {
     /// Список задач расписания.
@@ -1044,7 +1075,8 @@ enum CronCmd {
     Tick,
 }
 
-/// Подкоманды `arch eval` (continuous evals, docs/evals.md).
+/// Подкоманды `arch eval` (continuous evals, docs/evals.md; только сборка `harness`).
+#[cfg(feature = "harness")]
 #[derive(Subcommand)]
 enum EvalCmd {
     /// Прогнать eval-сьют: детерминированные проверки (офлайн) + опциональный
@@ -1081,8 +1113,14 @@ async fn main() -> Result<()> {
     let cfg = Arc::new(Config::load(cli.config.as_deref()).context("загрузка конфигурации")?);
 
     match cli.cmd {
+        #[cfg(feature = "harness")]
         None | Some(Cmd::Tui) => arch_harness::tui::run(cfg).await?,
+        // Core-сборка: TUI и агентного цикла нет — вместо запуска пустого
+        // интерфейса печатаем краткую карту возможностей слим-сборки.
+        #[cfg(not(feature = "harness"))]
+        None => print_core_notice(),
         Some(Cmd::Init) => cmd_init(&cfg)?,
+        #[cfg(feature = "harness")]
         Some(Cmd::Run {
             prompt,
             model,
@@ -1113,6 +1151,7 @@ async fn main() -> Result<()> {
                 println!("  {name:<20} {} ({})", p.model(), p.name());
             }
         }
+        #[cfg(feature = "harness")]
         Some(Cmd::Prompts { name }) => cmd_prompts(&cfg, name)?,
         Some(Cmd::Memory { cmd }) => cmd_memory(&cfg, cmd)?,
         Some(Cmd::Mermaid { file }) => {
@@ -1127,6 +1166,7 @@ async fn main() -> Result<()> {
         }
         Some(Cmd::Archify { cmd }) => cmd_archify(&cfg, cmd).await?,
         Some(Cmd::Rubric { cmd }) => cmd_rubric(&cfg, cmd).await?,
+        #[cfg(feature = "harness")]
         Some(Cmd::Bench { cmd }) => cmd_bench(&cfg, cmd).await?,
         Some(Cmd::Kb { query, limit }) => {
             let hits = arch_harness::kb::search(
@@ -1149,8 +1189,10 @@ async fn main() -> Result<()> {
                 println!("Ничего не найдено.");
             }
         }
+        #[cfg(feature = "harness")]
         Some(Cmd::Web { cmd }) => cmd_web(&cfg, cmd).await?,
         Some(Cmd::Mcp { cmd }) => cmd_mcp(&cfg, cmd).await?,
+        #[cfg(feature = "harness")]
         Some(Cmd::Handoff {
             harness,
             repo,
@@ -1201,6 +1243,7 @@ async fn main() -> Result<()> {
                 );
             }
         }
+        #[cfg(feature = "harness")]
         Some(Cmd::HarnessRun {
             harness,
             repo,
@@ -1304,6 +1347,7 @@ async fn main() -> Result<()> {
                 }
             }
         }
+        #[cfg(feature = "harness")]
         Some(Cmd::Harnesses) => {
             println!("Известные кодовые харнессы:");
             for name in arch_harness::harness::known() {
@@ -1379,8 +1423,11 @@ async fn main() -> Result<()> {
         Some(Cmd::Delta { cmd }) => cmd_delta(cmd)?,
         Some(Cmd::Openspec { cmd }) => cmd_openspec(cmd)?,
         Some(Cmd::AgentsMd { cmd }) => cmd_agents_md(&cfg, cmd)?,
+        #[cfg(feature = "harness")]
         Some(Cmd::Cron { cmd }) => cmd_cron(&cfg, cmd).await?,
+        #[cfg(feature = "harness")]
         Some(Cmd::Eval { cmd }) => cmd_eval(&cfg, cmd).await?,
+        #[cfg(feature = "harness")]
         Some(Cmd::Worktree { cmd }) => cmd_worktree(&cfg, cmd).await?,
         Some(Cmd::Fleet { cmd }) => cmd_fleet(&cfg, cmd).await?,
         Some(Cmd::Survey { repo, out }) => cmd_survey(&repo, out.as_deref())?,
@@ -1421,6 +1468,9 @@ async fn main() -> Result<()> {
 }
 
 /// `arch-be archunit …`: `ArchUnit`-мост (ADR-039).
+// В core-сборке единственный async-участок (fetch по сети) вырезан фичей —
+// async-обёртка остаётся для единого вида с полной сборкой.
+#[cfg_attr(not(feature = "harness"), allow(clippy::unused_async))]
 async fn cmd_archunit(cmd: ArchunitCmd) -> Result<()> {
     match cmd {
         ArchunitCmd::Gen {
@@ -1535,6 +1585,7 @@ async fn cmd_archunit(cmd: ArchunitCmd) -> Result<()> {
                 std::process::exit(1);
             }
         }
+        #[cfg(feature = "harness")]
         ArchunitCmd::Fetch { jar_dir } => {
             let dest = jar_dir.unwrap_or_else(|| {
                 arch_harness::config::Config::home_dir()
@@ -1580,7 +1631,14 @@ fn cmd_survey(repo: &Path, out: Option<&Path>) -> Result<()> {
 }
 
 /// `arch-be fleet`: аудит флота worktree (дубли/дрейф) и гейт мерджа прогонов.
+// В core-сборке остаётся только синхронный аудит (гейт мерджа — за
+// worktree-фабрикой сборки `harness`) — async-обёртка едина с полной сборкой.
+#[cfg_attr(not(feature = "harness"), allow(clippy::unused_async))]
 async fn cmd_fleet(cfg: &Arc<Config>, cmd: FleetCmd) -> Result<()> {
+    // В core-сборке живёт только аудит (гейт мерджа — за worktree-фабрикой
+    // сборки `harness`); конфиг нужен лишь ему.
+    #[cfg(not(feature = "harness"))]
+    let _ = cfg;
     match cmd {
         FleetCmd::Audit {
             paths,
@@ -1613,6 +1671,7 @@ async fn cmd_fleet(cfg: &Arc<Config>, cmd: FleetCmd) -> Result<()> {
                 std::process::exit(1);
             }
         }
+        #[cfg(feature = "harness")]
         FleetCmd::Merge {
             run_id,
             owner_approve,
@@ -1635,6 +1694,7 @@ async fn cmd_fleet(cfg: &Arc<Config>, cmd: FleetCmd) -> Result<()> {
 }
 
 /// `arch-be worktree`: изоляция агентной работы (создание, review, accept, drop).
+#[cfg(feature = "harness")]
 async fn cmd_worktree(cfg: &Arc<Config>, cmd: WorktreeCmd) -> Result<()> {
     let cwd = std::env::current_dir().context("cwd")?;
     let repo_of = |repo: Option<PathBuf>| repo.unwrap_or_else(|| cwd.clone());
@@ -1689,6 +1749,7 @@ fn cmd_init(cfg: &Config) -> Result<()> {
 }
 
 /// Опции headless-прогона `arch-be run` (бюджеты).
+#[cfg(feature = "harness")]
 struct RunOptions {
     /// Общий таймаут прогона, секунды.
     timeout_secs: Option<u64>,
@@ -1709,6 +1770,7 @@ struct RunOptions {
 ///
 /// В стрим-режиме stdout несёт только текст ответа (дельты); прогресс
 /// (вызовы инструментов, заметки) уходит в stderr — пайп остаётся чистым.
+#[cfg(feature = "harness")]
 async fn cmd_run(
     cfg: &Arc<Config>,
     prompt: Option<String>,
@@ -1843,6 +1905,7 @@ async fn cmd_run(
 
 /// Системный промпт по умолчанию: из библиотеки промптов или встроенный,
 /// дополненный глобальной md-памятью (`paths.memory_file`, см. `memory`).
+#[cfg(feature = "harness")]
 fn default_system_prompt(cfg: &Config) -> String {
     let dir = cfg.paths.prompts_dir();
     let base = match arch_harness::agent::prompts::load_library(&dir) {
@@ -1860,6 +1923,7 @@ fn default_system_prompt(cfg: &Config) -> String {
 }
 
 /// Встроенный системный промпт (fallback, когда библиотека недоступна).
+#[cfg(feature = "harness")]
 fn fallback_system_prompt() -> String {
     "Ты — solution-архитектор в корпоративном контуре банка. Помогаешь проектировать \
      решения, ведёшь ADR и architecture-spine, оцениваешь архитектуру по рубрикам, \
@@ -1867,7 +1931,8 @@ fn fallback_system_prompt() -> String {
         .into()
 }
 
-/// `arch-be prompts`.
+/// `arch-be prompts` (только сборка `harness`).
+#[cfg(feature = "harness")]
 fn cmd_prompts(cfg: &Config, name: Option<String>) -> Result<()> {
     let lib = arch_harness::agent::prompts::load_library(&cfg.paths.prompts_dir())?;
     match name {
@@ -2053,6 +2118,8 @@ async fn cmd_rubric(cfg: &Arc<Config>, cmd: RubricCmd) -> Result<()> {
     Ok(())
 }
 
+/// `arch-be bench` (только сборка `harness`).
+#[cfg(feature = "harness")]
 async fn cmd_bench(cfg: &Arc<Config>, cmd: BenchCmd) -> Result<()> {
     match cmd {
         BenchCmd::List => {
@@ -2165,6 +2232,8 @@ async fn cmd_bench(cfg: &Arc<Config>, cmd: BenchCmd) -> Result<()> {
     Ok(())
 }
 
+/// `arch-be web` (только сборка `harness`).
+#[cfg(feature = "harness")]
 async fn cmd_web(cfg: &Config, cmd: WebCmd) -> Result<()> {
     match cmd {
         WebCmd::Search { query, arch } => {
@@ -3061,6 +3130,8 @@ fn cmd_agents_md(cfg: &Config, cmd: AgentsMdCmd) -> Result<()> {
     Ok(())
 }
 
+/// `arch-be cron` (только сборка `harness`).
+#[cfg(feature = "harness")]
 async fn cmd_cron(cfg: &Arc<Config>, cmd: CronCmd) -> Result<()> {
     let tab = arch_harness::cron::load(&cfg.cron.file)?;
     match cmd {
@@ -3141,6 +3212,7 @@ async fn cmd_cron(cfg: &Arc<Config>, cmd: CronCmd) -> Result<()> {
 /// во временный каталог, живой `~/.arch-harness` не трогается — прогон зелёный
 /// и в CI без `arch init`. Пользовательский `--suite` бежит против живой
 /// установки. Гейт: pass-rate ниже `--gate` (дефолт 100%) — exit code 1.
+#[cfg(feature = "harness")]
 async fn cmd_eval(cfg: &Arc<Config>, cmd: EvalCmd) -> Result<()> {
     match cmd {
         EvalCmd::Run {
@@ -3195,6 +3267,27 @@ async fn cmd_eval(cfg: &Arc<Config>, cmd: EvalCmd) -> Result<()> {
     Ok(())
 }
 
+/// Заставка core-сборки при запуске без аргументов: TUI и агентный цикл —
+/// принадлежность фичи `harness`; здесь — карта возможностей слим-сборки
+/// и указание, как собрать полную.
+#[cfg(not(feature = "harness"))]
+fn print_core_notice() {
+    println!(
+        "arch-be {version} — core-сборка (без TUI, агентного цикла и сетевых LLM-провайдеров).\n\
+         \n\
+         Это «орган» внешнего CLI-агента: архитектурный контроль через MCP и CLI.\n\
+         \x20 MCP-сервер для хоста:  arch-be mcp serve [--rw]\n\
+         \x20 Подключение хоста:     arch-be connect <claude|qwen|codex|kimi|generic>\n\
+         \x20 Диагностика окружения: arch-be doctor\n\
+         \x20 Все команды сборки:    arch-be --help\n\
+         \n\
+         Полная сборка (TUI, агент, сетевые LLM): cargo build --release\n\
+         (фича `harness` включена по умолчанию; слим-сборка: \
+         --no-default-features --features core)",
+        version = env!("CARGO_PKG_VERSION")
+    );
+}
+
 /// Читает файл или stdin (`-`).
 fn read_file_or_stdin(file: &str) -> Result<String> {
     if file == "-" {
@@ -3221,7 +3314,8 @@ fn resolve_asset(dir: &std::path::Path, name: &str, ext: &str) -> PathBuf {
     dir.join(format!("{name}.{ext}"))
 }
 
-/// Есть ли бинарь в PATH.
+/// Есть ли бинарь в PATH (используется сводкой `arch-be harnesses`).
+#[cfg(feature = "harness")]
 fn which(binary: &str) -> String {
     std::process::Command::new("which")
         .arg(binary)

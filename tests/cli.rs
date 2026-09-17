@@ -16,6 +16,8 @@ use common::arch_cmd;
 /// Пишет исполняемый shell-скрипт фейкового кодового харнесса: печатает
 /// в stdout headless JSON-контракт результата (fenced json-блок со
 /// `status`) и завершается нулём. Возвращает путь к скрипту.
+/// Только сборка `harness` (команда `harness-run` в core отсутствует).
+#[cfg(feature = "harness")]
 fn write_fake_harness(dir: &Path, contract_json: &str) -> PathBuf {
     let script = dir.join("fake-harness.sh");
     let body = format!("#!/bin/sh\necho '```json'\necho '{contract_json}'\necho '```'\n");
@@ -35,6 +37,7 @@ fn write_fake_harness(dir: &Path, contract_json: &str) -> PathBuf {
 
 /// Готовая команда `arch-be harness-run fake`: контракт `contract_json`
 /// печатает фейковый харнесс, прописанный в тестовом config.toml.
+#[cfg(feature = "harness")]
 fn harness_run_cmd(home: &Path, contract_json: &str) -> assert_cmd::Command {
     let script = write_fake_harness(home, contract_json);
     // Харнесс-адаптер собирается из конфига: бинарь — наш скрипт, задача
@@ -190,6 +193,7 @@ fn control_spine_error_exits_1() {
 /// `harness-run` со `status=blocked` в контракте → exit 2 (скриптовый гейт
 /// в пайпах, см. `docs/harness_integrations.md`).
 #[test]
+#[cfg(feature = "harness")]
 fn harness_run_blocked_contract_exits_2() {
     let tmp = tempfile::tempdir().expect("tempdir");
     harness_run_cmd(
@@ -204,6 +208,7 @@ fn harness_run_blocked_contract_exits_2() {
 /// `harness-run` с непустыми `conflicts_with_prior_decisions` → exit 3
 /// (конфликт со spine останавливает интеграцию по контракту).
 #[test]
+#[cfg(feature = "harness")]
 fn harness_run_conflicts_exit_3() {
     let tmp = tempfile::tempdir().expect("tempdir");
     harness_run_cmd(
@@ -217,6 +222,7 @@ fn harness_run_conflicts_exit_3() {
 
 /// `harness-run` с чистым `complete` (списки пусты) → exit 0.
 #[test]
+#[cfg(feature = "harness")]
 fn harness_run_complete_exits_0() {
     let tmp = tempfile::tempdir().expect("tempdir");
     harness_run_cmd(tmp.path(), r#"{"status": "complete"}"#)
@@ -240,7 +246,9 @@ fn mermaid_renders_example_without_keys() {
 /// рендерится полностью, без паники и трейса ошибки в stderr. Код 1 —
 /// задокументированный контракт (Fail «нет ключа модели по умолчанию»,
 /// `src/doctor.rs`; отступление от буквы `DoD` ревью — ADR-005 §7).
+/// Контракт полной сборки: в core отсутствие ключей — Warn, см. соседний тест.
 #[test]
+#[cfg(feature = "harness")]
 fn doctor_without_keys_reports_problems_and_exits_1() {
     let tmp = tempfile::tempdir().expect("tempdir");
     arch_cmd(tmp.path())
@@ -250,6 +258,23 @@ fn doctor_without_keys_reports_problems_and_exits_1() {
         .stdout(contains("arch-be doctor"))
         .stdout(contains("нет ключа модели по умолчанию"))
         .stdout(contains("Итог:"))
+        .stderr(contains("Error:").not());
+}
+
+/// Core-сборка: сетевых LLM-провайдеров в бинаре нет, поэтому отсутствие
+/// API-ключей — предупреждение, а не ошибка (план «Spine без собственной
+/// LLM»: ключи живут у хоста, для судьи годится провайдер `kind = "cli"`).
+#[test]
+#[cfg(not(feature = "harness"))]
+fn doctor_core_missing_keys_are_not_an_error() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    arch_cmd(tmp.path())
+        .arg("doctor")
+        .assert()
+        .stdout(contains("arch-be doctor"))
+        .stdout(contains("ключи не требуются"))
+        .stdout(contains("Итог:"))
+        .stdout(contains("нет ключа модели по умолчанию").not())
         .stderr(contains("Error:").not());
 }
 
@@ -374,6 +399,7 @@ fn nfr_budget_missing_hop_budget_exits_1() {
 /// `arch-be run --max-turns 0` — лимит итераций не бывает нулевым
 /// (`value_parser` range `1..`, код 2, без обращения к LLM).
 #[test]
+#[cfg(feature = "harness")]
 fn run_max_turns_zero_rejected_exits_2() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let mut cmd = arch_cmd(tmp.path());
@@ -523,6 +549,7 @@ fn control_gate_unknown_gate_errors() {
 /// (временный дом, без ключей и сети), гейт 100% проходит, JSON-отчёт
 /// пишется в `<дом>/evals/` (docs/evals.md).
 #[test]
+#[cfg(feature = "harness")]
 fn eval_builtin_suite_passes_offline_and_writes_report() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let mut cmd = arch_cmd(tmp.path());
@@ -550,6 +577,7 @@ fn eval_builtin_suite_passes_offline_and_writes_report() {
 /// Гейт ломает код выхода: пользовательский сьют с заведомо красной
 /// задачей → exit 1 (регрессионный контракт для CI).
 #[test]
+#[cfg(feature = "harness")]
 fn eval_gate_below_pass_rate_exits_1() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let suite = tmp.path().join("suite");

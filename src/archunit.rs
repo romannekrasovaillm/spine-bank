@@ -61,6 +61,8 @@ use crate::error::{HarnessError, Result};
 /// Пин версий jar'ов `ArchUnit`-рантайма (supply-chain, ADR-039): версия и
 /// SHA-256 зафиксированы в коде и в `docs/archunit.md`; `archunit fetch`
 /// проверяет хэш после скачивания и отказывается писать файл при расхождении.
+/// Только сборка `harness`: скачивание идёт по сети (reqwest).
+#[cfg(feature = "harness")]
 pub struct PinnedJar {
     /// Имя файла в каталоге lib.
     pub file: &'static str,
@@ -75,6 +77,7 @@ pub struct PinnedJar {
 /// чтобы гейт не шумел логами). Версии сняты с maven-metadata 2026-09-04:
 /// archunit 1.5.0 — текущий <release>; slf4j 2.0.19 — последний стабильный
 /// 2.0.x (latest 2.1.0-alpha1 — предрелиз, не берём).
+#[cfg(feature = "harness")]
 pub const PINNED_JARS: &[PinnedJar] = &[
     PinnedJar {
         file: "archunit-1.5.0.jar",
@@ -1115,10 +1118,11 @@ pub(crate) fn run_control_rule(
 }
 
 // ---------------------------------------------------------------------------
-// fetch: пинnutые jar'ы с Maven Central
+// fetch: пинnutые jar'ы с Maven Central (только сборка `harness`: reqwest)
 // ---------------------------------------------------------------------------
 
 /// Результат скачивания одного jar'а.
+#[cfg(feature = "harness")]
 #[derive(Debug, Clone)]
 pub struct FetchedJar {
     /// Имя файла.
@@ -1134,6 +1138,7 @@ pub struct FetchedJar {
 ///
 /// # Errors
 /// Сеть/HTTP, запись, расхождение SHA-256 с пином (supply-chain guard).
+#[cfg(feature = "harness")]
 pub async fn fetch_jars(dest: &Path) -> Result<Vec<FetchedJar>> {
     std::fs::create_dir_all(dest).map_err(|e| HarnessError::io(dest, e))?;
     let client = reqwest::Client::new();

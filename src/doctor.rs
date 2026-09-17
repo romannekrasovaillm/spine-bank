@@ -119,6 +119,10 @@ fn check_default_model(cfg: &Config) -> Check {
 
 /// API-ключи: env-переменные моделей установлены (значения не выводим!).
 /// Ключ считается доступным и по `api_key_file` (запасной файл с ключом).
+/// Модели с `kind = "cli"` (внешний авторизованный CLI-агент как провайдер,
+/// `llm::harness_cli`) ключа не требуют и в проверке не участвуют.
+/// В core-сборке сетевых провайдеров нет вовсе (собрано без reqwest):
+/// отсутствие ключа — Warn с подсказкой, а не Fail.
 fn check_api_keys(cfg: &Config) -> Check {
     let key_available = |mc: &crate::config::ModelConfig| {
         if std::env::var_os(&mc.api_key_env).is_some_and(|v| !v.is_empty()) {
@@ -134,26 +138,46 @@ fn check_api_keys(cfg: &Config) -> Check {
             std::fs::metadata(&expanded).is_ok_and(|m| m.len() > 0)
         })
     };
+    // kind = "cli" — провайдер без собственного ключа: внешний CLI уже
+    // авторизован на машине (платит подписка хоста).
+    let keyed: Vec<(&String, &crate::config::ModelConfig)> = cfg
+        .models
+        .iter()
+        .filter(|(_, mc)| mc.kind.as_deref() != Some("cli"))
+        .collect();
     let mut missing = Vec::new();
-    for (name, mc) in &cfg.models {
+    for (name, mc) in &keyed {
         if !key_available(mc) {
             missing.push(format!("{name} ({})", mc.api_key_env));
         }
     }
-    let default_missing = cfg
-        .models
-        .get(&cfg.default_model)
-        .is_some_and(|mc| !key_available(mc));
+    let cli_count = cfg.models.len() - keyed.len();
+    let cli_note = if cli_count > 0 {
+        format!("; cli-провайдеров без ключа: {cli_count} (норма)")
+    } else {
+        String::new()
+    };
+    let default_missing = keyed
+        .iter()
+        .any(|(n, mc)| *n == &cfg.default_model && !key_available(mc));
     let (verdict, text) = if missing.is_empty() {
         (
             Verdict::Ok,
-            format!("все {} ключей на месте", cfg.models.len()),
+            format!("все {} ключей на месте{cli_note}", keyed.len()),
         )
-    } else if default_missing {
+    } else if default_missing && cfg!(feature = "harness") {
         (
             Verdict::Fail,
             format!(
-                "нет ключа модели по умолчанию; отсутствуют: {}",
+                "нет ключа модели по умолчанию; отсутствуют: {}{cli_note}",
+                missing.join(", ")
+            ),
+        )
+    } else if cfg!(not(feature = "harness")) {
+        (
+            Verdict::Warn,
+            format!(
+                "core-сборка без сетевых провайдеров: ключи не требуются (отсутствуют: {}){cli_note}",
                 missing.join(", ")
             ),
         )
@@ -161,7 +185,7 @@ fn check_api_keys(cfg: &Config) -> Check {
         (
             Verdict::Warn,
             format!(
-                "нет части ключей (нужны только при выборе модели): {}",
+                "нет части ключей (нужны только при выборе модели): {}{cli_note}",
                 missing.join(", ")
             ),
         )
@@ -548,5 +572,50 @@ mod tests {
         let checks = run_checks(&cfg);
         let mcp = checks.iter().find(|c| c.name == "mcp").expect("mcp");
         assert_eq!(mcp.verdict, Verdict::Fail);
+    }
+
+    #[test]
+    fn cli_kind_model_needs_no_api_key() {
+        // kind = "cli" (внешний авторизованный CLI-агент как LLM): ключ не
+        // требуется ни в одной сборке — такая модель не участвует в проверке.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let mut cfg = test_config(tmp.path());
+        cfg.models.clear();
+        cfg.models.insert(
+            "claude-cli".into(),
+            crate::config::ModelConfig {
+                kind: Some("cli".into()),
+                command: Some("claude".into()),
+                ..Default::default()
+            },
+        );
+        cfg.default_model = "claude-cli".into();
+        let checks = run_checks(&cfg);
+        let keys = checks
+            .iter()
+            .find(|c| c.name == "api-keys")
+            .expect("api-keys");
+        assert_eq!(
+            keys.verdict,
+            Verdict::Ok,
+            "cli-провайдер без ключа — норма: {keys:?}"
+        );
+        assert!(keys.text.contains("cli-провайдер"), "{}", keys.text);
+    }
+
+    /// В core-сборке отсутствие ключей сетевых провайдеров — Warn, не Fail:
+    /// сетевого стека в бинаре нет, ключи ему и не нужны.
+    #[test]
+    #[cfg(not(feature = "harness"))]
+    fn core_build_missing_keys_are_warn_not_fail() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let cfg = test_config(tmp.path());
+        let checks = run_checks(&cfg);
+        let keys = checks
+            .iter()
+            .find(|c| c.name == "api-keys")
+            .expect("api-keys");
+        assert_eq!(keys.verdict, Verdict::Warn, "core: {keys:?}");
+        assert!(keys.text.contains("core-сборка"), "{}", keys.text);
     }
 }

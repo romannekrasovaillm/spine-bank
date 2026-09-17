@@ -6,6 +6,12 @@
 //! [`harness_cli`]: `kind = "cli"` в `[models.*]` превращает уже
 //! авторизованный на машине CLI-агент (Claude Code, Codex…) в LLM-провайдера
 //! без собственного API-ключа (для вызовов без tool-calls — судья рубрик и т.п.).
+//!
+//! Сетевые провайдеры собираются только под фичей `harness` (в core-сборке
+//! нет reqwest); там их имена в реестре получают заглушку
+//! [`UnavailableProvider`] — реестр и команды вроде `arch-be models` работают,
+//! а фактический вызов завершается понятной ошибкой с подсказкой про
+//! `kind = "cli"` и полную сборку.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -19,11 +25,16 @@ use tokio::sync::mpsc;
 use crate::config::{Config, ModelConfig};
 use crate::error::{HarnessError, Result};
 
+#[cfg(feature = "harness")]
 pub mod deepseek;
+#[cfg(feature = "harness")]
 pub mod gigachat;
+#[cfg(feature = "harness")]
 pub mod glm;
 pub mod harness_cli;
+#[cfg(feature = "harness")]
 pub mod kimi;
+#[cfg(feature = "harness")]
 pub mod openai_compat;
 
 /// Роль сообщения в чате.
@@ -336,12 +347,22 @@ impl LlmRegistry {
         if mc.kind.as_deref() == Some("cli") {
             return harness_cli::provider(name, mc);
         }
-        match name {
-            n if n.starts_with("deepseek") => deepseek::provider(name, mc),
-            n if n.starts_with("kimi") => kimi::provider(name, mc),
-            n if n.starts_with("glm") => glm::provider(name, mc),
-            n if n.starts_with("gigachat") => gigachat::provider(name, mc),
-            _ => openai_compat::generic_provider(name, mc),
+        #[cfg(feature = "harness")]
+        {
+            match name {
+                n if n.starts_with("deepseek") => deepseek::provider(name, mc),
+                n if n.starts_with("kimi") => kimi::provider(name, mc),
+                n if n.starts_with("glm") => glm::provider(name, mc),
+                n if n.starts_with("gigachat") => gigachat::provider(name, mc),
+                _ => openai_compat::generic_provider(name, mc),
+            }
+        }
+        // Core-сборка: сетевых провайдеров нет (собрано без reqwest). Запись
+        // остаётся в реестре заглушкой — конфиг валиден, `models`/`doctor`
+        // работают; ошибка возникает только при фактическом вызове модели.
+        #[cfg(not(feature = "harness"))]
+        {
+            Ok(Arc::new(UnavailableProvider::new(name, &mc.model)))
         }
     }
 
@@ -376,6 +397,51 @@ impl LlmRegistry {
         let mut names: Vec<String> = self.providers.keys().cloned().collect();
         names.sort();
         names
+    }
+}
+
+/// Заглушка сетевого провайдера для core-сборки (без reqwest): имя и модель
+/// из конфига видны в реестре (`arch-be models`, `doctor`), но любой вызов
+/// завершается понятной ошибкой — сетевой транспорт собирается только под
+/// фичей `harness`.
+#[cfg(not(feature = "harness"))]
+#[derive(Debug)]
+struct UnavailableProvider {
+    /// Имя записи в `[models.*]`.
+    name: String,
+    /// Идентификатор модели из конфига.
+    model: String,
+}
+
+#[cfg(not(feature = "harness"))]
+impl UnavailableProvider {
+    /// Собирает заглушку по имени записи и идентификатору модели.
+    fn new(name: &str, model: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            model: model.to_string(),
+        }
+    }
+}
+
+#[cfg(not(feature = "harness"))]
+#[async_trait]
+impl LlmProvider for UnavailableProvider {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn model(&self) -> &str {
+        &self.model
+    }
+
+    async fn complete(&self, _req: ChatRequest) -> Result<ChatMessage> {
+        Err(HarnessError::Llm(format!(
+            "модель '{}' — сетевой провайдер, недоступный в core-сборке arch-be: \
+             используйте запись с kind = \"cli\" (внешний CLI-агент как LLM) или \
+             полную сборку (фича `harness` включена по умолчанию)",
+            self.name
+        )))
     }
 }
 
@@ -442,6 +508,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "harness")]
     fn registry_routes_gigachat_prefix_to_oauth_adapter() {
         // Имя с префиксом gigachat уходит в тонкую фабрику (ADR-021), а не
         // в generic_provider: пресет base_url виден в Debug провайдера.

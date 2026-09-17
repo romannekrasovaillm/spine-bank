@@ -484,7 +484,10 @@ fn rw_mode_lists_bridge_write_tools_over_stdio() {
     );
     let tools = responses[0]["result"]["tools"].as_array().expect("tools");
     let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
-    for want in [
+    // В core-сборке домены harness/distill не собираются — их rw-инструменты
+    // (handoff_create, skill_distill) мост не отдаёт (спеки строятся от реестра).
+    #[cfg(feature = "harness")]
+    let rw_want = [
         "handoff_create",
         "adr_new",
         "agentsmd_generate",
@@ -494,10 +497,27 @@ fn rw_mode_lists_bridge_write_tools_over_stdio() {
         // read-only мост остаётся доступен и под --rw:
         "openapi_lint",
         "rubric_prompt",
-    ] {
+    ];
+    #[cfg(not(feature = "harness"))]
+    let rw_want = [
+        "adr_new",
+        "agentsmd_generate",
+        "reverse_survey",
+        "archify_deliver",
+        "openapi_lint",
+        "rubric_prompt",
+    ];
+    for want in rw_want {
         assert!(
             names.contains(&want),
             "нет инструмента {want} в --rw: {names:?}"
+        );
+    }
+    #[cfg(not(feature = "harness"))]
+    for banned in ["handoff_create", "skill_distill"] {
+        assert!(
+            !names.contains(&banned),
+            "harness-инструмент {banned} не должен отдаваться в core: {names:?}"
         );
     }
     // Принадлежность хоста не отдаётся ни в одном режиме.
@@ -522,12 +542,16 @@ fn rw_mode_lists_bridge_write_tools_over_stdio() {
             "never-инструмент {banned} не должен отдаваться и под --rw: {names:?}"
         );
     }
-    let handoff = tools
-        .iter()
-        .find(|t| t["name"] == "handoff_create")
-        .expect("handoff_create");
-    assert_eq!(handoff["annotations"]["readOnlyHint"], false);
-    assert_eq!(handoff["annotations"]["destructiveHint"], true);
+    // Аннотации mutating-инструмента (handoff_create — домен сборки `harness`).
+    #[cfg(feature = "harness")]
+    {
+        let handoff = tools
+            .iter()
+            .find(|t| t["name"] == "handoff_create")
+            .expect("handoff_create");
+        assert_eq!(handoff["annotations"]["readOnlyHint"], false);
+        assert_eq!(handoff["annotations"]["destructiveHint"], true);
+    }
 }
 
 #[test]

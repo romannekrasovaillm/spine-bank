@@ -60,6 +60,8 @@ pub struct ToolContext {
     /// агентной сессией: `/model` обновляет это поле вместе с провайдером.
     pub provider: Option<Arc<dyn crate::llm::LlmProvider>>,
     /// Реестр фоновых субагентов (общий между сессией и слэш-командами).
+    /// Только сборка `harness` (модуль `subagent` под фичей).
+    #[cfg(feature = "harness")]
     pub subagents: Option<crate::subagent::SubagentRegistry>,
 }
 
@@ -73,6 +75,7 @@ impl ToolContext {
             llm: None,
             ask: None,
             provider: None,
+            #[cfg(feature = "harness")]
             subagents: None,
         }
     }
@@ -99,6 +102,7 @@ impl ToolContext {
     }
 
     /// Подключает реестр фоновых субагентов.
+    #[cfg(feature = "harness")]
     #[must_use]
     pub fn with_subagents(mut self, registry: crate::subagent::SubagentRegistry) -> Self {
         self.subagents = Some(registry);

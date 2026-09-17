@@ -374,3 +374,56 @@ constraints:
     severity: critical
     owner: "solution-архитектор BE"
     expiry: "2027-09-04"
+
+  # --- Инверсия, шаг 4: фича core не тянет сетевой и TUI-стеки --------------
+  # Текстовый tripwire (быстрый): в файлах core-сборки не должно быть
+  # path-ссылок на crates сети/TUI/веба (`reqwest::…` и т.п.). Форма
+  # `name::` не срабатывает на прозу doc-комментариев (lib.rs упоминает
+  # ratatui словом). Исключения — harness-модули целиком (tui/agent/web/…)
+  # и три core-файла, где сетевой/TUI код живёт внутри
+  # #[cfg(feature = "harness")]-блоков: error.rs (вариант Http),
+  # clipboard.rs (Clipboard), archunit.rs (fetch_jars). Гарантия дерева
+  # зависимостей — CI-джоба core-build (cargo check/test
+  # --no-default-features --features core).
+  - id: C-29
+    name: core_free_of_network_and_tui_crates
+    type: must_not_contain
+    glob: "src/**/*.rs"
+    exclude_glob:
+      - "src/tui.rs"
+      - "src/tui/**"
+      - "src/agent.rs"
+      - "src/agent/**"
+      - "src/subagent.rs"
+      - "src/ralph.rs"
+      - "src/worktree.rs"
+      - "src/harness.rs"
+      - "src/bench.rs"
+      - "src/eval.rs"
+      - "src/distill.rs"
+      - "src/cron.rs"
+      - "src/web.rs"
+      - "src/net.rs"
+      - "src/llm/deepseek.rs"
+      - "src/llm/kimi.rs"
+      - "src/llm/glm.rs"
+      - "src/llm/gigachat.rs"
+      - "src/llm/openai_compat.rs"
+      - "src/error.rs"
+      - "src/clipboard.rs"
+      - "src/archunit.rs"
+    pattern: "\\b(reqwest|ratatui|crossterm|arboard|scraper)::"
+    severity: critical
+    owner: "solution-архитектор BE"
+    expiry: "2027-09-17"
+
+  # Маркер фич в манифесте: default = harness (полная сборка по умолчанию),
+  # слим-сборка — явная (--no-default-features --features core).
+  - id: C-30
+    name: cargo_features_core_harness
+    type: must_contain
+    glob: "Cargo.toml"
+    pattern: "default = \\[\"harness\"\\]"
+    severity: critical
+    owner: "solution-архитектор BE"
+    expiry: "2027-09-17"

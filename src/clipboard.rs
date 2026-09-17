@@ -11,20 +11,29 @@
 //!   буфера через OSC 52 отключена — это последний шанс, не гарантия);
 //! - возвращается имя сработавшего механизма для статус-сообщения; ошибка —
 //!   только если недоступны ВСЕ механизмы (с перечнем попыток).
+//!
+//! [`Clipboard`] собирается только под фичей `harness` (тащит `arboard`);
+//! в core-сборке остаётся чистый [`base64_encode`] — его переиспользуют
+//! мультимодальные инструменты (`tools::screenshot`).
 
+#[cfg(feature = "harness")]
 use std::io::Write;
+#[cfg(feature = "harness")]
 use std::process::{Command, Stdio};
 
+#[cfg(feature = "harness")]
 use crate::error::{HarnessError, Result};
 
 /// Держатель системного буфера обмена (ленивая инициализация `arboard`).
 ///
 /// Хранится в `App` на всю жизнь TUI: на X11 данные буфера живут, пока жив
 /// владелец селекции, — создавать `Clipboard` на каждое копирование нельзя.
+#[cfg(feature = "harness")]
 pub struct Clipboard {
     inner: Option<arboard::Clipboard>,
 }
 
+#[cfg(feature = "harness")]
 impl Clipboard {
     /// Пустой держатель; соединение с сервером откроется при первом `copy`.
     #[must_use]
@@ -82,6 +91,7 @@ impl Clipboard {
     }
 }
 
+#[cfg(feature = "harness")]
 impl Default for Clipboard {
     fn default() -> Self {
         Self::new()
@@ -89,6 +99,7 @@ impl Default for Clipboard {
 }
 
 /// Пишет текст в stdin утилиты буфера; Ok при коде возврата 0.
+#[cfg(feature = "harness")]
 fn pipe_to(prog: &str, args: &[&str], text: &str) -> std::io::Result<()> {
     let mut child = Command::new(prog)
         .args(args)
@@ -109,6 +120,7 @@ fn pipe_to(prog: &str, args: &[&str], text: &str) -> std::io::Result<()> {
 }
 
 /// OSC 52: `\x1b]52;c;<base64>\x07` в /dev/tty (clipboard-селекция `c`).
+#[cfg(feature = "harness")]
 fn osc52(text: &str) -> std::io::Result<()> {
     let mut tty = std::fs::OpenOptions::new().write(true).open("/dev/tty")?;
     let seq = format!("\x1b]52;c;{}\x07", base64_encode(text.as_bytes()));
@@ -160,6 +172,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "harness")]
     fn copy_reports_missing_mechanisms_gracefully() {
         // В тестовой среде хоть один механизм может и сработать — важно,
         // что вызов не паникует и завершается (Ok или понятная ошибка).
@@ -174,6 +187,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "harness")]
     fn second_copy_reuses_handle() {
         // Повторное копирование по живому хендлу не должно падать
         // (регрессия: «второй Ctrl+C молча теряет буфер»).

@@ -15,29 +15,48 @@ path = "src/main.rs"
 name = "arch_harness"
 path = "src/lib.rs"
 
+# Фичи сборки (шаг 4 плана «Spine без собственной LLM»,
+# Загрузки/spine-bank-inversion.md):
+# - `harness` (по умолчанию) — полная сборка: TUI (ratatui/crossterm/arboard),
+#   агентный цикл, сетевые LLM-провайдеры (reqwest), веб-доступ (scraper);
+# - `core` — слим-сборка «орган чужого CLI-агента»: MCP-сервер + CLI
+#   архитектурного контроля, без сети и TUI. Пустой маркер для читаемости:
+#   весь гейтинг идёт по `#[cfg(feature = "harness")]`.
+# Слим-сборка: `cargo build --no-default-features --features core`.
+[features]
+default = ["harness"]
+core = []
+harness = [
+    "dep:reqwest",
+    "dep:ratatui",
+    "dep:crossterm",
+    "dep:arboard",
+    "dep:scraper",
+    "dep:tokio-util",
+]
+
 [dependencies]
 anyhow = "1"
-arboard = { version = "3", default-features = false }
+arboard = { version = "3", default-features = false, optional = true }
 async-trait = "0.1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 clap = { version = "4", features = ["derive"] }
 cron-parser = "0.8"
-crossterm = { version = "0.28", features = ["event-stream"] }
+crossterm = { version = "0.28", features = ["event-stream"], optional = true }
 dirs = "6"
 futures = "0.3"
 pulldown-cmark = { version = "0.12", default-features = false }
-ratatui = "0.29"
+ratatui = { version = "0.29", optional = true }
 regex = "1"
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
-scraper = "0.23"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"], optional = true }
+scraper = { version = "0.23", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml_ng = "0.10"
 similar = "2"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
-tokio-stream = "0.1"
-tokio-util = "0.7"
+tokio-util = { version = "0.7", optional = true }
 toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

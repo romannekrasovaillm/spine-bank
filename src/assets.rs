@@ -454,6 +454,19 @@ pub const PLUGIN_SPINE_BE_DOCS_PLUGIN_JSON: &str =
 pub const PLUGIN_SPINE_BE_DOCS_SKILLS_CHECK_SPINE_BE_DOCS_SKILL_MD: &str =
     include_str!("../assets/plugins/spine-be-docs/skills/check-spine-be-docs/SKILL.md");
 
+/// Встроенный файл плагина `assets/plugins/arch-governance/plugin.json`.
+pub const PLUGIN_ARCH_GOVERNANCE_PLUGIN_JSON: &str =
+    include_str!("../assets/plugins/arch-governance/plugin.json");
+/// Встроенный файл плагина `assets/plugins/arch-governance/skills/architecture-sources-map/SKILL.md`.
+pub const PLUGIN_ARCH_GOVERNANCE_SKILLS_ARCHITECTURE_SOURCES_MAP_SKILL_MD: &str =
+    include_str!("../assets/plugins/arch-governance/skills/architecture-sources-map/SKILL.md");
+/// Встроенный файл плагина `assets/plugins/arch-governance/skills/fitness-function-catalog/SKILL.md`.
+pub const PLUGIN_ARCH_GOVERNANCE_SKILLS_FITNESS_FUNCTION_CATALOG_SKILL_MD: &str =
+    include_str!("../assets/plugins/arch-governance/skills/fitness-function-catalog/SKILL.md");
+/// Встроенный файл плагина `assets/plugins/arch-governance/skills/rule-library-antipatterns/SKILL.md`.
+pub const PLUGIN_ARCH_GOVERNANCE_SKILLS_RULE_LIBRARY_ANTIPATTERNS_SKILL_MD: &str =
+    include_str!("../assets/plugins/arch-governance/skills/rule-library-antipatterns/SKILL.md");
+
 /// Файлы плагинов: «относительный путь в домашнем каталоге → содержимое».
 const PLUGIN_FILES: &[(&str, &str)] = &[
     ("plugins/arch-core/plugin.json", PLUGIN_ARCH_CORE_PLUGIN_JSON),
@@ -550,6 +563,10 @@ const PLUGIN_FILES: &[(&str, &str)] = &[
     ("plugins/arch-office/skills/xlsx-system-catalog/references/xlsx_system_catalog_gen.py", PLUGIN_ARCH_OFFICE_SKILLS_XLSX_SYSTEM_CATALOG_REFERENCES_XLSX_SYSTEM_CATALOG_GEN_PY),
     ("plugins/spine-be-docs/plugin.json", PLUGIN_SPINE_BE_DOCS_PLUGIN_JSON),
     ("plugins/spine-be-docs/skills/check-spine-be-docs/SKILL.md", PLUGIN_SPINE_BE_DOCS_SKILLS_CHECK_SPINE_BE_DOCS_SKILL_MD),
+    ("plugins/arch-governance/plugin.json", PLUGIN_ARCH_GOVERNANCE_PLUGIN_JSON),
+    ("plugins/arch-governance/skills/architecture-sources-map/SKILL.md", PLUGIN_ARCH_GOVERNANCE_SKILLS_ARCHITECTURE_SOURCES_MAP_SKILL_MD),
+    ("plugins/arch-governance/skills/fitness-function-catalog/SKILL.md", PLUGIN_ARCH_GOVERNANCE_SKILLS_FITNESS_FUNCTION_CATALOG_SKILL_MD),
+    ("plugins/arch-governance/skills/rule-library-antipatterns/SKILL.md", PLUGIN_ARCH_GOVERNANCE_SKILLS_RULE_LIBRARY_ANTIPATTERNS_SKILL_MD),
 ];
 
 /// Карта «относительный путь в домашнем каталоге → содержимое».
@@ -868,6 +885,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "harness")]
     fn benchmarks_parse_and_reference_existing_rubric() {
         let benches = [
             BENCH_PAYMENT_INTEGRATION,
@@ -901,6 +919,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "harness")]
     fn golden_set_pairs_parse_and_match_adr_quality_rubric() {
         let rubric: crate::rubric::Rubric =
             serde_yaml_ng::from_str(RUBRIC_ADR_QUALITY).expect("рубрика adr_quality");
@@ -964,6 +983,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "harness")]
     fn example_cron_parses_and_tasks_are_shipped() {
         let tab: crate::cron::CronTab =
             toml::from_str(CRON_EXAMPLE).expect("cron.example.toml парсится");

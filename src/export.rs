@@ -16,6 +16,7 @@ use std::io::Write as _;
 use std::path::Path;
 
 use crate::error::{HarnessError, Result};
+#[cfg(feature = "harness")]
 use crate::tui::app::ChatBlock;
 
 /// Формат экспорта экрана.
@@ -57,7 +58,10 @@ pub struct ExportRow {
     pub text: String,
 }
 
-/// Блоки чата → плоские строки для экспорта.
+/// Блоки чата → плоские строки для экспорта. Только сборка `harness`:
+/// [`ChatBlock`] живёт в TUI (`tui::app`); журнальный путь CLI
+/// (`arch-be export`) обходится [`rows_of_journal`] без TUI-типов.
+#[cfg(feature = "harness")]
 #[must_use]
 pub(crate) fn rows_of(blocks: &[ChatBlock]) -> Vec<ExportRow> {
     let mut rows = Vec::new();
@@ -263,10 +267,12 @@ pub fn export_xlsx(rows: &[ExportRow], path: &Path) -> Result<()> {
     )
 }
 
-/// Экспорт экрана в выбранном формате.
+/// Экспорт экрана в выбранном формате. Только сборка `harness`
+/// (вход — блоки чата TUI).
 ///
 /// # Errors
 /// См. [`export_docx`]/[`export_xlsx`].
+#[cfg(feature = "harness")]
 pub(crate) fn export_blocks(
     blocks: &[ChatBlock],
     format: ExportFormat,
@@ -345,6 +351,35 @@ pub fn export_journal(session: &Path, format: ExportFormat, out: &Path) -> Resul
 mod tests {
     use super::*;
 
+    /// Строки-фикстура экспорта (независима от TUI-типов: `ChatBlock` живёт
+    /// только в сборке `harness`, а docx/xlsx-писатели — в обеих).
+    fn sample_rows() -> Vec<ExportRow> {
+        vec![
+            ExportRow {
+                role: "вы".into(),
+                text: "сделай диаграмму".into(),
+            },
+            ExportRow {
+                role: "арх".into(),
+                text: "Вот схема:".into(),
+            },
+            ExportRow {
+                role: String::new(),
+                text: "поток A → B".into(),
+            },
+            ExportRow {
+                role: "» mermaid".into(),
+                text: "┌───┐\n│ A │\n└───┘".into(),
+            },
+            ExportRow {
+                role: "✗ ошибка".into(),
+                text: "мелочь & <прочее>".into(),
+            },
+        ]
+    }
+
+    /// Блоки чата-фикстура (только `harness`: тип из `tui::app`).
+    #[cfg(feature = "harness")]
     fn sample_blocks() -> Vec<ChatBlock> {
         vec![
             ChatBlock::User("сделай диаграмму".into()),
@@ -358,6 +393,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "harness")]
     fn rows_flatten_blocks_with_roles() {
         let rows = rows_of(&sample_blocks());
         assert_eq!(rows[0].role, "вы");
@@ -398,7 +434,7 @@ mod tests {
     fn docx_is_valid_zip_with_document() {
         let tmp = tempfile::tempdir().expect("tmp");
         let path = tmp.path().join("screen.docx");
-        let rows = rows_of(&sample_blocks());
+        let rows = sample_rows();
         export_docx(&rows, &path).expect("export");
         let doc = zip_entry(&path, "word/document.xml");
         assert!(doc.contains("сделай диаграмму"), "{doc}");
@@ -415,7 +451,7 @@ mod tests {
     fn xlsx_is_valid_zip_with_sheet() {
         let tmp = tempfile::tempdir().expect("tmp");
         let path = tmp.path().join("screen.xlsx");
-        let rows = rows_of(&sample_blocks());
+        let rows = sample_rows();
         export_xlsx(&rows, &path).expect("export");
         let sheet = zip_entry(&path, "xl/worksheets/sheet1.xml");
         assert!(sheet.contains(r#"<row r="1">"#), "{sheet}");
@@ -426,6 +462,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "harness")]
     fn export_blocks_counts_rows() {
         let tmp = tempfile::tempdir().expect("tmp");
         let path = tmp.path().join("e.docx");

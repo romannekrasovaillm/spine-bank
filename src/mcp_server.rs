@@ -26,7 +26,11 @@
 //!   под `--rw`), не пересекающиеся с ручными, маршрутизируются в
 //!   [`crate::tools::full_registry`] (`dispatch` — с политикой R-уровней;
 //!   контекст БЕЗ LLM); спеки генерируются из `Tool::spec()`, annotations —
-//!   из членства в списке + [`crate::policy::classify_tool`];
+//!   из членства в списке + [`crate::policy::classify_tool`]. В core-сборке
+//!   (без фичи `harness`) домены `harness`/`distill`/`subagent`/`ralph`/
+//!   `worktree`/`web` в реестре отсутствуют — мост их имена из белых списков
+//!   молча пропускает (спеки строятся от реестра), `handoff_create` и
+//!   `skill_distill` там недоступны;
 //! - НИКОГДА не отдаются (даже под `--rw`) — [`BRIDGE_NEVER`]: write/exec/
 //!   веб/субагенты (`bash`, `read_file`/`write_file`/`edit_file`, `glob`,
 //!   `grep`, `propose_options`, `screenshot*`, `harness_run`, `subagent_*`,
@@ -155,6 +159,25 @@ const BRIDGE_NEVER: &[&str] = &[
     "web_arch_sites",
     "rubric_evaluate",
     "rubric_generate",
+];
+
+/// Имена белых/never-списков моста, чьи домены собираются только под фичей
+/// `harness` (кодовые харнессы, субагенты, ralph, worktree, веб, distill).
+/// В core-сборке их нет в реестре — мост их молча пропускает (спеки
+/// строятся от реестра). Используется тестами согласованности списков.
+#[cfg(test)]
+const HARNESS_ONLY_TOOLS: &[&str] = &[
+    "handoff_create",
+    "skill_distill",
+    "harness_run",
+    "ralph_run",
+    "subagent_run",
+    "subagent_list",
+    "subagent_result",
+    "worktree_new",
+    "web_search",
+    "web_fetch",
+    "web_arch_sites",
 ];
 
 /// Имена ручных инструментов (нижний слой диспетчера) — мост их не дублирует
@@ -2286,12 +2309,42 @@ mod tests {
         // конфига (страховка от переименований инструментов доменов).
         let registry = crate::tools::full_registry(&Config::default());
         for name in BRIDGE_READ_ONLY.iter().chain(BRIDGE_READ_WRITE) {
+            if HARNESS_ONLY_TOOLS.contains(name) {
+                // Домены сборки `harness` (кодовые харнессы, дистилляция): в
+                // core-сборке их нет в реестре — мост пропускает их молча.
+                if cfg!(feature = "harness") {
+                    assert!(
+                        registry.get(name).is_some(),
+                        "{name} из белого списка отсутствует в full_registry"
+                    );
+                } else {
+                    assert!(
+                        registry.get(name).is_none(),
+                        "{name} — инструмент сборки harness, в core его быть не должно"
+                    );
+                }
+                continue;
+            }
             assert!(
                 registry.get(name).is_some(),
                 "{name} из белого списка отсутствует в full_registry"
             );
         }
         for name in BRIDGE_NEVER {
+            if HARNESS_ONLY_TOOLS.contains(name) {
+                if cfg!(feature = "harness") {
+                    assert!(
+                        registry.get(name).is_some(),
+                        "{name} из never-списка отсутствует в full_registry — список протух?"
+                    );
+                } else {
+                    assert!(
+                        registry.get(name).is_none(),
+                        "{name} — инструмент сборки harness, в core его быть не должно"
+                    );
+                }
+                continue;
+            }
             assert!(
                 registry.get(name).is_some(),
                 "{name} из never-списка отсутствует в full_registry — список протух?"
@@ -2311,11 +2364,27 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().expect("имя"))
             .collect();
-        for rw in BRIDGE_READ_WRITE {
+        // Инструменты доменов сборки `harness` (handoff_create, skill_distill)
+        // в core-сборке в реестре отсутствуют — мост их пропускает.
+        let expected_rw: Vec<&str> = BRIDGE_READ_WRITE
+            .iter()
+            .copied()
+            .filter(|n| cfg!(feature = "harness") || !HARNESS_ONLY_TOOLS.contains(n))
+            .collect();
+        for rw in &expected_rw {
             assert!(
                 names.contains(rw),
                 "rw-инструмент '{rw}' нужен в --rw: {names:?}"
             );
+        }
+        // В core-сборке harness-инструментов нет и в выдаче.
+        for rw in BRIDGE_READ_WRITE {
+            if !cfg!(feature = "harness") && HARNESS_ONLY_TOOLS.contains(rw) {
+                assert!(
+                    !names.contains(rw),
+                    "harness-инструмент '{rw}' не должен собираться в core: {names:?}"
+                );
+            }
         }
         for forbidden in BRIDGE_NEVER {
             assert!(
@@ -2325,24 +2394,28 @@ mod tests {
         }
         assert_eq!(
             names.len(),
-            MANUAL_TOOLS.len() + BRIDGE_READ_ONLY.len() + BRIDGE_READ_WRITE.len(),
-            "rw-режим: ручные + оба белых списка"
+            MANUAL_TOOLS.len() + BRIDGE_READ_ONLY.len() + expected_rw.len(),
+            "rw-режим: ручные + оба белых списка (в core — без harness-доменов)"
         );
         // Аннотации: mutating по классификации политики → destructiveHint.
-        let handoff = tools
-            .iter()
-            .find(|t| t["name"] == "handoff_create")
-            .expect("handoff_create");
-        assert_eq!(handoff["annotations"]["readOnlyHint"], false);
-        assert_eq!(handoff["annotations"]["destructiveHint"], true);
-        // Аддитивная запись (политика — ReadOnly): readOnlyHint=false по
-        // членству в rw-списке, destructiveHint=false по классу риска.
-        let distill = tools
-            .iter()
-            .find(|t| t["name"] == "skill_distill")
-            .expect("skill_distill");
-        assert_eq!(distill["annotations"]["readOnlyHint"], false);
-        assert_eq!(distill["annotations"]["destructiveHint"], false);
+        // (handoff_create живёт в домене сборки `harness`.)
+        #[cfg(feature = "harness")]
+        {
+            let handoff = tools
+                .iter()
+                .find(|t| t["name"] == "handoff_create")
+                .expect("handoff_create");
+            assert_eq!(handoff["annotations"]["readOnlyHint"], false);
+            assert_eq!(handoff["annotations"]["destructiveHint"], true);
+            // Аддитивная запись (политика — ReadOnly): readOnlyHint=false по
+            // членству в rw-списке, destructiveHint=false по классу риска.
+            let distill = tools
+                .iter()
+                .find(|t| t["name"] == "skill_distill")
+                .expect("skill_distill");
+            assert_eq!(distill["annotations"]["readOnlyHint"], false);
+            assert_eq!(distill["annotations"]["destructiveHint"], false);
+        }
     }
 
     #[tokio::test]
