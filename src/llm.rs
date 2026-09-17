@@ -1,8 +1,11 @@
 //! Провайдеры LLM: единый трейт [`LlmProvider`], реестр [`LlmRegistry`].
 //!
-//! Все провайдеры (`DeepSeek`, Kimi, GLM, `GigaChat`) — OpenAI-совместимые
-//! endpoint'ы; общая реализация живёт в [`openai_compat`], файлы провайдеров —
-//! тонкие фабрики с пресетами `base_url`.
+//! Все облачные провайдеры (`DeepSeek`, Kimi, GLM, `GigaChat`) —
+//! OpenAI-совместимые endpoint'ы; общая реализация живёт в [`openai_compat`],
+//! файлы провайдеров — тонкие фабрики с пресетами `base_url`. Отдельный вид —
+//! [`harness_cli`]: `kind = "cli"` в `[models.*]` превращает уже
+//! авторизованный на машине CLI-агент (Claude Code, Codex…) в LLM-провайдера
+//! без собственного API-ключа (для вызовов без tool-calls — судья рубрик и т.п.).
 
 use std::collections::HashMap;
 use std::fmt;
@@ -19,6 +22,7 @@ use crate::error::{HarnessError, Result};
 pub mod deepseek;
 pub mod gigachat;
 pub mod glm;
+pub mod harness_cli;
 pub mod kimi;
 pub mod openai_compat;
 
@@ -301,9 +305,10 @@ impl fmt::Debug for LlmRegistry {
 }
 
 impl LlmRegistry {
-    /// Строит реестр из конфигурации. Известным именам (`deepseek`, `kimi`,
-    /// `glm`, `gigachat`) соответствуют фабрики модулей; остальные — generic
-    /// OpenAI-compat.
+    /// Строит реестр из конфигурации. Записи с `kind = "cli"` уходят в
+    /// [`harness_cli`] (внешний CLI-агент как LLM, без API-ключа); известным
+    /// именам (`deepseek`, `kimi`, `glm`, `gigachat`) соответствуют фабрики
+    /// модулей; остальные — generic OpenAI-compat.
     ///
     /// # Errors
     /// `default_model` отсутствует в `models`.
@@ -326,6 +331,11 @@ impl LlmRegistry {
     }
 
     fn build(name: &str, mc: &ModelConfig) -> Result<Arc<dyn LlmProvider>> {
+        // CLI-провайдер — ПЕРВАЯ проверка: kind решает транспорт, а не имя
+        // (имя cli-записи может совпадать с префиксом вендора).
+        if mc.kind.as_deref() == Some("cli") {
+            return harness_cli::provider(name, mc);
+        }
         match name {
             n if n.starts_with("deepseek") => deepseek::provider(name, mc),
             n if n.starts_with("kimi") => kimi::provider(name, mc),

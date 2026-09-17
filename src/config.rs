@@ -64,6 +64,22 @@ pub struct ModelConfig {
     pub base_url: String,
     /// Идентификатор модели, напр. `deepseek-flash`.
     pub model: String,
+    /// Род провайдера: None — обычный OpenAI-совместимый endpoint (поведение
+    /// прежних версий); Some("cli") — внешний CLI-агент как LLM
+    /// (см. [`crate::llm::harness_cli`]): модель вызывается через УЖЕ
+    /// авторизованный на машине пользователя CLI-харнесс (Claude Code, Codex,
+    /// Qwen Code), собственный API-ключ Spine не нужен — платит подписка
+    /// хоста. Неизвестные значения трактуются как обычный провайдер.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// Команда CLI-харнесса (имя/путь бинаря) — только для `kind = "cli"`.
+    /// Промпт передаётся процессу через stdin, ответ читается из stdout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    /// Аргументы командной строки CLI-харнесса, подставляются как есть —
+    /// только для `kind = "cli"` (напр. `["-p", "--output-format", "json"]`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
     /// Имя переменной окружения с API-ключом.
     pub api_key_env: String,
     /// Запасной путь к файлу с ключом (`~` раскрывается): читается, если
@@ -137,6 +153,9 @@ impl Default for ModelConfig {
         Self {
             base_url: String::new(),
             model: String::new(),
+            kind: None,
+            command: None,
+            args: Vec::new(),
             api_key_env: String::new(),
             api_key_file: None,
             proxy: None,
@@ -1302,6 +1321,33 @@ mod tests {
         assert!(mc.client_key_file.is_none());
         assert!(mc.oauth.is_none());
         assert!(mc.proxy.is_none());
+    }
+
+    #[test]
+    fn model_config_cli_fields_parse_and_default() {
+        // kind = "cli": провайдер — внешний CLI-агент, свои ключи не нужны.
+        let mc: ModelConfig = toml::from_str(
+            "kind = \"cli\"\n\
+             command = \"claude\"\n\
+             args = [\"-p\", \"--output-format\", \"json\"]\n\
+             timeout_secs = 240\n",
+        )
+        .expect("deserialize");
+        assert_eq!(mc.kind.as_deref(), Some("cli"));
+        assert_eq!(mc.command.as_deref(), Some("claude"));
+        assert_eq!(mc.args, vec!["-p", "--output-format", "json"]);
+        assert_eq!(mc.timeout_secs, 240);
+        // Старые конфиги без новых полей: None/пусто — поведение не меняется.
+        let plain: ModelConfig = toml::from_str(
+            "base_url = \"https://api.deepseek.com/v1\"\n\
+             model = \"deepseek-flash\"\n\
+             api_key_env = \"DEEPSEEK_API_KEY\"\n",
+        )
+        .expect("deserialize");
+        assert!(plain.kind.is_none());
+        assert!(plain.command.is_none());
+        assert!(plain.args.is_empty());
+        assert!(ModelConfig::default().kind.is_none());
     }
 
     #[test]

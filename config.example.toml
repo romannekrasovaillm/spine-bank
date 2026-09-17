@@ -202,6 +202,28 @@ thinking_off = { thinking = { type = "enabled" }, reasoning_effort = "low" }
 # api_key_env = "OPENROUTER_API_KEY"
 # proxy = "http://127.0.0.1:12080"      # локальный egress-шлюз (vpn-egress)
 
+# ── LLM через внешний CLI-агент (kind = "cli") — API-ключи НЕ нужны ──
+# Spine вызывает УЖЕ авторизованный на машине CLI-харнесс как подпроцесс:
+# промпт передаётся через stdin, ответ читается из stdout — платит подписка
+# хоста (Claude Code, Codex, Qwen Code…). Подходит вызовам без tool-calls в
+# ответе: LLM-судья рубрик (`arch-be rubric run`), `bench --golden`,
+# `skill_distill`, cron-задачи. Для агентного цикла с tool-calls НЕ подходит.
+# temperature/max_tokens/thinking игнорируются — сэмплирование решает сам CLI.
+# Ответ: stdout триммится; JSON-конверт `claude -p --output-format json`
+# разбирается (поле "result"; также "text"/"content"), иначе stdout берётся
+# как текст. Таймаут прогона — timeout_secs (по умолчанию 180).
+# [models.claude-cli]
+# kind = "cli"
+# command = "claude"
+# args = ["-p", "--output-format", "json"]
+# timeout_secs = 180
+#
+# [models.codex-cli]
+# kind = "cli"
+# command = "codex"
+# args = ["exec"]                       # codex exec читает промпт из stdin
+# timeout_secs = 300                    # сверьте флаги с вашей версией CLI
+
 # -----------------------------------------------------------------------------
 # Агентный цикл «модель ↔ инструменты».
 # -----------------------------------------------------------------------------
