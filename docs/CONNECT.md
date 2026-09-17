@@ -1,9 +1,9 @@
 # Подключение Spine к вашему CLI-агенту
 
 Пошаговое руководство для коллег: как подключить архитектурный контур Spine
-(`arch-be`) к Claude Code, Qwen Code, Codex, Kimi Code или любому
-MCP-совместимому агенту. Ни одного API-ключа LLM не потребуется — модель
-даёт ваш агент, Spine даёт контроль, знания и гейты.
+(`arch-be`) к Claude Code, Qwen Code, Codex, Kimi Code, oh-my-pi (omp) или
+любому MCP-совместимому агенту. Ни одного API-ключа LLM не потребуется —
+модель даёт ваш агент, Spine даёт контроль, знания и гейты.
 
 ## 0. Установка
 
@@ -32,9 +32,19 @@ ln -sf "$PWD/target/release/arch-be" ~/.local/bin/arch-be
 arch-be connect claude      # Claude Code — полное подключение
 arch-be connect qwen        # Qwen Code — .qwen/settings.json
 arch-be connect codex       # Codex — печать TOML-блока (+ --apply-global)
-arch-be connect kimi        # Kimi Code — печать JSON-блока (+ --apply-global)
+arch-be connect kimi        # Kimi Code — проектный .kimi-code/mcp.json
+arch-be connect omp         # oh-my-pi — .mcp.json + скиллы (если нет .claude/skills)
 arch-be connect generic     # любой MCP-хост — все сниппеты на печать
 ```
+
+| Хост | Что пишется в проект | Что печатается |
+|---|---|---|
+| `claude` | `.mcp.json`, `.claude/settings.json` (хуки), `.claude/skills/`, `CLAUDE.md` | следующие шаги |
+| `qwen` | `.qwen/settings.json` (мердж `mcpServers`) | скиллы и хуки — сниппеты (layout не подтверждён) |
+| `codex` | ничего (с `--apply-global` — `~/.codex/config.toml`) | TOML-блок для `~/.codex/config.toml` |
+| `kimi` | `.kimi-code/mcp.json` (мердж; с `--apply-global` — ещё и `~/.kimi-code/mcp.json`) | JSON-блок user-level, TOML-блок хука для `~/.kimi-code/config.toml`, напоминание про trust-диалог |
+| `omp` | `.mcp.json` (мердж); скиллы в `.claude/skills/` — только если каталога ещё нет | автодискавери `.mcp.json`; хуки — TS-расширения `omp --hook <file.ts>` |
+| `generic` | ничего | все сниппеты для ручной установки |
 
 ![Установка и подключение](screenshots/connect/01-connect.png)
 
@@ -46,6 +56,39 @@ arch-be connect generic     # любой MCP-хост — все сниппет�
 Что появляется в проекте (на примере Claude Code):
 
 ![Файлы подключения](screenshots/connect/02-files.png)
+
+### Kimi Code
+
+`arch-be connect kimi` пишет проектный `.kimi-code/mcp.json` (мердж
+`mcpServers.spine`, чужие серверы сохраняются; проектная запись перекрывает
+одноимённую пользовательскую — так устроен Kimi Code). Поле `cwd` не
+записывается: сервер наследует рабочий каталог харнесса.
+
+Дополнительно печатаются:
+
+- блок для ручной регистрации на пользовательском уровне
+  (`~/.kimi-code/mcp.json`, общий для всех проектов) — запись туда с
+  мерджем и бэкапом делает `arch-be connect kimi --apply-global`;
+- TOML-блок Stop-хука для `~/.kimi-code/config.toml` (проектных хуков у
+  Kimi Code нет): `[[hooks]]` с той же командой-гейтом
+  `arch-be control check .`, что у Claude Code (exit 2 = блок, stderr
+  уходит модели).
+
+При первом запуске `kimi` в каталоге появится trust-диалог со списком
+project-level MCP-серверов — подтвердите «Trust this folder» (в
+untrusted-папке project MCP не стартует, это штатная защита). Проверка
+подключения: команда `/mcp` в TUI.
+
+### oh-my-pi (omp)
+
+`arch-be connect omp` пишет проектный `.mcp.json` формата Claude Desktop —
+omp дискаверит его автоматически, отдельная регистрация не нужна. Скиллы
+omp читает нативно из `.claude/skills/`: если такого каталога в проекте
+ещё нет, connect раскладывает туда встроенные скиллы (как для Claude
+Code); каталог уже есть — не трогается, чтобы не перетирать вашу
+библиотеку. Хуков через connect нет: механизм хуков omp —
+TypeScript-расширения, подключаемые флагом `omp --hook <file.ts>`;
+команда-гейт для такого расширения — `arch-be control check .`.
 
 ## 2. Проверка подключения
 

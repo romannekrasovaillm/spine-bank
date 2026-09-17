@@ -689,3 +689,110 @@ fn connect_unknown_host_errors() {
         .stderr(contains("неизвестный хост"))
         .stderr(contains("claude"));
 }
+
+/// `arch-be connect kimi --dir <проект>` пишет проектный
+/// `.kimi-code/mcp.json` (без поля cwd), печатает user-level сниппет,
+/// TOML-блок хука и напоминание про trust-диалог; повторный запуск
+/// идемпотентен; `--rw` добавляет флаг в args.
+#[test]
+fn connect_kimi_writes_project_mcp_json() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let proj = tmp.path().join("proj");
+    std::fs::create_dir_all(&proj).expect("mkdir proj");
+
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("connect")
+        .arg("kimi")
+        .arg("--dir")
+        .arg(proj.as_os_str());
+    cmd.assert()
+        .success()
+        .stdout(contains("Подключение Spine к хосту «kimi»"))
+        .stdout(contains("~/.kimi-code/mcp.json"))
+        .stdout(contains("[[hooks]]"))
+        .stdout(contains("~/.kimi-code/config.toml"))
+        .stdout(contains("trust"));
+
+    let mcp_path = proj.join(".kimi-code/mcp.json");
+    let text = std::fs::read_to_string(&mcp_path).expect("read mcp.json");
+    assert!(text.contains("\"command\": \"arch-be\""), "{text}");
+    assert!(
+        !text.contains("\"cwd\""),
+        "поле cwd не пишем — сервер наследует cwd харнесса: {text}"
+    );
+
+    // Повторный запуск — «Без изменений», дублей нет.
+    let mut again = arch_cmd(tmp.path());
+    again
+        .arg("connect")
+        .arg("kimi")
+        .arg("--dir")
+        .arg(proj.as_os_str());
+    again.assert().success().stdout(contains("Без изменений"));
+    assert_eq!(
+        std::fs::read_to_string(&mcp_path).expect("read"),
+        text,
+        "повторный запуск изменил файл"
+    );
+
+    // --rw добавляет флаг.
+    let mut rw = arch_cmd(tmp.path());
+    rw.arg("connect")
+        .arg("kimi")
+        .arg("--dir")
+        .arg(proj.as_os_str())
+        .arg("--rw");
+    rw.assert().success();
+    let text = std::fs::read_to_string(&mcp_path).expect("read");
+    assert!(text.contains("\"--rw\""), "{text}");
+}
+
+/// `arch-be connect omp --dir <проект>` пишет `.mcp.json` и раскладывает
+/// встроенные скиллы в `.claude/skills/` (omp читает его нативно); повтор —
+/// «Без изменений»; `--dry-run` ничего не записывает.
+#[test]
+fn connect_omp_writes_mcp_json_and_skills() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let proj = tmp.path().join("proj");
+    std::fs::create_dir_all(&proj).expect("mkdir proj");
+
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("connect")
+        .arg("omp")
+        .arg("--dir")
+        .arg(proj.as_os_str());
+    cmd.assert()
+        .success()
+        .stdout(contains("Подключение Spine к хосту «omp»"))
+        .stdout(contains("omp --hook"));
+
+    assert!(proj.join(".mcp.json").is_file(), ".mcp.json создан");
+    assert!(
+        proj.join(".claude/skills/adr-authoring/SKILL.md").is_file(),
+        "скиллы разложены"
+    );
+
+    let mut again = arch_cmd(tmp.path());
+    again
+        .arg("connect")
+        .arg("omp")
+        .arg("--dir")
+        .arg(proj.as_os_str());
+    again.assert().success().stdout(contains("Без изменений"));
+
+    // --dry-run на новом каталоге: ничего не появляется.
+    let proj2 = tmp.path().join("proj2");
+    std::fs::create_dir_all(&proj2).expect("mkdir proj2");
+    let mut dry = arch_cmd(tmp.path());
+    dry.arg("connect")
+        .arg("omp")
+        .arg("--dir")
+        .arg(proj2.as_os_str())
+        .arg("--dry-run");
+    dry.assert().success().stdout(contains("dry-run"));
+    assert_eq!(
+        std::fs::read_dir(&proj2).expect("read dir").count(),
+        0,
+        "dry-run ничего не записал"
+    );
+}

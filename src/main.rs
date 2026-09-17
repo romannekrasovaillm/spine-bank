@@ -287,10 +287,10 @@ enum Cmd {
         cmd: ArchunitCmd,
     },
     /// Подключить Spine к внешнему CLI-агенту (MCP-сервер + скиллы + хуки):
-    /// claude | qwen | codex | kimi | generic. (Инверсия харнесса, шаг 3;
-    /// называется `connect`, т.к. `export` занят экспортом журнала.)
+    /// claude | qwen | codex | kimi | omp | generic. (Инверсия харнесса,
+    /// шаг 3; называется `connect`, т.к. `export` занят экспортом журнала.)
     Connect {
-        /// Хост: claude | qwen | codex | kimi | generic.
+        /// Хост: claude | qwen | codex | kimi | omp | generic.
         host: String,
         /// Каталог проекта (по умолчанию — текущий).
         #[arg(long)]
@@ -3277,7 +3277,7 @@ fn print_core_notice() {
          \n\
          Это «орган» внешнего CLI-агента: архитектурный контроль через MCP и CLI.\n\
          \x20 MCP-сервер для хоста:  arch-be mcp serve [--rw]\n\
-         \x20 Подключение хоста:     arch-be connect <claude|qwen|codex|kimi|generic>\n\
+         \x20 Подключение хоста:     arch-be connect <claude|qwen|codex|kimi|omp|generic>\n\
          \x20 Диагностика окружения: arch-be doctor\n\
          \x20 Все команды сборки:    arch-be --help\n\
          \n\

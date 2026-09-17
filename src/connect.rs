@@ -29,9 +29,23 @@
 //!   `*.bak-spine-connect`). AGENTS.md Codex читает нативно: файл сами не
 //!   генерируем (наименее инвазивный вариант), при отсутствии —
 //!   рекомендация `arch-be agents-md refresh .`;
-//! - `kimi`: аналогично codex — печать блока для `~/.kimi-code/mcp.json`
-//!   или запись по `--apply-global`; проектный layout Kimi Code не
-//!   подтверждён, поэтому путь как у `generic` (заметка в выводе);
+//! - `kimi`: проектный `.kimi-code/mcp.json` (мердж `mcpServers.spine` по
+//!   правилам `.mcp.json` claude; layout подтверждён официальной докой
+//!   kimi.com/code/docs: project-уровень перекрывает user-уровень, поле
+//!   `cwd` не пишем — сервер наследует cwd харнесса). Плюс печать: блок для
+//!   ручной регистрации в user-level `~/.kimi-code/mcp.json` (альтернатива;
+//!   запись туда с мерджем и бэкапом — по `--apply-global`) и TOML-блок
+//!   хука `[[hooks]]` для `~/.kimi-code/config.toml` (хуки у Kimi Code
+//!   бывают только пользовательского уровня; схема `event`/`matcher`/
+//!   `command`/`timeout` подтверждена докой, exit 2 = блок) и напоминание
+//!   про trust-диалог при первом запуске в каталоге;
+//! - `omp` (oh-my-pi): `.mcp.json` (мердж, как у claude — omp дискаверит
+//!   проектный файл автоматически, регистрация не нужна). Скиллы omp читает
+//!   нативно из `.claude/skills/`: если такого каталога в проекте ещё нет,
+//!   встроенные скиллы раскладываются туда же, как у claude; каталог уже
+//!   есть — не трогаем (чужую библиотеку не перетираем). Хуков через
+//!   connect нет: механизм хуков omp — TypeScript-расширения, печатается
+//!   указание на `omp --hook <file.ts>`;
 //! - `generic`: только печать — сниппеты `.mcp.json` и хуков, куда что
 //!   вставить вручную.
 //!
@@ -88,15 +102,21 @@ pub enum Host {
     Qwen,
     /// Codex: `~/.codex/config.toml` — печать блока или `--apply-global`.
     Codex,
-    /// Kimi Code: `~/.kimi-code/mcp.json` — печать блока или `--apply-global`.
+    /// Kimi Code: проектный `.kimi-code/mcp.json` (мердж); user-level
+    /// `~/.kimi-code/mcp.json` — печать блока или `--apply-global`; хук —
+    /// печать TOML-блока для `~/.kimi-code/config.toml`.
     Kimi,
+    /// oh-my-pi: `.mcp.json` (автодискавери) + скиллы в `.claude/skills/`,
+    /// если того каталога ещё нет.
+    Omp,
     /// Любой другой агент: только печать сниппетов.
     Generic,
 }
 
 impl Host {
-    /// Разбор значения CLI: `claude` | `qwen` | `codex` | `kimi` | `generic`
-    /// (допускаются составные алиасы `claude-code`, `qwen-code`, `kimi-code`).
+    /// Разбор значения CLI: `claude` | `qwen` | `codex` | `kimi` | `omp` |
+    /// `generic` (допускаются составные алиасы `claude-code`, `qwen-code`,
+    /// `kimi-code`, `oh-my-pi`).
     ///
     /// # Errors
     /// Неизвестное имя хоста — сообщение со списком допустимых.
@@ -106,9 +126,10 @@ impl Host {
             "qwen" | "qwen-code" => Ok(Self::Qwen),
             "codex" => Ok(Self::Codex),
             "kimi" | "kimi-code" => Ok(Self::Kimi),
+            "omp" | "oh-my-pi" => Ok(Self::Omp),
             "generic" => Ok(Self::Generic),
             other => Err(format!(
-                "неизвестный хост '{other}' (допустимы: claude, qwen, codex, kimi, generic)"
+                "неизвестный хост '{other}' (допустимы: claude, qwen, codex, kimi, omp, generic)"
             )),
         }
     }
@@ -121,6 +142,7 @@ impl Host {
             Self::Qwen => "qwen",
             Self::Codex => "codex",
             Self::Kimi => "kimi",
+            Self::Omp => "omp",
             Self::Generic => "generic",
         }
     }
@@ -240,6 +262,7 @@ pub fn connect(opts: &ConnectOptions) -> Result<ConnectReport> {
         Host::Qwen => connect_qwen(opts, &mut report)?,
         Host::Codex => connect_codex(opts, &mut report)?,
         Host::Kimi => connect_kimi(opts, &mut report)?,
+        Host::Omp => connect_omp(opts, &mut report)?,
         Host::Generic => connect_generic(opts, &mut report),
     }
     Ok(report)
@@ -327,10 +350,11 @@ fn backup_once(path: &Path, old: &str, dry_run: bool, report: &mut ConnectReport
     Ok(())
 }
 
-/// Мердж `mcpServers.spine` в JSON-конфиг хоста (claude `.mcp.json`,
-/// qwen `.qwen/settings.json`, kimi `~/.kimi-code/mcp.json`): чужие ключи
-/// верхнего уровня и чужие серверы сохраняются, перезаписывается только
-/// наш сервер. `backup` — для пользовательских конфигов (`--apply-global`).
+/// Мердж `mcpServers.spine` в JSON-конфиг хоста (claude/omp `.mcp.json`,
+/// qwen `.qwen/settings.json`, kimi `.kimi-code/mcp.json` проекта и
+/// `~/.kimi-code/mcp.json`): чужие ключи верхнего уровня и чужие серверы
+/// сохраняются, перезаписывается только наш сервер. `backup` — для
+/// пользовательских конфигов (`--apply-global`).
 fn merge_mcp_servers_json(
     path: &Path,
     rw: bool,
@@ -962,24 +986,46 @@ fn connect_codex(opts: &ConnectOptions, report: &mut ConnectReport) -> Result<()
     Ok(())
 }
 
-/// `arch-be connect kimi`: MCP — пользовательский `~/.kimi-code/mcp.json`
-/// (печать блока или `--apply-global`); проектный layout не подтверждён —
-/// путь как у generic.
+/// `arch-be connect kimi`: пишет проектный `.kimi-code/mcp.json` (мердж
+/// `mcpServers.spine`; layout подтверждён официальной докой Kimi Code —
+/// project-уровень действует только на текущий репозиторий и перекрывает
+/// одноимённые user-level записи). Поле `cwd` не пишем: сервер наследует
+/// рабочий каталог харнесса, как у остальных хостов. Плюс печать: блок для
+/// ручной регистрации в user-level `~/.kimi-code/mcp.json` (запись туда с
+/// мерджем и бэкапом — по `--apply-global`) и TOML-блок хука `[[hooks]]`
+/// для `~/.kimi-code/config.toml` (проектных хуков у Kimi Code нет).
 fn connect_kimi(opts: &ConnectOptions, report: &mut ConnectReport) -> Result<()> {
+    merge_mcp_servers_json(
+        &opts.dir.join(".kimi-code/mcp.json"),
+        opts.rw,
+        false,
+        opts.dry_run,
+        report,
+    )?;
     if opts.apply_global {
         let path = global_config_path(opts, ".kimi-code/mcp.json")?;
         merge_mcp_servers_json(&path, opts.rw, true, opts.dry_run, report)?;
-    } else {
-        report.snippets.push((
-            "MCP-сервер для Kimi Code — добавьте в ~/.kimi-code/mcp.json:".to_string(),
-            mcp_json_snippet(opts.rw),
-        ));
         report.notes.push(
-            "в дом пользователя без --apply-global не пишем; проектный \
-             .kimi-code/mcp.json не подтверждён — поэтому только пользовательский \
-             уровень"
+            "записаны оба уровня; при совпадении имён проектная запись \
+             .kimi-code/mcp.json перекрывает пользовательскую (дока Kimi Code)"
                 .into(),
         );
+    } else {
+        report.snippets.push((
+            "MCP-сервер для Kimi Code (альтернатива) — пользовательский уровень \
+             ~/.kimi-code/mcp.json, общий для всех проектов (запись с мерджем и \
+             бэкапом — перезапуском с --apply-global):"
+                .to_string(),
+            mcp_json_snippet(opts.rw),
+        ));
+    }
+    if opts.hooks {
+        report.snippets.push((
+            "Хук-гейт для Kimi Code — добавьте в ~/.kimi-code/config.toml \
+             (проектного уровня у хуков нет; схема подтверждена докой Kimi Code):"
+                .to_string(),
+            kimi_hooks_toml_block(),
+        ));
     }
     if opts.skills {
         report.notes.push(
@@ -989,16 +1035,108 @@ fn connect_kimi(opts: &ConnectOptions, report: &mut ConnectReport) -> Result<()>
                 .into(),
         );
     }
+    report.next_steps.extend([
+        "перезапустите Kimi Code (`kimi`) в этом каталоге".to_string(),
+        "при первом запуске в каталоге Kimi Code покажет trust-диалог со списком \
+         project-level MCP-серверов: project MCP не стартует в untrusted-папке \
+         (штатная защита) — подтвердите «Trust this folder»"
+            .to_string(),
+        "проверьте подключение: команда `/mcp` в TUI — в списке сервер «spine»".to_string(),
+        format!(
+            "режим сервера: {}",
+            if opts.rw {
+                "rw (разрешены аддитивные записи: handoff_create, adr_new, …)"
+            } else {
+                "read-only"
+            }
+        ),
+    ]);
+    Ok(())
+}
+
+/// TOML-блок хука-гейта для `~/.kimi-code/config.toml` (Kimi Code): событие
+/// `Stop`, та же команда с гардом, что пишется Claude Code. Схема
+/// подтверждена официальной докой Kimi Code (customization/hooks):
+/// массив `[[hooks]]` с полями `event`/`matcher`/`command`/`timeout`,
+/// только пользовательский уровень; семантика exit-кодов совпадает с
+/// Claude Code — 0 пропуск, 2 блок (stderr уходит модели), прочие сбои
+/// fail-open; рабочий каталог команды — каталог проекта сессии.
+fn kimi_hooks_toml_block() -> String {
+    format!(
+        "# Семантика: exit 0 — пропустить, exit 2 — блок (stderr уходит модели),\n\
+         # прочие ошибки — fail-open. Команда выполняется в каталоге проекта.\n\
+         [[hooks]]\n\
+         event = \"Stop\"\n\
+         command = \"{}\"\n\
+         timeout = {}\n",
+        toml_escape_basic(&stop_hook_command()),
+        STOP_HOOK_TIMEOUT_SECS
+    )
+}
+
+/// Экранирует строку для встраивания в TOML basic string (печать сниппета):
+/// обратный слэш и двойная кавычка.
+fn toml_escape_basic(text: &str) -> String {
+    text.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// `arch-be connect omp` (oh-my-pi): проектный `.mcp.json` формата Claude
+/// Desktop — omp дискаверит его автоматически, регистрация не нужна.
+/// Скиллы omp читает нативно из `.claude/skills/`: если такого каталога в
+/// проекте ещё нет, встроенные скиллы раскладываются туда тем же
+/// `install_skills`, что у claude; каталог уже есть — не трогаем, чтобы не
+/// перетирать чужую библиотеку (об этом заметка). Хуков через connect нет:
+/// механизм хуков omp — TypeScript-расширения (`omp --hook <file.ts>`),
+/// печатается указание.
+fn connect_omp(opts: &ConnectOptions, report: &mut ConnectReport) -> Result<()> {
+    merge_mcp_servers_json(
+        &opts.dir.join(".mcp.json"),
+        opts.rw,
+        false,
+        opts.dry_run,
+        report,
+    )?;
+    report.notes.push(
+        "omp автоматически дискаверит проектный .mcp.json — отдельная регистрация \
+         сервера не нужна"
+            .into(),
+    );
+    if opts.skills {
+        let skills_root = opts.dir.join(".claude/skills");
+        if skills_root.exists() {
+            report.notes.push(format!(
+                "{} уже существует — встроенные скиллы НЕ раскладываются (чужую \
+                 библиотеку не перетираем; omp читает .claude/skills нативно, \
+                 принудительно разложить встроенные может `arch-be connect claude`)",
+                skills_root.display()
+            ));
+        } else {
+            install_skills(&skills_root, opts.dry_run, report)?;
+            report.notes.push(
+                "скиллы разложены в .claude/skills/ — omp читает этот каталог \
+                 нативно (тот же layout, что у Claude Code)"
+                    .into(),
+            );
+        }
+    }
     if opts.hooks {
         report.notes.push(
-            "хуки не пишутся: схема hooks Kimi Code живёт в config.toml — \
-             настройте вручную (команда-гейт: `arch-be control check .`)"
+            "хуков через connect нет: механизм хуков omp — TypeScript-расширения, \
+             подключение: `omp --hook <file.ts>`; команда-гейт для такого \
+             расширения: `arch-be control check .`"
                 .into(),
         );
     }
     report.next_steps.extend([
-        "перезапустите Kimi Code (`kimi`) в этом каталоге".to_string(),
-        "проверьте список MCP-серверов хоста — в нём «spine»".to_string(),
+        "перезапустите omp в этом каталоге — сервер «spine» подхватится из .mcp.json".to_string(),
+        format!(
+            "инструменты видны агенту как инструменты сервера «spine»; режим: {}",
+            if opts.rw {
+                "rw (разрешены аддитивные записи: handoff_create, adr_new, …)"
+            } else {
+                "read-only"
+            }
+        ),
     ]);
     Ok(())
 }
@@ -1334,11 +1472,12 @@ mod tests {
         assert_eq!(before, snapshot(&dir), "dry-run что-то записал");
     }
 
-    /// (e) codex/kimi/generic без --apply-global — только печать: ни в
-    /// проект, ни в дом ничего не пишется.
+    /// (e) codex/generic без --apply-global — только печать: ни в проект,
+    /// ни в дом ничего не пишется (kimi с подтверждённым проектным layout
+    /// таким больше не является — см. `kimi_writes_project_mcp_json`).
     #[test]
-    fn codex_kimi_generic_are_print_only_by_default() {
-        for host in [Host::Codex, Host::Kimi, Host::Generic] {
+    fn codex_generic_are_print_only_by_default() {
+        for host in [Host::Codex, Host::Generic] {
             let tmp = tempfile::tempdir().expect("tmp");
             let dir = tmp.path().join("proj");
             let home = tmp.path().join("home");
@@ -1385,7 +1524,37 @@ mod tests {
             mcp["mcpServers"]["spine"]["args"],
             json!(["mcp", "serve", "--rw"])
         );
-        // В сниппетах тоже.
+        // kimi: --rw в проектном .kimi-code/mcp.json и в user-level сниппете.
+        let kimi_dir = tmp.path().join("proj-kimi");
+        let opts = ConnectOptions {
+            rw: true,
+            ..ConnectOptions::new(Host::Kimi, kimi_dir.clone())
+        };
+        let report = connect(&opts).expect("kimi");
+        let mcp: Value =
+            serde_json::from_str(&read(&kimi_dir.join(".kimi-code/mcp.json"))).expect("json");
+        assert_eq!(
+            mcp["mcpServers"]["spine"]["args"],
+            json!(["mcp", "serve", "--rw"])
+        );
+        assert!(
+            report.snippets.iter().any(|(_, s)| s.contains("--rw")),
+            "{:?}",
+            report.snippets
+        );
+        // omp: --rw в .mcp.json.
+        let omp_dir = tmp.path().join("proj-omp");
+        let opts = ConnectOptions {
+            rw: true,
+            ..ConnectOptions::new(Host::Omp, omp_dir.clone())
+        };
+        connect(&opts).expect("omp");
+        let mcp: Value = serde_json::from_str(&read(&omp_dir.join(".mcp.json"))).expect("json");
+        assert_eq!(
+            mcp["mcpServers"]["spine"]["args"],
+            json!(["mcp", "serve", "--rw"])
+        );
+        // В сниппетах codex тоже.
         let opts = ConnectOptions {
             rw: true,
             ..ConnectOptions::new(Host::Codex, tmp.path().join("p2"))
@@ -1456,15 +1625,20 @@ mod tests {
         connect(&opts).expect("повтор codex");
         assert_eq!(first, read(&cfg), "повторный apply_global идемпотентен");
 
-        // kimi: JSON-мердж в ~/.kimi-code/mcp.json.
+        // kimi: JSON-мердж в ~/.kimi-code/mcp.json + проектный файл тоже
+        // записывается (проектный уровень перекрывает пользовательский).
+        let kimi_proj = tmp.path().join("proj-kimi");
         let opts = ConnectOptions {
             apply_global: true,
             home: Some(home.clone()),
-            ..ConnectOptions::new(Host::Kimi, tmp.path().join("proj"))
+            ..ConnectOptions::new(Host::Kimi, kimi_proj.clone())
         };
         connect(&opts).expect("apply kimi");
         let mcp: Value =
             serde_json::from_str(&read(&home.join(".kimi-code/mcp.json"))).expect("json");
+        assert_eq!(mcp["mcpServers"]["spine"]["command"], "arch-be");
+        let mcp: Value =
+            serde_json::from_str(&read(&kimi_proj.join(".kimi-code/mcp.json"))).expect("json");
         assert_eq!(mcp["mcpServers"]["spine"]["command"], "arch-be");
     }
 
@@ -1594,6 +1768,181 @@ mod tests {
         assert!(post_tool_use_hook_command().contains("# spine-connect:post-tool-use"));
     }
 
+    /// kimi: пишется проектный `.kimi-code/mcp.json` (без поля cwd), дом не
+    /// трогается без --apply-global; печатаются user-level сниппет, TOML-блок
+    /// хука и напоминание про trust-диалог. Мердж чужих серверов, отказ на
+    /// битом JSON, идемпотентность — как у claude `.mcp.json`.
+    #[test]
+    fn kimi_writes_project_mcp_json_with_merge_and_idempotency() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path().join("proj");
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(dir.join(".kimi-code")).expect("mkdir");
+        std::fs::write(
+            dir.join(".kimi-code/mcp.json"),
+            "{\n  \"mcpServers\": {\n    \"other\": {\"command\": \"uvx\", \"args\": [\"x\"]}\n  }\n}\n",
+        )
+        .expect("write mcp.json");
+        let opts = ConnectOptions {
+            home: Some(home.clone()),
+            ..ConnectOptions::new(Host::Kimi, dir.clone())
+        };
+        let report = connect(&opts).expect("connect");
+
+        let mcp: Value =
+            serde_json::from_str(&read(&dir.join(".kimi-code/mcp.json"))).expect("json");
+        assert_eq!(mcp["mcpServers"]["spine"]["command"], "arch-be");
+        assert_eq!(mcp["mcpServers"]["spine"]["args"], json!(["mcp", "serve"]));
+        assert!(
+            mcp["mcpServers"]["spine"].get("cwd").is_none(),
+            "поле cwd не пишем — сервер наследует cwd харнесса: {mcp}"
+        );
+        assert_eq!(
+            mcp["mcpServers"]["other"]["command"], "uvx",
+            "чужой сервер цел"
+        );
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|n| n.contains("сохранены") && n.contains("other")),
+            "заметка о чужих серверах: {:?}",
+            report.notes
+        );
+        assert!(!home.exists(), "дом не трогается без --apply-global");
+        // Печать: user-level альтернатива, TOML-блок хука, trust-диалог.
+        let all_snippets = report
+            .snippets
+            .iter()
+            .map(|(t, s)| format!("{t}\n{s}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            all_snippets.contains("~/.kimi-code/mcp.json"),
+            "user-level сниппет: {:?}",
+            report.snippets
+        );
+        assert!(all_snippets.contains("[[hooks]]"), "TOML-блок хука");
+        assert!(all_snippets.contains("event = \"Stop\""), "{all_snippets}");
+        assert!(
+            all_snippets.contains("~/.kimi-code/config.toml"),
+            "{all_snippets}"
+        );
+        assert!(
+            all_snippets.contains("arch-be control check ."),
+            "{all_snippets}"
+        );
+        assert!(
+            report.next_steps.iter().any(|s| s.contains("trust")),
+            "напоминание про trust-диалог: {:?}",
+            report.next_steps
+        );
+
+        // Идемпотентность: повторный запуск побайтово тот же, без дублей.
+        let first = snapshot(&dir);
+        let report = connect(&opts).expect("повтор");
+        assert_eq!(first, snapshot(&dir), "повторный запуск изменил файлы");
+        assert!(report.merged.is_empty() && report.created.is_empty());
+
+        // Битый JSON — отказ без затирания.
+        std::fs::write(dir.join(".kimi-code/mcp.json"), "{это не json").expect("write");
+        let err = connect(&opts).expect_err("должна быть ошибка");
+        assert!(err.to_string().contains("не затираю"), "{err}");
+        assert_eq!(
+            read(&dir.join(".kimi-code/mcp.json")),
+            "{это не json",
+            "файл цел"
+        );
+    }
+
+    /// kimi --dry-run: ни проектный файл, ни дом не трогаются.
+    #[test]
+    fn kimi_dry_run_writes_nothing() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path().join("proj");
+        let opts = ConnectOptions {
+            dry_run: true,
+            home: Some(tmp.path().join("home")),
+            ..ConnectOptions::new(Host::Kimi, dir.clone())
+        };
+        let report = connect(&opts).expect("dry-run");
+        assert!(!report.created.is_empty(), "план непустой");
+        assert!(!dir.exists(), "dry-run ничего не записал");
+        assert!(!tmp.path().join("home").exists(), "дом не трогается");
+    }
+
+    /// omp: пишется только `.mcp.json` + скиллы в `.claude/skills/` (omp
+    /// читает его нативно); повторный запуск без дублей; существующий
+    /// каталог `.claude/skills` не трогается; --dry-run ничего не пишет.
+    #[test]
+    fn omp_writes_mcp_json_and_skills() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path().join("proj");
+        let report = connect(&ConnectOptions::new(Host::Omp, dir.clone())).expect("connect");
+
+        let mcp: Value = serde_json::from_str(&read(&dir.join(".mcp.json"))).expect("json");
+        assert_eq!(mcp["mcpServers"]["spine"]["command"], "arch-be");
+        assert!(
+            dir.join(".claude/skills/adr-authoring/SKILL.md").is_file(),
+            "скиллы разложены в .claude/skills"
+        );
+        assert!(
+            !dir.join(".claude/settings.json").exists(),
+            "хуки не пишутся"
+        );
+        assert!(!dir.join("CLAUDE.md").exists(), "CLAUDE.md не создаётся");
+        assert!(
+            report.notes.iter().any(|n| n.contains("дискаверит")),
+            "заметка про автодискавери: {:?}",
+            report.notes
+        );
+        assert!(
+            report.notes.iter().any(|n| n.contains("omp --hook")),
+            "указание на TS-хуки: {:?}",
+            report.notes
+        );
+
+        // Повтор: дерево побайтово то же (каталог скиллов уже есть —
+        // скиллы не перетираются, .mcp.json мержится ключ-в-ключ).
+        let first = snapshot(&dir);
+        let report = connect(&ConnectOptions::new(Host::Omp, dir.clone())).expect("повтор");
+        assert_eq!(first, snapshot(&dir), "повторный запуск изменил файлы");
+        assert!(report.created.is_empty() && report.merged.is_empty());
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|n| n.contains("уже существует") && n.contains("НЕ раскладываются")),
+            "скип существующего каталога скиллов: {:?}",
+            report.notes
+        );
+
+        // Существующий (даже пустой) .claude/skills не наполняется.
+        let dir2 = tmp.path().join("proj2");
+        std::fs::create_dir_all(dir2.join(".claude/skills")).expect("mkdir");
+        let report = connect(&ConnectOptions::new(Host::Omp, dir2.clone())).expect("connect");
+        assert!(report.skills.is_empty(), "скиллы не раскладывались");
+        assert_eq!(
+            std::fs::read_dir(dir2.join(".claude/skills"))
+                .expect("read dir")
+                .count(),
+            0,
+            "чужой каталог скиллов не тронут"
+        );
+        assert!(dir2.join(".mcp.json").is_file(), ".mcp.json записан");
+
+        // --dry-run: ничего не пишется.
+        let dir3 = tmp.path().join("proj3");
+        let opts = ConnectOptions {
+            dry_run: true,
+            ..ConnectOptions::new(Host::Omp, dir3.clone())
+        };
+        let report = connect(&opts).expect("dry-run");
+        assert!(!report.created.is_empty(), "план непустой");
+        assert!(!report.skills.is_empty(), "план по скиллам непустой");
+        assert!(!dir3.exists(), "dry-run ничего не записал");
+    }
+
     /// Разбор имён хостов: алиасы, регистр, ошибка со списком допустимых.
     #[test]
     fn host_parse_accepts_aliases_and_rejects_unknown() {
@@ -1601,9 +1950,12 @@ mod tests {
         assert_eq!(Host::parse("Claude-Code"), Ok(Host::Claude));
         assert_eq!(Host::parse("qwen"), Ok(Host::Qwen));
         assert_eq!(Host::parse("kimi-code"), Ok(Host::Kimi));
+        assert_eq!(Host::parse("omp"), Ok(Host::Omp));
+        assert_eq!(Host::parse("oh-my-pi"), Ok(Host::Omp));
         assert_eq!(Host::parse("generic"), Ok(Host::Generic));
         let err = Host::parse("cursor").expect_err("неизвестный хост");
         assert!(err.contains("claude"), "{err}");
+        assert!(err.contains("omp"), "{err}");
     }
 
     /// Рендер отчёта: русские секции, dry-run помечен.

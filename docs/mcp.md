@@ -76,7 +76,8 @@ claude mcp add arch-spine -- arch-be mcp serve
 | `claude` | `.mcp.json` (мердж `mcpServers.spine`), `.claude/settings.json` (мердж хуков), `.claude/skills/<имя>/`, `CLAUDE.md` (блок между `<!-- SPINE:BEGIN/END -->`) | следующие шаги (`claude mcp list`) |
 | `qwen` | `.qwen/settings.json` (мердж `mcpServers`) | скиллы и хуки — сниппеты (layout Qwen Code не подтверждён) |
 | `codex` | только с `--apply-global`: `~/.codex/config.toml` (мердж `[mcp_servers.spine]`, бэкап `*.bak-spine-connect`) | TOML-блок; рекомендация `arch-be agents-md refresh .` |
-| `kimi` | только с `--apply-global`: `~/.kimi-code/mcp.json` (мердж, бэкап) | JSON-блок (проектный layout не подтверждён) |
+| `kimi` | `.kimi-code/mcp.json` проекта (мердж `mcpServers.spine`, чужие серверы сохраняются; project-уровень перекрывает user-level); с `--apply-global` — также `~/.kimi-code/mcp.json` (мердж, бэкап) | JSON-блок для user-level (альтернатива), TOML-блок хука `[[hooks]]` для `~/.kimi-code/config.toml` (проектных хуков у Kimi Code нет), напоминание про trust-диалог (project MCP не стартует в untrusted-папке) |
+| `omp` | `.mcp.json` (мердж, как у claude — omp дискаверит проектный файл автоматически); скиллы в `.claude/skills/`, только если такого каталога ещё нет (omp читает его нативно) | заметки: автодискавери `.mcp.json`; хуков нет — TS-расширения через `omp --hook <file.ts>` |
 | `generic` | ничего | все сниппеты для ручной установки |
 
 Хуки Claude Code: `Stop` → `arch-be control check .` (гард: только если
