@@ -52,7 +52,8 @@ chmod +x arch-be && mv arch-be ~/.local/bin/
 ### GigaCode CLI (форк Qwen Code)
 
 Целевой сценарий для архитекторов. Механика — как у Qwen Code
-(project-level `mcpServers`); проверено живыми прогонами на qwen-code 0.0.5:
+(project-level `mcpServers`); проверено живыми прогонами на **двух версиях
+qwen-code: 0.0.5 (старая) и 0.24.0 (свежая)**:
 
 ```bash
 cd ~/projects/my-project
@@ -273,7 +274,7 @@ fitness-правил, **сам** чинил его и перепроверял. 
 
 | Харнесс | MCP | FAIL→PASS | Скиллы | Хуки |
 |---|---|---|---|---|
-| **GigaCode CLI** (форк Qwen Code) | ✅ проверено на qwen-code 0.0.5/0.24.0 | ✅ | ✅ через MCP; в 0.24 и `.qwen/skills` | ⚠️ `qwen hooks` в 0.24 (UI) |
+| **GigaCode CLI** (форк Qwen Code) | ✅ живые прогоны на qwen-code **0.0.5 и 0.24.0** | ✅ | ✅ через MCP; в 0.24 и `.qwen/skills` | ⚠️ `qwen hooks` в 0.24 (UI) |
 | Claude Code 2.1.274 | ✅ | ✅ | ✅ 55 | ✅ Stop-гейт |
 | Kimi Code 0.42.0 | ✅ | ✅ | ✅ Project scope | ✅ Stop (user-level) |
 | Qwen Code 0.0.5 → 0.24.0 | ✅ (+ `mcp approve` в 0.24) | ✅ на локальной qwen3.8 | ✅ через MCP / `.qwen/skills` | ⚠️ UI в 0.24, headless н/п |
