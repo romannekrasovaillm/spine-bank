@@ -1,0 +1,5 @@
+Claude Code видит скиллы Spine (проектные .claude/skills)
+$ claude -p "Какие project-скиллы тебе доступны? Назови 5."
++ Проверил: ls .claude/skills даёт 55 каталогов, в каждом есть SKILL.md, и все имена совпадают со списком скиллов, доступных мне в этой сессии.
+Пять реальных имён оттуда: adr-authoring, spine-invariants, handoff-packaging, fitness-function-catalog, transactional-outbox.
++ Всего в каталоге .claude/skills лежит 55 скиллов.

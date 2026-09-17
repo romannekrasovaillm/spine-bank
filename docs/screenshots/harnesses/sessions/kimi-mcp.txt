@@ -1,0 +1,11 @@
+Kimi Code × spine: MCP из project-файла .kimi-code/mcp.json
+$ kimi -p "Проверь проект через spine fitness_check"
+# вызов: mcp__spine__fitness_check {"repo":"."}
+- FAIL: issue_count=2 (no_float_for_money, tests_present)
+# агент исправил main.rs → повторный fitness_check → passed=true
+$ kimi -p "model_query + trace_check + significance_score через spine"
+# вызовы: model_query {"dir":"model"} → trace_check {"case":"."}
+#         → significance_score {"triggers":{"new_component":true}}
++ model_query: 6 сущностей (SYS/REQ/NFR/CMP/AD-1/AD-2)
++ trace_check: passed=true (цепочка REQ→NFR→AD→CMP→C полная)
++ significance_score: route "Fast" (новый компонент, триггер сработал)

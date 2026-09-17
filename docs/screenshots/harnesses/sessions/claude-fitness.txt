@@ -1,0 +1,6 @@
+Claude Code × spine: fitness-гейт через MCP (дословный трейс)
+$ claude -p "Проверь fitness_check, исправь нарушения, перепроверь"
+# агент вызывает: mcp__spine__fitness_check {"repo": "."}
+- FAIL: 2 error — no_float_for_money (f64), tests_present (нет #[test])
+# агент вызывает: mcp__spine__fitness_check {"repo": "."}
++ PASS: {"issue_count":0,"passed":true,"summary":"Правил: 4, нарушений: 0"}

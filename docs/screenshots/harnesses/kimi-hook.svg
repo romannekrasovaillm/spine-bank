@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="741" height="179" viewBox="0 0 741 179">
+<rect x="0.5" y="0.5" width="740" height="178" rx="10" fill="#1a1b26" stroke="#3b4261"/>
+<circle cx="20" cy="14" r="5" fill="#f7768e"/>
+<circle cx="38" cy="14" r="5" fill="#e0af68"/>
+<circle cx="56" cy="14" r="5" fill="#9ece6a"/>
+<text x="370.5" y="18" text-anchor="middle" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="12" fill="#565f89">Kimi Code: Stop-хук (user-level [[hooks]] в config.toml) — реальный трейс</text>
+<text x="14.0" y="49.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#9ece6a">$</text>
+<text x="32.06" y="49.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#c0caf5">kimi -p "Ответь одним словом: Готово."   # в проекте 2 error-находки</text>
+<text x="14.0" y="68.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#565f89">ход завершается → Stop-хук запускает arch-be control check .:</text>
+<text x="14.0" y="87.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#e0af68">HOOK_FIRED {"hook_event_name":"Stop","stop_hook_active":false}</text>
+<text x="14.0" y="106.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#e0af68">gate FAIL → exit 2 → находки уходят модели как feedback:</text>
+<text x="14.0" y="125.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#565f89">Модель (дословно): "Гейт подтверждаю — обе находки реальные:</text>
+<text x="14.0" y="144.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#565f89"> no_float_for_money (src/main.rs:2 f64) и tests_present (нет #[test])"</text>
+<text x="14.0" y="163.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#565f89">нюанс kimi: Stop-хук срабатывает однократно на ход (stop_hook_active)</text>
+</svg>

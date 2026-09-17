@@ -1,0 +1,9 @@
+omp видит скиллы Spine (нативный discovery .claude/skills)
+$ omp -p "Какие скиллы доступны? Есть ли архитектурные?"
++ агент видит 81 скилл, из них 55 — spine (из .claude/skills проекта)
+  adr-authoring
+  circuit-breaker-retry
+  fitness-function-catalog
+  handoff-packaging
+  readiness-gate
+  saga-transactions

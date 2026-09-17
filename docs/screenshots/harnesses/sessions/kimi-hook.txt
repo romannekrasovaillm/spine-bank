@@ -1,0 +1,8 @@
+Kimi Code: Stop-хук (user-level [[hooks]] в config.toml) — реальный трейс
+$ kimi -p "Ответь одним словом: Готово."   # в проекте 2 error-находки
+# ход завершается → Stop-хук запускает arch-be control check .:
+! HOOK_FIRED {"hook_event_name":"Stop","stop_hook_active":false}
+! gate FAIL → exit 2 → находки уходят модели как feedback:
+# Модель (дословно): "Гейт подтверждаю — обе находки реальные:
+#  no_float_for_money (src/main.rs:2 f64) и tests_present (нет #[test])"
+# нюанс kimi: Stop-хук срабатывает однократно на ход (stop_hook_active)

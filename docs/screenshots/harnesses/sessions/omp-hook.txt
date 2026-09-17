@@ -1,0 +1,8 @@
+omp: хук-гейт на TS-расширении (--hook hook-gate.ts)
+# pi.on('tool_call', …) → {block:true} при правке CONSTRAINTS.yaml
+! 2026-09-17T14:00:15.172Z tool_call read {"path":"CONSTRAINTS.yaml"}
+! 2026-09-17T14:00:15.173Z tool_call read {"path":"README.md"}
+! 2026-09-17T14:00:17.919Z tool_call edit {"input":"[CONSTRAINTS.yaml#327D]\ndelete 2..7"}
+! 2026-09-17T14:00:17.919Z BLOCK edit {"input":"[CONSTRAINTS.yaml#327D]\ndelete 2..7"}
+! 2026-09-17T14:00:23.214Z agent_end (stop)
+- CONSTRAINTS.yaml защищён: попытка edit заблокирована хуком

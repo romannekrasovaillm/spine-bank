@@ -1,0 +1,9 @@
+Kimi Code: скиллы Spine в Project scope (.kimi-code/skills) — дословно
+$ kimi -p "Какие скиллы доступны? Откуда они?"
+# Ответ агента (сокращён):
+Проектные скиллы (Project scope), загружены из .kimi-code/skills/:
+- adr-authoring — дисциплина ADR: решение до реализации, альтернативы,
+  отрицательные последствия, обратимость, статусы Proposed…Superseded
+- fitness-function-catalog — каталог 20 готовых fitness-функций для
+  CONSTRAINTS.yaml (таймауты, ретраи, OpenAPI/AsyncAPI, идемпотентность)
+- c4-mermaid — C4-диаграммы с рендером в терминале

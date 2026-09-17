@@ -1,0 +1,5 @@
+OpenClaw: 55 скиллов Spine видны нативно (skills list)
+Skills (77/108 ready)
++ 55/55 spine-скиллов: status ready (source: workspace skills/)
+  adr-authoring
+  bulkhead

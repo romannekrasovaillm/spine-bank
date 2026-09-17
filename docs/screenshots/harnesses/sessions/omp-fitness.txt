@@ -1,0 +1,6 @@
+omp (oh-my-pi) × spine: .mcp.json подхвачен автоматически
+$ omp -p "Вызови fitness_check, исправь нарушения, перепроверь"
+# вызов: mcp__spine_fitness_check {"repo":"."}
+- FAIL: issue_count=2 — no_float_for_money, tests_present
+# вызов: mcp__spine_fitness_check {"repo":"."}
++ PASS: passed=true, "Правил: 4, нарушений: 0"

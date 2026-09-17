@@ -1,0 +1,7 @@
+Qwen Code × spine: контрактный контур (дословный вывод агента)
+# openapi_lint(contracts/openapi-v1.yaml):
++ PASS: 9 warn (0 error) — пути без версионного префикса /v<n>/ (OA-002)
+# contract_diff(old=v1, new=v2):
+- FAIL: 1 breaking change (CD-001) — в v2 удалён путь /notices
+# asyncapi_lint(contracts/payments-notify.asyncapi.yaml):
++ PASS: 0 находок, контракт чист

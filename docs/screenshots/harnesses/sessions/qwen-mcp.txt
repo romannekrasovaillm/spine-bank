@@ -1,0 +1,8 @@
+Qwen Code × spine: MCP из .qwen/settings.json (реальный прогон)
+$ qwen mcp list
++ ✓ spine: /tmp/.../arch-be mcp serve — Connected (20 инструментов)
+$ OPENAI_BASE_URL=http://gpu-host:8000/v1 qwen "Вызови fitness_check"
+# модель — локальная qwen3.8-27b (llm-platform, без облачных ключей)
+- FAIL: issue_count=2 — no_float_for_money (f64), tests_present
+# агент переписал src/main.rs, прогнал rustc --test (2 passed)
++ PASS: "passed": true, 0 нарушений (4 правила)

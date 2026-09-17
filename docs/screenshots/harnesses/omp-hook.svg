@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="822" height="179" viewBox="0 0 822 179">
+<rect x="0.5" y="0.5" width="821" height="178" rx="10" fill="#1a1b26" stroke="#3b4261"/>
+<circle cx="20" cy="14" r="5" fill="#f7768e"/>
+<circle cx="38" cy="14" r="5" fill="#e0af68"/>
+<circle cx="56" cy="14" r="5" fill="#9ece6a"/>
+<text x="411.0" y="18" text-anchor="middle" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="12" fill="#565f89">omp: хук-гейт на TS-расширении (--hook hook-gate.ts)</text>
+<text x="14.0" y="49.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#565f89">pi.on('tool_call', …) → {block:true} при правке CONSTRAINTS.yaml</text>
+<text x="14.0" y="68.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#e0af68">2026-09-17T14:00:15.172Z tool_call read {"path":"CONSTRAINTS.yaml"}</text>
+<text x="14.0" y="87.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#e0af68">2026-09-17T14:00:15.173Z tool_call read {"path":"README.md"}</text>
+<text x="14.0" y="106.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#e0af68">2026-09-17T14:00:17.919Z tool_call edit {"input":"[CONSTRAINTS.yaml#327D]\ndelete 2..7"}</text>
+<text x="14.0" y="125.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#e0af68">2026-09-17T14:00:17.919Z BLOCK edit {"input":"[CONSTRAINTS.yaml#327D]\ndelete 2..7"}</text>
+<text x="14.0" y="144.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#e0af68">2026-09-17T14:00:23.214Z agent_end (stop)</text>
+<text x="14.0" y="163.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#f7768e">CONSTRAINTS.yaml защищён: попытка edit заблокирована хуком</text>
+</svg>

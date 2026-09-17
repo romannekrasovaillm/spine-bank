@@ -1,0 +1,9 @@
+OpenClaw (--dev) × spine: fitness-гейт (дословные строки трейса)
+$ openclaw --dev mcp add spine --command ~/.local/bin/arch-be --arg mcp --arg serve
++ MCP server 'spine' added; probe: 20 инструментов spine__*
+$ openclaw --dev agent --local -m "Вызови spine__fitness_check с repo=. и доложи"
+# агент вызывает: spine__fitness_check {"repo":"."}
+- FAIL: no_float_for_money — src/main.rs:2: запрещённый паттерн '\bf64\b'
+- FAIL: tests_present — нет #[test] (деньги во float — прямое нарушение AD-1)
+# ход 2: агент сам переписал main.rs (i64-копейки + 2 теста)
++ passed = true ✅ Нарушений: 0 (error: 0)
