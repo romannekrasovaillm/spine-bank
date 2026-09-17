@@ -3,9 +3,9 @@
 </p>
 
 <p align="center">
-  <b>Spine: архитектурный контур — для вашего CLI-агента или как самостоятельный харнесс</b><br>
-  <sub>MCP-сервер с детерминированным контролем · 55 архитектурных скиллов · хуки-гейты · судья без API-ключей<br>
-  Spine as an organ of your coding agent (Claude Code / Kimi / Qwen / omp / OpenClaw) — or a standalone architect harness (TUI + own LLM).</sub>
+  <b>Spine: архитектурный контур — внутри вашего CLI-агента или как отдельный харнесс с TUI</b><br>
+  <sub>GigaCode CLI · Claude Code · Kimi Code · Qwen Code · omp · OpenClaw — MCP, 55 скиллов, хуки-гейты, судья без API-ключей<br>
+  Spine as an organ of your coding agent — or a standalone architect harness (TUI + own LLM).</sub>
 </p>
 
 <p align="center">
@@ -25,94 +25,195 @@
 
 | | **Spine Core** | **Spine Harness (TUI)** |
 |---|---|---|
-| Для кого | У вас уже есть кодовый агент (Claude Code, Kimi, Qwen, omp, OpenClaw) | Вы — архитектор и работаете сами, без внешнего агента |
-| Что это | «Орган» чужого харнесса: MCP-сервер + скиллы + хуки | Полный харнесс архитектора: TUI + агентный цикл + то же ядро |
-| LLM | **Не нужна**: думает ваш агент; судья — через `kind="cli"` или split-judge | Своя: DeepSeek / GLM / Kimi / GigaChat / локальная платформа |
+| Для кого | У вас уже есть кодовый агент — **кодер или архитектор** работает внутри него | Вы — архитектор и работаете сами, без внешнего агента |
+| Что это | «Орган» чужого харнесса: MCP-сервер + 55 скиллов + хуки-гейты | Полный харнесс архитектора: TUI + агентный цикл + то же ядро |
+| LLM | **Не нужна**: думает ваш агент; судья — `kind="cli"` или split-judge | Своя: DeepSeek / GLM / Kimi / GigaChat / локальная платформа |
 | Бинарь (релиз) | `arch-be-core-linux-x86_64` (~10 МБ) | `arch-be-linux-x86_64` (~19 МБ) |
-| Сборка из исходников | `cargo build --release --no-default-features --features core` | `cargo build --release` |
+| Сборка | `cargo build --release --no-default-features --features core` | `cargo build --release` |
 
-Это форк **Spine Banking Edition**, перевёрнутый по плану инверсии: харнесс
-перестаёт вызывать LLM сам и становится MCP-сервером + пакетом скиллов +
-хуками **внутри вашего агента**. Ядро — MIT; банковский слой (`banking/`)
-в публикацию не входит. Полный тур исходного харнесса —
-в [README-full.md](README-full.md).
+Одна кодовая база — специально: ядро, тесты (1000+) и CI общие, версии не
+расходятся. Различие — только в том, кто «думает»: ваш агент или Spine сам.
+Это форк **Spine Banking Edition**, перевёрнутый по плану инверсии. Ядро —
+MIT; слой `banking/` в публикацию не входит.
 
-## Быстрый старт Spine Core (2 минуты)
+---
+
+# Режим 1. Spine Core внутри вашего харнесса
+
+## Шаг 0. Бинарь (30 секунд)
 
 ```bash
-# 1. Бинарь из раздела Releases (Linux x86_64)
 curl -L -o arch-be https://github.com/romannekrasovaillm/spine-bank/releases/latest/download/arch-be-core-linux-x86_64
 chmod +x arch-be && mv arch-be ~/.local/bin/
-
-# 2. В корне проекта, который должен контролировать Spine
-cd ~/projects/my-project
-arch-be connect claude        # или: kimi / qwen / omp / codex / generic
 ```
 
-![Установка и подключение](docs/screenshots/connect/01-connect.png)
+## Шаг 1. Подключение
 
-`connect` пишет в проект (мердж без затирания чужого, идемпотентно,
-`--dry-run` для предпросмотра):
+### GigaCode CLI (форк Qwen Code)
 
-| Файл | Что даёт |
-|---|---|
-| `.mcp.json` | MCP-сервер `spine` (`arch-be mcp serve`) — 20 инструментов контроля |
-| `.claude/settings.json` | Stop-хук `arch-be control check .`: агент **не может завершить работу**, пока архитектурный гейт FAIL |
-| `.claude/skills/` | 55 скиллов: ADR, fitness-функции, saga/outbox/circuit-breaker, офисные отчёты (docx/pptx/xlsx) |
-| `CLAUDE.md` | Точка входа с ссылкой на AGENTS.md (блок между маркерами `SPINE:BEGIN/END`) |
+Целевой сценарий для архитекторов. Механика — как у Qwen Code
+(project-level `mcpServers`); проверено живыми прогонами на qwen-code 0.0.5:
 
-Перезапустите агента и проверьте: `claude mcp list` →
-`spine: arch-be mcp serve - ✔ Connected`. При первом запуске Claude Code
-спросит разрешение на project-сервер из `.mcp.json` — это штатная защита.
+```bash
+cd ~/projects/my-project
+arch-be connect qwen        # пишет .qwen/settings.json (мердж, чужое цело)
+```
 
-**Подробная инструкция со скриншотами для всех хостов — [docs/CONNECT.md](docs/CONNECT.md).**
+```jsonc
+// .qwen/settings.json — что записалось:
+{"mcpServers": {"spine": {"command": "arch-be", "args": ["mcp", "serve"]}}}
+```
 
-## Проверено на пяти харнессах (живые прогоны, не моки)
+Перезапустите GigaCode в каталоге проекта. Проверка: сервер `spine` в
+списке MCP (`mcp list`), инструменты видны как `fitness_check`,
+`trace_check`, `rubric_prompt`… Дальше — просто просите агента:
 
-Каждый харнесс подключался к Spine, получал проект с нарушением
-fitness-правил, **сам** чинил его и перепроверял. Полная матрица со всеми
-скриншотами и ограничениями — **[docs/HARNESSES.md](docs/HARNESSES.md)**.
+![Архитектор в GigaCode/Qwen: модель, трасса, скоринг](docs/screenshots/harnesses/qwen-architect.png)
 
-| Харнесс | MCP | FAIL→PASS | Скиллы | Хуки |
-|---|---|---|---|---|
-| Claude Code | ✅ | ✅ | ✅ 55 | ✅ Stop-гейт |
-| Kimi Code | ✅ | ✅ | ✅ Project scope | ✅ Stop (user-level) |
-| Qwen Code | ✅ | ✅ (локальная qwen3.8) | ⚠️ через MCP | ❌ нет событий |
-| omp (oh-my-pi) | ✅ авто-дискавери `.mcp.json` | ✅ | ✅ нативно | ✅ TS-хук block |
-| OpenClaw | ✅ `mcp add` | ✅ | ✅ 55/55 ready | ✅ плагин `before_agent_finalize` |
+### Claude Code
 
-Скиллы Spine видны агенту нативно — например, Claude Code и omp читают
-`.claude/skills` напрямую:
+```bash
+arch-be connect claude
+```
+
+Пишет `.mcp.json` + `.claude/settings.json` (Stop-хук-гейт) +
+`.claude/skills/` (55 скиллов) + `CLAUDE.md`. Проверка: `claude mcp list` →
+`spine … ✔ Connected`. При первом запуске — разрешите project-сервер («Yes»).
+
+![Подключение Claude Code](docs/screenshots/connect/01-connect.png)
+
+### Kimi Code
+
+```bash
+arch-be connect kimi
+```
+
+Пишет project-level `.kimi-code/mcp.json`; печатает TOML-блок Stop-хука для
+`~/.kimi-code/config.toml`. При первом запуске `kimi` в каталоге примите
+trust-диалог (иначе project-сервер молча пропускается).
+
+![Kimi × Spine](docs/screenshots/harnesses/kimi-mcp.png)
+
+### Qwen Code
+
+Как у GigaCode CLI: `arch-be connect qwen`. Нюансы: модель для
+openai-совместимого endpoint задаётся через `OPENAI_MODEL`; lifecycle-хуков
+в версии 0.0.5 нет (гейт работает через вызовы инструментов).
+
+![Qwen × Spine: контрактный контур](docs/screenshots/harnesses/qwen-contracts.png)
+
+### omp (oh-my-pi)
+
+```bash
+arch-be connect omp      # .mcp.json (автодискавери) + скиллы в .claude/skills
+```
+
+Нюанс: при большом числе инструментов omp активирует их BM25-поиском —
+если агент «не видит» инструмент, попросите его поискать по имени.
+
+![omp × Spine](docs/screenshots/harnesses/omp-fitness.png)
+
+### OpenClaw
+
+```bash
+openclaw mcp add spine --command arch-be --arg mcp --arg serve
+```
+
+### Codex и другие MCP-хосты
+
+```bash
+arch-be connect codex     # TOML для ~/.codex/config.toml (+ --apply-global)
+arch-be connect generic   # сниппеты для любого MCP-совместимого хоста
+```
+
+## Шаг 2. Три способа работы
+
+### А. Кодер под гейтом
+
+Агент сам проверяет проект (`fitness_check`), чинит нарушения и
+перепроверяет; Stop-хук не даёт завершить работу при красном гейте —
+находки возвращаются агенту как feedback:
+
+<p align="center">
+  <img src="docs/screenshots/connect/04-fitness.png" alt="fitness FAIL → fix → PASS" width="47%">
+  <img src="docs/screenshots/connect/05-stop-hook.png" alt="Stop-хук блокирует завершение" width="47%">
+</p>
+
+### Б. Архитектор внутри харнесса
+
+Маршрут изменения (significance), модель системы, трассировка
+REQ→NFR→AD→CMP→правила, оценка ADR рубрикой, диаграммы — всё через MCP.
+LLM у Spine нет: думает ваш агент, вердикты даёт механика Spine:
+
+![Архитектурная сессия](docs/screenshots/harnesses/architect-session.png)
+
+### В. Судья по рубрикам — без API-ключей
+
+1. `kind = "cli"`: `arch-be rubric run adr_quality target.md` вызывает ваш
+   `claude -p` подпроцессом — платит подписка хоста;
+2. split-judge для любого MCP-хоста: `rubric_prompt` → хост судит k раз →
+   `rubric_verify` (медиана, проверка цитат, флаги `unstable` /
+   `evidence_not_found`).
+
+![Судья через подписку](docs/screenshots/connect/06-rubric-cli-judge.png)
+
+### Скиллы видны агенту нативно
+
+55 архитектурных скиллов (ADR, fitness-функции, saga/outbox/circuit-breaker,
+docx/pptx/xlsx-отчёты) раскладываются в проект и видны агенту:
 
 <p align="center">
   <img src="docs/screenshots/harnesses/claude-skills.png" alt="Claude Code видит 55 скиллов Spine" width="47%">
-  <img src="docs/screenshots/harnesses/omp-skills.png" alt="omp видит 55 скиллов Spine через discovery .claude/skills" width="47%">
+  <img src="docs/screenshots/harnesses/omp-skills.png" alt="omp видит 55 скиллов Spine" width="47%">
 </p>
 
-## Как это работает в сессии
+---
 
-**Агент проверяет проект сам.** Инструмент `fitness_check` возвращает
-машиночитаемый вердикт по вашему `CONSTRAINTS.yaml`; видя FAIL, агент чинит
-нарушения и перепроверяет:
+# Режим 2. Spine Harness (TUI) — самостоятельный
 
-![fitness FAIL → fix → PASS](docs/screenshots/connect/04-fitness.png)
+```bash
+# 1. Бинарь (полная сборка)
+curl -L -o arch-be https://github.com/romannekrasovaillm/spine-bank/releases/latest/download/arch-be-linux-x86_64
+chmod +x arch-be && mv arch-be ~/.local/bin/
 
-**Гейт не отпускает, пока не зелёный.** Stop-хук блокирует завершение хода
-при нарушениях (fail-soft на инфраструктуру: нет бинаря или
-`CONSTRAINTS.yaml` — молча пропускает):
+# 2. Конфиг и ассеты
+arch-be init
 
-![Stop-хук блокирует завершение](docs/screenshots/connect/05-stop-hook.png)
+# 3. Модель: ключи только через окружение (или kind="cli" / локальная платформа)
+export DEEPSEEK_API_KEY=...     # deepseek (по умолчанию)
+export ZHIPU_API_KEY=...        # glm-5.x
+export KIMI_API_KEY=...         # kimi
 
-**LLM-судья — без единого API-ключа**, двумя путями:
+# 4. Запуск
+arch-be                          # интерактивный TUI (Tokyo Night)
+arch-be run -q "черновик ADR по саге" > adr.md   # строгий headless
+arch-be doctor                   # проверка окружения
+```
 
-1. `kind = "cli"` в конфиге: `arch-be rubric run …` вызывает ваш
-   `claude -p` / `codex exec` подпроцессом — платит подписка хоста;
-2. split-judge для любого MCP-хоста: `rubric_prompt` отдаёт промпт + схему
-   ответа, хост судит сам, `rubric_verify` собирает k ответов в отчёт
-   (медиана, проверка цитат, флаги `unstable` / `evidence_not_found`) —
-   проверено на Claude Code (итог 2.70/5 по двум ответам судьи).
+<p align="center">
+  <img src="docs/screenshots/02-chat-mermaid.png" alt="TUI Spine Harness: архитектурный ход, mermaid, индикатор контекста" width="80%">
+</p>
 
-![Судья через подписку Claude Code](docs/screenshots/connect/06-rubric-cli-judge.png)
+Смоук без LLM: `arch-be mermaid examples/mermaid/flow.mmd`,
+`arch-be control score --trigger new_component=true`. Полный тур харнесса —
+в [README-full.md](README-full.md).
+
+---
+
+## Проверено на харнессах (живые прогоны, не моки)
+
+Каждый харнесс подключался к Spine, получал проект с нарушением
+fitness-правил, **сам** чинил его и перепроверял. Полная матрица,
+ограничения и все скриншоты — **[docs/HARNESSES.md](docs/HARNESSES.md)**.
+
+| Харнесс | MCP | FAIL→PASS | Скиллы | Хуки |
+|---|---|---|---|---|
+| **GigaCode CLI** (форк Qwen Code) | ✅ через прокси qwen-code | ✅ | ⚠️ через MCP | ❌ нет событий |
+| Claude Code 2.1.274 | ✅ | ✅ | ✅ 55 | ✅ Stop-гейт |
+| Kimi Code 0.42.0 | ✅ | ✅ | ✅ Project scope | ✅ Stop (user-level) |
+| Qwen Code 0.0.5 | ✅ | ✅ на локальной qwen3.8 | ⚠️ через MCP | ❌ нет событий |
+| omp (oh-my-pi) 15.10.3 | ✅ | ✅ | ✅ нативно | ✅ TS-хук block |
+| OpenClaw 2026.7.1 | ✅ | ✅ | ✅ 55/55 | ✅ плагин `before_agent_finalize` |
 
 ## Что внутри MCP-сервера
 
@@ -128,51 +229,37 @@ arch-be mcp serve --rw    # + handoff_create, adr_new, agentsmd_generate, …
   `plugin_list`, `mermaid_render`.
 - **Судья**: `rubric_run` (через `kind="cli"`), `rubric_prompt` +
   `rubric_verify` (split-judge для любого хоста).
-- **Никогда не отдаются наружу** (у хоста свои): `bash`, `write_file`,
-  `edit_file`, `harness_run`, `subagent_*`, `web_*` — зашитый never-список,
-  охраняется тестами реестра.
+- **Никогда наружу** (у хоста свои): `bash`, `write_file`, `edit_file`,
+  `harness_run`, `subagent_*`, `web_*` — зашитый never-список, охраняется
+  тестами реестра.
 
-## Spine Harness (TUI)
-
-Полная сборка — это исходный харнесс архитектора: TUI на ratatui (Tokyo
-Night), агентный цикл с компактификацией, пикер моделей, флоты субагентов,
-бенчмарки, экспорт сессий в docx/xlsx. Скриншоты и полный тур —
-в [README-full.md](README-full.md).
-
-<p align="center">
-  <img src="docs/screenshots/02-chat-mermaid.png" alt="TUI Spine Harness" width="72%">
-</p>
-
-## Кейсы — сквозные прогоны, а не обещания
+## Кейсы
 
 | Кейс | Что показывает |
 |------|----------------|
-| [drift-control](кейсы/drift-control/) | Голая задача → гейт FAIL 2/6; та же задача + handoff-пакет → PASS 6/6 |
-| [fleet-spine-drift](кейсы/fleet-spine-drift/) | Аудит флота: дрейф `CONSTRAINTS.yaml` как exit-код — полностью механически |
-| [parallel-epics](кейсы/parallel-epics/) · [fleet-of-ten](кейсы/fleet-of-ten/) | Спайн как клей флота Claude Code: стыки сходятся с первой сборки |
-| [legacy-survey](кейсы/legacy-survey/) · [jvm-archunit-gate](кейсы/jvm-archunit-gate/) · [fleet-patterns](кейсы/fleet-patterns/) | Reverse discovery, гейт по байткоду, движок оркестрации — без LLM |
+| [drift-control](кейсы/drift-control/) | Голая задача → FAIL 2/6; с handoff-пакетом → PASS 6/6 |
+| [fleet-spine-drift](кейсы/fleet-spine-drift/) | Аудит флота: дрейф `CONSTRAINTS.yaml` как exit-код — без LLM |
+| [parallel-epics](кейсы/parallel-epics/) · [fleet-of-ten](кейсы/fleet-of-ten/) | Спайн как клей флота Claude Code |
+| [legacy-survey](кейсы/legacy-survey/) · [jvm-archunit-gate](кейсы/jvm-archunit-gate/) · [fleet-patterns](кейсы/fleet-patterns/) | Reverse discovery, гейт по байткоду, оркестрация флотов |
 
-Реестр и конвенции — [`кейсы/AGENTS.md`](кейсы/AGENTS.md); ещё шесть кейсов —
+Реестр — [`кейсы/AGENTS.md`](кейсы/AGENTS.md); ещё шесть кейсов —
 в [README-full.md](README-full.md).
 
 ## Документация
 
-- **[docs/CONNECT.md](docs/CONNECT.md)** — подключение со скриншотами:
-  claude / kimi / qwen / omp / codex / generic; хуки, `--rw`, неполадки.
-- **[docs/HARNESSES.md](docs/HARNESSES.md)** — матрица реальных прогонов
-  пяти харнессов: MCP, скиллы, хуки, ограничения.
-- [docs/mcp.md](docs/mcp.md) — контракт MCP-сервера, белые списки, split-judge.
-- [README-full.md](README-full.md) — полный тур (TUI, флоты, бенчмарки, EN).
-- Скриншоты регенерируются из сценариев:
-  `docs/screenshots/{connect,harnesses}/sessions/*.txt` + `scripts/termshot.py`.
+- **[docs/CONNECT.md](docs/CONNECT.md)** — подробное подключение со
+  скриншотами, хуки, `--rw`, устранение неполадок.
+- **[docs/HARNESSES.md](docs/HARNESSES.md)** — матрица прогонов пяти
+  харнессов + прокси-прогон GigaCode: MCP, скиллы, хуки, ограничения.
+- [docs/mcp.md](docs/mcp.md) — контракт MCP-сервера и split-judge.
+- [README-full.md](README-full.md) — полный тур харнесса (RU/EN).
 
 ## Для разработчиков форка
 
 ```bash
-cargo build              # полная сборка (фича harness по умолчанию)
-cargo test               # ~1000 тестов, офлайн
-cargo test --no-default-features --features core   # core-поднабор
-arch-be control check . --constraints CONSTRAINTS.yaml   # догфуд-гейт
+cargo build && cargo test                                     # полная сборка, ~1000 тестов офлайн
+cargo test --no-default-features --features core              # core-поднабор
+arch-be control check . --constraints CONSTRAINTS.yaml        # догфуд-гейт
 ```
 
 Конвенции — `AGENTS.md`; инварианты — `ARCHITECTURE-SPINE.md` /

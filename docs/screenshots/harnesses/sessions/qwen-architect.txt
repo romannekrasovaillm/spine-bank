@@ -1,0 +1,9 @@
+GigaCode CLI / Qwen Code: архитектор через Spine MCP (реальный прогон)
+$ arch-be connect qwen          # .qwen/settings.json → mcpServers.spine
+$ qwen mcp list
++ ✓ spine: arch-be mcp serve — Connected (20 инструментов)
+# "Вызови significance_score, model_query, trace_check"
++ significance_score: score 1 (new_component) → маршрут Fast
++ model_query: 6 сущностей — AD-1, AD-2 (ADOPTED), CMP-001, NFR-001, REQ-001, SYS-001
++ trace_check: PASS — 6 сущностей, 4 правила, покрытие 100%
+# модель — локальная llm-platform (qwen3.8-27b), облачные ключи не нужны

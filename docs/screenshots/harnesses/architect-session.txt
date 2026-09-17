@@ -1,0 +1,11 @@
+Архитектор внутри Claude Code: Spine без своей LLM (чистый MCP)
+$ claude -p "Ты solution-архитектор: оцени маршрут, модель, ADR, диаграмму"
+# mcp__spine__significance_score {"triggers":{"new_component":true}}
++ route: Fast (score 1); fired: [new_component]; 14 триггеров в резерве
+# mcp__spine__model_query {"dir":"model"}
++ 6 сущностей; сигнал: REQ-001 и SYS-001 — сироты без связей
+# mcp__spine__rubric_prompt → 2 ответа судьи → mcp__spine__rubric_verify
++ ADR-001: взвешенный итог 1.60/5 (медиана 2 сэмплов, dropped=0, stdev=0)
+# mcp__spine__mermaid_render {"path":"diagrams/c4-container.mmd"}
++ flowchart TB: 11 узлов, 11 рёбер
+! Мозг — Claude Code; вердикты, рубрика, диаграмма — механика Spine

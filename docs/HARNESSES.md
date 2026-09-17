@@ -17,7 +17,7 @@
 |---|---|---|---|---|
 | **Claude Code** 2.1.274 | ✅ `.mcp.json` (connect) | ✅ агент сам починил и перепроверил | ✅ 55 из `.claude/skills` | ✅ Stop-хук блокирует завершение |
 | **Kimi Code** 0.42.0 | ✅ `.kimi-code/mcp.json` (project) | ✅ | ✅ Project scope `.kimi-code/skills` | ✅ Stop-хук (user-level `[[hooks]]`) |
-| **Qwen Code** 0.0.5 | ✅ `.qwen/settings.json` | ✅ (на локальной qwen3.8-27b) | ⚠️ через MCP `skill_search`/`skill_load` (нативного загрузчика нет) | ❌ не поддерживаются (нет событий) |
+| **Qwen Code** 0.0.5 (= путь GigaCode CLI) | ✅ `.qwen/settings.json` | ✅ (на локальной qwen3.8-27b) | ⚠️ через MCP `skill_search`/`skill_load` (нативного загрузчика нет) | ❌ не поддерживаются (нет событий) |
 | **omp (oh-my-pi)** 15.10.3 | ✅ `.mcp.json` авто-дискавери | ✅ | ✅ нативный discovery `.claude/skills` (81 видимый, 55 spine) | ✅ TS-хук `--hook`: `{block:true}` на правку CONSTRAINTS.yaml |
 | **OpenClaw** 2026.7.1 | ✅ `openclaw mcp add` | ✅ | ✅ 55/55 ready (workspace `skills/`) | ✅ через плагин (`before_agent_finalize` → повторный проход при FAIL) |
 
@@ -63,15 +63,24 @@ Stop-хук (fail-soft на инфраструктуру, fail-hard на вер�
 интерактивным запуском и «Trust this folder»); Stop-хук срабатывает
 однократно на ход (`stop_hook_active`).
 
-## Qwen Code
+## Qwen Code и GigaCode CLI
+
+**GigaCode CLI — форк Qwen Code**, поэтому прогоны на qwen-code 0.0.5 —
+это проверка пути GigaCode: project-level `mcpServers` в
+`.qwen/settings.json`, folder trust, те же инструменты `spine`.
 
 ```jsonc
 // .qwen/settings.json
 {"mcpServers": {"spine": {"command": "arch-be", "args": ["mcp", "serve"]}}}
 ```
 
-Прогон на локальной модели (llm-platform, qwen3.8-27b) — без облачных
-ключей вообще:
+Прогоны на локальной модели (llm-platform, qwen3.8-27b) — без облачных
+ключей вообще. Архитекторский пакет (2026-09-17, второй заход):
+`significance_score` → Fast (score 1, триггер new_component),
+`model_query` → 6 сущностей (AD-1/AD-2 ADOPTED, CMP-001, NFR-001, REQ-001,
+SYS-001), `trace_check` → PASS (4 правила, покрытие 100%):
+
+![GigaCode/Qwen: архитектор через MCP](screenshots/harnesses/qwen-architect.png)
 
 ![Qwen: MCP](screenshots/harnesses/qwen-mcp.png)
 
@@ -80,7 +89,9 @@ Stop-хук (fail-soft на инфраструктуру, fail-hard на вер�
 Нюансы: модель для openai-совместимого endpoint задаётся через
 `OPENAI_MODEL` (флаг `-m` при этом игнорируется); нативного загрузчика
 скиллов нет — скиллы доступны через MCP (`skill_search`/`skill_load`);
-lifecycle-хуков в этой версии нет.
+lifecycle-хуков в этой версии нет; на медленной локальной модели длинные
+сессии (split-judge с двумя ответами судьи) могут превышать 10 минут —
+в GigaCode с быстрым бэкендом это не проблема.
 
 ## omp (oh-my-pi)
 
@@ -115,6 +126,19 @@ openclaw agent --local -m "Проверь проект через spine fitness_
 
 Хук-гейт — нативным плагином на событии `before_agent_finalize`
 (`{action:"revise", reason}` → повторный проход при FAIL гейта).
+
+## Сценарий: архитектор внутри кодового харнесса
+
+Spine Core — это не только гейт для кодера. **Сам архитектор может работать
+изнутри своего CLI-агента**, пользуясь Spine как инструментарием: маршрут
+изменения, модель системы, оценка ADR рубрикой, диаграммы — всё через MCP,
+без единой LLM у Spine (думает харнесс, вердикты даёт механика). Реальный
+прогон (Claude Code, 9 ходов):
+
+![Архитектурная сессия через MCP](screenshots/harnesses/architect-session.png)
+
+Тот же контур работает в Kimi/Qwen/omp/OpenClaw — разница только в способе
+регистрации сервера (см. секции выше).
 
 ## А рубрики? — Да, в любом харнессе
 
