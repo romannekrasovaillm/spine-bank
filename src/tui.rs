@@ -65,8 +65,9 @@ pub async fn run(cfg: Arc<Config>) -> Result<()> {
         .map_err(|e| HarnessError::Tui(format!("очистка экрана: {e}")))?;
 
     let mut app = App::build(cfg).await;
-    // Стартовая заставка-интро: «живая сессия» поверх экрана Splash.
-    app.start_intro();
+    // Стартовая заставка-интро: «живая сессия» поверх экрана Splash
+    // (полная — на первом запуске, далее — компакт-сплэш).
+    app.maybe_start_intro();
     let (msg_tx, mut msg_rx) = mpsc::channel::<AppMessage>(APP_CHANNEL_CAP);
     app.attach(msg_tx);
 

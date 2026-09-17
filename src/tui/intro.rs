@@ -1,10 +1,14 @@
 //! Стартовая заставка-интро: «живая сессия» ≈10 с — сплэш-логотип каскадом,
 //! печатающийся запрос, тики вызовов инструментов, ответ архитектора и
 //! mermaid-схема, собирающаяся по узлам (как на демо-кадрах README).
-//! Пропуск — любая клавиша; реиграция из чата — `/intro`.
+//! Дизайн по скиллам tui-design: полный показ только на первом запуске
+//! (принцип сдержанности), далее — компакт-сплэш ~2 с; ASCII-фолбэк рамок
+//! и глифов при локали без UTF-8; пропуск — любая клавиша (в чат);
+//! реиграция из чата — `/intro`.
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
+use ratatui::symbols::border;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
@@ -136,37 +140,120 @@ const MERMAID_NOTE: &str = "6 узлов · mermaid_render";
 
 /// Строки блока очереди (второй акт сценария — как в живом TUI).
 const QUEUE_LINES: [&str; 2] = [
-    "▶ 1. а теперь NFR: p95 шлюза и деградация НСПК",
-    "• 2. потом /handoff claude-code ./sbp-gateway ↵",
+    "1. а теперь NFR: p95 шлюза и деградация НСПК",
+    "2. потом /handoff claude-code ./sbp-gateway ↵",
 ];
 /// Модель и индикатор контекста в демо-статусе.
 const STATUS_MODEL: &str = "deepseek:v4-flash";
 const STATUS_GAUGE: &str = "◆ 61.4k/1.0M ▰▰▱▱▱ 6%";
-/// Галка вызова инструмента.
+const STATUS_GAUGE_ASCII: &str = "◆ 61.4k/1.0M ##--- 6%";
+/// Галка вызова инструмента (Unicode-режим; в ASCII — `v`).
 const OK_MARK: &str = "✓";
 
-/// Состояние заставки: число тиков с момента старта.
-#[derive(Default)]
+/// Режим показа заставки: полная демо-сессия или короткий сплэш.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum IntroMode {
+    /// Полный сценарий ≈10 с: первый запуск или явная реиграция `/intro`.
+    Full,
+    /// Только сплэш-каскад ≈2 с: повторные запуски (вау не должно стоить
+    /// пользователю десять секунд каждый старт — принцип сдержанности).
+    Compact,
+}
+
+/// Состояние заставки: тики с момента старта, режим, алфавит рамок.
 pub(crate) struct Intro {
     ticks: u32,
+    mode: IntroMode,
+    /// ASCII-рамки и глифы (локаль без UTF-8): `+-|` вместо `╭─╮│`.
+    ascii: bool,
 }
 
 impl Intro {
-    /// Новая заставка с первого тика.
-    pub(crate) fn new() -> Self {
-        Self::default()
+    /// Полный сценарий (первый запуск, `/intro`).
+    pub(crate) fn full(ascii: bool) -> Self {
+        Self {
+            ticks: 0,
+            mode: IntroMode::Full,
+            ascii,
+        }
+    }
+
+    /// Компакт-сплэш (повторные запуски).
+    pub(crate) fn compact(ascii: bool) -> Self {
+        Self {
+            ticks: 0,
+            mode: IntroMode::Compact,
+            ascii,
+        }
     }
 
     /// Продвигает сценарий на тик. `false` — сценарий доигран, App снимает интро.
     pub(crate) fn advance(&mut self) -> bool {
         self.ticks += 1;
-        self.ticks < END_TICKS
+        self.ticks < self.end_ticks()
+    }
+
+    /// Длительность сценария в тиках по режиму.
+    fn end_ticks(&self) -> u32 {
+        match self.mode {
+            IntroMode::Full => END_TICKS,
+            IntroMode::Compact => SPLASH_TICKS + 2,
+        }
     }
 
     /// Текущий тик (для рендера и тестов).
     pub(crate) fn ticks(&self) -> u32 {
         self.ticks
     }
+
+    /// ASCII-режим рамок и глифов (для тестов).
+    #[cfg(test)]
+    pub(crate) fn is_ascii(&self) -> bool {
+        self.ascii
+    }
+}
+
+/// Рамки блоков: Unicode box-drawing либо ASCII-фолбэк `+-|`.
+fn border_set(ascii: bool) -> border::Set {
+    if ascii {
+        border::Set {
+            top_left: "+",
+            top_right: "+",
+            bottom_left: "+",
+            bottom_right: "+",
+            vertical_left: "|",
+            vertical_right: "|",
+            horizontal_top: "-",
+            horizontal_bottom: "-",
+        }
+    } else {
+        border::PLAIN
+    }
+}
+
+/// Глиф стрелки/маркера по алфавиту.
+fn glyph_arrow(ascii: bool) -> &'static str {
+    if ascii { "v" } else { "▼" }
+}
+
+/// Глиф начала активной строки очереди.
+fn glyph_queue_head(ascii: bool) -> &'static str {
+    if ascii { ">" } else { "▶" }
+}
+
+/// Глиф курсора печати.
+fn glyph_cursor(ascii: bool) -> &'static str {
+    if ascii { "|" } else { "▌" }
+}
+
+/// Глиф буллета второй строки очереди.
+fn glyph_bullet(ascii: bool) -> &'static str {
+    if ascii { "*" } else { "•" }
+}
+
+/// Глиф точки роли «вы».
+fn glyph_user_dot(ascii: bool) -> &'static str {
+    if ascii { "*" } else { "●" }
 }
 
 /// Длина напечатанной части запроса на тике `ticks` (0 до старта печати).
@@ -179,10 +266,10 @@ fn typed_len(ticks: u32) -> usize {
 }
 
 /// Строки диалога, видимые на тике `ticks` (метка «вы», запрос, шаги сценария).
-fn dialog_lines(ticks: u32, theme: &Theme) -> Vec<Line<'static>> {
+fn dialog_lines(ticks: u32, theme: &Theme, ascii: bool) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     lines.push(Line::from(vec![
-        Span::styled("● ", theme.heading()),
+        Span::styled(format!("{} ", glyph_user_dot(ascii)), theme.heading()),
         Span::styled("вы", theme.heading()),
     ]));
     let typed: String = USER_LINE.chars().take(typed_len(ticks)).collect();
@@ -190,7 +277,7 @@ fn dialog_lines(ticks: u32, theme: &Theme) -> Vec<Line<'static>> {
     if typed_len(ticks) < full {
         lines.push(Line::from(vec![
             Span::styled(typed, theme.base()),
-            Span::styled("▌", theme.heading()),
+            Span::styled(glyph_cursor(ascii), theme.heading()),
         ]));
     } else {
         lines.push(Line::from(Span::styled(typed, theme.base())));
@@ -214,7 +301,10 @@ fn dialog_lines(ticks: u32, theme: &Theme) -> Vec<Line<'static>> {
 pub(super) fn draw(f: &mut Frame, app: &App) {
     let theme = &app.theme;
     let area = f.area();
-    let ticks = app.intro.as_ref().map_or(0, Intro::ticks);
+    let (ticks, ascii) = app
+        .intro
+        .as_ref()
+        .map_or((0, false), |i| (i.ticks(), i.ascii));
     // Подсказка о пропуске — всегда в правом верхнем углу.
     let hint = Paragraph::new("любая клавиша — пропустить · skip: any key")
         .style(theme.muted())
@@ -223,7 +313,7 @@ pub(super) fn draw(f: &mut Frame, app: &App) {
     if ticks < TYPE_START {
         draw_splash(f, area, theme, ticks);
     } else {
-        draw_session(f, area, theme, ticks);
+        draw_session(f, area, theme, ticks, ascii);
     }
 }
 
@@ -263,7 +353,7 @@ fn draw_splash(f: &mut Frame, area: Rect, theme: &Theme, ticks: u32) {
 }
 
 /// Фаза демо-сессии: диалог слева, собирающаяся mermaid-схема справа.
-fn draw_session(f: &mut Frame, area: Rect, theme: &Theme, ticks: u32) {
+fn draw_session(f: &mut Frame, area: Rect, theme: &Theme, ticks: u32, ascii: bool) {
     let (dialog, panel) = if area.width >= 100 {
         let chunks =
             Layout::horizontal([Constraint::Ratio(2, 3), Constraint::Ratio(1, 3)]).split(area);
@@ -271,7 +361,7 @@ fn draw_session(f: &mut Frame, area: Rect, theme: &Theme, ticks: u32) {
     } else {
         (area, None)
     };
-    let lines = dialog_lines(ticks, theme);
+    let lines = dialog_lines(ticks, theme, ascii);
 
     let mut constraints = vec![Constraint::Min(3)];
     if ticks >= QUEUE_AT {
@@ -286,39 +376,56 @@ fn draw_session(f: &mut Frame, area: Rect, theme: &Theme, ticks: u32) {
     let mut idx = 1;
     if ticks >= QUEUE_AT {
         let queue = Paragraph::new(vec![
-            Line::from(Span::styled("▼ очередь · 2", theme.muted())),
-            Line::from(Span::styled(QUEUE_LINES[0], theme.art())),
-            Line::from(Span::styled(QUEUE_LINES[1], theme.muted())),
+            Line::from(Span::styled(
+                format!("{} очередь · 2", glyph_arrow(ascii)),
+                theme.muted(),
+            )),
+            Line::from(Span::styled(
+                format!("{} {}", glyph_queue_head(ascii), QUEUE_LINES[0]),
+                theme.art(),
+            )),
+            Line::from(Span::styled(
+                format!("{} {}", glyph_bullet(ascii), QUEUE_LINES[1]),
+                theme.muted(),
+            )),
         ])
         .block(
             Block::default()
                 .borders(Borders::ALL)
+                .border_set(border_set(ascii))
                 .border_style(theme.purple()),
         );
         f.render_widget(queue, chunks[idx]);
         idx += 1;
     }
     if ticks >= STATUS_AT {
+        let gauge = if ascii {
+            STATUS_GAUGE_ASCII
+        } else {
+            STATUS_GAUGE
+        };
         let status = Paragraph::new(Line::from(vec![
             Span::styled(format!(" {STATUS_MODEL} "), theme.badge()),
-            Span::styled(format!("  {STATUS_GAUGE}"), theme.muted()),
+            Span::styled(format!("  {gauge}"), theme.muted()),
         ]))
         .block(
             Block::default()
                 .borders(Borders::ALL)
+                .border_set(border_set(ascii))
                 .border_style(theme.border()),
         );
         f.render_widget(status, chunks[idx]);
     }
     if let Some(panel) = panel.filter(|_| ticks >= PANEL_AT) {
-        draw_mermaid(f, panel, theme, ticks);
+        draw_mermaid(f, panel, theme, ticks, ascii);
     }
 }
 
 /// Правая панель: схема mermaid, собирающаяся по узлам со стрелками.
-fn draw_mermaid(f: &mut Frame, area: Rect, theme: &Theme, ticks: u32) {
+fn draw_mermaid(f: &mut Frame, area: Rect, theme: &Theme, ticks: u32, ascii: bool) {
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_set(border_set(ascii))
         .border_style(theme.border())
         .title(Span::styled(" ◇ Mermaid · живой рендер ", theme.accent()));
     let inner = block.inner(area);
@@ -345,7 +452,7 @@ fn draw_mermaid(f: &mut Frame, area: Rect, theme: &Theme, ticks: u32) {
         let chunk = chunks[i * 2];
         match node {
             Node::One(_, text) => {
-                let w = node_box((*text).to_string(), theme);
+                let w = node_box((*text).to_string(), theme, ascii);
                 f.render_widget(w, chunk);
             }
             Node::Row(_, cells) => {
@@ -355,12 +462,12 @@ fn draw_mermaid(f: &mut Frame, area: Rect, theme: &Theme, ticks: u32) {
                     .collect();
                 let cols = Layout::horizontal(widths).split(chunk);
                 for (j, cell) in cells.iter().enumerate() {
-                    f.render_widget(node_box((*cell).to_string(), theme), cols[j]);
+                    f.render_widget(node_box((*cell).to_string(), theme, ascii), cols[j]);
                 }
             }
         }
         if i + 1 < visible.len() {
-            let arrow = Paragraph::new("▼")
+            let arrow = Paragraph::new(glyph_arrow(ascii))
                 .style(theme.art())
                 .alignment(Alignment::Center);
             f.render_widget(arrow, chunks[i * 2 + 1]);
@@ -382,13 +489,14 @@ fn draw_mermaid(f: &mut Frame, area: Rect, theme: &Theme, ticks: u32) {
 }
 
 /// Рамка узла схемы (стиль зелёного арта, как у настоящих mermaid-рендеров).
-fn node_box(text: String, theme: &Theme) -> Paragraph<'static> {
+fn node_box(text: String, theme: &Theme, ascii: bool) -> Paragraph<'static> {
     Paragraph::new(text)
         .style(theme.art())
         .alignment(Alignment::Center)
         .block(
             Block::default()
                 .borders(Borders::ALL)
+                .border_set(border_set(ascii))
                 .border_style(theme.art()),
         )
 }
@@ -413,14 +521,14 @@ mod tests {
     #[test]
     fn steps_appear_in_scenario_order() {
         let theme = Theme::default();
-        let early = dialog_lines(31, &theme);
+        let early = dialog_lines(31, &theme, false);
         let text31 = format!("{early:?}");
         assert!(
             text31.contains("skill_load"),
             "на 31 тике ждём skill_load: {text31}"
         );
         assert!(!text31.contains("web_search"), "на 31 тике web_search рано");
-        let later = dialog_lines(50, &theme);
+        let later = dialog_lines(50, &theme, false);
         let text50 = format!("{later:?}");
         assert!(text50.contains("web_search"));
         assert!(
@@ -430,12 +538,24 @@ mod tests {
     }
 
     #[test]
-    fn advance_finishes_at_end_ticks() {
-        let mut intro = Intro::new();
+    fn full_mode_finishes_at_end_ticks() {
+        let mut intro = Intro::full(false);
         for _ in 0..END_TICKS - 1 {
             assert!(intro.advance());
         }
         assert!(!intro.advance(), "на END_TICKS сценарий обязан завершиться");
+    }
+
+    #[test]
+    fn compact_mode_finishes_right_after_splash() {
+        let mut intro = Intro::compact(false);
+        for _ in 0..=SPLASH_TICKS {
+            assert!(intro.advance());
+        }
+        assert!(
+            !intro.advance(),
+            "компакт-режим завершается сразу после сплэша"
+        );
     }
 
     #[test]
@@ -490,6 +610,36 @@ mod tests {
         }
         assert!(app.intro.is_none(), "после сценария интро снято");
         assert!(matches!(app.screen, super::super::app::Screen::Chat));
+    }
+
+    #[test]
+    fn ascii_mode_uses_ascii_borders_and_glyphs() {
+        let mut app = test_app();
+        app.intro = Some(Intro::full(true));
+        assert!(app.intro.as_ref().is_some_and(Intro::is_ascii));
+        for _ in 0..60 {
+            app.tick();
+        }
+        let mut terminal = Terminal::new(TestBackend::new(140, 44)).expect("terminal");
+        terminal.draw(|f| app.render(f)).expect("draw ascii");
+        let text = buffer_text(&terminal);
+        assert!(
+            !text.contains('╭') && !text.contains('│'),
+            "ascii-режим без box-drawing:\n{text}"
+        );
+        assert!(
+            text.contains("v очередь"),
+            "ascii-стрелка в очереди:\n{text}"
+        );
+    }
+
+    #[test]
+    fn first_run_full_then_compact_by_seen_marker() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = dir.path().join("state");
+        assert!(!super::super::app::intro_was_seen(&state));
+        super::super::app::mark_intro_seen(&state);
+        assert!(super::super::app::intro_was_seen(&state));
     }
 
     /// Текст буфера `TestBackend` одной строкой (как в `render.rs::tests`).
