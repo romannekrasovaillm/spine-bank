@@ -65,6 +65,10 @@ arch-be connect qwen        # пишет .qwen/settings.json (мердж, чуж
 {"mcpServers": {"spine": {"command": "arch-be", "args": ["mcp", "serve"]}}}
 ```
 
+> Пути `.qwen/settings.json` и `.qwen/skills/` — от Qwen Code; в GigaCode CLI
+> адаптируйте их под фактический каталог вашей сборки (например
+> `.gigacode/…`). Форматы ключей те же.
+
 Перезапустите GigaCode в каталоге проекта. Если сервер в статусе
 «Pending approval» (обязательно в qwen-code 0.24+): `qwen mcp approve spine`.
 Проверка: `qwen mcp list` → `spine … ✓ Connected`.
