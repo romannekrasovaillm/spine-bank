@@ -1,0 +1,10 @@
+GigaCode/Qwen: агент читает скилл и работает ПО НЕМУ (spine-architect-review)
+$ qwen --yolo "У тебя есть project-скилл spine-architect-review.
+$            Прочитай его и действуй по нему: разбери проект"
+# агент выполнил шаги скилла (дословный отчёт):
++ 1. Маршрут: significance_score → Fast
++ 2. Модель: model_query — 6 карточек; сироты SYS-001/REQ-001 отмечены
++ 3. Трассировка: trace_check {case:"."} — разобраны пустые звенья
++ 4. Спайн: spine_lint → 6 error (формат инвариантов)
++ 5. AGENTS.md: ручная сверка (agentsmd_lint не нашёл в tools)
+! read-only: «правок не вносил» — границы скилла соблюдены

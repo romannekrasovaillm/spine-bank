@@ -467,6 +467,33 @@ pub const PLUGIN_ARCH_GOVERNANCE_SKILLS_FITNESS_FUNCTION_CATALOG_SKILL_MD: &str 
 pub const PLUGIN_ARCH_GOVERNANCE_SKILLS_RULE_LIBRARY_ANTIPATTERNS_SKILL_MD: &str =
     include_str!("../assets/plugins/arch-governance/skills/rule-library-antipatterns/SKILL.md");
 
+// ── Плагин spine-workflows: плейбуки работы со Spine из чужого харнесса ──
+
+/// Встроенный файл плагина `assets/plugins/spine-workflows/plugin.json`.
+pub const PLUGIN_SPINE_WORKFLOWS_PLUGIN_JSON: &str =
+    include_str!("../assets/plugins/spine-workflows/plugin.json");
+/// Встроенный файл `skills/spine-quickstart/SKILL.md`.
+pub const PLUGIN_SPINE_WORKFLOWS_SKILLS_SPINE_QUICKSTART_SKILL_MD: &str =
+    include_str!("../assets/plugins/spine-workflows/skills/spine-quickstart/SKILL.md");
+/// Встроенный файл `skills/spine-fitness-gate/SKILL.md`.
+pub const PLUGIN_SPINE_WORKFLOWS_SKILLS_SPINE_FITNESS_GATE_SKILL_MD: &str =
+    include_str!("../assets/plugins/spine-workflows/skills/spine-fitness-gate/SKILL.md");
+/// Встроенный файл `skills/spine-architect-review/SKILL.md`.
+pub const PLUGIN_SPINE_WORKFLOWS_SKILLS_SPINE_ARCHITECT_REVIEW_SKILL_MD: &str =
+    include_str!("../assets/plugins/spine-workflows/skills/spine-architect-review/SKILL.md");
+/// Встроенный файл `skills/spine-adr-judge/SKILL.md`.
+pub const PLUGIN_SPINE_WORKFLOWS_SKILLS_SPINE_ADR_JUDGE_SKILL_MD: &str =
+    include_str!("../assets/plugins/spine-workflows/skills/spine-adr-judge/SKILL.md");
+/// Встроенный файл `skills/spine-contracts-gate/SKILL.md`.
+pub const PLUGIN_SPINE_WORKFLOWS_SKILLS_SPINE_CONTRACTS_GATE_SKILL_MD: &str =
+    include_str!("../assets/plugins/spine-workflows/skills/spine-contracts-gate/SKILL.md");
+/// Встроенный файл `skills/spine-content-bootstrap/SKILL.md`.
+pub const PLUGIN_SPINE_WORKFLOWS_SKILLS_SPINE_CONTENT_BOOTSTRAP_SKILL_MD: &str =
+    include_str!("../assets/plugins/spine-workflows/skills/spine-content-bootstrap/SKILL.md");
+/// Встроенный файл `skills/spine-archify-viz/SKILL.md`.
+pub const PLUGIN_SPINE_WORKFLOWS_SKILLS_SPINE_ARCHIFY_VIZ_SKILL_MD: &str =
+    include_str!("../assets/plugins/spine-workflows/skills/spine-archify-viz/SKILL.md");
+
 /// Файлы плагинов: «относительный путь в домашнем каталоге → содержимое».
 const PLUGIN_FILES: &[(&str, &str)] = &[
     ("plugins/arch-core/plugin.json", PLUGIN_ARCH_CORE_PLUGIN_JSON),
@@ -567,6 +594,14 @@ const PLUGIN_FILES: &[(&str, &str)] = &[
     ("plugins/arch-governance/skills/architecture-sources-map/SKILL.md", PLUGIN_ARCH_GOVERNANCE_SKILLS_ARCHITECTURE_SOURCES_MAP_SKILL_MD),
     ("plugins/arch-governance/skills/fitness-function-catalog/SKILL.md", PLUGIN_ARCH_GOVERNANCE_SKILLS_FITNESS_FUNCTION_CATALOG_SKILL_MD),
     ("plugins/arch-governance/skills/rule-library-antipatterns/SKILL.md", PLUGIN_ARCH_GOVERNANCE_SKILLS_RULE_LIBRARY_ANTIPATTERNS_SKILL_MD),
+    ("plugins/spine-workflows/plugin.json", PLUGIN_SPINE_WORKFLOWS_PLUGIN_JSON),
+    ("plugins/spine-workflows/skills/spine-quickstart/SKILL.md", PLUGIN_SPINE_WORKFLOWS_SKILLS_SPINE_QUICKSTART_SKILL_MD),
+    ("plugins/spine-workflows/skills/spine-fitness-gate/SKILL.md", PLUGIN_SPINE_WORKFLOWS_SKILLS_SPINE_FITNESS_GATE_SKILL_MD),
+    ("plugins/spine-workflows/skills/spine-architect-review/SKILL.md", PLUGIN_SPINE_WORKFLOWS_SKILLS_SPINE_ARCHITECT_REVIEW_SKILL_MD),
+    ("plugins/spine-workflows/skills/spine-adr-judge/SKILL.md", PLUGIN_SPINE_WORKFLOWS_SKILLS_SPINE_ADR_JUDGE_SKILL_MD),
+    ("plugins/spine-workflows/skills/spine-contracts-gate/SKILL.md", PLUGIN_SPINE_WORKFLOWS_SKILLS_SPINE_CONTRACTS_GATE_SKILL_MD),
+    ("plugins/spine-workflows/skills/spine-content-bootstrap/SKILL.md", PLUGIN_SPINE_WORKFLOWS_SKILLS_SPINE_CONTENT_BOOTSTRAP_SKILL_MD),
+    ("plugins/spine-workflows/skills/spine-archify-viz/SKILL.md", PLUGIN_SPINE_WORKFLOWS_SKILLS_SPINE_ARCHIFY_VIZ_SKILL_MD),
 ];
 
 /// Карта «относительный путь в домашнем каталоге → содержимое».

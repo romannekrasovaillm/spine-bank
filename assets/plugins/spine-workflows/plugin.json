@@ -1,0 +1,16 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "spine-workflows",
+  "version": "1.0.0",
+  "description": "Плейбуки работы со Spine из чужого кодового харнесса (GigaCode/Claude Code/Kimi/Qwen/omp): подключение MCP, fitness-гейт, архитектурный разбор, split-judge рубрик, контрактный гейт, наполнение пустого проекта, визуализация Archify.",
+  "keywords": [
+    "spine",
+    "mcp",
+    "architecture",
+    "fitness",
+    "rubric",
+    "contracts",
+    "archify",
+    "gigacode"
+  ]
+}

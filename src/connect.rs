@@ -1583,10 +1583,7 @@ mod tests {
         assert_eq!(settings["mcpServers"]["spine"]["command"], "arch-be");
         assert!(!dir.join(".claude").exists(), "каталога .claude нет");
         assert!(
-            report
-                .notes
-                .iter()
-                .any(|n| n.contains(".qwen/skills")),
+            report.notes.iter().any(|n| n.contains(".qwen/skills")),
             "заметка про скиллы .qwen/skills: {:?}",
             report.notes
         );

@@ -4,7 +4,7 @@
 
 <p align="center">
   <b>Spine: архитектурный контур — внутри вашего CLI-агента или как отдельный харнесс с TUI</b><br>
-  <sub>GigaCode CLI · Claude Code · Kimi Code · Qwen Code · omp · OpenClaw — MCP, 55 скиллов, хуки-гейты, судья без API-ключей<br>
+  <sub>GigaCode CLI · Claude Code · Kimi Code · Qwen Code · omp · OpenClaw — MCP, 62 скилла, хуки-гейты, судья без API-ключей<br>
   Spine as an organ of your coding agent — or a standalone architect harness (TUI + own LLM).</sub>
 </p>
 
@@ -26,7 +26,7 @@
 | | **Spine Core** | **Spine Harness (TUI)** |
 |---|---|---|
 | Для кого | У вас уже есть кодовый агент — **кодер или архитектор** работает внутри него | Вы — архитектор и работаете сами, без внешнего агента |
-| Что это | «Орган» чужого харнесса: MCP-сервер + 55 скиллов + хуки-гейты | Полный харнесс архитектора: TUI + агентный цикл + то же ядро |
+| Что это | «Орган» чужого харнесса: MCP-сервер + 62 скилла + хуки-гейты | Полный харнесс архитектора: TUI + агентный цикл + то же ядро |
 | LLM | **Не нужна**: думает ваш агент; судья — `kind="cli"` или split-judge | Своя: DeepSeek / GLM / Kimi / GigaChat / локальная платформа |
 | Бинарь (релиз) | `arch-be-core-linux-x86_64` (~10 МБ) | `arch-be-linux-x86_64` (~19 МБ) |
 | Сборка | `cargo build --release --no-default-features --features core` | `cargo build --release` |
@@ -99,7 +99,7 @@ arch-be connect qwen        # пишет .qwen/settings.json (мердж, чуж
 
 ![GigaCode: split-judge](docs/screenshots/harnesses/qwen-splitjudge.png)
 
-**5. Скиллы.** 55 архитектурных скиллов через `skill_search`/`skill_load` —
+**5. Скиллы.** 62 архитектурных скилла через `skill_search`/`skill_load` —
 агент применяет их к контексту вашего проекта:
 
 ![GigaCode: скиллы](docs/screenshots/harnesses/qwen-skills.png)
@@ -144,7 +144,7 @@ arch-be connect claude
 ```
 
 Пишет `.mcp.json` + `.claude/settings.json` (Stop-хук-гейт) +
-`.claude/skills/` (55 скиллов) + `CLAUDE.md`. Проверка: `claude mcp list` →
+`.claude/skills/` (62 скилла) + `CLAUDE.md`. Проверка: `claude mcp list` →
 `spine … ✔ Connected`. При первом запуске — разрешите project-сервер («Yes»).
 
 ![Подключение Claude Code](docs/screenshots/connect/01-connect.png)
@@ -225,12 +225,13 @@ LLM у Spine нет: думает ваш агент, вердикты даёт �
 
 ### Скиллы видны агенту нативно
 
-55 архитектурных скиллов (ADR, fitness-функции, saga/outbox/circuit-breaker,
-docx/pptx/xlsx-отчёты) раскладываются в проект и видны агенту:
+62 архитектурных скилла (ADR, fitness-функции, saga/outbox/circuit-breaker,
+pptx/docx/xlsx-отчёты + плейбуки spine-*) раскладываются в проект и видны
+агенту (на кадрах с прогонов — 55, плейбуки добавлены позже):
 
 <p align="center">
-  <img src="docs/screenshots/harnesses/claude-skills.png" alt="Claude Code видит 55 скиллов Spine" width="47%">
-  <img src="docs/screenshots/harnesses/omp-skills.png" alt="omp видит 55 скиллов Spine" width="47%">
+  <img src="docs/screenshots/harnesses/claude-skills.png" alt="Claude Code видит 62 скилла Spine" width="47%">
+  <img src="docs/screenshots/harnesses/omp-skills.png" alt="omp видит 62 скилла Spine" width="47%">
 </p>
 
 ---
@@ -317,9 +318,12 @@ arch-be mcp serve --rw    # + handoff_create, adr_new, agentsmd_generate, …
   скриншотами, хуки, `--rw`, устранение неполадок.
 - **[docs/GIGACODE.md](docs/GIGACODE.md)** — развёртывание MCP+скиллов+хуков
   силами самого агента GigaCode (готовый промпт).
+- **[docs/ARCHITECT-IN-HARNESS.md](docs/ARCHITECT-IN-HARNESS.md)** — детальный
+  сценарий «архитектор внутри харнесса»: каналы, рабочий день, безопасность.
 - **[docs/HARNESSES.md](docs/HARNESSES.md)** — матрица прогонов пяти
   харнессов + прокси-прогон GigaCode: MCP, скиллы, хуки, ограничения.
 - [docs/mcp.md](docs/mcp.md) — контракт MCP-сервера и split-judge.
+- [docs/INVERSION.md](docs/INVERSION.md) — отчёт по плану инверсии: что сделано, отступления.
 - [README-full.md](README-full.md) — полный тур харнесса (RU/EN).
 
 ## Для разработчиков форка

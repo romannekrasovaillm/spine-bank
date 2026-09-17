@@ -36,7 +36,7 @@ arch-be connect claude     # .mcp.json + .claude/settings.json + .claude/skills/
 
 ![Claude: fitness FAIL→PASS](screenshots/harnesses/claude-fitness.png)
 
-Скиллы видны нативно (55 штук в `.claude/skills`):
+Скиллы видны нативно (на момент прогона 55; сейчас 62 — добавлен плагин плейбуков spine-workflows):
 
 ![Claude: скиллы](screenshots/harnesses/claude-skills.png)
 
@@ -135,6 +135,13 @@ openclaw agent --local -m "Проверь проект через spine fitness_
 
 Хук-гейт — нативным плагином на событии `before_agent_finalize`
 (`{action:"revise", reason}` → повторный проход при FAIL гейта).
+
+## Скилл как плейбук: агент работает ПО инструкции
+
+Доказано на qwen 0.24.0: агенту сказали «действуй по скиллу
+spine-architect-review» — он пошагово выполнил разбор и отчитался по шагам:
+
+![Агент работает по скиллу](screenshots/harnesses/qwen-skill-use.png)
 
 ## Сценарий: архитектор внутри кодового харнесса
 
