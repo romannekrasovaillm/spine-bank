@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="642" height="255" viewBox="0 0 642 255">
+<rect x="0.5" y="0.5" width="641" height="254" rx="10" fill="#1a1b26" stroke="#3b4261"/>
+<circle cx="20" cy="14" r="5" fill="#f7768e"/>
+<circle cx="38" cy="14" r="5" fill="#e0af68"/>
+<circle cx="56" cy="14" r="5" fill="#9ece6a"/>
+<text x="321.0" y="18" text-anchor="middle" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="12" fill="#565f89">TUI Qwen Code × spine: вердикт архитектурного ревью (дословно)</text>
+<text x="14.0" y="49.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#c0caf5">  Формально — отказать в коммите: spine_lint passed=false (6 error),</text>
+<text x="14.0" y="68.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#c0caf5">  гейт красный. По существу — отказ адресован не коду: src/main.rs</text>
+<text x="14.0" y="87.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#c0caf5">  соответствует AD-1/AD-2 и проходит fitness; красный гейт —</text>
+<text x="14.0" y="106.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#c0caf5">  унаследованный дефект спайна, а ADR-002 вне контура модели.</text>
+<text x="14.0" y="125.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#c0caf5">  Минимальный путь к зелёному:</text>
+<text x="14.0" y="144.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#9ece6a"> 1. Заполнить Binds/Prevents/Rule у AD-1/AD-2 → spine_lint</text>
+<text x="14.0" y="163.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#9ece6a"> 2. Внести ADR-002 в модель как adr, связать с CMP и правилом</text>
+<text x="14.0" y="182.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#9ece6a"> 3. Переоценить маршрут ADR-002 (cross_domain_integration…)</text>
+<text x="14.0" y="201.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#9ece6a"> 4. Починить AGENTS.md (ADR 2 шт.), добавить ADR в источники дрейфа</text>
+<text x="14.0" y="220.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#e0af68">Попутно найден долг: дубль CONSTRAINTS.yaml (root + .arch-handoff),</text>
+<text x="14.0" y="239.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#e0af68">непереносимый абсолютный cli_path, несвежий AGENTS.md</text>
+</svg>

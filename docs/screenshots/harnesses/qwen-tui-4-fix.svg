@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="669" height="179" viewBox="0 0 669 179">
+<rect x="0.5" y="0.5" width="668" height="178" rx="10" fill="#1a1b26" stroke="#3b4261"/>
+<circle cx="20" cy="14" r="5" fill="#f7768e"/>
+<circle cx="38" cy="14" r="5" fill="#e0af68"/>
+<circle cx="56" cy="14" r="5" fill="#9ece6a"/>
+<text x="334.5" y="18" text-anchor="middle" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="12" fill="#565f89">TUI Qwen Code × spine: агент чинит спайн и объясняет компромиссы</text>
+<text x="14.0" y="49.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#565f89">"заполни спайн-поля, заведи ADR-002 в модель, перепроверь"</text>
+<text x="14.0" y="68.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#9ece6a">Binds/Prevents/Rule у AD-1/AD-2 заполнены (по fitness-function-catalog)</text>
+<text x="14.0" y="87.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#9ece6a">model/ADR-002-….md создан (type: adr), связан с CMP-001 и C-05</text>
+<text x="14.0" y="106.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#565f89">C-05 сделан ДОКУМЕНТНЫМ, а не кодовым (честная оговорка):</text>
+<text x="14.0" y="125.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#c0caf5">  «rail-коннектора в репозитории нет — каноничная функция из каталога</text>
+<text x="14.0" y="144.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#c0caf5">   сейчас падала бы; C-05 держит параметры решения, пока нет кода»</text>
+<text x="14.0" y="163.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#e0af68">остаточные дефекты названы явно, файлы не закоммичены</text>
+</svg>

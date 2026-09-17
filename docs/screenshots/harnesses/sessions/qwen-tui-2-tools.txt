@@ -1,0 +1,9 @@
+TUI Qwen Code: вызовы spine MCP Server видны вживую (дословный захват)
+  ✓ openapi_lint (spine MCP Server) {"path":"contracts/openapi-v2.yaml"}
+    openapi: 7 находок (error: 0, warn: 7) … Итог: PASS
+  ✓ contract_diff (spine MCP Server) {"old":"v1.yaml","new":"v2.yaml"}
+-   contract_diff: 1 изменений (breaking: 1)
+-   [error] CD-001 — удалён путь «/notices» · Итог: FAIL
+  ✓ archify_validate (IR) — ok, checks 9/9, composition pass
+  ✓ agentsmd_lint — «свежий, нарушений нет»
+  ∵ Thinking… ↑ 2.5k tokens

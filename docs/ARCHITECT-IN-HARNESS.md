@@ -33,14 +33,33 @@ qwen mcp approve spine        # qwen-code ≥ 0.24: project-серверы тр�
 
 ## Рабочий день архитектора — по сценариям
 
-### 0. Пустой проект: наполнить контур
+### 0. Живая TUI-сессия (Qwen Code ⇐ путь GigaCode)
+
+Не headless, а обычный интерактивный запуск: архитектор открывает Qwen Code
+в проекте и просит разбор — агент идёт по плейбук-скиллу, вызовы
+`spine MCP Server` видны вживую, вердикт ревью — с конкретным путём к
+зелёному гейту (всё ниже — дословные захваты реальной TUI-сессии на
+qwen-code 0.24.0):
+
+![TUI: запуск и промпт](screenshots/harnesses/qwen-tui-1-launch.png)
+
+![TUI: вызовы spine вживую](screenshots/harnesses/qwen-tui-2-tools.png)
+
+![TUI: вердикт ревью](screenshots/harnesses/qwen-tui-3-verdict.png)
+
+Второй ход той же сессии — агент чинит спайн (и честно докладывает
+компромиссы: документное правило вместо кодового, остаточный долг):
+
+![TUI: чинка спайна](screenshots/harnesses/qwen-tui-4-fix.png)
+
+### 1. Пустой проект: наполнить контур
 
 Плейбук `spine-content-bootstrap`: агент сам создаёт спайн инвариантов,
 `CONSTRAINTS.yaml`, `model/`, `knowledge/` — и сразу проверяет:
 
 ![Наполнение с нуля](screenshots/harnesses/qwen-fill.png)
 
-### 1. Разбор проекта
+### 2. Разбор проекта
 
 Плейбук `spine-architect-review`: маршрут значимости (с оговоркой про
 триггеры), инвентаризация модели (сироты!), трассировка
@@ -48,7 +67,7 @@ REQ→NFR→AD→CMP→правила:
 
 ![Маршрут+модель+трасса](screenshots/harnesses/qwen-architect.png)
 
-### 2. Решение: ADR и его оценка
+### 3. Решение: ADR и его оценка
 
 Создать ADR — `adr_new` (сервер в `--rw`); оценить — split-judge
 (`rubric_prompt` → агент судит k раз → `rubric_verify`), без единого
@@ -58,14 +77,14 @@ API-ключа у Spine:
 
 ![Split-judge](screenshots/harnesses/qwen-splitjudge.png)
 
-### 3. Контракты до релиза
+### 4. Контракты до релиза
 
 Плейбук `spine-contracts-gate`: линт + diff версий, ломающие изменения
 называются ломающими:
 
 ![Контрактный контур](screenshots/harnesses/qwen-contracts.png)
 
-### 4. Визуализация
+### 5. Визуализация
 
 Плейбук `spine-archify-viz`: IR из модели → 9 проверок → интерактивный HTML:
 
@@ -73,7 +92,7 @@ API-ключа у Spine:
 
 ![HTML-рендер Archify](screenshots/harnesses/qwen-archify-html.png)
 
-### 5. Гейт для кодера
+### 6. Гейт для кодера
 
 Когда пишется код: `fitness_check` FAIL → агент чинит → PASS; Stop-хук не
 даёт завершить при красном гейте (плейбук `spine-fitness-gate`):
