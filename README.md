@@ -64,11 +64,14 @@ arch-be connect qwen        # пишет .qwen/settings.json (мердж, чуж
 {"mcpServers": {"spine": {"command": "arch-be", "args": ["mcp", "serve"]}}}
 ```
 
-Перезапустите GigaCode в каталоге проекта. Проверка: сервер `spine` в
-списке MCP (`mcp list`), инструменты видны как `fitness_check`,
-`trace_check`, `rubric_prompt`… Дальше — просто просите агента:
+Перезапустите GigaCode в каталоге проекта. Если сервер в статусе
+«Pending approval» (обязательно в qwen-code 0.24+): `qwen mcp approve spine`.
+Проверка: `qwen mcp list` → `spine … ✓ Connected`, дальше — просто просите
+агента:
 
 ![Архитектор в GigaCode/Qwen: модель, трасса, скоринг](docs/screenshots/harnesses/qwen-architect.png)
+
+**Быстрое развёртывание силами самого агента GigaCode** (после клона репо — промпт для агента): [docs/GIGACODE.md](docs/GIGACODE.md).
 
 ### Claude Code
 
@@ -97,8 +100,7 @@ trust-диалог (иначе project-сервер молча пропуска�
 ### Qwen Code
 
 Как у GigaCode CLI: `arch-be connect qwen`. Нюансы: модель для
-openai-совместимого endpoint задаётся через `OPENAI_MODEL`; lifecycle-хуков
-в версии 0.0.5 нет (гейт работает через вызовы инструментов).
+openai-совместимого endpoint задаётся через `OPENAI_MODEL`; в 0.24 появились хуки (`qwen hooks`, UI); headless-файринг не подтверждён.
 
 ![Qwen × Spine: контрактный контур](docs/screenshots/harnesses/qwen-contracts.png)
 
@@ -208,10 +210,10 @@ fitness-правил, **сам** чинил его и перепроверял. 
 
 | Харнесс | MCP | FAIL→PASS | Скиллы | Хуки |
 |---|---|---|---|---|
-| **GigaCode CLI** (форк Qwen Code) | ✅ через прокси qwen-code | ✅ | ⚠️ через MCP | ❌ нет событий |
+| **GigaCode CLI** (форк Qwen Code) | ✅ проверено на qwen-code 0.0.5/0.24.0 | ✅ | ✅ через MCP; в 0.24 и `.qwen/skills` | ⚠️ `qwen hooks` в 0.24 (UI) |
 | Claude Code 2.1.274 | ✅ | ✅ | ✅ 55 | ✅ Stop-гейт |
 | Kimi Code 0.42.0 | ✅ | ✅ | ✅ Project scope | ✅ Stop (user-level) |
-| Qwen Code 0.0.5 | ✅ | ✅ на локальной qwen3.8 | ⚠️ через MCP | ❌ нет событий |
+| Qwen Code 0.0.5 → 0.24.0 | ✅ (+ `mcp approve` в 0.24) | ✅ на локальной qwen3.8 | ✅ через MCP / `.qwen/skills` | ⚠️ UI в 0.24, headless н/п |
 | omp (oh-my-pi) 15.10.3 | ✅ | ✅ | ✅ нативно | ✅ TS-хук block |
 | OpenClaw 2026.7.1 | ✅ | ✅ | ✅ 55/55 | ✅ плагин `before_agent_finalize` |
 
@@ -249,6 +251,8 @@ arch-be mcp serve --rw    # + handoff_create, adr_new, agentsmd_generate, …
 
 - **[docs/CONNECT.md](docs/CONNECT.md)** — подробное подключение со
   скриншотами, хуки, `--rw`, устранение неполадок.
+- **[docs/GIGACODE.md](docs/GIGACODE.md)** — развёртывание MCP+скиллов+хуков
+  силами самого агента GigaCode (готовый промпт).
 - **[docs/HARNESSES.md](docs/HARNESSES.md)** — матрица прогонов пяти
   харнессов + прокси-прогон GigaCode: MCP, скиллы, хуки, ограничения.
 - [docs/mcp.md](docs/mcp.md) — контракт MCP-сервера и split-judge.

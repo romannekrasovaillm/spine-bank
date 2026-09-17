@@ -17,7 +17,7 @@
 |---|---|---|---|---|
 | **Claude Code** 2.1.274 | ✅ `.mcp.json` (connect) | ✅ агент сам починил и перепроверил | ✅ 55 из `.claude/skills` | ✅ Stop-хук блокирует завершение |
 | **Kimi Code** 0.42.0 | ✅ `.kimi-code/mcp.json` (project) | ✅ | ✅ Project scope `.kimi-code/skills` | ✅ Stop-хук (user-level `[[hooks]]`) |
-| **Qwen Code** 0.0.5 (= путь GigaCode CLI) | ✅ `.qwen/settings.json` | ✅ (на локальной qwen3.8-27b) | ⚠️ через MCP `skill_search`/`skill_load` (нативного загрузчика нет) | ❌ не поддерживаются (нет событий) |
+| **Qwen Code** 0.0.5 → **0.24.0** (= путь GigaCode CLI) | ✅ `.qwen/settings.json`; в 0.24 обязателен `qwen mcp approve` | ✅ (на локальной qwen3.8-27b) | ✅ через MCP; в 0.24 есть и `.qwen/skills` | ⚠️ в 0.24 есть `qwen hooks` (UI), headless-файринг не подтверждён |
 | **omp (oh-my-pi)** 15.10.3 | ✅ `.mcp.json` авто-дискавери | ✅ | ✅ нативный discovery `.claude/skills` (81 видимый, 55 spine) | ✅ TS-хук `--hook`: `{block:true}` на правку CONSTRAINTS.yaml |
 | **OpenClaw** 2026.7.1 | ✅ `openclaw mcp add` | ✅ | ✅ 55/55 ready (workspace `skills/`) | ✅ через плагин (`before_agent_finalize` → повторный проход при FAIL) |
 
@@ -65,7 +65,7 @@ Stop-хук (fail-soft на инфраструктуру, fail-hard на вер�
 
 ## Qwen Code и GigaCode CLI
 
-**GigaCode CLI — форк Qwen Code**, поэтому прогоны на qwen-code 0.0.5 —
+**GigaCode CLI — форк Qwen Code**, поэтому прогоны на qwen-code 0.0.5 и 0.24.0 —
 это проверка пути GigaCode: project-level `mcpServers` в
 `.qwen/settings.json`, folder trust, те же инструменты `spine`.
 
@@ -89,7 +89,7 @@ SYS-001), `trace_check` → PASS (4 правила, покрытие 100%):
 Нюансы: модель для openai-совместимого endpoint задаётся через
 `OPENAI_MODEL` (флаг `-m` при этом игнорируется); нативного загрузчика
 скиллов нет — скиллы доступны через MCP (`skill_search`/`skill_load`);
-lifecycle-хуков в этой версии нет; на медленной локальной модели длинные
+lifecycle-хуков в 0.0.5 нет; в 0.24.0 появились `qwen hooks` (SessionStart/SessionEnd/UserPromptSubmit/AfterTool, UI-управление `/hooks`), но файринг в headless (`-p`/позиционный промпт) не подтверждён — используйте в интерактиве; в 0.24 project-MCP требуют `qwen mcp approve spine`; split-judge (`rubric_prompt`→`rubric_verify`) проверен и работает (1.60/5 по двум ответам судьи); на медленной локальной модели длинные
 сессии (split-judge с двумя ответами судьи) могут превышать 10 минут —
 в GigaCode с быстрым бэкендом это не проблема.
 

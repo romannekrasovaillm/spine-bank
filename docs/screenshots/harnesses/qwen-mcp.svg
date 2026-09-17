@@ -1,16 +1,23 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="651" height="179" viewBox="0 0 651 179">
-<rect x="0.5" y="0.5" width="650" height="178" rx="10" fill="#1a1b26" stroke="#3b4261"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="705" height="255" viewBox="0 0 705 255">
+<rect x="0.5" y="0.5" width="704" height="254" rx="10" fill="#1a1b26" stroke="#3b4261"/>
 <circle cx="20" cy="14" r="5" fill="#f7768e"/>
 <circle cx="38" cy="14" r="5" fill="#e0af68"/>
 <circle cx="56" cy="14" r="5" fill="#9ece6a"/>
-<text x="325.5" y="18" text-anchor="middle" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="12" fill="#565f89">Qwen Code × spine: MCP из .qwen/settings.json (реальный прогон)</text>
+<text x="352.5" y="18" text-anchor="middle" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="12" fill="#565f89">GigaCode CLI / Qwen Code 0.24: MCP (реальный прогон после обновления)</text>
 <text x="14.0" y="49.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#9ece6a">$</text>
-<text x="32.06" y="49.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#c0caf5">qwen mcp list</text>
-<text x="14.0" y="68.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#9ece6a">✓ spine: /tmp/.../arch-be mcp serve — Connected (20 инструментов)</text>
-<text x="14.0" y="87.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#9ece6a">$</text>
-<text x="32.06" y="87.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#c0caf5">OPENAI_BASE_URL=http://gpu-host:8000/v1 qwen "Вызови fitness_check"</text>
-<text x="14.0" y="106.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#565f89">модель — локальная qwen3.8-27b (llm-platform, без облачных ключей)</text>
-<text x="14.0" y="125.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#f7768e">FAIL: issue_count=2 — no_float_for_money (f64), tests_present</text>
-<text x="14.0" y="144.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#565f89">агент переписал src/main.rs, прогнал rustc --test (2 passed)</text>
-<text x="14.0" y="163.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#9ece6a">PASS: "passed": true, 0 нарушений (4 правила)</text>
+<text x="32.06" y="49.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#c0caf5">arch-be connect qwen   # .qwen/settings.json → mcpServers.spine</text>
+<text x="14.0" y="68.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#9ece6a">$</text>
+<text x="32.06" y="68.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#c0caf5">qwen mcp list</text>
+<text x="14.0" y="87.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#c0caf5">● spine: arch-be mcp serve (stdio) - Pending approval</text>
+<text x="14.0" y="106.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#9ece6a">$</text>
+<text x="32.06" y="106.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#c0caf5">qwen mcp approve spine    # в 0.24 project-серверы требуют одобрения</text>
+<text x="14.0" y="125.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#9ece6a">✓ spine — Connected (20 инструментов)</text>
+<text x="14.0" y="144.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#9ece6a">$</text>
+<text x="32.06" y="144.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#c0caf5">qwen --yolo "Вызови fitness_check, исправь нарушения, перепроверь"</text>
+<text x="14.0" y="163.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#f7768e">FAIL: issue_count=2 (no_float_for_money, tests_present)</text>
+<text x="14.0" y="182.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#9ece6a">PASS: passed=true, «Правил: 4, нарушений: 0»</text>
+<text x="14.0" y="201.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#9ece6a">$</text>
+<text x="32.06" y="201.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#c0caf5">qwen --yolo "…rubric_prompt → 2 ответа судьи → rubric_verify"</text>
+<text x="14.0" y="220.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#9ece6a">split-judge: взвешенный балл 1.60/5 (2/2 валидных ответа судьи)</text>
+<text x="14.0" y="239.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#565f89">модель — локальная llm-platform (qwen3.8-27b), облачных ключей нет</text>
 </svg>

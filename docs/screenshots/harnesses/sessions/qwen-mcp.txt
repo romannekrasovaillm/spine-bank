@@ -1,8 +1,12 @@
-Qwen Code × spine: MCP из .qwen/settings.json (реальный прогон)
+GigaCode CLI / Qwen Code 0.24: MCP (реальный прогон после обновления)
+$ arch-be connect qwen   # .qwen/settings.json → mcpServers.spine
 $ qwen mcp list
-+ ✓ spine: /tmp/.../arch-be mcp serve — Connected (20 инструментов)
-$ OPENAI_BASE_URL=http://gpu-host:8000/v1 qwen "Вызови fitness_check"
-# модель — локальная qwen3.8-27b (llm-platform, без облачных ключей)
-- FAIL: issue_count=2 — no_float_for_money (f64), tests_present
-# агент переписал src/main.rs, прогнал rustc --test (2 passed)
-+ PASS: "passed": true, 0 нарушений (4 правила)
+● spine: arch-be mcp serve (stdio) - Pending approval
+$ qwen mcp approve spine    # в 0.24 project-серверы требуют одобрения
++ ✓ spine — Connected (20 инструментов)
+$ qwen --yolo "Вызови fitness_check, исправь нарушения, перепроверь"
+- FAIL: issue_count=2 (no_float_for_money, tests_present)
++ PASS: passed=true, «Правил: 4, нарушений: 0»
+$ qwen --yolo "…rubric_prompt → 2 ответа судьи → rubric_verify"
++ split-judge: взвешенный балл 1.60/5 (2/2 валидных ответа судьи)
+# модель — локальная llm-platform (qwen3.8-27b), облачных ключей нет
