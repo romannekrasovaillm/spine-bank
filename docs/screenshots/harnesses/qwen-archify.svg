@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="858" height="179" viewBox="0 0 858 179">
+<rect x="0.5" y="0.5" width="857" height="178" rx="10" fill="#1a1b26" stroke="#3b4261"/>
+<circle cx="20" cy="14" r="5" fill="#f7768e"/>
+<circle cx="38" cy="14" r="5" fill="#e0af68"/>
+<circle cx="56" cy="14" r="5" fill="#9ece6a"/>
+<text x="429.0" y="18" text-anchor="middle" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="12" fill="#565f89">GigaCode/Qwen: Archify из харнесса — IR → validate → HTML</text>
+<text x="14.0" y="49.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#9ece6a">$</text>
+<text x="32.06" y="49.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#c0caf5"># arch-harness.toml: [archify] cli_path = "&lt;клон&gt;/vendor/archify/bin/archify.mjs"</text>
+<text x="14.0" y="68.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#565f89">"Напиши IR архитектуры по model/, провалидируй, покажи"</text>
+<text x="14.0" y="87.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#565f89">вызов: archify_validate {type:"architecture", path:"diagrams/payment-svc.architecture.json"}</text>
+<text x="14.0" y="106.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#9ece6a">checks: 9/9, composition: pass (0 errors, 0 warnings)</text>
+<text x="14.0" y="125.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#565f89">вызов: archify_show → атомарная доставка HTML + SHA-256 receipt</text>
+<text x="14.0" y="144.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#9ece6a">payment-svc.architecture.html (guided views, легенда, карточки потоков)</text>
+<text x="14.0" y="163.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#e0af68">движок вендорен в репо (vendor/archify), нужен только node ≥ 18</text>
+</svg>

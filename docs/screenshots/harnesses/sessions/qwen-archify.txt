@@ -1,0 +1,8 @@
+GigaCode/Qwen: Archify из харнесса — IR → validate → HTML
+$ # arch-harness.toml: [archify] cli_path = "<клон>/vendor/archify/bin/archify.mjs"
+# "Напиши IR архитектуры по model/, провалидируй, покажи"
+# вызов: archify_validate {type:"architecture", path:"diagrams/payment-svc.architecture.json"}
++ checks: 9/9, composition: pass (0 errors, 0 warnings)
+# вызов: archify_show → атомарная доставка HTML + SHA-256 receipt
++ payment-svc.architecture.html (guided views, легенда, карточки потоков)
+! движок вендорен в репо (vendor/archify), нужен только node ≥ 18

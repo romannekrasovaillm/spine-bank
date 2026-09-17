@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="687" height="198" viewBox="0 0 687 198">
+<rect x="0.5" y="0.5" width="686" height="197" rx="10" fill="#1a1b26" stroke="#3b4261"/>
+<circle cx="20" cy="14" r="5" fill="#f7768e"/>
+<circle cx="38" cy="14" r="5" fill="#e0af68"/>
+<circle cx="56" cy="14" r="5" fill="#9ece6a"/>
+<text x="343.5" y="18" text-anchor="middle" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="12" fill="#565f89">GigaCode/Qwen: наполнение ПУСТОГО проекта с нуля (без banking-зоны)</text>
+<text x="14.0" y="49.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#565f89">"Создай спайн: ARCHITECTURE-SPINE.md (AD-1, AD-2), CONSTRAINTS.yaml,</text>
+<text x="14.0" y="68.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#565f89"> knowledge/idempotency.md — и проверь"</text>
+<text x="14.0" y="87.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#9ece6a">Файлы созданы агентом: спайн, 2 правила (C-01/C-02), knowledge-документ</text>
+<text x="14.0" y="106.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#565f89">вызов: fitness_check {"repo":"."}</text>
+<text x="14.0" y="125.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#f7768e">FAIL: tests_present — кода ещё нет (правильно: гейт уже сторожит)</text>
+<text x="14.0" y="144.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#565f89">вызов: kb_search {"query":"Idempotency-Key"}</text>
+<text x="14.0" y="163.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#9ece6a">хит: knowledge/idempotency.md (score 1.1)</text>
+<text x="14.0" y="182.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#e0af68">kb_search — BM25 по дословным токенам: термины пишем в текст явно</text>
+</svg>

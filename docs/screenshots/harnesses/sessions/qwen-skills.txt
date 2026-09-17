@@ -1,0 +1,9 @@
+GigaCode/Qwen: скиллы Spine через MCP (skill_search → skill_load)
+# "skill_search saga → skill_load первого → чем полезен архитектору"
++ skill_search("saga"): 7 скиллов (saga-transactions, saga-orchestration-agents…)
++ skill_load("saga-transactions"): полное тело SKILL.md загружено
+# Ответ агента (дословно, сокращён):
+  «…даёт supervisor-паттерн с обязательными бюджетом шагов, логом
+   делегирований для аудита и контрактом выхода complete/partial/blocked —
+   агентность не появляется там, где ломает AD-1 (деньги i64) и AD-2 (тесты)»
+! скилл применён к контексту стенда — связан с инвариантами спайна

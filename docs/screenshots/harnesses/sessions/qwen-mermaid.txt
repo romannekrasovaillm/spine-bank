@@ -1,0 +1,7 @@
+GigaCode/Qwen: диаграмма C4 через mermaid_render
+# "mermaid_render diagrams/c4-container.mmd → что на диаграмме?"
++ flowchart отрисован (ASCII-арт, 11 узлов)
+# Ответ агента (дословно, сокращён):
+  «web-portal → api-gateway (/v1) → core-monolith → signing (УКЭП,
+   КриптоПро, OCSP/CRL к УЦ), RabbitMQ, notification, DMZ-адаптер ЕИС,
+   Postgres Pro, внешние системы (ЕИС zakupki.gov.ru, email-шлюз)»

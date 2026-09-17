@@ -1,0 +1,9 @@
+GigaCode/Qwen: наполнение ПУСТОГО проекта с нуля (без banking-зоны)
+# "Создай спайн: ARCHITECTURE-SPINE.md (AD-1, AD-2), CONSTRAINTS.yaml,
+#  knowledge/idempotency.md — и проверь"
++ Файлы созданы агентом: спайн, 2 правила (C-01/C-02), knowledge-документ
+# вызов: fitness_check {"repo":"."}
+- FAIL: tests_present — кода ещё нет (правильно: гейт уже сторожит)
+# вызов: kb_search {"query":"Idempotency-Key"}
++ хит: knowledge/idempotency.md (score 1.1)
+! kb_search — BM25 по дословным токенам: термины пишем в текст явно

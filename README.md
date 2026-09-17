@@ -66,12 +66,75 @@ arch-be connect qwen        # пишет .qwen/settings.json (мердж, чуж
 
 Перезапустите GigaCode в каталоге проекта. Если сервер в статусе
 «Pending approval» (обязательно в qwen-code 0.24+): `qwen mcp approve spine`.
-Проверка: `qwen mcp list` → `spine … ✓ Connected`, дальше — просто просите
-агента:
+Проверка: `qwen mcp list` → `spine … ✓ Connected`.
 
-![Архитектор в GigaCode/Qwen: модель, трасса, скоринг](docs/screenshots/harnesses/qwen-architect.png)
+**Быстрое развёртывание силами самого агента GigaCode** (после клона репо — готовый промпт для агента): [docs/GIGACODE.md](docs/GIGACODE.md).
 
-**Быстрое развёртывание силами самого агента GigaCode** (после клона репо — промпт для агента): [docs/GIGACODE.md](docs/GIGACODE.md).
+#### С нуля: сценарии архитектора (все кадры — реальные прогоны)
+
+**0. Наполнение пустого проекта.** Банковской зоны в форке нет — спайн,
+правила, модель и базу знаний агент создаёт под ваш проект сам:
+
+![GigaCode: наполнение с нуля](docs/screenshots/harnesses/qwen-fill.png)
+
+**1. Подключение и fitness-гейт.** Агент сам находит 2 нарушения
+(`f64` для денег, нет тестов), переписывает код и перепроверяет до PASS:
+
+![GigaCode: подключение, approve, fitness FAIL→PASS](docs/screenshots/harnesses/qwen-mcp.png)
+
+**2. Маршрут + модель + трассировка.** Перед изменением — скоринг
+значимости, состав модели, полнота цепочки REQ→NFR→AD→CMP→правила:
+
+![GigaCode: significance/model/trace](docs/screenshots/harnesses/qwen-architect.png)
+
+**3. Контракты.** Линт OpenAPI/AsyncAPI и diff версий с поимкой
+ломающих изменений:
+
+![GigaCode: контракты](docs/screenshots/harnesses/qwen-contracts.png)
+
+**4. Оценка ADR рубрикой — без API-ключей (split-judge).** Spine отдаёт
+промпт и схему, судит сам GigaCode (2 независимых прогона), Spine собирает
+медиану и проверяет цитаты:
+
+![GigaCode: split-judge](docs/screenshots/harnesses/qwen-splitjudge.png)
+
+**5. Скиллы.** 55 архитектурных скиллов через `skill_search`/`skill_load` —
+агент применяет их к контексту вашего проекта:
+
+![GigaCode: скиллы](docs/screenshots/harnesses/qwen-skills.png)
+
+**6. База знаний.** Корпоративные заметки/стандарты проекта — через
+`kb_search`:
+
+![GigaCode: kb_search](docs/screenshots/harnesses/qwen-kb.png)
+
+**7. Диаграммы.** Рендер mermaid/C4 прямо в сессии:
+
+![GigaCode: mermaid](docs/screenshots/harnesses/qwen-mermaid.png)
+
+**8. Создание ADR (режим `--rw`).** Агент пишет ADR через Spine; Spine
+напоминает привязать решение к спайну и CONSTRAINTS:
+
+![GigaCode: adr_new в rw-режиме](docs/screenshots/harnesses/qwen-rw-adr.png)
+
+**9. Визуализация архитектуры (Archify).** Агент пишет JSON IR по вашей
+модели, `archify_validate` гоняет 9 артефактных проверок с машиночитаемыми
+диагностиками (агент чинит IR итеративно), `archify_show` доставляет
+интерактивный HTML. Движок вендорен в репо (`vendor/archify/`, нужен только
+Node.js ≥ 18); настройка — одна строка в `arch-harness.toml`:
+
+```toml
+[archify]
+cli_path = "<путь-к-клону>/vendor/archify/bin/archify.mjs"
+```
+
+![GigaCode: Archify validate → show](docs/screenshots/harnesses/qwen-archify.png)
+
+А вот сам результат — интерактивная HTML-диаграмма, собранная агентом из
+модели проекта (guided views, легенда, карточки потоков со ссылками на
+инварианты и ADR):
+
+![Archify HTML: payment-svc](docs/screenshots/harnesses/qwen-archify-html.png)
 
 ### Claude Code
 

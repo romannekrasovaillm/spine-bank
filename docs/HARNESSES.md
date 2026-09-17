@@ -93,6 +93,15 @@ lifecycle-хуков в 0.0.5 нет; в 0.24.0 появились `qwen hooks` 
 сессии (split-judge с двумя ответами судьи) могут превышать 10 минут —
 в GigaCode с быстрым бэкендом это не проблема.
 
+Дополнительно проверено на 0.24.0: **наполнение пустого проекта с нуля**
+(агент сам создал `ARCHITECTURE-SPINE.md`, `.arch-handoff/CONSTRAINTS.yaml`,
+`knowledge/` — `fitness_check` сразу начал сторожить; `kb_search` нашёл
+документ по точному токену) и **Archify из харнесса** (агент написал JSON IR
+по модели, `archify_validate` 9/9, `archify_show` → интерактивный HTML:
+`screenshots/harnesses/qwen-archify-html.png`). Настройка Archify — одна
+строка `[archify] cli_path` в `arch-harness.toml`, движок вендорен в репо
+(`vendor/archify/`, нужен Node.js ≥ 18).
+
 ## omp (oh-my-pi)
 
 `.mcp.json` подхватывается автоматически (совместим с выводом

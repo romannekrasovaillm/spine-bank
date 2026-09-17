@@ -1,0 +1,9 @@
+GigaCode/Qwen: создание ADR через MCP в режиме --rw (запись)
+$ # .qwen/settings.json: "args": ["mcp", "serve", "--rw"] → approve
+# "Вызови adr_new: ADR-002 «Retry-стратегия для rail-коннекторов»"
++ создан docs/adr/ADR-002-retry-strategiya-dlya-rail-konnektorov.md
+# Агент сам добавил (дословно):
+  «ADR-002 пока ни на что не биндится; если решение должно стать
+   инвариантом — заведите AD в спайн + правило в CONSTRAINTS.yaml»
+! rw открывает только белый список (adr_new, handoff_create, …);
+! bash/write_file/harness_run — никогда

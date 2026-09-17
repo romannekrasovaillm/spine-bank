@@ -1,0 +1,5 @@
+GigaCode/Qwen: оценка ADR рубрикой — split-judge без API-ключей
+# rubric_prompt(adr_quality, ADR-001) → промпт + JSON-схема (5 критериев)
+# агент САМ судит дважды независимо → rubric_verify(answers=[2])
++ Взвешенный балл: 1.60/5 (2/2 валидных ответа, dropped=0)
+! LLM живёт в GigaCode; Spine лишь механика: схема, медиана, проверка цитат
