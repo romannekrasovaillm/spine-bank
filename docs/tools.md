@@ -71,6 +71,7 @@
 | `agentsmd_generate` / `agentsmd_lint` | AGENTS.md для репозиториев команд + дрейф-контроль |
 | `landscape_report` / `adr_registry` / `rules_report` | Реестры и отчёты контура (EA-3, ADR-036/037): ландшафт систем, глобальный реестр ADR, инвентарь правил — JSON со счётчиками |
 | `openspec_coverage` / `model_graph` | Покрытие требований OpenSpec правилами (`covers:`) / граф связей модели text или mermaid |
+| `architect_review` / `change_impact` | Составные инструменты (п.13): всё ревью репозитория одним вызовом / «что я задену и с кем согласовывать» по графу модели |
 
 Ниже — полные таблицы с параметрами и правилами.
 
@@ -222,6 +223,8 @@ Archify CLI (`schemaVersion: 1`) — точка машинного потреб�
 | `rules_report` | Отчёт по реестру правил CONSTRAINTS.yaml: сводка по типам/severity, карточки (owner/expiry/exclude_glob/effort_hours), находки (без owner/expiry, просроченные), git-прокси стоимости. Ответ — JSON `{rules_total, by_kind, by_severity, summary, report_markdown}` (мост в MCP, read-only; отчёт, `passed` всегда true) | `repo`*; `constraints` (путь к YAML, иначе `<repo>/.arch-handoff/CONSTRAINTS.yaml`) |
 | `openspec_coverage` | Покрытие требований OpenSpec правилами CONSTRAINTS.yaml (связь — поле `covers:`): SHALL всего / покрыто / unverifiable с owner / без решения, непокрытые поимённо. Ответ — JSON `{passed, total, covered, unverifiable, unresolved, unresolved_items, summary, report_markdown}` (мост в MCP, read-only); `passed=false` только при `strict=true` и требованиях «без решения» | `path`* (корень репозитория с openspec/); `constraints` (иначе авто-детект); `strict` (по умолчанию `false`) |
 | `model_graph` | Граф связей модели (`model/`, ADR-003): text — список сущностей со связями; mermaid — flowchart LR (совместим с `mermaid_render`). Ответ — JSON `{format, entities, edges, summary, graph}` (мост в MCP, read-only; отчёт, не гейт) | `dir` (каталог модели, по умолчанию `model`); `format` (`text`/`mermaid`, по умолчанию `text`) |
+| `architect_review` | Составное ревью репозитория одним вызовом (п.13): маршрут значимости из git-диффа + контур единого гейта (fitness, delta_guard, rule_weakened, spine_lint, trace_check; на Standard/Critical — nfr, evidence) + `model_validate` + линт контрактов OpenAPI/AsyncAPI (из `contract` у INT и `contracts/`). Каждая секция fail-soft SKIP без входа. Ответ — JSON `{passed, route, components (status/detail/findings), summary}`; `passed=false` — основание отказать изменению. CLI: `arch-be review <dir> [--base] [--json]` | `path` (репозиторий, по умолчанию текущий каталог); `base` (git-ref базы диффа) |
+| `change_impact` | Радиус взрыва изменения (п.13): от `id` сущности или `paths` файлов (→ CMP по `code_roots`, ADR-030) транзитивный обход графа модели в обе стороны → затронутые сущности по типам, правила CONSTRAINTS.yaml (C-NNN из `verified_by`, с владельцами из карточек), контракты INT, владельцы OWNER. Ответ — JSON `{seeds, affected, rules, contracts, owners, gaps, summary}`; отчёт, не гейт. CLI: `arch-be model impact <dir> --id\|--paths [--json]` | `path` (корень кейса, по умолчанию текущий каталог); `id` (сущность-источник) или `paths` (массив файлов) — хотя бы одно |
 
 ## Передача кодовым харнессам
 

@@ -1333,3 +1333,182 @@ fn digest_reads_journal_and_register() {
     );
     assert_eq!(json["expiring"][0]["rule"], "no-pan");
 }
+
+/// Кейс-фикстура для составного ревью и радиуса изменения (бэклог волны 3,
+/// п.13): git-репо (один коммит), model/ с цепочкой CMP→INT→AD→OWNER,
+/// корневой CONSTRAINTS.yaml (карточка C-001 с владельцем), spine,
+/// контракт contracts/api.yaml и .arch-handoff/CONSTRAINTS.yaml.
+fn review_case(home: &Path) -> PathBuf {
+    let case = home.join("review-case");
+    let model = case.join("model");
+    std::fs::create_dir_all(&model).expect("mkdir model");
+    for (name, fm) in [
+        (
+            "AD-1.md",
+            "---\nid: AD-1\ntype: ad\ntitle: Точные деньги\nstatus: ADOPTED\nverified_by: [C-001]\n---\n\nПравило.\n",
+        ),
+        (
+            "CMP-001.md",
+            "---\nid: CMP-001\ntype: cmp\ntitle: Платёжный шлюз\nstatus: designed\nimplements: [AD-1]\ndepends_on: [INT-001]\naffects: [OWNER-1]\ncode_roots: [services/pay]\n---\n\nТело.\n",
+        ),
+        (
+            "INT-001.md",
+            "---\nid: INT-001\ntype: int\ntitle: Рельс процессинга\nstatus: accepted\ncontract: contracts/api.yaml\n---\n\nТело.\n",
+        ),
+        (
+            "OWNER-1.md",
+            "---\nid: OWNER-1\ntype: owner\ntitle: Команда процессинга\nstatus: active\n---\n\nТело.\n",
+        ),
+    ] {
+        std::fs::write(model.join(name), fm).expect("сущность");
+    }
+    std::fs::write(
+        case.join("CONSTRAINTS.yaml"),
+        "constraints:\n  - id: C-001\n    name: no_float_money\n    owner: Команда платежей\n",
+    )
+    .expect("constraints");
+    std::fs::write(
+        case.join("ARCHITECTURE-SPINE.md"),
+        "# Spine\n\n### AD-1. Точные деньги\n- Binds: денежные суммы\n- Prevents: потеря копеек\n- Rule: суммы в minor units\n",
+    )
+    .expect("spine");
+    std::fs::create_dir_all(case.join("contracts")).expect("mkdir contracts");
+    std::fs::write(
+        case.join("contracts/api.yaml"),
+        "openapi: 3.0.3\ninfo:\n  title: Processing API\n  version: 1.0.0\npaths:\n  /v1/charges:\n    get:\n      operationId: listCharges\n      responses:\n        '200':\n          description: ok\n",
+    )
+    .expect("контракт");
+    std::fs::create_dir_all(case.join(".arch-handoff")).expect("mkdir handoff");
+    std::fs::write(
+        case.join(".arch-handoff/CONSTRAINTS.yaml"),
+        "rules:\n  - name: spine_present\n    type: file_exists\n    path: \"ARCHITECTURE-SPINE.md\"\n    severity: error\n",
+    )
+    .expect("handoff constraints");
+    git(&case, &["init", "-q"]);
+    git(&case, &["add", "."]);
+    git(&case, &["commit", "-q", "-m", "init"]);
+    case
+}
+
+/// `arch-be review <dir>`: единое ревью одной командой — все секции
+/// PASS, exit 0; `--json` — валидный JSON-вердикт с составом секций.
+#[test]
+fn review_clean_case_exits_0_text_and_json() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let case = review_case(tmp.path());
+
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("review").arg(case.as_os_str());
+    cmd.assert()
+        .success()
+        .stdout(contains("Ревью:"))
+        .stdout(contains("Маршрут: Fast (auto"))
+        .stdout(contains("[PASS] fitness"))
+        .stdout(contains("[PASS] trace_check"))
+        .stdout(contains("[PASS] model_validate"))
+        .stdout(contains("[PASS] contracts"))
+        .stdout(contains("Итог: PASS"));
+
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("review").arg(case.as_os_str()).arg("--json");
+    let out = cmd.assert().success();
+    let json: serde_json::Value =
+        serde_json::from_slice(&out.get_output().stdout).expect("stdout — валидный JSON");
+    assert_eq!(json["passed"], true);
+    assert_eq!(json["route"], "Fast");
+    let names: Vec<&str> = json["components"]
+        .as_array()
+        .expect("components")
+        .iter()
+        .filter_map(|c| c["name"].as_str())
+        .collect();
+    for want in ["fitness", "trace_check", "model_validate", "contracts"] {
+        assert!(names.contains(&want), "нет секции {want}: {names:?}");
+    }
+}
+
+/// `arch-be review` на кейсе с битой ссылкой модели: секция `model_validate`
+/// FAIL, exit 1 (гейт-семантика единого ревью).
+#[test]
+fn review_broken_model_exits_1() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let case = review_case(tmp.path());
+    std::fs::write(
+        case.join("model/ADR-002-bad.md"),
+        "---\nid: ADR-002\ntype: adr\ntitle: Битое\nstatus: Accepted\naffects: [CMP-999]\n---\n\nТело.\n",
+    )
+    .expect("битый ADR");
+
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("review").arg(case.as_os_str());
+    cmd.assert()
+        .code(1)
+        .stdout(contains("[FAIL] model_validate"))
+        .stdout(contains("broken-link"))
+        .stdout(contains("Итог: FAIL"));
+}
+
+/// `arch-be model impact <dir> --id`: радиус изменения — затронутые сущности,
+/// правило с владельцем, контракт INT, «с кем согласовывать»; exit 0
+/// (отчёт, не гейт). `--json` — машиночитаемая форма.
+#[test]
+fn model_impact_by_id_lists_rules_contracts_owners() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let case = review_case(tmp.path());
+
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("model")
+        .arg("impact")
+        .arg(case.as_os_str())
+        .arg("--id")
+        .arg("CMP-001");
+    cmd.assert()
+        .success()
+        .stdout(contains("Радиус изменения:"))
+        .stdout(contains("CMP-001"))
+        .stdout(contains("INT-001"))
+        .stdout(contains("OWNER-1"))
+        .stdout(contains(
+            "C-001 (no_float_money; владелец: Команда платежей)",
+        ))
+        .stdout(contains("contracts/api.yaml"))
+        .stdout(contains("Согласовать с владельцами:"));
+
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("model")
+        .arg("impact")
+        .arg(case.as_os_str())
+        .arg("--paths")
+        .arg("services/pay/src/main.rs")
+        .arg("--paths")
+        .arg("docs/notes.md")
+        .arg("--json");
+    let out = cmd.assert().success();
+    let json: serde_json::Value =
+        serde_json::from_slice(&out.get_output().stdout).expect("stdout — валидный JSON");
+    assert_eq!(json["seeds"], serde_json::json!(["CMP-001"]));
+    assert_eq!(json["gaps"], serde_json::json!(["docs/notes.md"]));
+    assert_eq!(json["contracts"], serde_json::json!(["contracts/api.yaml"]));
+}
+
+/// `arch-be model impact` с неизвестным id — честная ошибка (exit != 0),
+/// без источника — тоже.
+#[test]
+fn model_impact_unknown_id_and_no_source_fail() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let case = review_case(tmp.path());
+
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("model")
+        .arg("impact")
+        .arg(case.as_os_str())
+        .arg("--id")
+        .arg("CMP-999");
+    cmd.assert().failure().stderr(contains("не найдена"));
+
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("model").arg("impact").arg(case.as_os_str());
+    cmd.assert()
+        .failure()
+        .stderr(contains("id сущности или paths"));
+}

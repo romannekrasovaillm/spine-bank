@@ -86,6 +86,9 @@ fn domain_tools(cfg: &Config) -> Vec<Arc<dyn Tool>> {
     out.extend(crate::landscape::tools());
     out.extend(crate::adr_registry::tools());
     out.extend(crate::openspec::tools());
+    // Составные инструменты (транш 3 инверсии): единое ревью и радиус
+    // изменения — read-only, мост MCP по белому списку.
+    out.extend(crate::review::tools());
     // Домены агентного цикла — только в сборке `harness` (инверсия, шаг 4):
     // кодовые харнессы, субагенты, ralph, worktree, дистилляция скиллов.
     #[cfg(feature = "harness")]
@@ -142,6 +145,8 @@ mod tests {
             "adr_registry",
             "rules_report",
             "openspec_coverage",
+            "architect_review",
+            "change_impact",
         ] {
             assert!(
                 names.iter().any(|n| n == expected),

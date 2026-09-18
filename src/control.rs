@@ -1109,9 +1109,11 @@ pub struct FitnessRule {
     #[serde(default)]
     #[allow(dead_code)]
     reversibility: Option<String>,
-    /// Карточка правила: владелец.
+    /// Карточка правила: владелец. Переносится движком в находки
+    /// (`LintIssue::owner`) и читается обходом `change_impact`
+    /// (`src/review.rs`) — «с кем согласовывать».
     #[serde(default)]
-    owner: Option<String>,
+    pub(crate) owner: Option<String>,
     /// Карточка правила: дата пересмотра (YYYY-MM-DD). Просроченное правило —
     /// находка уровня warn (антипаттерн «правило без срока жизни» — теперь
     /// механически видно).

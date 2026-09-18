@@ -221,13 +221,15 @@ fn handshake_then_tools_list_over_stdio() {
         "rules_report",
         "openspec_coverage",
         "model_graph",
+        "architect_review",
+        "change_impact",
     ] {
         assert!(names.contains(&want), "нет инструмента {want}: {names:?}");
     }
     assert_eq!(
         tools.len(),
-        30,
-        "ровно 30 инструментов в ro-режиме (13 ручных + 17 read-only моста)"
+        32,
+        "ровно 32 инструмента в ro-режиме (13 ручных + 19 read-only моста)"
     );
     // rw-контур и write/exec-принадлежность хоста закрыты в ro-режиме.
     for banned in [
@@ -1205,5 +1207,160 @@ fn bridge_tranche2_reports_over_stdio() {
             .expect("report")
             .contains("# Ландшафт систем"),
         "{landscape}"
+    );
+}
+
+/// Транш 3 инверсии: составные инструменты по NDJSON. `architect_review` —
+/// единое ревью (маршрут + контур гейта + модель + контракты) с JSON-вердиктом
+/// в `structuredContent.output`; `change_impact` — радиус изменения по
+/// `id` (граф модели) и честная мягкая ошибка на неизвестном id.
+#[test]
+fn bridge_tranche3_composite_tools_over_stdio() {
+    let home = tempfile::tempdir().expect("tmp");
+
+    // Кейс-фикстура (та же цепочка, что в src/review.rs::make_case):
+    // git-репо, model/ с CMP→INT→SYS→AD→OWNER, CONSTRAINTS.yaml с C-001,
+    // spine, контракт contracts/api.yaml, .arch-handoff/CONSTRAINTS.yaml.
+    let case = home.path().join("case");
+    let model_dir = case.join("model");
+    std::fs::create_dir_all(&model_dir).expect("mkdir model");
+    for (name, fm) in [
+        (
+            "AD-1.md",
+            "---\nid: AD-1\ntype: ad\ntitle: Точные деньги\nstatus: ADOPTED\nverified_by: [C-001]\n---\n\nПравило.\n",
+        ),
+        (
+            "INT-001.md",
+            "---\nid: INT-001\ntype: int\ntitle: Рельс процессинга\nstatus: accepted\ncontract: contracts/api.yaml\n---\n\nТело.\n",
+        ),
+        (
+            "OWNER-1.md",
+            "---\nid: OWNER-1\ntype: owner\ntitle: Команда процессинга\nstatus: active\n---\n\nТело.\n",
+        ),
+    ] {
+        std::fs::write(model_dir.join(name), fm).expect("сущность");
+    }
+    // CMP-001 отдельно: несёт связь на владельца (affects OWNER-1).
+    std::fs::write(
+        model_dir.join("CMP-001.md"),
+        "---\nid: CMP-001\ntype: cmp\ntitle: Платёжный шлюз\nstatus: designed\nimplements: [AD-1]\ndepends_on: [INT-001]\naffects: [OWNER-1]\ncode_roots: [services/pay]\n---\n\nТело.\n",
+    )
+    .expect("CMP с владельцем");
+    std::fs::write(
+        case.join("CONSTRAINTS.yaml"),
+        "constraints:\n  - id: C-001\n    name: no_float_money\n    owner: Команда платежей\n",
+    )
+    .expect("constraints");
+    std::fs::write(
+        case.join("ARCHITECTURE-SPINE.md"),
+        "# Spine\n\n### AD-1. Точные деньги\n- Binds: денежные суммы\n- Prevents: потеря копеек\n- Rule: суммы в minor units\n",
+    )
+    .expect("spine");
+    let contracts = case.join("contracts");
+    std::fs::create_dir_all(&contracts).expect("mkdir contracts");
+    std::fs::write(
+        contracts.join("api.yaml"),
+        "openapi: 3.0.3\ninfo:\n  title: Processing API\n  version: 1.0.0\npaths:\n  /v1/charges:\n    get:\n      operationId: listCharges\n      responses:\n        '200':\n          description: ok\n",
+    )
+    .expect("контракт");
+    std::fs::create_dir_all(case.join(".arch-handoff")).expect("mkdir handoff");
+    std::fs::write(
+        case.join(".arch-handoff/CONSTRAINTS.yaml"),
+        "rules:\n  - name: spine_present\n    type: file_exists\n    path: \"ARCHITECTURE-SPINE.md\"\n    severity: error\n",
+    )
+    .expect("handoff constraints");
+    git(&case, &["init", "-q"]);
+    git(&case, &["add", "."]);
+    git(&case, &["commit", "-q", "-m", "init"]);
+
+    let responses = mcp_serve(
+        home.path(),
+        &batch(&[
+            call(1, "architect_review", &json!({"path": case})),
+            call(2, "change_impact", &json!({"path": case, "id": "CMP-001"})),
+            call(
+                3,
+                "change_impact",
+                &json!({"path": case, "paths": ["services/pay/src/main.rs", "docs/x.md"]}),
+            ),
+            call(4, "change_impact", &json!({"path": case, "id": "CMP-999"})),
+        ]),
+    );
+    assert_eq!(responses.len(), 4, "все вызовы отвечены: {responses:?}");
+
+    let output = |idx: u64| -> Value {
+        let verdict = structured(&responses[(idx - 1) as usize], idx);
+        serde_json::from_str(verdict["output"].as_str().expect("output"))
+            .expect("output — JSON-вердикт")
+    };
+
+    // architect_review: единый вердикт, все секции прогнались и зелёные.
+    let review = output(1);
+    assert_eq!(review["tool"], "architect_review");
+    assert_eq!(review["passed"], true, "{review}");
+    assert_eq!(review["route"], "Fast", "{review}");
+    let names: Vec<&str> = review["components"]
+        .as_array()
+        .expect("components")
+        .iter()
+        .filter_map(|c| c["name"].as_str())
+        .collect();
+    for want in [
+        "fitness",
+        "spine_lint",
+        "trace_check",
+        "model_validate",
+        "contracts",
+    ] {
+        assert!(names.contains(&want), "нет секции {want}: {names:?}");
+    }
+
+    // change_impact по id: вся цепочка + правило с владельцем + контракт.
+    let impact = output(2);
+    assert_eq!(impact["tool"], "change_impact");
+    assert_eq!(impact["seeds"], json!(["CMP-001"]), "{impact}");
+    let ids: Vec<&str> = impact["affected"]
+        .as_array()
+        .expect("affected")
+        .iter()
+        .filter_map(|a| a["id"].as_str())
+        .collect();
+    for want in ["CMP-001", "INT-001", "AD-1", "OWNER-1"] {
+        assert!(ids.contains(&want), "нет {want} в {ids:?}");
+    }
+    assert_eq!(
+        impact["contracts"],
+        json!(["contracts/api.yaml"]),
+        "{impact}"
+    );
+    assert_eq!(impact["rules"][0]["id"], "C-001", "{impact}");
+    assert_eq!(
+        impact["rules"][0]["owner"],
+        json!("Команда платежей"),
+        "{impact}"
+    );
+    assert!(
+        impact["owners"].as_array().expect("owners")[0]
+            .as_str()
+            .expect("owner")
+            .contains("Команда процессинга"),
+        "{impact}"
+    );
+
+    // change_impact по paths: code_roots → CMP-001; непокрытый путь — gap.
+    let impact = output(3);
+    assert_eq!(impact["seeds"], json!(["CMP-001"]), "{impact}");
+    assert_eq!(impact["gaps"], json!(["docs/x.md"]), "{impact}");
+
+    // Неизвестный id — доменный сбой (isError), не protocol error.
+    assert_eq!(responses[3]["result"]["isError"], true);
+    assert!(responses[3].get("error").is_none());
+    assert!(
+        responses[3]["result"]["content"][0]["text"]
+            .as_str()
+            .expect("text")
+            .contains("не найдена"),
+        "{}",
+        responses[3]
     );
 }

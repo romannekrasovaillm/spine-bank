@@ -81,6 +81,7 @@ pub mod publish;
 pub mod ralph;
 pub mod rehearsal;
 pub mod retry;
+pub mod review;
 pub mod rubric;
 pub mod secrets;
 #[cfg(feature = "harness")]

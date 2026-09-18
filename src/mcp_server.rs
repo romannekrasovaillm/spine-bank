@@ -43,8 +43,10 @@
 //!   `delta_propose`. Транш 2: `landscape_report`, `adr_registry`,
 //!   `rules_report`, `openspec_coverage`, `model_graph` (read-only отчёты:
 //!   счётчики + markdown/mermaid в JSON; `passed=false` только у strict-гейтов
-//!   `adr_registry`/`openspec_coverage`). В core-сборке (без фичи `harness`)
-//!   домены
+//!   `adr_registry`/`openspec_coverage`). Транш 3: `architect_review`,
+//!   `change_impact` (составные инструменты — единое ревью репозитория и
+//!   радиус изменения по графу модели; `src/review.rs`). В core-сборке (без
+//!   фичи `harness`) домены
 //!   `harness`/`distill`/`subagent`/`ralph`/`worktree`/`web` в реестре
 //!   отсутствуют — мост их имена из белых списков молча пропускает (спеки
 //!   строятся от реестра), `handoff_create` и `skill_distill` там
@@ -216,7 +218,9 @@ const BRIDGE_READ_ONLY: &[&str] = &[
     "adr_registry",
     "agentsmd_lint",
     "archify_validate",
+    "architect_review",
     "asyncapi_lint",
+    "change_impact",
     "contract_diff",
     "delta_guard",
     "evidence_verify",
@@ -572,7 +576,10 @@ impl McpServe {
                                          evidence_verify) доступен напрямую; отчёты реестров \
                                          (landscape_report, adr_registry, rules_report, \
                                          openspec_coverage, model_graph) — read-only JSON \
-                                         со счётчиками; аргумент `cwd` — \
+                                         со счётчиками; составные инструменты: architect_review \
+                                         (всё ревью одним вызовом — маршрут, контур контроля, \
+                                         модель, контракты) и change_impact (что заденет \
+                                         изменение и с кем согласовывать); аргумент `cwd` — \
                                          рабочий каталог клиента для относительных путей. \
                                          Чтение знаний (read-only): kb_search — поиск по \
                                          базе знаний архитектора; skill_search/skill_load — \

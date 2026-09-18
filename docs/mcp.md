@@ -110,7 +110,8 @@ exit 2, stderr уходит агенту; строки вывода хук не 
 `contract_diff`, `fleet_audit`, `agentsmd_lint` (`repo`),
 `archify_validate` (`type`, `path`), `rubric_list`, `plugin_list`,
 `nfr_check` (`path`, `kind`), `model_validate` (`dir`),
-`delta_guard` (`path`, `base`, `protect`), `evidence_verify` (`change_dir`).
+`delta_guard` (`path`, `base`, `protect`), `evidence_verify` (`change_dir`),
+`architect_review` (`path`, `base`), `change_impact` (`path`, `id` | `paths`).
 Под `--rw` добавляются: `handoff_create`, `adr_new`, `agentsmd_generate`,
 `skill_distill`, `archify_deliver`, `archify_show`, `archify_compare`,
 `reverse_survey`, `evidence_pack` (`change_dir`, `route`),
@@ -133,6 +134,13 @@ false`; `evidence_pack`/`delta_propose` политика R-уровней кла
 | `rules_report` | `path` (репозиторий), `constraints?` | инвентарь правил CONSTRAINTS.yaml: `rules_total`, `by_kind`, `by_severity`, `report_markdown` (карточки owner/expiry/effort_hours, находки, git-прокси). Отчёт — `passed` всегда true |
 | `openspec_coverage` | `path`, `constraints?`, `strict?` | покрытие требований OpenSpec правилами (`covers:`): `total`/`covered`/`unverifiable`/`unresolved` + `unresolved_items` поимённо + `report_markdown`; `passed=false` только при `strict: true` и требованиях «без решения» |
 | `model_graph` | `dir?`, `format?` (`text`\|`mermaid`) | граф связей модели: `entities`/`edges` + `graph` (список или flowchart LR, совместим с `mermaid_render`). Отчёт, не гейт — `passed` не применим |
+
+Составные инструменты (транш 3, read-only):
+
+| Инструмент | Аргументы | Возвращает |
+|---|---|---|
+| `architect_review` | `path?`, `base?` | единое ревью репозитория одним вызовом: маршрут значимости из git-диффа + весь контур гейта (fitness, delta_guard, rule_weakened, spine_lint, trace_check; на Standard/Critical — nfr, evidence) + секции `model_validate` и `contracts` (линт OpenAPI/AsyncAPI из `INT.contract` и `contracts/`). JSON: `passed` + `route` + `components` (status/detail/findings) + `summary`; `passed=false` — основание отказать изменению |
+| `change_impact` | `path?`, `id` \| `paths` | радиус изменения по графу модели: `seeds`, `affected` (сущности по типам), `rules` (C-NNN с владельцами), `contracts`, `owners`, `gaps` (пути без CMP-покрытия), `summary`. Отчёт, не гейт — `passed` не применим; неизвестный `id` — `isError` |
 
 Чтение знаний (транш T4, ADR-015; все — read-only, без verdict `passed`):
 

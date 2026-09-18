@@ -186,6 +186,26 @@ enum Cmd {
         #[arg(long)]
         constraints: Option<PathBuf>,
     },
+    /// Составное архитектурное ревью репозитория одним ответом (бэклог
+    /// волны 3, п.13): маршрут значимости из git-диффа + весь контур
+    /// единого гейта (fitness, delta guard, анти-ослабление правил, линтер
+    /// спайна, трассировка; на Standard/Critical — NFR и evidence) +
+    /// целостность модели + линт контрактов OpenAPI/AsyncAPI.
+    /// Провал любой секции — exit 1 (механически, как у `gate`).
+    Review {
+        /// Репозиторий.
+        dir: PathBuf,
+        /// База git для диффа и сравнения правил (по умолчанию — рабочее
+        /// дерево против HEAD; для CI — напр. origin/main...HEAD).
+        #[arg(long)]
+        base: Option<String>,
+        /// Файл ограничений (по умолчанию <dir>/.arch-handoff/`CONSTRAINTS.yaml`).
+        #[arg(long)]
+        constraints: Option<PathBuf>,
+        /// Машиночитаемый вывод: JSON-отчёт (passed + секции + находки).
+        #[arg(long)]
+        json: bool,
+    },
     /// Реестр ADR: глобальная агрегация решений по набору проектов (ADR-036).
     Adr {
         #[command(subcommand)]
@@ -933,6 +953,25 @@ enum ModelCmd {
         #[arg(long, default_value = "model")]
         dir: PathBuf,
     },
+    /// Радиус взрыва изменения (бэклог волны 3, п.13): от сущности (`--id`)
+    /// или файлов (`--paths` → CMP по `code_roots`, ADR-030) транзитивный
+    /// обход графа связей модели → затронутые сущности по типам, правила
+    /// `CONSTRAINTS.yaml` (C-NNN с владельцами), контракты INT, владельцы
+    /// OWNER — «что я задену и с кем согласовывать». Отчёт, не гейт.
+    Impact {
+        /// Корень кейса (каталог с model/).
+        dir: PathBuf,
+        /// ID сущности-источника (CMP-001, INT-002, …).
+        #[arg(long)]
+        id: Option<String>,
+        /// Файл изменения (повторяемый флаг). Источники — CMP, чьи
+        /// `code_roots` покрывают путь; непокрытые пути — в отчёте как gap.
+        #[arg(long)]
+        paths: Vec<String>,
+        /// Машиночитаемый вывод: JSON-отчёт.
+        #[arg(long)]
+        json: bool,
+    },
     /// Ландшафт систем набора проектов (EA-3, ADR-036/ADR-037): агрегация
     /// `model/` самого ROOT и непосредственных подкаталогов в единый
     /// реестр систем SYS/INT с дедупликацией по имени (без глобальных ID),
@@ -1474,6 +1513,36 @@ async fn main() -> Result<()> {
             }
         }
         Some(Cmd::Adr { cmd }) => cmd_adr(cmd)?,
+        Some(Cmd::Review {
+            dir,
+            base,
+            constraints,
+            json,
+        }) => {
+            // Пороги маршрутов — из конфига ([significance], ADR-034).
+            let limits = cfg
+                .significance
+                .limits()
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let report = arch_harness::review::architect_review(
+                &dir,
+                base.as_deref(),
+                constraints.as_deref(),
+                limits,
+            )?;
+            if json {
+                let verdict = arch_harness::review::review_json(&report);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&verdict).unwrap_or_else(|_| verdict.to_string())
+                );
+            } else {
+                print!("{}", arch_harness::review::render_review(&report));
+            }
+            if !report.gate.passed {
+                std::process::exit(1);
+            }
+        }
         Some(Cmd::Publish { cmd }) => cmd_publish(cmd)?,
         Some(Cmd::Model { cmd }) => cmd_model(cmd)?,
         Some(Cmd::Trace { cmd }) => cmd_trace(cmd)?,
@@ -2871,6 +2940,24 @@ fn cmd_model(cmd: ModelCmd) -> Result<()> {
                 report.written.len(),
                 report.warnings.len()
             );
+        }
+        ModelCmd::Impact {
+            dir,
+            id,
+            paths,
+            json,
+        } => {
+            let report = arch_harness::review::change_impact(&dir, id.as_deref(), &paths)
+                .with_context(|| format!("радиус изменения по {}", dir.display()))?;
+            if json {
+                let verdict = arch_harness::review::impact_json(&report);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&verdict).unwrap_or_else(|_| verdict.to_string())
+                );
+            } else {
+                print!("{}", arch_harness::review::render_impact(&report));
+            }
         }
         ModelCmd::Landscape { root, mermaid } => {
             let report = arch_harness::landscape::build_landscape(&root)?;
