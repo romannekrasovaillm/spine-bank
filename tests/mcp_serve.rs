@@ -244,6 +244,66 @@ fn handshake_then_tools_list_over_stdio() {
 }
 
 #[test]
+fn prompts_list_and_get_over_stdio() {
+    let home = tempfile::tempdir().expect("tmp");
+    let responses = mcp_serve(
+        home.path(),
+        &batch(&[
+            json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+                "protocolVersion":"2025-06-18","capabilities":{},
+                "clientInfo":{"name":"claude-code","version":"1.0"}}})
+            .to_string(),
+            json!({"jsonrpc":"2.0","id":2,"method":"prompts/list","params":{}}).to_string(),
+            json!({"jsonrpc":"2.0","id":3,"method":"prompts/get","params":{
+                "name":"spine-architect-review"}})
+            .to_string(),
+            json!({"jsonrpc":"2.0","id":4,"method":"prompts/get","params":{"name":"ghost"}})
+                .to_string(),
+            json!({"jsonrpc":"2.0","id":5,"method":"resources/list","params":{}}).to_string(),
+        ]),
+    );
+    // initialize рекламирует capability prompts.
+    assert!(responses[0]["result"]["capabilities"]["prompts"].is_object());
+    // prompts/list: ровно семь плейбуков spine-workflows (дом изолирован —
+    // тексты и описания из встроенных ассетов).
+    let prompts = responses[1]["result"]["prompts"]
+        .as_array()
+        .expect("prompts");
+    assert_eq!(prompts.len(), 7, "семь плейбуков: {prompts:?}");
+    let names: Vec<&str> = prompts.iter().filter_map(|p| p["name"].as_str()).collect();
+    for want in [
+        "spine-quickstart",
+        "spine-content-bootstrap",
+        "spine-architect-review",
+        "spine-adr-judge",
+        "spine-contracts-gate",
+        "spine-archify-viz",
+        "spine-fitness-gate",
+    ] {
+        assert!(names.contains(&want), "нет промпта {want}: {names:?}");
+    }
+    // prompts/get: одно user-сообщение с инструкцией и телом плейбука.
+    let got = &responses[2]["result"];
+    assert!(
+        got["description"].as_str().is_some_and(|d| !d.is_empty()),
+        "description из frontmatter: {got}"
+    );
+    let messages = got["messages"].as_array().expect("messages");
+    assert_eq!(messages.len(), 1, "одно user-сообщение: {got}");
+    assert_eq!(messages[0]["role"], "user");
+    assert_eq!(messages[0]["content"]["type"], "text");
+    let text = messages[0]["content"]["text"].as_str().expect("text");
+    assert!(
+        text.contains("spine-architect-review") && text.contains("significance_score"),
+        "тело плейбука в сообщении: {}",
+        &text[..text.len().min(200)]
+    );
+    // Неизвестный промпт → -32602; resources/* по-прежнему не поддержаны → -32601.
+    assert_eq!(responses[3]["error"]["code"], -32602, "{}", responses[3]);
+    assert_eq!(responses[4]["error"]["code"], -32601, "{}", responses[4]);
+}
+
+#[test]
 fn ping_and_unknown_method_and_broken_json() {
     let home = tempfile::tempdir().expect("tmp");
     let responses = mcp_serve(

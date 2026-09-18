@@ -199,6 +199,14 @@ fn load_plugin(dir: &Path) -> Option<Plugin> {
 /// indented-строки.
 fn parse_frontmatter(path: &Path) -> Option<(String, String)> {
     let text = std::fs::read_to_string(path).ok()?;
+    parse_frontmatter_text(&text)
+}
+
+/// Вариант [`parse_frontmatter`] без файловой системы: frontmatter из
+/// готового текста скилла (встроенные ассеты бинаря — MCP-промпты
+/// плейбуков в `mcp_server`).
+#[must_use]
+pub fn parse_frontmatter_text(text: &str) -> Option<(String, String)> {
     let mut lines = text.lines();
     if lines.next()?.trim() != "---" {
         return None;
