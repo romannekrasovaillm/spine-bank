@@ -66,7 +66,7 @@
 | `web_search` / `web_fetch` / `web_arch_sites` | Фактура из веба: кураторские сайты, первоисточники |
 | `skill_search` / `skill_load` / `plugin_list` | Библиотека методик (плагины) — поиск и подгрузка в контекст |
 | `skill_distill` | Дистилляция статьи/конспекта в новый скилл библиотеки |
-| `handoff_create` / `harness_run` | Передача контекста кодовому харнессу и прогон исполнителя |
+| `handoff_create` / `harness_run` | Передача контекста кодовому харнессу и прогон исполнителя (создание пакета — и в core-сборке; прогон — только полная) |
 | `fleet_audit` | SSOT-аудит флота worktree: точные дубли и дрейф копий спайна (модель 5.2) |
 | `agentsmd_generate` / `agentsmd_lint` | AGENTS.md для репозиториев команд + дрейф-контроль |
 | `landscape_report` / `adr_registry` / `rules_report` | Реестры и отчёты контура (EA-3, ADR-036/037): ландшафт систем, глобальный реестр ADR, инвентарь правил — JSON со счётчиками |
@@ -230,7 +230,7 @@ Archify CLI (`schemaVersion: 1`) — точка машинного потреб�
 
 | Инструмент | Назначение | Параметры |
 |---|---|---|
-| `handoff_create` | Handoff-пакет `.arch-handoff/` (TASK.md, ARCHITECTURE.md, CONSTRAINTS.yaml, SPEC.md — шаблон верифицируемых контрактов интерфейсов, MANIFEST.json, adr/) для кодового харнесса; предгейт: гарантирует git-репозиторий и baseline-коммит (якорь отката); TASK.md включает план отката и требование финального коммита | `repo`*, `task`*; `spec` — массив путей к спекам/ADR; `rollback` — явный план отката; `route` (`fast`/`standard`/`critical`) — рекомендованный таймаут прогона 1800/3600/7200 с (в MANIFEST, подхватывает `harness_run`) |
+| `handoff_create` | Handoff-пакет `.arch-handoff/` (TASK.md, ARCHITECTURE.md, CONSTRAINTS.yaml, SPEC.md — шаблон верифицируемых контрактов интерфейсов, MANIFEST.json, adr/) для кодового харнесса; предгейт: гарантирует git-репозиторий и baseline-коммит (якорь отката); TASK.md включает план отката и требование финального коммита. **Доступен и в core-сборке** (`arch-be mcp serve --rw`) — создание пакета чисто файловое | `repo`*, `task`*; `spec` — массив путей к спекам/ADR; `rollback` — явный план отката; `route` (`fast`/`standard`/`critical`) — рекомендованный таймаут прогона 1800/3600/7200 с (в MANIFEST, подхватывает `harness_run`) |
 | `harness_run` | Прогон пакета кодовым харнессом через настроенный адаптер (stdin/flag/positional, env): абсолютный потолок 30 мин + таймаут тишины 10 мин (heartbeat по mtime репо), прерывание убивает всю процессную группу, частичный вывод возвращается; JSON-контракт результата разбирается механически (валидация схемы, эскалация blocked/conflicts/open_questions); авто-коммит незакоммиченного хвоста исполнителя. `background=true` — фоновый прогон: немедленный возврат (задача `hr-*` в общем реестре фоновых задач, видна в `subagent_list`), агент остаётся доступным пользователю, результат — через `subagent_result` (в TUI о завершении агент уведомляется автоматически: отчёт приходит отдельным ходом), полный лог — `reports/harness/<id>.log`; прерывание хода (Esc/Alt+Enter) фоновый прогон не затрагивает. Не путать с bash — там квотинг ломает промпт, потолок 1800 с и нет heartbeat | `harness`* (claude-code, qwen-code, openclaw, hermes, theseus, codewhale, kimi-code), `repo`*; `task` (иначе `<repo>/.arch-handoff/TASK.md`); `timeout_secs`; `background` |
 
 Харнессы: Claude Code, Qwen Code, OpenClaw, Hermes, Theseus, CodeWhale —

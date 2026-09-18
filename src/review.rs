@@ -38,7 +38,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::error::{HarnessError, Result};
-use crate::gate::{self, GateComponent, GateReport, GateStatus};
+use crate::gate::{self, GateComponent, GateFinding, GateReport, GateStatus};
 use crate::llm::ToolSpec;
 use crate::model::{EntityKind, LinkKind, Model, load_model, validate};
 use crate::tool::{Tool, ToolContext, ToolOutput};
@@ -136,17 +136,15 @@ fn component_model_validate(repo: &Path) -> GateComponent {
         .iter()
         .filter(|i| i.severity == crate::model::Severity::Error)
         .count();
-    let findings: Vec<String> = report
+    let findings: Vec<GateFinding> = report
         .issues
         .iter()
-        .map(|i| {
-            format!(
-                "[{}] {} — {} ({})",
-                i.severity,
-                i.rule,
-                i.message,
-                i.file.display()
-            )
+        .map(|i| GateFinding {
+            severity: i.severity.to_string(),
+            rule: Some(i.rule.to_string()),
+            file: Some(i.file.display().to_string()),
+            line: None,
+            message: i.message.clone(),
         })
         .collect();
     GateComponent {
@@ -278,7 +276,7 @@ fn component_contracts(repo: &Path) -> GateComponent {
             findings: Vec::new(),
         };
     }
-    let mut findings: Vec<String> = Vec::new();
+    let mut findings: Vec<GateFinding> = Vec::new();
     let mut errors = 0usize;
     let mut linted_openapi = 0usize;
     let mut linted_asyncapi = 0usize;
@@ -304,15 +302,26 @@ fn component_contracts(repo: &Path) -> GateComponent {
                             if f.severity == "error" {
                                 errors += 1;
                             }
-                            findings
-                                .push(format!("[{}] {rel} {} — {}", f.severity, f.rule, f.message));
+                            findings.push(GateFinding {
+                                severity: f.severity.clone(),
+                                rule: Some(f.rule.clone()),
+                                file: Some(rel.clone()),
+                                line: None,
+                                message: f.message.clone(),
+                            });
                         }
                     }
                     // Файл распознан по маркеру, но линтер его не принял
                     // (например, Swagger 2.0) — это находка, а не сбой.
                     Err(e) => {
                         errors += 1;
-                        findings.push(format!("[error] {rel} contract-lint — {e}"));
+                        findings.push(GateFinding {
+                            severity: "error".to_string(),
+                            rule: Some("contract-lint".to_string()),
+                            file: Some(rel.clone()),
+                            line: None,
+                            message: e.to_string(),
+                        });
                     }
                 }
             }
@@ -324,13 +333,24 @@ fn component_contracts(repo: &Path) -> GateComponent {
                             if f.severity == "error" {
                                 errors += 1;
                             }
-                            findings
-                                .push(format!("[{}] {rel} {} — {}", f.severity, f.rule, f.message));
+                            findings.push(GateFinding {
+                                severity: f.severity.clone(),
+                                rule: Some(f.rule.clone()),
+                                file: Some(rel.clone()),
+                                line: None,
+                                message: f.message.clone(),
+                            });
                         }
                     }
                     Err(e) => {
                         errors += 1;
-                        findings.push(format!("[error] {rel} contract-lint — {e}"));
+                        findings.push(GateFinding {
+                            severity: "error".to_string(),
+                            rule: Some("contract-lint".to_string()),
+                            file: Some(rel.clone()),
+                            line: None,
+                            message: e.to_string(),
+                        });
                     }
                 }
             }
@@ -1194,7 +1214,7 @@ mod tests {
             .expect("секция");
         assert_eq!(model.status, GateStatus::Fail);
         assert!(
-            model.findings.iter().any(|f| f.contains("broken-link")),
+            model.findings.iter().any(|f| f.rule.as_deref() == Some("broken-link")),
             "{:?}",
             model.findings
         );
@@ -1224,7 +1244,7 @@ mod tests {
             .expect("секция");
         assert_eq!(contracts.status, GateStatus::Fail);
         assert!(
-            contracts.findings.iter().any(|f| f.contains("OA-001")),
+            contracts.findings.iter().any(|f| f.rule.as_deref() == Some("OA-001")),
             "{:?}",
             contracts.findings
         );

@@ -185,6 +185,11 @@ enum Cmd {
         /// Файл ограничений (по умолчанию <repo>/.arch-handoff/`CONSTRAINTS.yaml`).
         #[arg(long)]
         constraints: Option<PathBuf>,
+        /// Формат вывода: text (дефолт) | sarif | junit | gitlab-codequality |
+        /// markdown. Машинные форматы — строго в stdout (артефакт CI),
+        /// exit-код не меняется (красный гейт — данные отчёта: exit 1).
+        #[arg(long, default_value = "text", value_name = "FORMAT")]
+        format: String,
     },
     /// Составное архитектурное ревью репозитория одним ответом (бэклог
     /// волны 3, п.13): маршрут значимости из git-диффа + весь контур
@@ -211,15 +216,27 @@ enum Cmd {
     /// Avro (.avsc), JSON Schema топиков, DDL-миграции (.sql). Ломающее
     /// изменение — exit 1 (гейт для CI). С `--model` (корень кейса с
     /// model/) ломающий дифф сразу возвращает потребителей и владельцев
-    /// по полю `contract` у INT (ADR-035).
+    /// по полю `contract` у INT (ADR-035). Форматы вывода для CI —
+    /// `--format sarif|junit|gitlab-codequality|markdown` (волна 2, п.8).
+    #[command(name = "contract-diff", visible_alias = "contract_diff")]
     ContractDiff {
         /// Старая версия контракта (yaml/yml/json/proto/avsc/sql).
         old: PathBuf,
         /// Новая версия контракта (тот же формат).
         new: PathBuf,
-        /// Формат: auto (детектор, дефолт) | openapi | proto | avro |
+        /// Язык контракта: auto (детектор, дефолт) | openapi | proto | avro |
         /// jsonschema | ddl.
         #[arg(long, default_value = "auto")]
+        contract_format: String,
+        /// Формат вывода для CI: text (дефолт) | sarif | junit |
+        /// gitlab-codequality | markdown (машинные — в stdout, как --json;
+        /// несовместим с --json).
+        #[arg(
+            long,
+            default_value = "text",
+            value_name = "FORMAT",
+            conflicts_with = "json"
+        )]
         format: String,
         /// Корень кейса с model/ — секция impact (потребители/владельцы
         /// ломаемого контракта, ADR-035).
@@ -302,7 +319,17 @@ enum Cmd {
         json: bool,
     },
     /// Диагностика окружения: ключи, каталоги, плагины, харнессы, MCP.
-    Doctor,
+    /// С `--host <хост>` — точечная проверка подключения `connect <host>`:
+    /// бинарь arch-be в PATH, файл настроек хоста с `mcpServers.spine`,
+    /// скиллы на месте, версия хоста.
+    Doctor {
+        /// Хост connect: claude | qwen | gigacode | codex | kimi | omp | generic.
+        #[arg(long, value_name = "HOST")]
+        host: Option<String>,
+        /// Каталог проекта для проверки хоста (по умолчанию — текущий).
+        #[arg(long, requires = "host")]
+        dir: Option<PathBuf>,
+    },
     /// Экспорт журнала сессии в Word/Excel.
     Export {
         /// Формат: word (docx) или excel (xlsx).
@@ -369,11 +396,18 @@ enum Cmd {
         cmd: ArchunitCmd,
     },
     /// Подключить Spine к внешнему CLI-агенту (MCP-сервер + скиллы + хуки):
-    /// claude | qwen | codex | kimi | omp | generic. (Инверсия харнесса,
-    /// шаг 3; называется `connect`, т.к. `export` занят экспортом журнала.)
+    /// claude | qwen | gigacode | codex | kimi | omp | generic. Особые значения —
+    /// гейты, не зависящие от хоста: `ci` (джоба архитектурного гейта под
+    /// `--provider gitlab|github|jenkins`) и `git-hooks` (pre-commit + pre-push).
+    /// (Инверсия харнесса, шаг 3; называется `connect`, т.к. `export` занят
+    /// экспортом журнала.)
     Connect {
-        /// Хост: claude | qwen | codex | kimi | omp | generic.
+        /// Хост: claude | qwen | gigacode | codex | kimi | omp | generic |
+        /// ci | git-hooks.
         host: String,
+        /// CI-провайдер (только для `connect ci`): gitlab | github | jenkins.
+        #[arg(long, value_name = "PROVIDER")]
+        provider: Option<String>,
         /// Каталог проекта (по умолчанию — текущий).
         #[arg(long)]
         dir: Option<PathBuf>,
@@ -782,6 +816,16 @@ enum ControlCmd {
         /// прогонов (PostToolUse-хуки); полный прогон остаётся истиной гейта.
         #[arg(long, value_name = "GIT_REF")]
         changed_since: Option<String>,
+        /// Формат вывода для CI: text (дефолт) | sarif | junit |
+        /// gitlab-codequality | markdown (машинные — в stdout, как --json;
+        /// несовместим с --json).
+        #[arg(
+            long,
+            default_value = "text",
+            value_name = "FORMAT",
+            conflicts_with = "json"
+        )]
+        format: String,
     },
     /// Линтер ARCHITECTURE-SPINE.md.
     Spine {
@@ -1018,6 +1062,11 @@ enum TraceCmd {
     Check {
         /// Корень кейса (каталог с model/).
         dir: PathBuf,
+        /// Формат вывода: text (дефолт — markdown-отчёт звеньев) | sarif |
+        /// junit | gitlab-codequality | markdown (нормализованная таблица
+        /// находок, `src/report_fmt.rs`; машинные — в stdout).
+        #[arg(long, default_value = "text", value_name = "FORMAT")]
+        format: String,
     },
 }
 
@@ -1352,7 +1401,7 @@ async fn main() -> Result<()> {
             }
             let route: arch_harness::control::Route =
                 route.parse().map_err(|e: String| anyhow::anyhow!(e))?;
-            let packet = arch_harness::harness::generate_handoff(
+            let packet = arch_harness::handoff::generate_handoff(
                 &repo,
                 &task,
                 &spec,
@@ -1422,7 +1471,7 @@ async fn main() -> Result<()> {
                     .context("нет --task и не найден .arch-handoff/TASK.md")?,
             };
             let mut hcfg_owned = hcfg.clone();
-            if let Some(t) = arch_harness::harness::recommended_timeout_secs(&repo) {
+            if let Some(t) = arch_harness::handoff::recommended_timeout_secs(&repo) {
                 // Пакет несёт рекомендацию по маршруту значимости (Fast/Standard/Critical).
                 hcfg_owned.timeout_secs = t.clamp(600, 7200);
             }
@@ -1508,6 +1557,7 @@ async fn main() -> Result<()> {
             route,
             base,
             constraints,
+            format,
         }) => {
             let repo = repo.unwrap_or_else(|| PathBuf::from("."));
             let route = match route.trim().to_ascii_lowercase().as_str() {
@@ -1518,6 +1568,8 @@ async fn main() -> Result<()> {
                         .map_err(|e: String| anyhow::anyhow!(e))?,
                 ),
             };
+            let format = arch_harness::report_fmt::ReportFormat::parse(&format)
+                .map_err(anyhow::Error::msg)?;
             // Пороги маршрутов — из конфига ([significance], ADR-034).
             let limits = cfg
                 .significance
@@ -1530,7 +1582,22 @@ async fn main() -> Result<()> {
                 constraints.as_deref(),
                 limits,
             )?;
-            print!("{}", arch_harness::gate::render(&report));
+            match format {
+                arch_harness::report_fmt::ReportFormat::Text => {
+                    print!("{}", arch_harness::gate::render(&report));
+                }
+                machine => {
+                    // Машинные форматы — строго в stdout (артефакт CI);
+                    // exit-код тот же, что у текста.
+                    print!(
+                        "{}",
+                        arch_harness::report_fmt::render(
+                            machine,
+                            &arch_harness::report_fmt::FmtReport::from_gate(&report),
+                        )
+                    );
+                }
+            }
             if !report.passed {
                 std::process::exit(1);
             }
@@ -1570,23 +1637,26 @@ async fn main() -> Result<()> {
         Some(Cmd::ContractDiff {
             old,
             new,
+            contract_format,
             format,
             model,
             json,
         }) => {
-            let format = match format.trim() {
+            let lang = match contract_format.trim() {
                 "auto" => None,
                 other => Some(
                     arch_harness::contract_diff::ContractFormat::from_name(other)
                         .ok_or_else(|| {
                             anyhow::anyhow!(
-                                "неизвестный формат '{other}' (допустимы: auto, openapi, proto, avro, jsonschema, ddl)"
+                                "неизвестный формат контракта '{other}' (допустимы: auto, openapi, proto, avro, jsonschema, ddl)"
                             )
                         })?,
                 ),
             };
+            let out_format = arch_harness::report_fmt::ReportFormat::parse(&format)
+                .map_err(anyhow::Error::msg)?;
             let report =
-                arch_harness::contract_diff::diff_report(&old, &new, format, model.as_deref())?;
+                arch_harness::contract_diff::diff_report(&old, &new, lang, model.as_deref())?;
             if json {
                 let verdict = arch_harness::contract_diff::report_json(&report);
                 println!(
@@ -1594,7 +1664,22 @@ async fn main() -> Result<()> {
                     serde_json::to_string_pretty(&verdict).unwrap_or_else(|_| verdict.to_string())
                 );
             } else {
-                print!("{}", arch_harness::contract_diff::render_report(&report));
+                match out_format {
+                    arch_harness::report_fmt::ReportFormat::Text => {
+                        print!("{}", arch_harness::contract_diff::render_report(&report));
+                    }
+                    machine => {
+                        print!(
+                            "{}",
+                            arch_harness::report_fmt::render(
+                                machine,
+                                &arch_harness::report_fmt::FmtReport::from_contract_diff(
+                                    &report.findings,
+                                ),
+                            )
+                        );
+                    }
+                }
             }
             if report.has_breaking() {
                 std::process::exit(1);
@@ -1657,9 +1742,22 @@ async fn main() -> Result<()> {
                 print!("{}", arch_harness::digest::render_markdown(&report));
             }
         }
-        Some(Cmd::Doctor) => {
-            let checks = arch_harness::doctor::run_checks(&cfg);
-            print!("{}", arch_harness::doctor::render(&checks));
+        Some(Cmd::Doctor { host, dir }) => {
+            let checks = if let Some(raw) = host {
+                let host = arch_harness::connect::Host::parse(&raw).map_err(anyhow::Error::msg)?;
+                let dir = match dir {
+                    Some(d) => d,
+                    None => std::env::current_dir().context("cwd")?,
+                };
+                let checks =
+                    arch_harness::doctor::run_host_checks(host, &dir, dirs::home_dir().as_deref());
+                print!("{}", arch_harness::doctor::render_host(host, &checks));
+                checks
+            } else {
+                let checks = arch_harness::doctor::run_checks(&cfg);
+                print!("{}", arch_harness::doctor::render(&checks));
+                checks
+            };
             if arch_harness::doctor::exit_code(&checks) != 0 {
                 std::process::exit(1);
             }
@@ -1691,6 +1789,7 @@ async fn main() -> Result<()> {
         Some(Cmd::Archunit { cmd }) => cmd_archunit(cmd).await?,
         Some(Cmd::Connect {
             host,
+            provider,
             dir,
             rw,
             no_skills,
@@ -1700,11 +1799,53 @@ async fn main() -> Result<()> {
             apply_global,
             dry_run,
         }) => {
-            let host = arch_harness::connect::Host::parse(&host).map_err(anyhow::Error::msg)?;
             let dir = match dir {
                 Some(d) => d,
                 None => std::env::current_dir().context("cwd")?,
             };
+            let special = host.trim().to_ascii_lowercase();
+            if special == "ci" || special == "git-hooks" || special == "githooks" {
+                // Гейты, не зависящие от хоста (волна 2, п.8): флаги агентных
+                // хостов здесь неприменимы — отклоняем явно, чтобы не
+                // молча игнорировать.
+                if rw || no_skills || no_hooks || no_agents_md || strict_hooks || apply_global {
+                    return Err(anyhow::anyhow!(
+                        "флаги --rw/--no-skills/--no-hooks/--no-agents-md/--strict-hooks/--apply-global применимы только к хостам агентов, не к `connect {special}`"
+                    ));
+                }
+                if special == "ci" {
+                    let raw = provider.as_deref().ok_or_else(|| {
+                        anyhow::anyhow!("connect ci: укажите --provider gitlab|github|jenkins")
+                    })?;
+                    let provider = arch_harness::connect::CiProvider::parse(raw)
+                        .map_err(anyhow::Error::msg)?;
+                    let report = arch_harness::connect::connect_ci(provider, &dir, dry_run)?;
+                    print!(
+                        "{}",
+                        arch_harness::connect::render_plan(
+                            &format!("CI-джоба Spine ({}) — {}", provider.name(), dir.display()),
+                            &report,
+                        )
+                    );
+                } else {
+                    if provider.is_some() {
+                        return Err(anyhow::anyhow!("--provider применим только к `connect ci`"));
+                    }
+                    let report = arch_harness::connect::connect_git_hooks(&dir, dry_run)?;
+                    print!(
+                        "{}",
+                        arch_harness::connect::render_plan(
+                            &format!("Git-хуки Spine — {}", dir.display()),
+                            &report,
+                        )
+                    );
+                }
+                return Ok(());
+            }
+            if provider.is_some() {
+                return Err(anyhow::anyhow!("--provider применим только к `connect ci`"));
+            }
+            let host = arch_harness::connect::Host::parse(&host).map_err(anyhow::Error::msg)?;
             let opts = arch_harness::connect::ConnectOptions {
                 host,
                 dir,
@@ -2611,6 +2752,7 @@ fn cmd_control(cfg: &arch_harness::config::Config, cmd: ControlCmd) -> Result<()
             baseline,
             baseline_update,
             changed_since,
+            format,
         } => {
             let c = constraints.unwrap_or_else(|| repo.join(".arch-handoff/CONSTRAINTS.yaml"));
             let options = arch_harness::control::baseline::CheckOptions {
@@ -2619,11 +2761,23 @@ fn cmd_control(cfg: &arch_harness::config::Config, cmd: ControlCmd) -> Result<()
                 changed_since,
             };
             let report = arch_harness::control::check_with_options(&repo, &c, &options)?;
+            let format = arch_harness::report_fmt::ReportFormat::parse(&format)
+                .map_err(anyhow::Error::msg)?;
             if json {
                 // SDK-контракт v1: машиночитаемый отчёт, exit code как в текстовом режиме.
                 println!(
                     "{}",
                     serde_json::to_string(&report).expect("FitnessReport сериализуется")
+                );
+            } else if format != arch_harness::report_fmt::ReportFormat::Text {
+                // Машинные форматы CI (SARIF/JUnit/GitLab Code Quality/markdown):
+                // строго в stdout, exit-код как у текста.
+                print!(
+                    "{}",
+                    arch_harness::report_fmt::render(
+                        format,
+                        &arch_harness::report_fmt::FmtReport::from_fitness(&report),
+                    )
                 );
             } else {
                 println!("{}", report.summary);
@@ -3031,10 +3185,25 @@ fn cmd_model(cmd: ModelCmd) -> Result<()> {
 /// `arch-be trace`: трассируемость модели как fitness-функция (ADR-006).
 fn cmd_trace(cmd: TraceCmd) -> Result<()> {
     match cmd {
-        TraceCmd::Check { dir } => {
+        TraceCmd::Check { dir, format } => {
+            let format = arch_harness::report_fmt::ReportFormat::parse(&format)
+                .map_err(anyhow::Error::msg)?;
             let report = arch_harness::trace::trace_check(&dir)
                 .with_context(|| format!("трассировка кейса {}", dir.display()))?;
-            print!("{}", arch_harness::trace::render_markdown(&report));
+            match format {
+                arch_harness::report_fmt::ReportFormat::Text => {
+                    print!("{}", arch_harness::trace::render_markdown(&report));
+                }
+                machine => {
+                    print!(
+                        "{}",
+                        arch_harness::report_fmt::render(
+                            machine,
+                            &arch_harness::report_fmt::FmtReport::from_trace(&report),
+                        )
+                    );
+                }
+            }
             if report.has_errors() {
                 std::process::exit(1);
             }

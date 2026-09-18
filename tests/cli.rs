@@ -1593,7 +1593,417 @@ fn contract_diff_proto_breaking_exits_1_with_consumers() {
     cmd.arg("contract-diff")
         .arg(contracts.join("pay-old.proto").as_os_str())
         .arg(contracts.join("pay-new.proto").as_os_str())
-        .arg("--format")
+        .arg("--contract-format")
         .arg("xml");
     cmd.assert().failure();
+}
+
+/// `arch-be connect gigacode --dir <проект>`: автоопределение каталога
+/// настроек (пустой проект → новый `.gigacode/`), settings.json с
+/// mcpServers.spine + скиллы в `.gigacode/skills/`; `--dry-run` ничего не
+/// пишет. Проверка подключения — `arch-be doctor --host gigacode`.
+#[test]
+fn connect_gigacode_scaffolds_and_doctor_host_verifies() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let proj = tmp.path().join("proj");
+    std::fs::create_dir_all(&proj).expect("mkdir proj");
+
+    // dry-run: план без записи.
+    let mut dry = arch_cmd(tmp.path());
+    dry.arg("connect")
+        .arg("gigacode")
+        .arg("--dir")
+        .arg(proj.as_os_str())
+        .arg("--dry-run");
+    dry.assert()
+        .success()
+        .stdout(contains("dry-run"))
+        .stdout(contains(".gigacode"));
+    assert!(
+        !proj.join(".gigacode").exists(),
+        "dry-run ничего не записал"
+    );
+
+    // Реальный прогон: settings.json + скиллы + сниппет хуков.
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("connect")
+        .arg("gigacode")
+        .arg("--dir")
+        .arg(proj.as_os_str());
+    cmd.assert()
+        .success()
+        .stdout(contains("Подключение Spine к хосту «gigacode»"))
+        .stdout(contains("создан"))
+        .stdout(contains("doctor --host gigacode"));
+    let settings = proj.join(".gigacode/settings.json");
+    assert!(settings.is_file(), "settings.json создан");
+    let text = std::fs::read_to_string(&settings).expect("read settings");
+    assert!(text.contains("\"command\": \"arch-be\""), "{text}");
+    assert!(
+        proj.join(".gigacode/skills/adr-authoring/SKILL.md")
+            .is_file(),
+        "скиллы разложены"
+    );
+
+    // doctor --host: на подключённом проекте settings/skills — ✓.
+    // (Проверки «arch-be»/«host» зависят от PATH машины — их вердикты не
+    // ассертим; итоговый код здесь не проверяем по той же причине.)
+    let mut doctor = arch_cmd(tmp.path());
+    doctor
+        .arg("doctor")
+        .arg("--host")
+        .arg("gigacode")
+        .arg("--dir")
+        .arg(proj.as_os_str());
+    doctor
+        .assert()
+        .stdout(contains("arch-be doctor --host gigacode"))
+        .stdout(contains("settings"))
+        .stdout(contains("mcpServers.spine"))
+        .stdout(contains("Итог:"));
+
+    // doctor --host на неподключённом проекте — проблема и код 1.
+    let empty = tmp.path().join("empty");
+    std::fs::create_dir_all(&empty).expect("mkdir empty");
+    let mut bad = arch_cmd(tmp.path());
+    bad.arg("doctor")
+        .arg("--host")
+        .arg("qwen")
+        .arg("--dir")
+        .arg(empty.as_os_str());
+    bad.assert()
+        .code(1)
+        .stdout(contains("не найден или не JSON"));
+}
+
+// ---------------------------------------------------------------------------
+// Машинные форматы отчётов (--format) и connect ci/git-hooks (волна 2, п.8)
+// ---------------------------------------------------------------------------
+
+/// `arch-be gate --format sarif` на репозитории с находкой: exit 1, в stdout —
+/// валидный SARIF 2.1.0 с result'ом (ruleId, level, location, fingerprint).
+#[test]
+fn gate_format_sarif_emits_valid_sarif_with_result() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = gate_repo(tmp.path());
+    // Находка fitness: файл с запрещённым паттерном PAN.
+    std::fs::create_dir_all(repo.join("src")).expect("mkdir src");
+    std::fs::write(repo.join("src/hotfix.py"), "pan = 'PAN'\n").expect("write hotfix");
+
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("gate")
+        .arg("--repo")
+        .arg(repo.as_os_str())
+        .arg("--format")
+        .arg("sarif");
+    let assert = cmd.assert().code(1);
+    let out = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8");
+    let doc: serde_json::Value = serde_json::from_str(&out).expect("валидный SARIF JSON");
+    assert_eq!(doc["version"], "2.1.0");
+    let run = &doc["runs"][0];
+    assert_eq!(run["tool"]["driver"]["name"], "arch-be gate");
+    let results = run["results"].as_array().expect("results");
+    assert!(
+        !results.is_empty(),
+        "находка fitness обязана попасть в results"
+    );
+    let hit = results
+        .iter()
+        .find(|r| r["ruleId"] == "no_pan")
+        .expect("result по правилу no_pan");
+    assert_eq!(hit["level"], "error");
+    assert!(
+        hit["locations"][0]["physicalLocation"]["artifactLocation"]["uri"]
+            .as_str()
+            .expect("uri")
+            .ends_with("src/hotfix.py"),
+        "{hit}"
+    );
+    assert!(
+        hit["partialFingerprints"]["spine/v1"].as_str().is_some(),
+        "partialFingerprints: {hit}"
+    );
+}
+
+/// `arch-be gate --format gitlab-codequality`: массив Code Quality с
+/// обязательными полями (`description`/`check_name`/`fingerprint`/`severity`/`location`).
+#[test]
+fn gate_format_gitlab_codequality_emits_cq_entries() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = gate_repo(tmp.path());
+    std::fs::create_dir_all(repo.join("src")).expect("mkdir src");
+    std::fs::write(repo.join("src/hotfix.py"), "pan = 'PAN'\n").expect("write hotfix");
+
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("gate")
+        .arg("--repo")
+        .arg(repo.as_os_str())
+        .arg("--format")
+        .arg("gitlab-codequality");
+    let assert = cmd.assert().code(1);
+    let out = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8");
+    let doc: serde_json::Value = serde_json::from_str(&out).expect("валидный JSON");
+    let arr = doc.as_array().expect("массив Code Quality");
+    let hit = arr
+        .iter()
+        .find(|e| {
+            e["check_name"]
+                .as_str()
+                .is_some_and(|n| n.contains("no_pan"))
+        })
+        .expect("запись по no_pan");
+    assert_eq!(hit["severity"], "major");
+    assert!(
+        hit["location"]["path"]
+            .as_str()
+            .expect("path")
+            .ends_with("src/hotfix.py"),
+        "{hit}"
+    );
+    assert!(hit["fingerprint"].as_str().is_some(), "{hit}");
+}
+
+/// `arch-be control check --format junit` на репо с находкой: exit 1, в
+/// stdout — `JUnit` XML с `<failure>`; `--json` и `--format` несовместимы.
+#[test]
+fn control_check_format_junit_emits_failure_xml() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = gate_repo(tmp.path());
+    std::fs::create_dir_all(repo.join("src")).expect("mkdir src");
+    std::fs::write(repo.join("src/hotfix.py"), "pan = 'PAN'\n").expect("write hotfix");
+
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("control")
+        .arg("check")
+        .arg(repo.as_os_str())
+        .arg("--format")
+        .arg("junit");
+    cmd.assert()
+        .code(1)
+        .stdout(contains("<?xml version=\"1.0\" encoding=\"UTF-8\"?>"))
+        .stdout(contains("<testsuite name=\"no_pan\""))
+        .stdout(contains("<failure message="));
+
+    // Зелёный прогон: pass-группы без failure, exit 0.
+    let clean = gate_repo(&tmp.path().join("clean-home"));
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("control")
+        .arg("check")
+        .arg(clean.as_os_str())
+        .arg("--format")
+        .arg("junit");
+    cmd.assert()
+        .success()
+        .stdout(contains("<testsuite name=\"spine_present\""))
+        .stdout(predicate::str::contains("<failure").not());
+
+    // --json конфликтует с --format (ошибка clap, exit 2).
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("control")
+        .arg("check")
+        .arg(repo.as_os_str())
+        .arg("--json")
+        .arg("--format")
+        .arg("sarif");
+    cmd.assert().code(2);
+}
+
+/// `arch-be trace check --format gitlab-codequality`: error-находка (AD без
+/// правила) — exit 1 и запись с путём-заглушкой (у трассировки нет адреса).
+#[test]
+fn trace_check_format_gitlab_codequality_on_error() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let case = tmp.path().join("case");
+    std::fs::create_dir_all(case.join("model")).expect("mkdir model");
+    std::fs::write(
+        case.join("model/AD-1.md"),
+        "---\nid: AD-1\ntype: ad\ntitle: Инвариант\nstatus: ADOPTED\n---\n\nТело.\n",
+    )
+    .expect("write AD");
+    std::fs::write(case.join("CONSTRAINTS.yaml"), "rules: []\n").expect("write constraints");
+
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("trace")
+        .arg("check")
+        .arg(case.as_os_str())
+        .arg("--format")
+        .arg("gitlab-codequality");
+    let assert = cmd.assert().code(1);
+    let out = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8");
+    let doc: serde_json::Value = serde_json::from_str(&out).expect("валидный JSON");
+    let arr = doc.as_array().expect("массив Code Quality");
+    let hit = arr
+        .iter()
+        .find(|e| {
+            e["check_name"]
+                .as_str()
+                .is_some_and(|n| n.contains("ad-not-verified"))
+        })
+        .expect("запись ad-not-verified");
+    assert_eq!(hit["severity"], "major");
+    assert_eq!(hit["location"]["path"], "(repository)");
+}
+
+/// `arch-be contract-diff <old> <new>`: breaking-изменение — exit 1 (текст
+/// «Итог: FAIL»); `--format sarif` — валидный SARIF с ruleId CD-001;
+/// одинаковые контракты — exit 0.
+#[test]
+fn contract_diff_cli_text_and_sarif() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let old = tmp.path().join("old.yaml");
+    let new = tmp.path().join("new.yaml");
+    std::fs::write(
+        &old,
+        "openapi: 3.0.3\ninfo: {title: T, version: '1'}\npaths:\n  /v1/pets:\n    get:\n      responses:\n        '200': {description: ok}\n",
+    )
+    .expect("write old");
+    std::fs::write(
+        &new,
+        "openapi: 3.0.3\ninfo: {title: T, version: '1'}\npaths: {}\n",
+    )
+    .expect("write new");
+
+    // Текст по умолчанию: как у инструмента contract_diff.
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("contract-diff").arg(&old).arg(&new);
+    cmd.assert()
+        .code(1)
+        .stdout(contains("[error]"))
+        .stdout(contains("CD-001"))
+        .stdout(contains("Итог: FAIL"));
+
+    // Алиас с подчёркиванием (имя MCP-инструмента) тоже работает.
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("contract_diff")
+        .arg(&old)
+        .arg(&new)
+        .arg("--format")
+        .arg("sarif");
+    let assert = cmd.assert().code(1);
+    let out = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8");
+    let doc: serde_json::Value = serde_json::from_str(&out).expect("валидный SARIF JSON");
+    assert_eq!(doc["runs"][0]["results"][0]["ruleId"], "CD-001");
+
+    // Без изменений — PASS, exit 0.
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("contract-diff").arg(&old).arg(&old);
+    cmd.assert().success().stdout(contains("Итог: PASS"));
+}
+
+/// `arch-be connect ci --dry-run` для трёх провайдеров: план с путём джобы,
+/// ничего не пишется; без `--provider` — понятная ошибка (exit 1).
+#[test]
+fn connect_ci_dry_run_for_all_providers() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path().join("proj");
+    std::fs::create_dir_all(&dir).expect("mkdir proj");
+
+    for (provider, rel) in [
+        ("gitlab", ".gitlab-ci.yml"),
+        ("github", ".github/workflows/spine-gate.yml"),
+        ("jenkins", "Jenkinsfile"),
+    ] {
+        let mut cmd = arch_cmd(tmp.path());
+        cmd.arg("connect")
+            .arg("ci")
+            .arg("--provider")
+            .arg(provider)
+            .arg("--dir")
+            .arg(dir.as_os_str())
+            .arg("--dry-run");
+        cmd.assert()
+            .success()
+            .stdout(contains("CI-джоба Spine"))
+            .stdout(contains("dry-run"))
+            .stdout(contains(rel));
+        assert!(!dir.join(rel).exists(), "{provider}: dry-run записал файл");
+    }
+
+    // Без --provider — ошибка с подсказкой.
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("connect")
+        .arg("ci")
+        .arg("--dir")
+        .arg(dir.as_os_str());
+    cmd.assert()
+        .code(1)
+        .stderr(contains("--provider gitlab|github|jenkins"));
+
+    // Реальный прогон gitlab: файл с маркерами; повтор — «без изменений».
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("connect")
+        .arg("ci")
+        .arg("--provider")
+        .arg("gitlab")
+        .arg("--dir")
+        .arg(dir.as_os_str());
+    cmd.assert().success().stdout(contains(".gitlab-ci.yml"));
+    let text = std::fs::read_to_string(dir.join(".gitlab-ci.yml")).expect("read");
+    assert!(text.contains("spine-connect:begin"), "{text}");
+    assert!(text.contains("reports"), "{text}");
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("connect")
+        .arg("ci")
+        .arg("--provider")
+        .arg("gitlab")
+        .arg("--dir")
+        .arg(dir.as_os_str());
+    cmd.assert().success().stdout(contains("Без изменений"));
+    assert_eq!(
+        std::fs::read_to_string(dir.join(".gitlab-ci.yml")).expect("read"),
+        text,
+        "повтор изменил файл"
+    );
+}
+
+/// `arch-be connect git-hooks` в git-репозитории: pre-commit + pre-push с
+/// маркерами и fail-soft гардами; повтор — без дублей.
+#[test]
+fn connect_git_hooks_writes_marked_hooks_idempotently() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("mkdir repo");
+    git(&repo, &["init", "-q"]);
+
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("connect")
+        .arg("git-hooks")
+        .arg("--dir")
+        .arg(repo.as_os_str());
+    cmd.assert()
+        .success()
+        .stdout(contains("Git-хуки Spine"))
+        .stdout(contains("pre-commit"))
+        .stdout(contains("pre-push"));
+
+    let pre_commit = std::fs::read_to_string(repo.join(".git/hooks/pre-commit")).expect("read");
+    assert!(pre_commit.contains("spine-connect:begin"), "{pre_commit}");
+    assert!(
+        pre_commit.contains("arch-be control check ."),
+        "{pre_commit}"
+    );
+    assert!(pre_commit.contains("command -v arch-be"), "{pre_commit}");
+    let pre_push = std::fs::read_to_string(repo.join(".git/hooks/pre-push")).expect("read");
+    assert!(pre_push.contains("arch-be gate --route auto"), "{pre_push}");
+
+    // Повтор: содержимое то же, маркеры по одному.
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("connect")
+        .arg("git-hooks")
+        .arg("--dir")
+        .arg(repo.as_os_str());
+    cmd.assert().success().stdout(contains("Без изменений"));
+    let again = std::fs::read_to_string(repo.join(".git/hooks/pre-commit")).expect("read");
+    assert_eq!(again, pre_commit, "повтор изменил pre-commit");
+    assert_eq!(again.matches("spine-connect:begin").count(), 1, "{again}");
+
+    // Вне git-репозитория — понятная ошибка (exit 1).
+    let plain = tmp.path().join("plain");
+    std::fs::create_dir_all(&plain).expect("mkdir plain");
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("connect")
+        .arg("git-hooks")
+        .arg("--dir")
+        .arg(plain.as_os_str());
+    cmd.assert().code(1).stderr(contains("не git-репозиторий"));
 }

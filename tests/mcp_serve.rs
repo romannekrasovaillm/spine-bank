@@ -745,14 +745,12 @@ fn rw_mode_lists_bridge_write_tools_over_stdio() {
     );
     let tools = responses[0]["result"]["tools"].as_array().expect("tools");
     let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
-    // В core-сборке домены harness/distill не собираются — их rw-инструменты
-    // (handoff_create, skill_distill) мост не отдаёт (спеки строятся от реестра).
-    #[cfg(feature = "harness")]
-    let rw_want = [
+    // handoff_create — в обеих сборках (генерация пакета — core-модуль
+    // `crate::handoff`, волна 2 п.10); skill_distill — только в harness.
+    let mut rw_want = vec![
         "handoff_create",
         "adr_new",
         "agentsmd_generate",
-        "skill_distill",
         "reverse_survey",
         "archify_deliver",
         "evidence_pack",
@@ -762,18 +760,8 @@ fn rw_mode_lists_bridge_write_tools_over_stdio() {
         "nfr_check",
         "rubric_prompt",
     ];
-    #[cfg(not(feature = "harness"))]
-    let rw_want = [
-        "adr_new",
-        "agentsmd_generate",
-        "reverse_survey",
-        "archify_deliver",
-        "evidence_pack",
-        "delta_propose",
-        "openapi_lint",
-        "nfr_check",
-        "rubric_prompt",
-    ];
+    #[cfg(feature = "harness")]
+    rw_want.push("skill_distill");
     for want in rw_want {
         assert!(
             names.contains(&want),
@@ -781,7 +769,7 @@ fn rw_mode_lists_bridge_write_tools_over_stdio() {
         );
     }
     #[cfg(not(feature = "harness"))]
-    for banned in ["handoff_create", "skill_distill"] {
+    for banned in ["skill_distill"] {
         assert!(
             !names.contains(&banned),
             "harness-инструмент {banned} не должен отдаваться в core: {names:?}"
@@ -809,16 +797,13 @@ fn rw_mode_lists_bridge_write_tools_over_stdio() {
             "never-инструмент {banned} не должен отдаваться и под --rw: {names:?}"
         );
     }
-    // Аннотации mutating-инструмента (handoff_create — домен сборки `harness`).
-    #[cfg(feature = "harness")]
-    {
-        let handoff = tools
-            .iter()
-            .find(|t| t["name"] == "handoff_create")
-            .expect("handoff_create");
-        assert_eq!(handoff["annotations"]["readOnlyHint"], false);
-        assert_eq!(handoff["annotations"]["destructiveHint"], true);
-    }
+    // Аннотации mutating-инструмента (handoff_create — в обеих сборках).
+    let handoff = tools
+        .iter()
+        .find(|t| t["name"] == "handoff_create")
+        .expect("handoff_create");
+    assert_eq!(handoff["annotations"]["readOnlyHint"], false);
+    assert_eq!(handoff["annotations"]["destructiveHint"], true);
 }
 
 #[test]
@@ -1362,5 +1347,93 @@ fn bridge_tranche3_composite_tools_over_stdio() {
             .contains("не найдена"),
         "{}",
         responses[3]
+    );
+}
+
+/// П.10 (волна 2): `handoff_create` отдаётся мостом `--rw` и в core-сборке —
+/// главный доказательный кейс drift-control воспроизводится core-бинарём в
+/// части создания пакета. Фикстура — спайн кейса 006
+/// (`кейсы/drift-control/handoff-example/`): пакет собирается с git-предгейтом
+/// (init + baseline-якорь) в tempdir-репо.
+#[test]
+fn handoff_create_over_stdio_creates_packet_on_drift_control_fixture() {
+    let home = tempfile::tempdir().expect("tmp");
+    let repo = home.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("mkdir repo");
+    let spine = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("кейсы/drift-control/handoff-example/ARCHITECTURE-SPINE.md");
+    assert!(spine.is_file(), "фикстура кейса drift-control: {spine:?}");
+
+    let list = json!({"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}).to_string();
+    let create = call(
+        2,
+        "handoff_create",
+        &json!({
+            "repo": repo,
+            "task": "Реализуй платёжное ядро: деньги целыми minor units, thiserror, идемпотентный authorize",
+            "spec": [spine],
+            "route": "fast",
+        }),
+    );
+    let responses = mcp_serve_with_args(home.path(), &["--rw"], &batch(&[list, create]));
+
+    // Инструмент в выдаче (в core-сборке тоже — это и есть пункт приёмки).
+    let tools = responses[0]["result"]["tools"].as_array().expect("tools");
+    assert!(
+        tools.iter().any(|t| t["name"] == "handoff_create"),
+        "handoff_create должен отдаваться мостом --rw (сборка: {})",
+        if cfg!(feature = "harness") {
+            "harness"
+        } else {
+            "core"
+        }
+    );
+
+    let out = structured(&responses[1], 2);
+    assert_eq!(out["tool"], "handoff_create");
+    let text = out["output"].as_str().expect("output");
+    assert!(text.contains("Handoff-пакет создан"), "{text}");
+
+    // Пакет на месте: задача со спайном кейса, манифест с baseline-якорем.
+    let dir = repo.join(".arch-handoff");
+    for file in [
+        "TASK.md",
+        "ARCHITECTURE.md",
+        "MANIFEST.json",
+        "CONSTRAINTS.yaml",
+        "SPEC.md",
+        "ROLLBACK.yaml",
+    ] {
+        assert!(dir.join(file).is_file(), "нет файла пакета {file}");
+    }
+    let task_md = std::fs::read_to_string(dir.join("TASK.md")).expect("TASK.md");
+    assert!(task_md.contains("платёжное ядро"), "{task_md}");
+    assert!(task_md.contains("## План отката"), "{task_md}");
+    let arch_md = std::fs::read_to_string(dir.join("ARCHITECTURE.md")).expect("ARCHITECTURE.md");
+    assert!(
+        arch_md.contains("AD-1"),
+        "спайн drift-control доехал в epic-context:\n{arch_md}"
+    );
+    let manifest: Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.join("MANIFEST.json")).expect("MANIFEST.json"),
+    )
+    .expect("manifest json");
+    assert!(
+        manifest["baseline_commit"]
+            .as_str()
+            .is_some_and(|h| !h.is_empty()),
+        "git-предгейт: baseline_commit проставлен (git init + якорь): {manifest}"
+    );
+    // Якорь реально существует в репозитории.
+    let log = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["log", "--oneline"])
+        .output()
+        .expect("git log");
+    let log_text = String::from_utf8_lossy(&log.stdout);
+    assert!(
+        log_text.contains("baseline"),
+        "baseline-коммит в истории: {log_text}"
     );
 }

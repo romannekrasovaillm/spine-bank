@@ -54,6 +54,7 @@ pub mod export;
 pub mod failure_memory;
 pub mod fleet;
 pub mod gate;
+pub mod handoff;
 #[cfg(feature = "harness")]
 pub mod harness;
 pub mod hooks;
@@ -80,6 +81,7 @@ pub mod publish;
 #[cfg(feature = "harness")]
 pub mod ralph;
 pub mod rehearsal;
+pub mod report_fmt;
 pub mod retry;
 pub mod review;
 pub mod rubric;

@@ -5,8 +5,27 @@ Spine локально** и хочет, чтобы **агент GigaCode сам 
 MCP-сервер, скиллы, хуки-гейты. GigaCode CLI — форк Qwen Code, поэтому все
 шаги проверены живьём на qwen-code (0.0.5 и 0.24.0).
 
-> **ВАЖНО про пути.** Ниже везде фигурируют каталоги Qwen Code —
-> `.qwen/settings.json` и `.qwen/skills/`. В GigaCode CLI они могут
+> **Нативная поддержка.** Начиная с волны 2 у `arch-be connect` есть хост
+> `gigacode`: каталог настроек определяется автоматически (существующий
+> `.gigacode/`; иначе существующий `.qwen/` — форк совместим; иначе
+> создаётся `.gigacode/`), скиллы раскладываются в `<каталог>/skills/`,
+> проверка — `arch-be doctor --host gigacode`. Инструкция ниже с промптом
+> для агента остаётся рабочим путём (в т.ч. для старых версий arch-be);
+> ручная адаптация путей при `connect gigacode` не нужна.
+
+> **Закрытый контур (без интернета) — офлайн-бандл.** На машине с
+> исходниками Spine: `scripts/make_offline_bundle.sh` собирает
+> `dist/spine-offline-<версия>-<os>-<arch>.tar.gz` (core-редакция: без сети
+> и TUI; `--edition full` — полная; готовый бинарь — `--binary ПУТЬ`).
+> Внутри: бинарь, вендоренный движок Archify (`vendor/archify/`, BE-22),
+> `SHA256SUMS` и `install.sh`. Ассеты (промпты/рубрики/скиллы) встроены в
+> бинарь — `arch-be init` работает офлайн. Установка на целевой машине:
+> `tar xzf spine-offline-*.tar.gz && cd spine-offline-* && ./install.sh`,
+> проверка — `arch-be doctor`. Дальше в корне проекта:
+> `arch-be connect gigacode` → `arch-be doctor --host gigacode`.
+
+> **ВАЖНО про пути.** Ниже в промпте для агента фигурируют каталоги Qwen
+> Code — `.qwen/settings.json` и `.qwen/skills/`. В GigaCode CLI они могут
 > называться иначе (например `.gigacode/settings.json` и
 > `.gigacode/skills/`) — **адаптируйте пути под фактический каталог вашей
 > сборки** (посмотрите, какой каталог создаёт GigaCode в проекте, или сверьтесь
@@ -19,13 +38,18 @@ MCP-сервер, скиллы, хуки-гейты. GigaCode CLI — форк Q
 
 ## Часть 1. Для архитектора (что происходит)
 
-1. GigaCode ставит/собирает бинарь `arch-be` (из релиза или из вашего клона).
-2. `arch-be connect qwen`: MCP-сервер `spine` в `.qwen/settings.json` +
-   62 скилла в `.qwen/skills/` — одной командой.
+1. GigaCode ставит/собирает бинарь `arch-be` (из релиза, офлайн-бандла или
+   из вашего клона).
+2. `arch-be connect gigacode` (или `connect qwen` на старых версиях):
+   MCP-сервер `spine` в `<каталог настроек>/settings.json` + 62 скилла в
+   `<каталог настроек>/skills/` — одной командой; каталог настроек
+   определяется автоматически (`.gigacode/` → `.qwen/` → новый `.gigacode/`).
 3. Одобряет сервер (`qwen mcp approve spine`).
 4. Опционально включает информационный хук гейта (SessionEnd; в headless
    не файрит — блокирующие гейты есть у Claude Code/Kimi/omp/OpenClaw).
-5. Проверяет: вызывает `fitness_check` и докладывает вердикт.
+5. Проверяет: `arch-be doctor --host gigacode` (механическая проверка:
+   бинарь в PATH, settings.json, скиллы, версия хоста), затем вызывает
+   `fitness_check` и докладывает вердикт.
 
 Всё это делает сам агент — вы только выдаёте ему промпт из части 2.
 
@@ -53,14 +77,20 @@ MCP-сервер, скиллы, хуки-гейты. GigaCode CLI — форк Q
    - ВАРИАНТ Б (сборка из локального клона): cd <ПУТЬ_К_КЛОНУ> &&
      cargo build --release --no-default-features --features core && скопируй
      target/release/arch-be в ~/.local/bin/.
+   - ВАРИАНТ В (закрытый контур, офлайн-бандл): распакуй
+     spine-offline-*.tar.gz и выполни ./install.sh из него (бинарь, движок
+     Archify, init — всё офлайн; целостность проверяется по SHA256SUMS).
    - Проверь: `arch-be --version` (ожидается 0.2.x).
 
 2. MCP-сервер + скиллы (project-level, НЕ затирай существующее — мердж):
-   - Выполни `arch-be connect qwen` в корне проекта — это запишет
-     `.qwen/settings.json` (mcpServers.spine) И раскладывает 62 скилла в
-     `.qwen/skills/` (нативный project scope в qwen-code ≥ 0.24).
-     Если каталог `.qwen/skills/` уже существовал — connect его не трогает;
-     тогда скопируй скиллы вручную из клона: assets/plugins/*/skills/*/.
+   - Выполни `arch-be connect gigacode` в корне проекта (если твоя версия
+     arch-be его ещё не знает — `arch-be connect qwen` с адаптацией путей
+     ниже) — это запишет `<каталог настроек>/settings.json` (mcpServers.spine)
+     И разложит 62 скилла в `<каталог настроек>/skills/` (каталог выбирается
+     автоматически: существующий `.gigacode/`, иначе `.qwen/`, иначе новый
+     `.gigacode/`; project scope skills — как в qwen-code ≥ 0.24).
+     Если каталог скиллов уже существовал и остался без встроенных —
+     скопируй скиллы вручную из клона: assets/plugins/*/skills/*/.
    - Одобри сервер: `qwen mcp approve spine` (в 0.24 project-серверы требуют
      одобрения) — или подтверди диалог при следующем интерактивном запуске.
 
@@ -73,6 +103,9 @@ MCP-сервер, скиллы, хуки-гейты. GigaCode CLI — форк Q
    пропусти и доложи. Блокирующие гейты есть у Claude Code/Kimi/omp/OpenClaw.
 
 4. Проверка (обязательна):
+   - Механическая: `arch-be doctor --host gigacode` (бинарь в PATH, запись
+     mcpServers.spine, скиллы на месте, версия хоста); код выхода 1 — разбор
+     находки до продолжения.
    - Вызови MCP-инструмент spine fitness_check с {"repo": "."} и доложи
      вердикт (passed true/false, число находок).
    - Вызови skill_search с {"query": "saga"} и перечисли 3 найденных скилла.
