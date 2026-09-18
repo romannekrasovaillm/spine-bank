@@ -986,3 +986,81 @@ fn connect_omp_writes_mcp_json_and_skills() {
         "dry-run ничего не записал"
     );
 }
+
+/// `arch-be connect gigacode --dir <проект>`: автоопределение каталога
+/// настроек (пустой проект → новый `.gigacode/`), settings.json с
+/// mcpServers.spine + скиллы в `.gigacode/skills/`; `--dry-run` ничего не
+/// пишет. Проверка подключения — `arch-be doctor --host gigacode`.
+#[test]
+fn connect_gigacode_scaffolds_and_doctor_host_verifies() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let proj = tmp.path().join("proj");
+    std::fs::create_dir_all(&proj).expect("mkdir proj");
+
+    // dry-run: план без записи.
+    let mut dry = arch_cmd(tmp.path());
+    dry.arg("connect")
+        .arg("gigacode")
+        .arg("--dir")
+        .arg(proj.as_os_str())
+        .arg("--dry-run");
+    dry.assert()
+        .success()
+        .stdout(contains("dry-run"))
+        .stdout(contains(".gigacode"));
+    assert!(
+        !proj.join(".gigacode").exists(),
+        "dry-run ничего не записал"
+    );
+
+    // Реальный прогон: settings.json + скиллы + сниппет хуков.
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("connect")
+        .arg("gigacode")
+        .arg("--dir")
+        .arg(proj.as_os_str());
+    cmd.assert()
+        .success()
+        .stdout(contains("Подключение Spine к хосту «gigacode»"))
+        .stdout(contains("создан"))
+        .stdout(contains("doctor --host gigacode"));
+    let settings = proj.join(".gigacode/settings.json");
+    assert!(settings.is_file(), "settings.json создан");
+    let text = std::fs::read_to_string(&settings).expect("read settings");
+    assert!(text.contains("\"command\": \"arch-be\""), "{text}");
+    assert!(
+        proj.join(".gigacode/skills/adr-authoring/SKILL.md")
+            .is_file(),
+        "скиллы разложены"
+    );
+
+    // doctor --host: на подключённом проекте settings/skills — ✓.
+    // (Проверки «arch-be»/«host» зависят от PATH машины — их вердикты не
+    // ассертим; итоговый код здесь не проверяем по той же причине.)
+    let mut doctor = arch_cmd(tmp.path());
+    doctor
+        .arg("doctor")
+        .arg("--host")
+        .arg("gigacode")
+        .arg("--dir")
+        .arg(proj.as_os_str());
+    doctor
+        .assert()
+        .stdout(contains("arch-be doctor --host gigacode"))
+        .stdout(contains("settings"))
+        .stdout(contains("mcpServers.spine"))
+        .stdout(contains("Итог:"));
+
+    // doctor --host на неподключённом проекте — проблема и код 1.
+    let empty = tmp.path().join("empty");
+    std::fs::create_dir_all(&empty).expect("mkdir empty");
+    let mut bad = arch_cmd(tmp.path());
+    bad.arg("doctor")
+        .arg("--host")
+        .arg("qwen")
+        .arg("--dir")
+        .arg(empty.as_os_str());
+    bad.assert()
+        .code(1)
+        .stdout(contains("не найден или не JSON"));
+}

@@ -24,13 +24,26 @@ cargo build --release --no-default-features --features core   # слим-сбо�
 ln -sf "$PWD/target/release/arch-be" ~/.local/bin/arch-be
 ```
 
+Закрытый контур (без интернета) — **офлайн-бандл**: на машине с исходниками
+`scripts/make_offline_bundle.sh` собирает `dist/spine-offline-<версия>-<os>-<arch>.tar.gz`
+(core-редакция по умолчанию; `--edition full`, готовый бинарь — `--binary`).
+Установка на целевой машине — одна распаковка и одна команда:
+
+```bash
+tar xzf spine-offline-*.tar.gz && cd spine-offline-*
+./install.sh   # целостность (SHA256SUMS) → бинарь в ~/.local/bin → arch-be init
+               # (ассеты встроены в бинарь, сеть не нужна) → cli_path Archify
+arch-be doctor # проверка окружения
+```
+
 ## 1. Подключение одной командой
 
 В корне проекта, который должен контролировать Spine:
 
 ```bash
 arch-be connect claude      # Claude Code — полное подключение
-arch-be connect qwen        # Qwen Code — .qwen/settings.json
+arch-be connect qwen        # Qwen Code — .qwen/settings.json + скиллы
+arch-be connect gigacode    # GigaCode — автодетект .gigacode/ или .qwen/
 arch-be connect codex       # Codex — печать TOML-блока (+ --apply-global)
 arch-be connect kimi        # Kimi Code — проектный .kimi-code/mcp.json
 arch-be connect omp         # oh-my-pi — .mcp.json + скиллы (если нет .claude/skills)
@@ -40,7 +53,8 @@ arch-be connect generic     # любой MCP-хост — все сниппет�
 | Хост | Что пишется в проект | Что печатается |
 |---|---|---|
 | `claude` | `.mcp.json`, `.claude/settings.json` (хуки), `.claude/skills/`, `CLAUDE.md` | следующие шаги |
-| `qwen` | `.qwen/settings.json` (мердж `mcpServers`) | скиллы и хуки — сниппеты (layout не подтверждён) |
+| `qwen` | `.qwen/settings.json` (мердж `mcpServers`), скиллы в `.qwen/skills/` (существующий каталог не перетирается) | хуки — сниппет-референс |
+| `gigacode` | автодетект каталога настроек (`.gigacode/` → `.qwen/` → новый `.gigacode/`): `settings.json` (мердж `mcpServers`) + скиллы в `skills/` (как у claude) | хуки — сниппет-референс |
 | `codex` | ничего (с `--apply-global` — `~/.codex/config.toml`) | TOML-блок для `~/.codex/config.toml` |
 | `kimi` | `.kimi-code/mcp.json` (мердж; с `--apply-global` — ещё и `~/.kimi-code/mcp.json`) | JSON-блок user-level, TOML-блок хука для `~/.kimi-code/config.toml`, напоминание про trust-диалог |
 | `omp` | `.mcp.json` (мердж); скиллы в `.claude/skills/` — только если каталога ещё нет | автодискавери `.mcp.json`; хуки — TS-расширения `omp --hook <file.ts>` |
@@ -90,12 +104,36 @@ Code); каталог уже есть — не трогается, чтобы н
 TypeScript-расширения, подключаемые флагом `omp --hook <file.ts>`;
 команда-гейт для такого расширения — `arch-be gate`.
 
+### GigaCode
+
+`arch-be connect gigacode` — нативное подключение GigaCode (форк Qwen Code;
+алиасы: `gigacode`, `giga-code`, `gcode`). Каталог настроек определяется
+автоматически: существующий `.gigacode/` в проекте; при его отсутствии —
+существующий `.qwen/` (layout совместим, пишем туда); если нет ни того ни
+другого — создаётся `.gigacode/` (об исходе автоопределения — заметка в
+выводе). В каталог пишутся `settings.json` (мердж `mcpServers.spine`, чужие
+серверы сохраняются) и скиллы в `skills/` (с обновлением встроенных версий,
+как у `claude`). Хуки не записываются — подтверждённой схемы файла хуков у
+форка нет (в qwen-code 0.24 хуки управляются UI `qwen hooks` и в headless
+не файрят): печатается сниппет-референс и информационный вариант
+`SessionEnd` из [docs/GIGACODE.md](GIGACODE.md). Развёртывание силами самого
+агента и офлайн-бандл для закрытого контура — там же.
+
 ## 2. Проверка подключения
 
 ```bash
 claude mcp list
 # spine: arch-be mcp serve - ✔ Connected
 ```
+
+Механическая проверка со стороны Spine — `arch-be doctor --host <хост>`
+(в корне проекта; иначе — `--dir <путь>`): бинарь `arch-be` в PATH, файл
+настроек хоста содержит `mcpServers.spine` с командой `arch-be`, скиллы на
+месте (для хостов, куда connect их пишет), версия хоста по
+`<бинарь> --version`. Найденная проблема (нет записи о сервере, чужая
+команда) — вердикт ✗ и код выхода 1; отсутствие хоста в PATH или скиллов —
+предупреждение. Для `gigacode` проверка смотрит в тот же каталог, что
+выбрал connect (автоопределение `.gigacode/`/`.qwen/`).
 
 При первом запуске Claude Code в проекте он спросит разрешение на
 project-scoped сервер из `.mcp.json` и доверие каталогу — ответьте «Yes»

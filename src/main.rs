@@ -241,7 +241,17 @@ enum Cmd {
         cost_report: bool,
     },
     /// Диагностика окружения: ключи, каталоги, плагины, харнессы, MCP.
-    Doctor,
+    /// С `--host <хост>` — точечная проверка подключения `connect <host>`:
+    /// бинарь arch-be в PATH, файл настроек хоста с `mcpServers.spine`,
+    /// скиллы на месте, версия хоста.
+    Doctor {
+        /// Хост connect: claude | qwen | gigacode | codex | kimi | omp | generic.
+        #[arg(long, value_name = "HOST")]
+        host: Option<String>,
+        /// Каталог проекта для проверки хоста (по умолчанию — текущий).
+        #[arg(long, requires = "host")]
+        dir: Option<PathBuf>,
+    },
     /// Экспорт журнала сессии в Word/Excel.
     Export {
         /// Формат: word (docx) или excel (xlsx).
@@ -308,10 +318,10 @@ enum Cmd {
         cmd: ArchunitCmd,
     },
     /// Подключить Spine к внешнему CLI-агенту (MCP-сервер + скиллы + хуки):
-    /// claude | qwen | codex | kimi | omp | generic. (Инверсия харнесса,
+    /// claude | qwen | gigacode | codex | kimi | omp | generic. (Инверсия харнесса,
     /// шаг 3; называется `connect`, т.к. `export` занят экспортом журнала.)
     Connect {
-        /// Хост: claude | qwen | codex | kimi | omp | generic.
+        /// Хост: claude | qwen | gigacode | codex | kimi | omp | generic.
         host: String,
         /// Каталог проекта (по умолчанию — текущий).
         #[arg(long)]
@@ -1453,9 +1463,22 @@ async fn main() -> Result<()> {
             }
             println!("{}", m.to_markdown());
         }
-        Some(Cmd::Doctor) => {
-            let checks = arch_harness::doctor::run_checks(&cfg);
-            print!("{}", arch_harness::doctor::render(&checks));
+        Some(Cmd::Doctor { host, dir }) => {
+            let checks = if let Some(raw) = host {
+                let host = arch_harness::connect::Host::parse(&raw).map_err(anyhow::Error::msg)?;
+                let dir = match dir {
+                    Some(d) => d,
+                    None => std::env::current_dir().context("cwd")?,
+                };
+                let checks =
+                    arch_harness::doctor::run_host_checks(host, &dir, dirs::home_dir().as_deref());
+                print!("{}", arch_harness::doctor::render_host(host, &checks));
+                checks
+            } else {
+                let checks = arch_harness::doctor::run_checks(&cfg);
+                print!("{}", arch_harness::doctor::render(&checks));
+                checks
+            };
             if arch_harness::doctor::exit_code(&checks) != 0 {
                 std::process::exit(1);
             }

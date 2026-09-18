@@ -19,9 +19,16 @@
 //!   (создаётся краткий либо блок между маркерами
 //!   `<!-- SPINE:BEGIN -->`/`<!-- SPINE:END -->`; рукописное не затирается);
 //! - `qwen`: `.qwen/settings.json` (мердж `mcpServers`; Qwen Code — форк
-//!   gemini-cli, ключ `mcpServers` верхнего уровня подтверждён). Скиллы и
-//!   хуки НЕ пишутся: layout скиллов и схема хуков Qwen Code не
-//!   подтверждены — печатаются сниппеты с заметкой (поведение `generic`);
+//!   gemini-cli, ключ `mcpServers` верхнего уровня подтверждён) + скиллы в
+//!   `.qwen/skills/` (нативный project-scope в qwen-code ≥ 0.24; существующий
+//!   каталог скиллов не перетирается). Хуки НЕ пишутся: схема хуков Qwen Code
+//!   не подтверждена — печатается сниппет-референс;
+//! - `gigacode` (`GigaCode` — форк Qwen Code): автоопределение каталога
+//!   настроек проекта — существующий `.gigacode/`; иначе существующий
+//!   `.qwen/` (совместимость layout форка); иначе создаётся `.gigacode/`.
+//!   Дальше механика qwen (мердж `mcpServers.spine` в `<каталог>/settings.json`),
+//!   скиллы — как у `claude` (раскладка в `<каталог>/skills/` с обновлением
+//!   встроенных версий), хуки — печать сниппета (как у qwen);
 //! - `codex`: MCP у Codex — только пользовательский `~/.codex/config.toml`
 //!   (`[mcp_servers.spine]`); молча в дом пользователя не пишем: печать
 //!   готового TOML-блока, запись с мерджем — только по явному
@@ -110,14 +117,18 @@ pub enum Host {
     /// oh-my-pi: `.mcp.json` (автодискавери) + скиллы в `.claude/skills/`,
     /// если того каталога ещё нет.
     Omp,
+    /// `GigaCode` (форк Qwen Code): автоопределение каталога настроек
+    /// (`.gigacode/` → `.qwen/` → новый `.gigacode/`), мердж `mcpServers` в
+    /// `<каталог>/settings.json`, скиллы в `<каталог>/skills/`, хуки — печать.
+    GigaCode,
     /// Любой другой агент: только печать сниппетов.
     Generic,
 }
 
 impl Host {
-    /// Разбор значения CLI: `claude` | `qwen` | `codex` | `kimi` | `omp` |
-    /// `generic` (допускаются составные алиасы `claude-code`, `qwen-code`,
-    /// `kimi-code`, `oh-my-pi`).
+    /// Разбор значения CLI: `claude` | `qwen` | `gigacode` | `codex` | `kimi` |
+    /// `omp` | `generic` (допускаются составные алиасы `claude-code`,
+    /// `qwen-code`, `kimi-code`, `giga-code`, `gcode`, `oh-my-pi`).
     ///
     /// # Errors
     /// Неизвестное имя хоста — сообщение со списком допустимых.
@@ -125,12 +136,13 @@ impl Host {
         match raw.trim().to_ascii_lowercase().as_str() {
             "claude" | "claude-code" => Ok(Self::Claude),
             "qwen" | "qwen-code" => Ok(Self::Qwen),
+            "gigacode" | "giga-code" | "gcode" => Ok(Self::GigaCode),
             "codex" => Ok(Self::Codex),
             "kimi" | "kimi-code" => Ok(Self::Kimi),
             "omp" | "oh-my-pi" => Ok(Self::Omp),
             "generic" => Ok(Self::Generic),
             other => Err(format!(
-                "неизвестный хост '{other}' (допустимы: claude, qwen, codex, kimi, omp, generic)"
+                "неизвестный хост '{other}' (допустимы: claude, qwen, gigacode, codex, kimi, omp, generic)"
             )),
         }
     }
@@ -141,6 +153,7 @@ impl Host {
         match self {
             Self::Claude => "claude",
             Self::Qwen => "qwen",
+            Self::GigaCode => "gigacode",
             Self::Codex => "codex",
             Self::Kimi => "kimi",
             Self::Omp => "omp",
@@ -261,6 +274,7 @@ pub fn connect(opts: &ConnectOptions) -> Result<ConnectReport> {
     match opts.host {
         Host::Claude => connect_claude(opts, &mut report)?,
         Host::Qwen => connect_qwen(opts, &mut report)?,
+        Host::GigaCode => connect_gigacode(opts, &mut report)?,
         Host::Codex => connect_codex(opts, &mut report)?,
         Host::Kimi => connect_kimi(opts, &mut report)?,
         Host::Omp => connect_omp(opts, &mut report)?,
@@ -951,6 +965,105 @@ fn connect_qwen(opts: &ConnectOptions, report: &mut ConnectReport) -> Result<()>
     report.next_steps.extend([
         "перезапустите Qwen Code (`qwen`) в этом каталоге".to_string(),
         "проверьте список MCP-серверов хоста — в нём «spine»".to_string(),
+    ]);
+    Ok(())
+}
+
+/// Исход автоопределения каталога настроек `GigaCode` в проекте.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GigacodeDirOrigin {
+    /// В проекте уже есть `.gigacode/` — он и используется.
+    ExistingGigacode,
+    /// `.gigacode/` нет, но есть `.qwen/`: `GigaCode` — форк Qwen Code,
+    /// layout совместим — пишем в него.
+    FromQwen,
+    /// Ни того ни другого — создаётся `.gigacode/`.
+    NewGigacode,
+}
+
+/// Автоопределение каталога настроек `GigaCode`: существующий `.gigacode/`
+/// (приоритет), иначе существующий `.qwen/`, иначе — новый `.gigacode/`.
+/// Используется и `connect gigacode`, и `doctor --host gigacode` (проверка
+/// смотрит в тот же каталог, куда писал connect).
+#[must_use]
+pub fn gigacode_settings_dir(project_dir: &Path) -> (PathBuf, GigacodeDirOrigin) {
+    let gigacode = project_dir.join(".gigacode");
+    if gigacode.is_dir() {
+        return (gigacode, GigacodeDirOrigin::ExistingGigacode);
+    }
+    let qwen = project_dir.join(".qwen");
+    if qwen.is_dir() {
+        return (qwen, GigacodeDirOrigin::FromQwen);
+    }
+    (gigacode, GigacodeDirOrigin::NewGigacode)
+}
+
+/// `arch-be connect gigacode` (`GigaCode` — форк Qwen Code): каталог настроек
+/// определяется автоматически ([`gigacode_settings_dir`]); в него пишется
+/// `settings.json` (мердж `mcpServers.spine`, как у qwen) и раскладываются
+/// скиллы в `<каталог>/skills/` (как у claude — с обновлением встроенных
+/// версий: целевой хост `GigaCode` освоил project-скиллы по layout Qwen Code
+/// 0.24). Хуки не пишутся (подтверждённой схемы файла хуков у форка нет —
+/// в qwen-code 0.24 хуки управляются UI `qwen hooks` и в headless не файрят)
+/// — печатается сниппет-референс, как у qwen.
+fn connect_gigacode(opts: &ConnectOptions, report: &mut ConnectReport) -> Result<()> {
+    let (settings_dir, origin) = gigacode_settings_dir(&opts.dir);
+    match origin {
+        GigacodeDirOrigin::ExistingGigacode => report.notes.push(format!(
+            "каталог настроек автоопределён: {} (существующий .gigacode/)",
+            settings_dir.display()
+        )),
+        GigacodeDirOrigin::FromQwen => report.notes.push(format!(
+            "каталог настроек автоопределён: {} (`.gigacode/` нет, найден `.qwen/` — \
+             GigaCode — форк Qwen Code, layout совместим)",
+            settings_dir.display()
+        )),
+        GigacodeDirOrigin::NewGigacode => report.notes.push(format!(
+            "каталога настроек в проекте нет — {} (ни .gigacode/, ни .qwen/)",
+            if opts.dry_run {
+                format!("будет создан {}", settings_dir.display())
+            } else {
+                format!("создан {}", settings_dir.display())
+            }
+        )),
+    }
+    merge_mcp_servers_json(
+        &settings_dir.join("settings.json"),
+        opts.rw,
+        false,
+        opts.dry_run,
+        report,
+    )?;
+    if opts.skills {
+        install_skills(&settings_dir.join("skills"), opts.dry_run, report)?;
+        report.notes.push(
+            "скиллы разложены в <каталог настроек>/skills/ — layout project-скиллов \
+             Qwen Code ≥ 0.24, унаследован форком"
+                .into(),
+        );
+    }
+    if opts.hooks {
+        report.notes.push(
+            "хуки не записаны: подтверждённой схемы файла хуков у GigaCode нет \
+             (в qwen-code 0.24 хуки управляются через `qwen hooks` (UI) и в \
+             headless-режиме не файрят). Информационный вариант из docs/GIGACODE.md — \
+             вручную в settings.json: \"hooks\": {\"SessionEnd\": [{\"hooks\": \
+             [{\"type\": \"command\", \"command\": \"arch-be gate --route auto 2>&1 | \
+             tail -3\"}]}]} (показывает вердикт гейта, но НЕ блокирует завершение). \
+             Блокирующие гейты есть у Claude Code/Kimi/omp"
+                .into(),
+        );
+        report.snippets.push((
+            "Хуки (формат Claude Code, референс)".to_string(),
+            hooks_snippet(opts.strict_hooks),
+        ));
+    }
+    report.next_steps.extend([
+        "перезапустите GigaCode в этом каталоге".to_string(),
+        "одобрите project-сервер, если хост попросит (в Qwen Code: \
+         `qwen mcp approve spine`; в GigaCode — аналог вашей сборки)"
+            .to_string(),
+        "проверьте подключение: `arch-be doctor --host gigacode`".to_string(),
     ]);
     Ok(())
 }
@@ -2023,5 +2136,168 @@ mod tests {
         assert!(text.contains("dry-run"), "{text}");
         assert!(text.contains("Следующие шаги"), "{text}");
         assert!(text.contains("claude mcp list"), "{text}");
+    }
+
+    /// gigacode: автоопределение каталога настроек — приоритет существующего
+    /// `.gigacode/`, затем `.qwen/` (форк), иначе новый `.gigacode/`.
+    #[test]
+    fn gigacode_autodetect_priorities() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path().join("proj");
+        // Ни одного каталога — новый .gigacode/.
+        let (path, origin) = gigacode_settings_dir(&dir);
+        assert_eq!(origin, GigacodeDirOrigin::NewGigacode);
+        assert_eq!(path, dir.join(".gigacode"));
+        // Есть только .qwen/ — пишем в него.
+        std::fs::create_dir_all(dir.join(".qwen")).expect("mkdir .qwen");
+        let (path, origin) = gigacode_settings_dir(&dir);
+        assert_eq!(origin, GigacodeDirOrigin::FromQwen);
+        assert_eq!(path, dir.join(".qwen"));
+        // Есть оба — приоритет .gigacode/.
+        std::fs::create_dir_all(dir.join(".gigacode")).expect("mkdir .gigacode");
+        let (path, origin) = gigacode_settings_dir(&dir);
+        assert_eq!(origin, GigacodeDirOrigin::ExistingGigacode);
+        assert_eq!(path, dir.join(".gigacode"));
+    }
+
+    /// gigacode в пустом проекте: создаётся `.gigacode/settings.json` (мердж
+    /// mcpServers.spine), скиллы — в `.gigacode/skills/` (как у claude, с
+    /// обновлением встроенных); хуки — только сниппет; заметка про создание
+    /// каталога; повтор идемпотентен.
+    #[test]
+    fn gigacode_scaffolds_new_settings_dir() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path().join("proj");
+        std::fs::create_dir_all(&dir).expect("mkdir proj");
+        let report = connect(&ConnectOptions::new(Host::GigaCode, dir.clone())).expect("connect");
+
+        let settings: Value =
+            serde_json::from_str(&read(&dir.join(".gigacode/settings.json"))).expect("json");
+        assert_eq!(settings["mcpServers"]["spine"]["command"], "arch-be");
+        assert_eq!(
+            settings["mcpServers"]["spine"]["args"],
+            json!(["mcp", "serve"])
+        );
+        assert!(
+            dir.join(".gigacode/skills/adr-authoring/SKILL.md")
+                .is_file(),
+            "скиллы разложены в .gigacode/skills"
+        );
+        assert!(!dir.join(".qwen").exists(), "каталога .qwen не появилось");
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|n| n.contains("создан") && n.contains(".gigacode")),
+            "заметка про создание каталога: {:?}",
+            report.notes
+        );
+        assert!(
+            report.snippets.iter().any(|(t, _)| t.contains("Хуки")),
+            "сниппет хуков напечатан: {:?}",
+            report.snippets
+        );
+        assert!(
+            report
+                .next_steps
+                .iter()
+                .any(|s| s.contains("doctor --host gigacode")),
+            "{:?}",
+            report.next_steps
+        );
+
+        // Идемпотентность: повторный прогон побайтово тот же.
+        let first = snapshot(&dir);
+        let report = connect(&ConnectOptions::new(Host::GigaCode, dir.clone())).expect("повтор");
+        assert_eq!(first, snapshot(&dir), "повторный запуск изменил файлы");
+        assert!(report.created.is_empty() && report.merged.is_empty());
+    }
+
+    /// gigacode в проекте с существующим `.qwen/`: пишет в него (чужой сервер
+    /// сохранён), `.gigacode/` не создаётся; существующий чужой скилл в
+    /// `.qwen/skills/` не трогается, встроенные докладываются рядом.
+    #[test]
+    fn gigacode_reuses_existing_qwen_dir() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path().join("proj");
+        std::fs::create_dir_all(dir.join(".qwen/skills/foreign")).expect("mkdir");
+        std::fs::write(
+            dir.join(".qwen/settings.json"),
+            "{\n  \"mcpServers\": {\n    \"other\": {\"command\": \"uvx\", \"args\": [\"x\"]}\n  }\n}\n",
+        )
+        .expect("write settings");
+        std::fs::write(
+            dir.join(".qwen/skills/foreign/SKILL.md"),
+            "---\nname: foreign\ndescription: чужой\n---\n",
+        )
+        .expect("write foreign skill");
+
+        let report = connect(&ConnectOptions::new(Host::GigaCode, dir.clone())).expect("connect");
+
+        let settings: Value =
+            serde_json::from_str(&read(&dir.join(".qwen/settings.json"))).expect("json");
+        assert_eq!(settings["mcpServers"]["spine"]["command"], "arch-be");
+        assert_eq!(
+            settings["mcpServers"]["other"]["command"], "uvx",
+            "чужой сервер цел"
+        );
+        assert!(
+            !dir.join(".gigacode").exists(),
+            ".gigacode не создаётся при живом .qwen"
+        );
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|n| n.contains(".qwen/") && n.contains("совместим")),
+            "заметка про наследование .qwen: {:?}",
+            report.notes
+        );
+        assert_eq!(
+            read(&dir.join(".qwen/skills/foreign/SKILL.md")),
+            "---\nname: foreign\ndescription: чужой\n---\n",
+            "чужой скилл не тронут"
+        );
+        assert!(
+            dir.join(".qwen/skills/adr-authoring/SKILL.md").is_file(),
+            "встроенные скиллы доложены в .qwen/skills"
+        );
+    }
+
+    /// gigacode --dry-run: только план, ничего не создаётся.
+    #[test]
+    fn gigacode_dry_run_writes_nothing() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path().join("proj");
+        std::fs::create_dir_all(&dir).expect("mkdir proj");
+        let opts = ConnectOptions {
+            dry_run: true,
+            ..ConnectOptions::new(Host::GigaCode, dir.clone())
+        };
+        let report = connect(&opts).expect("dry-run");
+        assert!(!report.created.is_empty(), "план непустой");
+        assert!(!report.skills.is_empty(), "план по скиллам непустой");
+        assert!(
+            report.notes.iter().any(|n| n.contains("будет создан")),
+            "заметка про будущее создание каталога: {:?}",
+            report.notes
+        );
+        assert_eq!(
+            std::fs::read_dir(&dir).expect("read dir").count(),
+            0,
+            "dry-run ничего не записал"
+        );
+    }
+
+    /// Разбор имён хостов: gigacode и его алиасы.
+    #[test]
+    fn host_parse_accepts_gigacode_aliases() {
+        assert_eq!(Host::parse("gigacode"), Ok(Host::GigaCode));
+        assert_eq!(Host::parse("GigaCode"), Ok(Host::GigaCode));
+        assert_eq!(Host::parse("giga-code"), Ok(Host::GigaCode));
+        assert_eq!(Host::parse("gcode"), Ok(Host::GigaCode));
+        assert_eq!(Host::GigaCode.name(), "gigacode");
+        let err = Host::parse("cursor").expect_err("неизвестный хост");
+        assert!(err.contains("gigacode"), "{err}");
     }
 }
