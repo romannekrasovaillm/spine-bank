@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="967" height="141" viewBox="0 0 967 141">
+<rect x="0.5" y="0.5" width="966" height="140" rx="10" fill="#1a1b26" stroke="#3b4261"/>
+<circle cx="20" cy="14" r="5" fill="#f7768e"/>
+<circle cx="38" cy="14" r="5" fill="#e0af68"/>
+<circle cx="56" cy="14" r="5" fill="#9ece6a"/>
+<text x="483.5" y="18" text-anchor="middle" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="12" fill="#565f89">Qwen Code 0.24.0 — /hooks: 22 события жизненного цикла, включая Stop/SessionEnd (живой захват TUI)</text>
+<text x="14.0" y="49.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#c0caf5">&gt; /hooks — события хуков (выбор для нового хука):</text>
+<text x="14.0" y="68.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#e0af68">9. Stop — непосредственно перед завершением ответа</text>
+<text x="14.0" y="87.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#e0af68">15. SessionEnd — при завершении сессии · 17. PermissionRequest · 19. StopFailure…</text>
+<text x="14.0" y="106.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#565f89">команда-гейт для хука Stop: arch-be gate --route auto (connect qwen печатает готовый сниппет)</text>
+<text x="14.0" y="125.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#565f89">нюанс: в 0.24 хуки настраиваются через UI; headless-файринг на момент прогона не подтверждён</text>
+</svg>

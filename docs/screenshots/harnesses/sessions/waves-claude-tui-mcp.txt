@@ -1,0 +1,6 @@
+Claude Code 2.1.276 — /mcp: сервер spine подключён (живой захват TUI)
+$ claude   # в проекте с .mcp.json от arch-be connect claude
+> /mcp — Manage MCP servers
+! ❯ spine · ✔ connected · 33 tools     (Project MCPs, .mcp.json)
+# архитектор зовёт mcp__spine__* прямо из диалога: architect_review, fitness_check,
+# significance_from_diff, nfr_check, contract_diff, change_impact, model_drift…

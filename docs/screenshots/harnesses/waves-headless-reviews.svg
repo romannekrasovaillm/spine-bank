@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1003" height="217" viewBox="0 0 1003 217">
+<rect x="0.5" y="0.5" width="1002" height="216" rx="10" fill="#1a1b26" stroke="#3b4261"/>
+<circle cx="20" cy="14" r="5" fill="#f7768e"/>
+<circle cx="38" cy="14" r="5" fill="#e0af68"/>
+<circle cx="56" cy="14" r="5" fill="#9ece6a"/>
+<text x="501.5" y="18" text-anchor="middle" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="12" fill="#565f89">Headless-прогоны architect_review (MCP): omp 15.10.3 · OpenClaw 2026.7.1 · Qwen Code 0.24.0 (дословно)</text>
+<text x="14.0" y="49.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#9ece6a">$</text>
+<text x="32.06" y="49.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#c0caf5">omp -p "…architect_review (path: \".\")…" --no-session</text>
+<text x="14.0" y="68.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#e0af68">Маршрут: Standard (auto из диффа) · Итог гейта: FAIL — 3 составляющих</text>
+<text x="14.0" y="87.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#f7768e">fitness: src/money.rs:2 no_float_for_money (f64 в деньгах)</text>
+<text x="14.0" y="106.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#f7768e">nfr: budget-no-chain (NFR-001 без affects → INT-*) · contracts: OA-003 (POST без Idempotency-Key)</text>
+<text x="14.0" y="125.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#9ece6a">PASS: delta_guard, rule_weakened, model_validate · SKIP: spine_lint/trace_check/evidence_verify</text>
+<text x="14.0" y="144.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#9ece6a">$</text>
+<text x="32.06" y="144.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#c0caf5">openclaw agent --local -m "…architect_review…"   # MCP: mcp set spine {command: arch-be mcp serve}</text>
+<text x="14.0" y="163.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#e0af68">Ревью не прошло: f64 для денег · незамкнутый latency-бюджет NFR · неидемпотентный post</text>
+<text x="14.0" y="182.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#9ece6a">$</text>
+<text x="32.06" y="182.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#c0caf5">qwen --yolo "…architect_review…"  # + наблюдение: SKIP spine_lint/trace_check — пути артефактов</text>
+<text x="14.0" y="201.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#565f89">все три — один и тот же механический вердикт механики Spine, LLM только пересказывает</text>
+</svg>

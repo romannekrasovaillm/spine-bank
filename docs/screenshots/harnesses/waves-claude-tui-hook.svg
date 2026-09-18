@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="940" height="236" viewBox="0 0 940 236">
+<rect x="0.5" y="0.5" width="939" height="235" rx="10" fill="#1a1b26" stroke="#3b4261"/>
+<circle cx="20" cy="14" r="5" fill="#f7768e"/>
+<circle cx="38" cy="14" r="5" fill="#e0af68"/>
+<circle cx="56" cy="14" r="5" fill="#9ece6a"/>
+<text x="470.0" y="18" text-anchor="middle" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="12" fill="#565f89">Claude Code 2.1.276 — Stop-хук с arch-be gate: блокировка и достойный ответ (живой захват, TUI)</text>
+<text x="14.0" y="49.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#c0caf5">❯ Ответь одним словом: Готово. Ничего не изменяй.</text>
+<text x="14.0" y="68.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#c0caf5">● Готово.</text>
+<text x="14.0" y="87.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#e0af68">● Ran 1 stop hook — Stop hook error: [… arch-be gate --route auto …]:</text>
+<text x="14.0" y="106.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#c0caf5">  Маршрут: Standard (auto: score 2 (new_component, new_vendor))</text>
+<text x="14.0" y="125.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#f7768e">[FAIL] fitness — src/money.rs:2 no_float_for_money ('\bf64\b': pub fn fee(amount: f64))</text>
+<text x="14.0" y="144.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#f7768e">[FAIL] nfr — budget-no-chain: NFR-001 p99 250 мс, в affects нет ни одного INT-*</text>
+<text x="14.0" y="163.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#c0caf5">  [PASS] delta_guard · rule_weakened · [SKIP] spine_lint/trace_check/evidence_verify</text>
+<text x="14.0" y="182.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#f7768e">Итог: FAIL — провалено составляющих: 2 (exit 1) → exit 2 → находки ушли модели</text>
+<text x="14.0" y="201.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#c0caf5">● «Гейт не пропускает завершение, но моё вмешательство противоречило бы вашему</text>
+<text x="14.0" y="220.0" font-family="DejaVu Sans Mono, Noto Color Emoji, monospace" font-size="15.0" fill="#e0af68"> «ничего не изменяй» — поэтому только докладываю, правок не вносил» + минимальный план правок</text>
+</svg>

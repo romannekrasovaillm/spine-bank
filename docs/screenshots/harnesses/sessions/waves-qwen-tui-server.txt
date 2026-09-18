@@ -1,0 +1,7 @@
+Qwen Code 0.24.0 — карточка MCP-сервера spine (живой захват TUI, /mcp)
+$ qwen   # в проекте с .qwen/settings.json от arch-be connect qwen
+# первый запуск: диалог «Untrusted MCP server» → 1. Approve this server
+! spine — arch-be mcp serve (stdio)
++ Статус: ✓ подключен · Источник: настройки рабочего пространства
+! Инструменты: 33 инструменты · Промпты: 7
+# 33 = 13 ручных + 20 read-only моста (волны 1–3); 7 промптов — плейбуки spine-*
