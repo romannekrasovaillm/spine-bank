@@ -6,9 +6,13 @@
 //! подкаталогам (ADR-033: реестры — агрегация файлов, не сервис).
 //! Дедупликация — по НОРМАЛИЗОВАННОМУ ИМЕНИ системы, БЕЗ глобального
 //! пространства ID (глобальные ID инвазивны: потребовали бы переписывания
-//! существующих `model/` всех проектов).
+//! существующих `model/` всех проектов). Опциональная карта АЛИАСОВ
+//! (`--aliases`, yaml/json «алиас → каноничное имя») склеивает известные
+//! варианты написания до дедупликации (обе стороны нормализуются тем же
+//! [`canonical_name`]).
 //!
-//! Команда `arch-be model landscape <ROOT> [--mermaid]`:
+//! Команда `arch-be model landscape <ROOT> [--mermaid] [--aliases <file>]
+//! [--diff-since <ref|date>]`:
 //! - реестр систем: каноническое имя (lowercase, схлопывание пробелов и
 //!   дефисов) → проекты/id/статусы всех вхождений (дедуп-витрина);
 //! - находки: `id-divergence` (одна система — разные id в разных проектах),
@@ -17,7 +21,13 @@
 //!   наборе), `cross-project-link` (связь на систему другого проекта —
 //!   показываемый положительный факт, не ошибка);
 //! - топ-5 систем по связности (вход+исход); `--mermaid` — `graph TD`
-//!   канонических систем.
+//!   канонических систем;
+//! - `--diff-since` — дифф ландшафта против версии в git: ссылка
+//!   (ветка/тег/sha) или дата `YYYY-MM-DD` (последний коммит не позже конца
+//!   этого дня). Состояние «тогда» материализуется во временный каталог
+//!   (`git ls-tree` + `git show` файлов `model/*.md`) и агрегируется тем же
+//!   кодом; в диффе — появившиеся/исчезнувшие/изменившиеся системы (смена
+//!   статуса или набора id). Текущее состояние — РАБОЧЕЕ ДЕРЕВО (не HEAD).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -88,7 +98,9 @@ pub struct LandscapeReport {
 /// Нормализация имени системы: lowercase, дефисы → пробелы, схлопывание
 /// пробелов. Ключ дедупликации («Процессинг» == «процессинг» ==
 /// «Процессинг  СБОЛ» по пробелам).
-fn canonical_name(title: &str) -> String {
+/// `pub(crate)`: тот же ключ использует импорт реестров (`model::registry`)
+/// для идемпотентного сопоставления по названию.
+pub(crate) fn canonical_name(title: &str) -> String {
     title
         .trim()
         .to_lowercase()
@@ -124,6 +136,18 @@ fn load_project(dir: &Path) -> Result<Option<(String, crate::model::Model)>> {
 /// `ROOT` не каталог; ни в самом `ROOT`, ни в подкаталогах нет ни одного
 /// `model/` — понятная ошибка; модель проекта не разбирается.
 pub fn build_landscape(root: &Path) -> Result<LandscapeReport> {
+    build_landscape_with_aliases(root, &BTreeMap::new())
+}
+
+/// Строит ландшафт систем с картой алиасов (нормализованное имя-вариант →
+/// нормализованное каноническое имя): дедупликация учитывает алиасы.
+///
+/// # Errors
+/// См. [`build_landscape`].
+pub fn build_landscape_with_aliases(
+    root: &Path,
+    aliases: &BTreeMap<String, String>,
+) -> Result<LandscapeReport> {
     if !root.is_dir() {
         return Err(HarnessError::Model(format!(
             "ландшафт: корень недоступен: {}",
@@ -177,14 +201,16 @@ pub fn build_landscape(root: &Path) -> Result<LandscapeReport> {
         }
     }
 
-    // Реестр систем: только SYS/INT, дедуп по каноническому имени.
+    // Реестр систем: только SYS/INT, дедуп по каноническому имени
+    // (алиасы склеивают известные варианты написания до дедупликации).
     let mut by_canonical: BTreeMap<String, Vec<Occurrence>> = BTreeMap::new();
     for (project, model) in &projects {
         for e in &model.entities {
             if !matches!(e.kind, EntityKind::Sys | EntityKind::Int) {
                 continue;
             }
-            let canonical = canonical_name(&e.title);
+            let raw = canonical_name(&e.title);
+            let canonical = aliases.get(&raw).cloned().unwrap_or(raw);
             if canonical.is_empty() {
                 continue;
             }
@@ -444,10 +470,298 @@ pub fn render_mermaid(report: &LandscapeReport) -> String {
     out
 }
 
+// ---------------------------------------------------------------------------
+// Карта алиасов и дифф между датами (бэклог волны 3, роадмап горизонт 3)
+// ---------------------------------------------------------------------------
+
+/// Потолок файлов `model/*.md`, материализуемых из git для диффа (bounded
+/// работа: по одному `git show` на файл).
+const MAX_GIT_SHOW_FILES: usize = 2000;
+
+/// Загружает карту алиасов ландшафта: плоское отображение «вариант имени →
+/// каноничное имя» (yaml или json — по расширению `.json`). Обе стороны
+/// нормализуются [`canonical_name`]; пустые ключи/значения пропускаются.
+///
+/// # Errors
+/// Файл не читается или не разбирается как плоское отображение строк.
+pub fn load_aliases(path: &Path) -> Result<BTreeMap<String, String>> {
+    let text = std::fs::read_to_string(path).map_err(|e| HarnessError::io(path, e))?;
+    let raw: BTreeMap<String, String> = if path.extension().is_some_and(|e| e == "json") {
+        serde_json::from_str(&text).map_err(|e| {
+            HarnessError::Model(format!("{}: карта алиасов (json): {e}", path.display()))
+        })?
+    } else {
+        serde_yaml_ng::from_str(&text).map_err(|e| {
+            HarnessError::Model(format!("{}: карта алиасов (yaml): {e}", path.display()))
+        })?
+    };
+    let mut out = BTreeMap::new();
+    for (alias, canonical) in raw {
+        let (alias, canonical) = (canonical_name(&alias), canonical_name(&canonical));
+        if alias.is_empty() || canonical.is_empty() || alias == canonical {
+            continue;
+        }
+        out.insert(alias, canonical);
+    }
+    Ok(out)
+}
+
+/// Дифф ландшафта против версии в git.
+#[derive(Debug)]
+pub struct LandscapeDiff {
+    /// Коммит, к которому разрешился `--diff-since` (полный sha).
+    pub base: String,
+    /// Появившиеся системы (представительные имена).
+    pub added: Vec<String>,
+    /// Исчезнувшие системы.
+    pub removed: Vec<String>,
+    /// Изменившиеся системы (что поменялось — статусы/id).
+    pub changed: Vec<String>,
+}
+
+/// Прогон git с читаемой ошибкой (первые строки stderr).
+fn git(root: &Path, args: &[&str]) -> Result<String> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .output()
+        .map_err(|e| HarnessError::Model(format!("ландшафт-дифф: git недоступен: {e}")))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let hint = stderr.lines().next().unwrap_or("").trim().to_string();
+        return Err(HarnessError::Model(format!(
+            "ландшафт-дифф: git {}: {hint}",
+            args.join(" ")
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Прогон git с бинарным выводом (`git show` файла).
+fn git_show(root: &Path, spec: &str) -> Result<Vec<u8>> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["show", spec])
+        .output()
+        .map_err(|e| HarnessError::Model(format!("ландшафт-дифф: git недоступен: {e}")))?;
+    if !output.status.success() {
+        return Err(HarnessError::Model(format!(
+            "ландшафт-дифф: git show {spec}: файл не читается"
+        )));
+    }
+    Ok(output.stdout)
+}
+
+/// Разрешает `--diff-since` в sha коммита: дата `YYYY-MM-DD` (последний
+/// коммит не позже конца дня по `rev-list --before`) или ссылка
+/// (ветка/тег/sha через `rev-parse --verify`).
+fn resolve_since(root: &Path, since: &str) -> Result<String> {
+    let date_re = regex::Regex::new(r"^\d{4}-\d{2}-\d{2}$")
+        .map_err(|e| HarnessError::Model(format!("внутренний regex даты: {e}")))?;
+    if date_re.is_match(since.trim()) {
+        let out = git(
+            root,
+            &[
+                "rev-list",
+                "-1",
+                &format!("--before={}T23:59:59", since.trim()),
+                "HEAD",
+            ],
+        )?;
+        let sha = out.trim();
+        if sha.is_empty() {
+            return Err(HarnessError::Model(format!(
+                "ландшафт-дифф: нет коммитов не позже {since} (HEAD)"
+            )));
+        }
+        return Ok(sha.to_string());
+    }
+    let spec = format!("{}^{{commit}}", since.trim());
+    Ok(git(root, &["rev-parse", "--verify", &spec])?
+        .trim()
+        .to_string())
+}
+
+/// Материализует файлы `model/*.md` коммита `sha` в каталог `dest` (пути —
+/// относительно `prefix`, только глубины `model/x.md` и `<sub>/model/x.md` —
+/// ровно то, что читает [`build_landscape`]). Возвращает число файлов.
+fn materialize_models_at_ref(root: &Path, sha: &str, prefix: &str, dest: &Path) -> Result<usize> {
+    let list = if prefix.is_empty() {
+        git(root, &["ls-tree", "-r", "--name-only", sha])?
+    } else {
+        git(root, &["ls-tree", "-r", "--name-only", sha, "--", prefix])?
+    };
+    let mut count = 0usize;
+    for path in list.lines() {
+        let stripped = path
+            .strip_prefix(prefix)
+            .map_or(path, |s| s.strip_prefix('/').unwrap_or(s));
+        let segments: Vec<&str> = stripped.split('/').collect();
+        let is_model_file = matches!(segments.as_slice(), ["model", name] | [_, "model", name] if name.to_ascii_lowercase().ends_with(".md"));
+        if !is_model_file {
+            continue;
+        }
+        if count >= MAX_GIT_SHOW_FILES {
+            return Err(HarnessError::Model(format!(
+                "ландшафт-дифф: в {sha} более {MAX_GIT_SHOW_FILES} файлов модели — отказ"
+            )));
+        }
+        let bytes = git_show(root, &format!("{sha}:{path}"))?;
+        let target = dest.join(stripped);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| HarnessError::io(parent, e))?;
+        }
+        std::fs::write(&target, &bytes).map_err(|e| HarnessError::io(&target, e))?;
+        count += 1;
+    }
+    Ok(count)
+}
+
+/// Сводка системы для сравнения: отсортированные id и статусы (lowercase).
+fn system_signature(s: &LandscapeSystem) -> (Vec<String>, Vec<String>) {
+    let mut ids: Vec<String> = s.occurrences.iter().map(|o| o.id.clone()).collect();
+    ids.sort();
+    let mut statuses: Vec<String> = s
+        .occurrences
+        .iter()
+        .map(|o| o.status.trim().to_lowercase())
+        .collect();
+    statuses.sort();
+    statuses.dedup();
+    (ids, statuses)
+}
+
+/// Дифф ландшафта: текущее состояние (рабочее дерево `root`) против версии
+/// в git на `since` (ссылка или дата `YYYY-MM-DD`).
+///
+/// # Errors
+/// `root` вне git-репозитория, ссылка/дата не разрешается в коммит,
+/// модель (текущая или историческая) не агрегируется.
+pub fn diff_landscape(
+    root: &Path,
+    since: &str,
+    aliases: &BTreeMap<String, String>,
+) -> Result<LandscapeDiff> {
+    // Корень репозитория и префикс `root` внутри него (дифф возможен из
+    // подкаталога репо — видна только его часть ландшафта).
+    let toplevel = git(root, &["rev-parse", "--show-toplevel"]).map_err(|e| {
+        HarnessError::Model(format!(
+            "ландшафт-дифф: {} не в git-репозитории ({e})",
+            root.display()
+        ))
+    })?;
+    let toplevel = PathBuf::from(toplevel.trim());
+    let prefix = std::fs::canonicalize(root)
+        .ok()
+        .and_then(|r| {
+            std::fs::canonicalize(&toplevel).ok().and_then(|t| {
+                r.strip_prefix(t)
+                    .ok()
+                    .map(|p| p.to_string_lossy().replace('\\', "/"))
+            })
+        })
+        .unwrap_or_default();
+    let sha = resolve_since(root, since)?;
+    let current = build_landscape_with_aliases(root, aliases)?;
+
+    let tmp = tempfile::tempdir()
+        .map_err(|e| HarnessError::Model(format!("ландшафт-дифф: временный каталог: {e}")))?;
+    let files = materialize_models_at_ref(root, &sha, &prefix, tmp.path())?;
+    // Пустая историческая модель (model/ появились позже) — легитимна:
+    // все текущие системы «появились».
+    let past = if files == 0 {
+        None
+    } else {
+        Some(build_landscape_with_aliases(tmp.path(), aliases)?)
+    };
+
+    let mut added = Vec::new();
+    let mut removed = Vec::new();
+    let mut changed = Vec::new();
+    let past_systems: BTreeMap<&str, &LandscapeSystem> = past
+        .as_ref()
+        .map(|p| {
+            p.systems
+                .iter()
+                .map(|s| (s.canonical.as_str(), s))
+                .collect()
+        })
+        .unwrap_or_default();
+    let current_systems: BTreeMap<&str, &LandscapeSystem> = current
+        .systems
+        .iter()
+        .map(|s| (s.canonical.as_str(), s))
+        .collect();
+    for (canonical, s) in &current_systems {
+        match past_systems.get(canonical) {
+            None => added.push(s.display.clone()),
+            Some(old) => {
+                let (old_ids, old_statuses) = system_signature(old);
+                let (ids, statuses) = system_signature(s);
+                if old_ids != ids || old_statuses != statuses {
+                    let mut parts = Vec::new();
+                    if old_ids != ids {
+                        parts.push(format!("id {} → {}", old_ids.join(","), ids.join(",")));
+                    }
+                    if old_statuses != statuses {
+                        parts.push(format!(
+                            "статусы {} → {}",
+                            old_statuses.join(","),
+                            statuses.join(",")
+                        ));
+                    }
+                    changed.push(format!("«{}»: {}", s.display, parts.join("; ")));
+                }
+            }
+        }
+    }
+    for (canonical, s) in &past_systems {
+        if !current_systems.contains_key(canonical) {
+            removed.push(s.display.clone());
+        }
+    }
+    Ok(LandscapeDiff {
+        base: sha,
+        added,
+        removed,
+        changed,
+    })
+}
+
+/// Рендер диффа ландшафта в markdown-секцию.
+#[must_use]
+pub fn render_diff_markdown(diff: &LandscapeDiff, since: &str) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "## Дифф ландшафта (против {since})\n");
+    let section = |out: &mut String, title: &str, items: &[String]| {
+        let _ = writeln!(out, "### {title}");
+        if items.is_empty() {
+            let _ = writeln!(out, "- нет\n");
+        } else {
+            for item in items {
+                let _ = writeln!(out, "- {item}");
+            }
+            out.push('\n');
+        }
+    };
+    section(&mut out, "Новые системы", &diff.added);
+    section(&mut out, "Исчезнувшие системы", &diff.removed);
+    section(&mut out, "Изменившиеся системы", &diff.changed);
+    let _ = write!(
+        out,
+        "Итого: +{} / −{} / ~{}",
+        diff.added.len(),
+        diff.removed.len(),
+        diff.changed.len()
+    );
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
     /// Пишет файл в каталог и возвращает его путь.
     fn write_file(dir: &Path, name: &str, content: &str) -> PathBuf {
         let p = dir.join(name);
@@ -615,5 +929,173 @@ mod tests {
         let err = build_landscape(&root).unwrap_err();
         assert!(err.to_string().contains("model/"), "{err}");
         assert!(build_landscape(&root.join("missing")).is_err());
+    }
+
+    #[test]
+    fn aliases_merge_name_variants_before_dedup() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        write_file(
+            &root,
+            "p1/model/SYS-001.md",
+            "---\nid: SYS-001\ntype: sys\ntitle: Процессинг\nstatus: adopted\n---\nСистема.\n",
+        );
+        write_file(
+            &root,
+            "p2/model/SYS-002.md",
+            "---\nid: SYS-002\ntype: sys\ntitle: Процессинг-СБОЛ\nstatus: adopted\n---\nСистема.\n",
+        );
+        // Без карты — две системы.
+        let report = build_landscape(&root).unwrap();
+        assert_eq!(report.systems.len(), 2, "{:?}", report.systems);
+
+        // Карта (json): вариант → каноничное имя; обе стороны нормализуются.
+        let aliases_file = dir.path().join("aliases.json");
+        std::fs::write(&aliases_file, "{\"Процессинг СБОЛ\": \" Процессинг \"}").unwrap();
+        let aliases = load_aliases(&aliases_file).unwrap();
+        assert_eq!(
+            aliases.get("процессинг сбол").map(String::as_str),
+            Some("процессинг")
+        );
+        let report = build_landscape_with_aliases(&root, &aliases).unwrap();
+        assert_eq!(report.systems.len(), 1, "{:?}", report.systems);
+        assert_eq!(report.systems[0].occurrences.len(), 2);
+        // Слияние по алиасу делает видимой расходку id (id-divergence).
+        assert!(
+            report.findings.iter().any(|f| f.kind == "id-divergence"),
+            "{:?}",
+            report.findings
+        );
+
+        // yaml-вариант карты.
+        let yaml = dir.path().join("aliases.yaml");
+        std::fs::write(&yaml, "Процессинг СБОЛ: процессинг\n").unwrap();
+        assert_eq!(load_aliases(&yaml).unwrap(), aliases);
+        // Не плоское отображение — понятная ошибка.
+        let bad = dir.path().join("bad.yaml");
+        std::fs::write(&bad, "- не\n- карта\n").unwrap();
+        assert!(load_aliases(&bad).is_err());
+    }
+
+    /// Git-фикстура: коммит «тогда» (SYS-001 adopted + SYS-002) против
+    /// рабочего дерева «сейчас» (SYS-001 proposed, SYS-002 удалена,
+    /// +SYS-003). Возвращает корень репо.
+    fn git_fixture(dir: &Path) -> PathBuf {
+        let repo = dir.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .env("GIT_COMMITTER_DATE", "2026-01-10T12:00:00")
+                .output()
+                .expect("git");
+            assert!(out.status.success(), "git {args:?}: {:?}", out.status);
+        };
+        git(&["init", "-q"]);
+        write_file(
+            &repo,
+            "p1/model/SYS-001.md",
+            "---\nid: SYS-001\ntype: sys\ntitle: Процессинг\nstatus: adopted\n---\nСистема.\n",
+        );
+        write_file(
+            &repo,
+            "p2/model/SYS-002.md",
+            "---\nid: SYS-002\ntype: sys\ntitle: Фрод-монитор\nstatus: adopted\n---\nСистема.\n",
+        );
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "тогда"]);
+        // «Сейчас» — рабочее дерево без коммита.
+        write_file(
+            &repo,
+            "p1/model/SYS-001.md",
+            "---\nid: SYS-001\ntype: sys\ntitle: Процессинг\nstatus: proposed\n---\nСистема.\n",
+        );
+        std::fs::remove_file(repo.join("p2/model/SYS-002.md")).unwrap();
+        write_file(
+            &repo,
+            "p1/model/SYS-003.md",
+            "---\nid: SYS-003\ntype: sys\ntitle: Шлюз СБП\nstatus: adopted\n---\nСистема.\n",
+        );
+        repo
+    }
+
+    #[test]
+    fn landscape_diff_since_ref_and_date() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = git_fixture(dir.path());
+        let aliases = BTreeMap::new();
+
+        // По ссылке HEAD.
+        let diff = diff_landscape(&repo, "HEAD", &aliases).unwrap();
+        assert_eq!(diff.added, vec!["Шлюз СБП".to_string()], "{diff:?}");
+        assert_eq!(diff.removed, vec!["Фрод-монитор".to_string()], "{diff:?}");
+        assert_eq!(diff.changed.len(), 1, "{diff:?}");
+        assert!(
+            diff.changed[0].contains("Процессинг")
+                && diff.changed[0].contains("adopted → proposed"),
+            "{diff:?}"
+        );
+        let md = render_diff_markdown(&diff, "HEAD");
+        assert!(md.contains("## Дифф ландшафта"), "{md}");
+        assert!(md.contains("+1 / −1 / ~1"), "{md}");
+
+        // По дате (последний коммит не позже 15.01) — тот же дифф.
+        let diff_by_date = diff_landscape(&repo, "2026-01-15", &aliases).unwrap();
+        assert_eq!(
+            diff_by_date.base, diff.base,
+            "дата разрешилась в тот же sha"
+        );
+
+        // Дата до первого коммита — понятная ошибка.
+        let err = diff_landscape(&repo, "2025-12-31", &aliases).unwrap_err();
+        assert!(err.to_string().contains("нет коммитов"), "{err}");
+        // Мусорная ссылка — понятная ошибка.
+        assert!(diff_landscape(&repo, "no-such-ref", &aliases).is_err());
+    }
+
+    #[test]
+    fn landscape_diff_outside_git_is_clear_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = fixture(dir.path());
+        let err = diff_landscape(&root, "HEAD", &BTreeMap::new()).unwrap_err();
+        assert!(err.to_string().contains("git"), "{err}");
+    }
+
+    #[test]
+    fn landscape_diff_with_empty_past_model_reports_all_added() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .output()
+                .expect("git");
+            assert!(out.status.success(), "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        write_file(&repo, "README.md", "без модели\n");
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "до моделей"]);
+        write_file(
+            &repo,
+            "p1/model/SYS-001.md",
+            "---\nid: SYS-001\ntype: sys\ntitle: Процессинг\nstatus: adopted\n---\nСистема.\n",
+        );
+        let diff = diff_landscape(&repo, "HEAD", &BTreeMap::new()).unwrap();
+        assert_eq!(diff.added, vec!["Процессинг".to_string()], "{diff:?}");
+        assert!(diff.removed.is_empty() && diff.changed.is_empty());
     }
 }
