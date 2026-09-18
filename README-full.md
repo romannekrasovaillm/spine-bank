@@ -198,7 +198,7 @@ BMAD, Spec Kit, OpenSpec и др.):
 > они живут внутри плагина (`skills/<имя>/SKILL.md`). `arch-be skills …` —
 > плоский индекс скиллов со всех плагинов, а не отдельный реестр.
 
-- Восемь встроенных плагинов (`arch-be init` раскладывает в `~/.arch-harness/plugins`):
+- Девять встроенных плагинов (`arch-be init` раскладывает в `~/.arch-harness/plugins`):
   **arch-core** (15 методических скиллов архитектора, вкл. мета-скилл `skill-authoring`),
   **patterns-integration** (сага, outbox, CQRS, strangler+ACL, идемпотентность —
   дистилляты microservices.io), **patterns-resilience** (circuit breaker+retry,
@@ -211,12 +211,23 @@ BMAD, Spec Kit, OpenSpec и др.):
   python-docx/pptx/openpyxl) и **arch-governance** (управление библиотекой
   правил: 20 готовых fitness-функций для CONSTRAINTS.yaml, три волны
   внедрения, карточка дистилляции, антипаттерны расширения, карта 15 блоков
-  источников), а также **spine-be-docs** (справка по самому продукту: скилл
+  источников), **spine-workflows** (7 плейбуков `spine-*` — сценарии работы
+  архитектора поверх MCP из чужого кодового харнесса: `spine-quickstart`,
+  `spine-architect-review`, `spine-fitness-gate`, `spine-contracts-gate`,
+  `spine-adr-judge`, `spine-content-bootstrap`, `spine-archify-viz`), а также
+  **spine-be-docs** (справка по самому продукту: скилл
   `check-spine-be-docs` отвечает на вопросы о Spine-BE по документации
   репозитория, а не по памяти).
 - Поиск `arch-be skills search`, показ `arch-be skills show`; в TUI — `/skills`,
   `/skill` (в контекст сессии), `/plugins`; модель зовёт `skill_search`/`skill_load`
   сама. Дистилляция статей/контекста в новые скиллы — `skill_distill` и `/distill`.
+- **Banking Edition** (проприетарный слой, в эту публикацию не входит)
+  добавляет шесть доменных плагинов `ru-*` — 39 скиллов: **ru-integration**
+  (DDD, event storming, таксономия саг, FAPI 2.0, Platform V), **ru-data**
+  (medallion, data mesh, PACELC, Platform V Pangolin/Ocean/Radish/DataMarts),
+  **ru-compliance** (PCI DSS, OWASP ASVS/LLM Top 10, CIS, MITRE ATT&CK),
+  **ru-architecture** (анкета ADF, ISO 42010, ArchiMate), **ru-payments**,
+  **ru-archify** — итого в полной редакции **101 скилл в 15 плагинах**.
 - Сессии: `/new` — чистый лист с ротацией журнала; `/resume` — пикер сессий
   (стрелки + Enter), `/resume last` — мгновенно к последней; `/sessions` —
   журналы из append-only архива.
@@ -226,7 +237,34 @@ BMAD, Spec Kit, OpenSpec и др.):
   `[agent] failure_memory = "write"` — append в AGENTS.md проекта
   (`docs/failure_memory.md`).
 
-Подробности: `docs/plugins_and_skills.md`.
+**Самое интересное в библиотеке** (полный разбор — `docs/skills_for_architects.md`):
+
+- `spine-invariants`, `significance-routing`, `handoff-packaging`,
+  `adversarial-review` (arch-core) — метод: позвоночник инвариантов,
+  маршрутизация Fast/Standard/Critical, упаковка контекста кодовым агентам,
+  состязательное ревью.
+- `fitness-function-catalog` (arch-governance) — 20 готовых fitness-функций
+  с реальными regex и три волны внедрения.
+- `docx-research-report` и весь arch-office — отчёты для МД, SAD, деки для
+  правления и архкомитета, матрицы и реестр рисков: генераторы
+  python-docx/pptx/openpyxl внутри скиллов.
+- `timeouts-backoff-jitter`, `load-shedding`, `eight-failure-modes`
+  (aws-builders-library) и `saga-transactions`/`transactional-outbox`
+  (patterns-integration) — дистиллированная инженерная классика.
+- `saga-taxonomy` и `parallel-run-money` (Banking Edition) — какая сага нужна
+  именно здесь и как перевести деньги без остановки (двойной учёт + сверка).
+- `adf-questionnaire`, `pci-dss-scope-map`, `fapi-financial-api`
+  (Banking Edition) — анкета ДИТ, границы scope PCI DSS, hardened OAuth для
+  внешних финансовых API.
+
+<p align="center">
+  <a href="docs/skills_for_architects.md"><img src="docs/screenshots/07-skills.png" alt="Библиотека скиллов в действии: skill_search находит методики надёжной интеграции, skill_load грузит transactional-outbox и fitness-functions в контекст, контур гейтов фиксируется в ADR · skills library in action" width="92%"></a><br>
+  <sub>Скиллы в живом ходе: модель сама ищет методики (<code>skill_search</code>), грузит две в контекст (<code>skill_load</code>) и отвечает по методике · Обзор всех 62 скиллов: <a href="docs/skills_for_architects.md">docs/skills_for_architects.md</a></sub>
+</p>
+
+Подробности: `docs/plugins_and_skills.md` (механика: установка, поиск,
+доверие) и `docs/skills_for_architects.md` (обзор содержимого — все 62
+скилла с разбором самого интересного).
 
 #### Фоновые субагенты, ralph-циклы, worktree-фабрика
 
@@ -645,7 +683,9 @@ arch-be [--config <path>] <command>   # без команды — TUI
 - `AGENTS.md` — путеводитель для агентов и контрибьюторов (установка, карта модулей, конвенции); `AGENTS-READERS.md` — для агентов-читателей (навигация по идеям за 5 минут, безопасное чтение без ключей).
 - `docs/slash_commands.md` — слэш-команды TUI; `docs/tools.md` — инструменты (карта «база vs архитектурные» + полные параметры).
 - `docs/models.md` — подключение LLM (DeepSeek/Kimi/GLM, свои endpoint'ы).
-- `docs/plugins_and_skills.md` — плагины и библиотека скиллов.
+- `docs/plugins_and_skills.md` — плагины и библиотека скиллов (механика).
+- `docs/skills_for_architects.md` — обзор библиотеки: все 62 скилла в 9
+  плагинах, с чего начать.
 - `docs/failure_memory.md` — память сбоев инструментов («ошибся дважды → урок»).
 - `docs/rubrics_and_benchmarks.md`, `docs/control.md`, `docs/governance.md`,
   `docs/harness_integrations.md`, `docs/handoff_walkthrough.md` (передача
@@ -720,7 +760,7 @@ BMAD, Spec Kit, OpenSpec, and more):
 > they live inside a plugin (`skills/<name>/SKILL.md`). `arch-be skills …` is a
 > flat index over all plugins, not a separate registry.
 
-- Eight built-in plugins (deployed by `arch-be init`): **arch-core** (15 architecture
+- Nine built-in plugins (deployed by `arch-be init`): **arch-core** (15 architecture
   method skills incl. the `skill-authoring` meta-skill), **patterns-integration**
   (saga, outbox, CQRS, strangler+ACL — distilled from microservices.io),
   **patterns-resilience** (circuit breaker, bulkhead, load leveling — Azure
@@ -731,17 +771,58 @@ BMAD, Spec Kit, OpenSpec, and more):
   migration roadmaps, decision matrices, risk registers),
   **arch-governance** (rule-library governance: 20 ready fitness functions
   for CONSTRAINTS.yaml, three rollout waves, distillation card, library
-  antipatterns, a map of 15 architecture-source blocks), and
+  antipatterns, a map of 15 architecture-source blocks),
+  **spine-workflows** (7 `spine-*` playbooks — architect workflows over MCP
+  from a foreign coding harness: `spine-quickstart`, `spine-architect-review`,
+  `spine-fitness-gate`, `spine-contracts-gate`, `spine-adr-judge`,
+  `spine-content-bootstrap`, `spine-archify-viz`), and
   **spine-be-docs** (product self-help: the `check-spine-be-docs` skill
   answers questions about Spine-BE from the repository documentation,
   not from memory).
 - `skill_search`/`skill_load` tools, `/skills`, `/distill` (distill articles or
   the session transcript into new skills), `/new` (fresh session with journal
   rotation), `/resume` (session picker: arrows + Enter), `/sessions`.
+- **Banking Edition** (a proprietary layer, not part of this publication)
+  adds six domain plugins `ru-*` — 39 skills: **ru-integration** (DDD, event
+  storming, a saga taxonomy, FAPI 2.0, Platform V), **ru-data** (medallion,
+  data mesh, PACELC, Platform V Pangolin/Ocean/Radish/DataMarts),
+  **ru-compliance** (PCI DSS, OWASP ASVS/LLM Top 10, CIS, MITRE ATT&CK),
+  **ru-architecture** (the ADF architecture questionnaire, ISO 42010,
+  ArchiMate), **ru-payments**, **ru-archify** — **101 skills in 15 plugins**
+  in the full edition.
 - **Failure memory** ("fail twice → lesson"): a repeated tool-failure
   signature (paths/file names collapsed) produces a lesson — chat note +
   `state/failure_lessons.md` (`/lessons`); with
   `[agent] failure_memory = "write"` it is appended to the project AGENTS.md.
+
+**Highlights of the library** (full tour — `docs/skills_for_architects.md`):
+
+- `spine-invariants`, `significance-routing`, `handoff-packaging`,
+  `adversarial-review` (arch-core) — the method: a backbone of invariants,
+  Fast/Standard/Critical routing, context packaging for coding agents,
+  adversarial review.
+- `fitness-function-catalog` (arch-governance) — 20 ready fitness functions
+  with real regexes and three rollout waves.
+- `docx-research-report` and the whole arch-office — management reports, SAD,
+  board and architecture-committee decks, matrices and a risk register, with
+  python-docx/pptx/openpyxl generators inside the skills.
+- `timeouts-backoff-jitter`, `load-shedding`, `eight-failure-modes`
+  (aws-builders-library) and `saga-transactions`/`transactional-outbox`
+  (patterns-integration) — distilled engineering classics.
+- `saga-taxonomy` and `parallel-run-money` (Banking Edition) — which saga fits
+  *here*, and how to migrate money flows without downtime (dual accounting +
+  reconciliation).
+- `adf-questionnaire`, `pci-dss-scope-map`, `fapi-financial-api` (Banking
+  Edition) — the in-house architecture questionnaire, PCI DSS scope
+  boundaries, hardened OAuth for external financial APIs.
+
+<p align="center">
+  <a href="docs/skills_for_architects.md"><img src="docs/screenshots/07-skills.png" alt="Skills library in action: skill_search finds reliable-integration methodologies, skill_load pulls transactional-outbox and fitness-functions into context, the gate contour is recorded in an ADR" width="92%"></a><br>
+  <sub>Skills in a live turn: the model searches methodologies (<code>skill_search</code>), loads two into context (<code>skill_load</code>) and answers by the book · All 62 skills: <a href="docs/skills_for_architects.md">docs/skills_for_architects.md</a> (Russian)</sub>
+</p>
+
+Details: `docs/plugins_and_skills.md` (mechanics: install, search, trust) and
+`docs/skills_for_architects.md` (content tour — all 62 skills).
 
 **Background sub-agents, ralph loops, worktree factory**
 
@@ -1107,7 +1188,8 @@ Fully commented sample: `config.example.toml`.
 - `AGENTS.md` — guide for agents and contributors (install, module map, conventions); `AGENTS-READERS.md` — for reading agents (5-minute idea map, key-free safe exploration).
 - `docs/tools.md` — full tool reference (core vs architecture map, 30+ tools with parameters).
 - `docs/slash_commands.md`, `docs/models.md`, `docs/plugins_and_skills.md`,
-  `docs/rubrics_and_benchmarks.md`, `docs/harness_integrations.md`,
+  `docs/skills_for_architects.md` (the skills-library tour: all 62 skills in
+  9 plugins), `docs/rubrics_and_benchmarks.md`, `docs/harness_integrations.md`,
   `docs/handoff_walkthrough.md` (handing context to a coding harness,
   frame by frame), `docs/governance.md`, `docs/mcp.md`, `docs/cron_and_md_pipes.md`,
   `docs/web_kb.md`, `docs/agents_md.md`, `docs/failure_memory.md`, `docs/SOURCE_BRIEF.md` (idea sources).
