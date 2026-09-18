@@ -7,9 +7,10 @@
 //! - [`core_registry`] — реестр ядерных инструментов;
 //! - [`full_registry`] — ядро + доменные инструменты (`mermaid::tools()`,
 //!   `rubric::tools()`, `kb::tools()`, `control::tools()`,
-//!   `openapi::tools()`, `model::tools()`, `trace::tools()` и др.;
-//!   под фичей `harness` дополнительно `web::tools()`, `harness::tools()`,
-//!   `subagent`, `ralph`, `worktree`, `distill`).
+//!   `openapi::tools()`, `model::tools()`, `trace::tools()`,
+//!   `handoff::tools()` и др.; под фичей `harness` дополнительно
+//!   `web::tools()`, `harness::tools()` (прогон `harness_run`), `subagent`,
+//!   `ralph`, `worktree`, `distill`).
 
 use std::sync::Arc;
 
@@ -81,8 +82,11 @@ fn domain_tools(cfg: &Config) -> Vec<Arc<dyn Tool>> {
     out.extend(crate::nfr::tools());
     out.extend(crate::delta::tools());
     out.extend(crate::evidence::tools());
-    // Домены агентного цикла — только в сборке `harness` (инверсия, шаг 4):
-    // кодовые харнессы, субагенты, ralph, worktree, дистилляция скиллов.
+    // Генерация handoff-пакета — чисто файловая: в обеих сборках (core и
+    // harness). Прогон пакета кодовым харнессом (harness_run) и домены
+    // агентного цикла — только в сборке `harness` (инверсия, шаг 4;
+    // handoff_create в core — волна 2, п.10).
+    out.extend(crate::handoff::tools(cfg));
     #[cfg(feature = "harness")]
     out.extend(crate::harness::tools(cfg));
     out.extend(crate::plugin::tools(cfg));
@@ -132,6 +136,7 @@ mod tests {
             "delta_propose",
             "evidence_verify",
             "evidence_pack",
+            "handoff_create",
         ] {
             assert!(
                 names.iter().any(|n| n == expected),

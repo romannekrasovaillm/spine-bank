@@ -391,12 +391,18 @@ constraints:
   # Текстовый tripwire (быстрый): в файлах core-сборки не должно быть
   # path-ссылок на crates сети/TUI/веба (`reqwest::…` и т.п.). Форма
   # `name::` не срабатывает на прозу doc-комментариев (lib.rs упоминает
-  # ratatui словом). Исключения — harness-модули целиком (tui/agent/web/…)
+  # ratatui словом). Исключения — harness-модули целиком (tui/agent/web/…;
+  # harness.rs остаётся harness-only: адаптеры и прогон кодовых харнессов)
   # и три core-файла, где сетевой/TUI код живёт внутри
   # #[cfg(feature = "harness")]-блоков: error.rs (вариант Http),
   # clipboard.rs (Clipboard), archunit.rs (fetch_jars). Гарантия дерева
   # зависимостей — CI-джоба core-build (cargo check/test
   # --no-default-features --features core).
+  # Волна 2 (п.10): генерация handoff-пакета вынесена из harness.rs в
+  # core-модуль src/handoff.rs (чисто файловая: без запрещённых крейтов —
+  # исключения ему не нужны); инструмент handoff_create отдаётся и в core
+  # (`mcp serve --rw`), охраняется тестами реестра (tools.rs, mcp_server.rs,
+  # tests/mcp_serve.rs).
   - id: C-29
     name: core_free_of_network_and_tui_crates
     type: must_not_contain

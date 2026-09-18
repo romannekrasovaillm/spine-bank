@@ -34,8 +34,9 @@
 //!   `delta_propose`. В core-сборке (без фичи `harness`) домены
 //!   `harness`/`distill`/`subagent`/`ralph`/`worktree`/`web` в реестре
 //!   отсутствуют — мост их имена из белых списков молча пропускает (спеки
-//!   строятся от реестра), `handoff_create` и `skill_distill` там
-//!   недоступны;
+//!   строятся от реестра), `skill_distill` там недоступен;
+//!   `handoff_create` — доступен и в core (генерация пакета — чисто
+//!   файловая, модуль `crate::handoff`, волна 2 п.10);
 //! - НИКОГДА не отдаются (даже под `--rw`) — [`BRIDGE_NEVER`]: write/exec/
 //!   веб/субагенты (`bash`, `read_file`/`write_file`/`edit_file`, `glob`,
 //!   `grep`, `propose_options`, `screenshot*`, `harness_run`, `subagent_*`,
@@ -178,9 +179,10 @@ const BRIDGE_NEVER: &[&str] = &[
 /// `harness` (кодовые харнессы, субагенты, ralph, worktree, веб, distill).
 /// В core-сборке их нет в реестре — мост их молча пропускает (спеки
 /// строятся от реестра). Используется тестами согласованности списков.
+/// (`handoff_create` здесь намеренно НЕТ: с волны 2 (п.10) генерация
+/// пакета — core-модуль `crate::handoff`, инструмент собирается везде.)
 #[cfg(test)]
 const HARNESS_ONLY_TOOLS: &[&str] = &[
-    "handoff_create",
     "skill_distill",
     "harness_run",
     "ralph_run",
@@ -2527,8 +2529,8 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().expect("имя"))
             .collect();
-        // Инструменты доменов сборки `harness` (handoff_create, skill_distill)
-        // в core-сборке в реестре отсутствуют — мост их пропускает.
+        // Инструменты доменов сборки `harness` (skill_distill и др.) в
+        // core-сборке в реестре отсутствуют — мост их пропускает.
         let expected_rw: Vec<&str> = BRIDGE_READ_WRITE
             .iter()
             .copied()
@@ -2561,17 +2563,18 @@ mod tests {
             "rw-режим: ручные + оба белых списка (в core — без harness-доменов)"
         );
         // Аннотации: mutating по классификации политики → destructiveHint.
-        // (handoff_create живёт в домене сборки `harness`.)
+        // handoff_create — в обеих сборках (core-модуль crate::handoff).
+        let handoff = tools
+            .iter()
+            .find(|t| t["name"] == "handoff_create")
+            .expect("handoff_create");
+        assert_eq!(handoff["annotations"]["readOnlyHint"], false);
+        assert_eq!(handoff["annotations"]["destructiveHint"], true);
+        // Аддитивная запись (политика — ReadOnly): readOnlyHint=false по
+        // членству в rw-списке, destructiveHint=false по классу риска.
+        // (skill_distill живёт в домене сборки `harness`.)
         #[cfg(feature = "harness")]
         {
-            let handoff = tools
-                .iter()
-                .find(|t| t["name"] == "handoff_create")
-                .expect("handoff_create");
-            assert_eq!(handoff["annotations"]["readOnlyHint"], false);
-            assert_eq!(handoff["annotations"]["destructiveHint"], true);
-            // Аддитивная запись (политика — ReadOnly): readOnlyHint=false по
-            // членству в rw-списке, destructiveHint=false по классу риска.
             let distill = tools
                 .iter()
                 .find(|t| t["name"] == "skill_distill")

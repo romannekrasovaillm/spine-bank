@@ -614,7 +614,7 @@ fn cmd_handoff(rest: &str, ctx: &ToolContext) -> Result<SlashOutcome> {
             known.join(", ")
         )));
     }
-    let packet = crate::harness::generate_handoff(
+    let packet = crate::handoff::generate_handoff(
         &ctx.resolve(repo),
         &task,
         &[],

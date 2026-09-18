@@ -1240,7 +1240,7 @@ async fn main() -> Result<()> {
             }
             let route: arch_harness::control::Route =
                 route.parse().map_err(|e: String| anyhow::anyhow!(e))?;
-            let packet = arch_harness::harness::generate_handoff(
+            let packet = arch_harness::handoff::generate_handoff(
                 &repo,
                 &task,
                 &spec,
@@ -1310,7 +1310,7 @@ async fn main() -> Result<()> {
                     .context("нет --task и не найден .arch-handoff/TASK.md")?,
             };
             let mut hcfg_owned = hcfg.clone();
-            if let Some(t) = arch_harness::harness::recommended_timeout_secs(&repo) {
+            if let Some(t) = arch_harness::handoff::recommended_timeout_secs(&repo) {
                 // Пакет несёт рекомендацию по маршруту значимости (Fast/Standard/Critical).
                 hcfg_owned.timeout_secs = t.clamp(600, 7200);
             }

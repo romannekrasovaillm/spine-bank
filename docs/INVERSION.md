@@ -24,6 +24,15 @@
   `evidence_verify` — read-only мост; `evidence_pack`, `delta_propose` —
   под `--rw`) с JSON-вердиктом `passed`/`issues`/`summary` и политикой
   R-уровней.
+- **`handoff_create` — в core** (волна 2, п.10, 2026-09-18): генерация
+  handoff-пакета вынесена из `src/harness.rs` в core-модуль `src/handoff.rs`
+  (чисто файловая, без сети/TUI); инструмент регистрируется в
+  `tools::domain_tools` в обеих сборках, core-сборка `arch-be mcp serve --rw`
+  отдаёт его мостом. Кейс drift-control воспроизводится core-бинарём в части
+  создания пакета (тест в `tests/mcp_serve.rs` на фикстуре кейса 006).
+  `harness_run` и адаптеры кодовых харнессов остаются harness-only; CLI
+  `arch-be handoff` тоже (его поверхность — связка с адаптерами; core-путь
+  создания пакета — MCP `handoff_create`).
 - **never-список** шире планового: кроме `bash`/`write_file`/`harness_run`
   наружу не отдаются также `read_file`/`glob`/`grep`/скриншоты/`subagent_*`/
   `ralph_*`/`worktree_new`/`web_*` — это всё принадлежит хосту.

@@ -179,6 +179,10 @@ arch-be mcp serve --rw     # + записывающие: handoff_create, adr_new
                            #   reverse_survey, evidence_pack, delta_propose
 ```
 
+Из rw-списка в core-сборке нет только `skill_distill` (дистилляция зовёт
+LLM); `handoff_create` доступен и в core (создание пакета — чисто файловая
+работа, см. `docs/handoff_walkthrough.md`).
+
 Инструменты хоста за файлы и shell отвечают сами — `bash`, `write_file`,
 `edit_file`, `harness_run`, `subagent_*`, `web_*` из Spine наружу **не
 отдаются никогда** (never-список зашит и охраняется тестами реестра).
