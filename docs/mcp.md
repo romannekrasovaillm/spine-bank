@@ -80,13 +80,15 @@ claude mcp add arch-spine -- arch-be mcp serve
 | `omp` | `.mcp.json` (мердж, как у claude — omp дискаверит проектный файл автоматически); скиллы в `.claude/skills/`, только если такого каталога ещё нет (omp читает его нативно) | заметки: автодискавери `.mcp.json`; хуков нет — TS-расширения через `omp --hook <file.ts>` |
 | `generic` | ничего | все сниппеты для ручной установки |
 
-Хуки Claude Code: `Stop` → `arch-be control check .` (гард: только если
-`arch-be` в PATH и есть `.arch-handoff/CONSTRAINTS.yaml`). Дефолт —
-fail-soft на инфраструктуру (нет бинаря/правил, ошибка запуска — молча
-exit 0) и fail-hard на вердикт («Итог: FAIL» → exit 2, stderr уходит
-агенту). `PostToolUse` (matcher `Edit|Write|MultiEdit`) — только под
-`--strict-hooks`: на репозиториях с правилами `command_succeeds`
-`control check` может гонять сборки — для каждой правки это дорого.
+Хуки Claude Code: `Stop` → `arch-be gate --route auto` (гард: только если
+`arch-be` в PATH и есть `.arch-handoff/CONSTRAINTS.yaml`; единый гейт —
+состав составляющих и SKIP-семантика в `docs/control.md`). Дефолт —
+fail-soft на инфраструктуру (нет бинаря/правил, нет входа у составляющих —
+молча exit 0) и fail-hard на вердикт (ненулевой код возврата гейта →
+exit 2, stderr уходит агенту; строки вывода хук не разбирает). `PostToolUse`
+(matcher `Edit|Write|MultiEdit`) — только под `--strict-hooks`: на
+репозиториях с правилами `command_succeeds` гейт может гонять сборки — для
+каждой правки это дорого.
 
 ### Инструменты
 

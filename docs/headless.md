@@ -196,6 +196,7 @@ CI-шаг (условный): `arch-be control check . --json > fitness-report.j
 
 | Команда | Что делает | stdout | Exit-контракт | Гайд |
 |---|---|---|---|---|
+| `arch-be gate [--repo R] [--route auto\|fast\|standard\|critical] [--base REF] [--constraints F]` | Единый архитектурный гейт: fitness + delta guard + rule_weakened (анти-ослабление правил) + spine-линт + трассировка; на маршрутах Standard/Critical — ещё nfr и evidence | по каждой составляющей PASS/FAIL/SKIP + причина, строка маршрута, «Итог: PASS/FAIL» | 0 — все PASS/SKIP; 1 — провал любой составляющей (механически, без разбора строк) | `docs/control.md` |
 | `arch-be control check <REPO> [--constraints F] [--json]` | Fitness-контроль репозитория по `CONSTRAINTS.yaml` | сводка «Правил/нарушений, Итог PASS/FAIL»; с `--json` — одна строка JSON `FitnessReport` | 0 — PASS, 1 — FAIL (JSON печатается и при FAIL) или ошибка исполнения | `docs/control.md` |
 | `arch-be archify validate\|deliver\|compare … [--json]` | Приёмка диаграмм JSON IR → HTML/SVG (9 checks + composition), атомарная доставка с SHA-256 receipt | сводка receipt; с `--json` — pretty JSON, `schemaVersion: 1` | 0 — `ok:true`; 1 — провал валидации/ошибка использования/таймаут (исходный код CLI в stderr) | `docs/archify.md` |
 | `arch-be mermaid <FILE\|->` | Черновой Unicode/ASCII-рендер mermaid (читается из stdin при `-`) | ASCII-арт диаграммы | 0 — рендер; 1 — файл не читается / ошибка разбора (`Error: mermaid: строка N: …`) | ADR-009 (`docs/adr/`) |

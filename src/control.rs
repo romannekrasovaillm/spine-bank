@@ -1802,6 +1802,174 @@ pub fn check(repo: &Path, constraints: &Path) -> Result<FitnessReport> {
     })
 }
 
+// --- Анти-ослабление гейта (находка `rule_weakened`, `arch-be gate`) -------
+
+/// Тип ослабления правила — расшифровка находки `rule_weakened`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WeakenedKind {
+    /// Правило удалено из реестра (было в базовой версии, нет в текущей).
+    Removed,
+    /// У правила появился или расширился `exclude_glob` (новые исключения
+    /// из набора проверяемых файлов).
+    ExcludeWidened,
+    /// Severity понижен (нормализованное error → warn; сами нормализованные
+    /// значения сравниваются — `critical`/`high`/`block` ≡ error).
+    SeverityLowered,
+}
+
+impl WeakenedKind {
+    /// Русская метка для текста находки.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Removed => "удалено из реестра",
+            Self::ExcludeWidened => "появился/расширился exclude_glob",
+            Self::SeverityLowered => "severity понижен",
+        }
+    }
+}
+
+/// Имена/идентификаторы правил с АКТИВНЫМИ overrides (`rule`+`adr`+`until`,
+/// дата корректна и не просрочена — та же логика, что у
+/// [`evaluate_overrides`]). Активный override узаконивает ослабление своего
+/// правила: находка `rule_weakened` по нему подавляется.
+fn active_override_keys(overrides: &[OverrideEntry]) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for entry in overrides {
+        let (Some(rule), Some(adr), Some(until)) = (&entry.rule, &entry.adr, &entry.until) else {
+            continue; // неполный override — не активен (отдельная error-находка `check`)
+        };
+        let rule = rule.trim();
+        if rule.is_empty() || adr.trim().is_empty() {
+            continue;
+        }
+        let Some((y, m, d)) = parse_until(until.trim()) else {
+            continue; // некорректная дата — override не активен
+        };
+        if until_expired(y, m, d) {
+            continue;
+        }
+        out.insert(rule.to_string());
+    }
+    out
+}
+
+/// Снимок правила для сравнения версий: `exclude_glob` и нормализованный
+/// severity (id — для матчинга overrides, которые могут ссылаться на правило
+/// по id).
+struct RuleSnapshot {
+    /// Идентификатор правила (`id: C-NNN`), если задан.
+    id: Option<String>,
+    /// Множество `exclude_glob`.
+    excludes: BTreeSet<String>,
+    /// Нормализованный severity (`error`/`warn`).
+    severity: &'static str,
+}
+
+/// Строит карту «имя правила → снимок» из разобранного constraint-файла.
+/// Невалидный severity — ошибка разбора (ту же ошибку дал бы и `check`).
+fn rules_snapshot(parsed: &ConstraintsFile) -> Result<BTreeMap<String, RuleSnapshot>> {
+    let mut out = BTreeMap::new();
+    for rule in parsed.all_rules() {
+        out.insert(
+            rule.name.clone(),
+            RuleSnapshot {
+                id: rule.id.clone(),
+                excludes: rule.exclude_glob.iter().cloned().collect(),
+                severity: normalize_severity(&rule.severity, &rule.name)?,
+            },
+        );
+    }
+    Ok(out)
+}
+
+/// Анти-ослабление fitness-гейта (находка `rule_weakened`): сравнивает
+/// текущий `CONSTRAINTS.yaml` с версией из git-базы (обе версии — текстами,
+/// git-разрешение делает вызывающий — [`crate::gate`]). Ослабления, дающие
+/// error-находку с именем правила:
+///
+/// - правило из базы исчезло из текущего файла (по именам);
+/// - у правила появился/расширился `exclude_glob` (новые glob'ы исключений);
+/// - severity понижен (error → warn, нормализация [`normalize_severity`]).
+///
+/// Ослабление УЗАКОНЕНО (находки нет), если в текущем файле есть активный
+/// override на это правило (по имени или id) с ADR — гейт «только через ADR»
+/// (`docs/corp-spine.md`).
+///
+/// Сравнение — по плоскому разбору этого файла (оба корня `rules:`/
+/// `constraints:`), наследование `extends` не разворачивается: правке через
+/// смену пина родителя соответствует отдельная error-находка резолва.
+///
+/// # Errors
+/// YAML любой из версий невалиден, severity правила вне допустимых значений.
+pub fn rule_weakened(current_src: &str, base_src: &str, file: &Path) -> Result<Vec<LintIssue>> {
+    let current: ConstraintsFile = serde_yaml_ng::from_str(current_src)?;
+    let base: ConstraintsFile = serde_yaml_ng::from_str(base_src)?;
+    let current_rules = rules_snapshot(&current)?;
+    let base_rules = rules_snapshot(&base)?;
+    let legalized = active_override_keys(&current.overrides);
+
+    let mut issues = Vec::new();
+    let push = |kind: WeakenedKind,
+                name: &str,
+                id: Option<&str>,
+                detail: String,
+                issues: &mut Vec<LintIssue>| {
+        // Активный override по имени или id правила узаконивает ослабление.
+        if legalized.contains(name) || id.is_some_and(|i| legalized.contains(i)) {
+            return;
+        }
+        issues.push(LintIssue {
+            file: file.to_path_buf(),
+            line: 0,
+            rule: "rule_weakened".to_string(),
+            message: format!(
+                "правило '{name}': {} — {detail}; ослабление гейта требует активный override \
+                 с ADR (overrides: rule+adr+until)",
+                kind.label()
+            ),
+            severity: "error".to_string(),
+            ..LintIssue::default()
+        });
+    };
+
+    for (name, base_rule) in &base_rules {
+        let Some(current_rule) = current_rules.get(name) else {
+            push(
+                WeakenedKind::Removed,
+                name,
+                base_rule.id.as_deref(),
+                "правило присутствовало в базовой версии и удалено".to_string(),
+                &mut issues,
+            );
+            continue;
+        };
+        let added: Vec<String> = current_rule
+            .excludes
+            .difference(&base_rule.excludes)
+            .cloned()
+            .collect();
+        if !added.is_empty() {
+            push(
+                WeakenedKind::ExcludeWidened,
+                name,
+                current_rule.id.as_deref(),
+                format!("новые исключения: {}", added.join(", ")),
+                &mut issues,
+            );
+        }
+        if base_rule.severity == "error" && current_rule.severity == "warn" {
+            push(
+                WeakenedKind::SeverityLowered,
+                name,
+                current_rule.id.as_deref(),
+                "error → warn".to_string(),
+                &mut issues,
+            );
+        }
+    }
+    Ok(issues)
+}
+
 /// Число коммитов за последние 90 дней, трогавших файл ограничений —
 /// git-прокси стоимости сопровождения реестра правил. `None` — не
 /// git-репозиторий или git недоступен: отчёт показывает «недоступно»,
@@ -3700,6 +3868,163 @@ mod tests {
         }
         std::fs::write(&p, content).unwrap();
         p
+    }
+
+    // --- Анти-ослабление гейта (rule_weakened) ------------------------------
+
+    /// Базовая версия CONSTRAINTS.yaml для тестов `rule_weakened`: два
+    /// правила уровня error, у `no-pan` есть id для матчинга overrides.
+    const WEAK_BASE: &str = "rules:\n\
+         - name: no-pan\n  \
+         id: C-01\n  \
+         type: must_not_contain\n  \
+         glob: \"src/**\"\n  \
+         pattern: 'PAN'\n  \
+         severity: error\n\
+         - name: spine-present\n  \
+         type: file_exists\n  \
+         path: \"ARCHITECTURE-SPINE.md\"\n  \
+         severity: error\n";
+
+    /// Текущая версия, идентичная базовой (без ослаблений).
+    #[test]
+    fn rule_weakened_clean_when_unchanged_or_strengthened() {
+        let file = Path::new("CONSTRAINTS.yaml");
+        let issues = rule_weakened(WEAK_BASE, WEAK_BASE, file).expect("сравнение");
+        assert!(issues.is_empty(), "{issues:?}");
+        // Усиление (новое правило, поднятие severity, добавление glob) —
+        // не ослабление: находок нет.
+        let stronger = "rules:\n\
+             - name: no-pan\n  \
+             id: C-01\n  \
+             type: must_not_contain\n  \
+             glob: \"src/**\"\n  \
+             pattern: 'PAN'\n  \
+             severity: critical\n\
+             - name: spine-present\n  \
+             type: file_exists\n  \
+             path: \"ARCHITECTURE-SPINE.md\"\n  \
+             severity: error\n\
+             - name: no-dbg\n  \
+             type: must_not_contain\n  \
+             glob: \"src/**\"\n  \
+             pattern: 'dbg!'\n  \
+             severity: warn\n";
+        let issues = rule_weakened(stronger, WEAK_BASE, file).expect("сравнение");
+        assert!(issues.is_empty(), "{issues:?}");
+    }
+
+    /// Удаление правила (агент «позеленил» гейт) — error-находка с именем.
+    #[test]
+    fn rule_weakened_flags_removed_rule() {
+        let current = "rules:\n\
+             - name: spine-present\n  \
+             type: file_exists\n  \
+             path: \"ARCHITECTURE-SPINE.md\"\n  \
+             severity: error\n";
+        let issues =
+            rule_weakened(current, WEAK_BASE, Path::new("CONSTRAINTS.yaml")).expect("сравнение");
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        let i = &issues[0];
+        assert_eq!(i.rule, "rule_weakened");
+        assert_eq!(i.severity, "error");
+        assert!(i.message.contains("no-pan"), "{}", i.message);
+        assert!(i.message.contains("удалено из реестра"), "{}", i.message);
+    }
+
+    /// Появление `exclude_glob` у правила — error-находка.
+    #[test]
+    fn rule_weakened_flags_new_exclude_glob() {
+        let current = WEAK_BASE.replace(
+            "pattern: 'PAN'\n  severity: error",
+            "pattern: 'PAN'\n  exclude_glob: [\"src/legacy/**\"]\n  severity: error",
+        );
+        assert_ne!(current, WEAK_BASE, "подстановка сработала");
+        let issues =
+            rule_weakened(&current, WEAK_BASE, Path::new("CONSTRAINTS.yaml")).expect("сравнение");
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert!(
+            issues[0].message.contains("exclude_glob"),
+            "{}",
+            issues[0].message
+        );
+        assert!(
+            issues[0].message.contains("src/legacy/**"),
+            "{}",
+            issues[0].message
+        );
+    }
+
+    /// Понижение severity error → warn без override — error-находка;
+    /// нормализованные эквиваленты (critical → error) ослаблением не считаются.
+    #[test]
+    fn rule_weakened_flags_severity_downgrade_only_when_real() {
+        let lowered = WEAK_BASE.replace(
+            "path: \"ARCHITECTURE-SPINE.md\"\n  severity: error",
+            "path: \"ARCHITECTURE-SPINE.md\"\n  severity: warn",
+        );
+        assert_ne!(lowered, WEAK_BASE, "подстановка сработала");
+        let issues =
+            rule_weakened(&lowered, WEAK_BASE, Path::new("CONSTRAINTS.yaml")).expect("сравнение");
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert!(
+            issues[0].message.contains("spine-present")
+                && issues[0].message.contains("severity понижен"),
+            "{}",
+            issues[0].message
+        );
+        // critical → error: оба нормализуются в error — не ослабление.
+        let base_critical = WEAK_BASE.replacen("severity: error", "severity: critical", 1);
+        let current_error = WEAK_BASE;
+        let issues = rule_weakened(current_error, &base_critical, Path::new("CONSTRAINTS.yaml"))
+            .expect("сравнение");
+        assert!(issues.is_empty(), "{issues:?}");
+    }
+
+    /// Ослабление с АКТИВНЫМ override (rule+adr+until в будущем) — узаконено:
+    /// находок нет; просроченный override ослабление не легализует.
+    #[test]
+    fn rule_weakened_active_override_legalizes_weakening() {
+        // Удаление no-pan + активный override по id правила (C-01).
+        let legal = "rules:\n\
+             - name: spine-present\n  \
+             type: file_exists\n  \
+             path: \"ARCHITECTURE-SPINE.md\"\n  \
+             severity: error\n\
+             overrides:\n\
+             - rule: C-01\n  \
+             adr: ADR-042\n  \
+             until: \"2999-01\"\n";
+        let issues =
+            rule_weakened(legal, WEAK_BASE, Path::new("CONSTRAINTS.yaml")).expect("сравнение");
+        assert!(
+            issues.is_empty(),
+            "активный override узаконивает: {issues:?}"
+        );
+
+        // Тот же override, но просроченный, — ослабление снова находка.
+        let expired = legal.replace("2999-01", "2001-01");
+        let issues =
+            rule_weakened(&expired, WEAK_BASE, Path::new("CONSTRAINTS.yaml")).expect("сравнение");
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert!(
+            issues[0].message.contains("no-pan"),
+            "{}",
+            issues[0].message
+        );
+
+        // Override на ДРУГОЕ правило ослабление no-pan не легализует.
+        let alien = legal.replace("rule: C-01", "rule: spine-present");
+        let issues =
+            rule_weakened(&alien, WEAK_BASE, Path::new("CONSTRAINTS.yaml")).expect("сравнение");
+        assert_eq!(issues.len(), 1, "{issues:?}");
+    }
+
+    /// Невалидный YAML любой из версий — ошибка разбора, не паника.
+    #[test]
+    fn rule_weakened_reports_broken_yaml() {
+        assert!(rule_weakened("{битый", WEAK_BASE, Path::new("C.yaml")).is_err());
+        assert!(rule_weakened(WEAK_BASE, "{битый", Path::new("C.yaml")).is_err());
     }
 
     #[test]

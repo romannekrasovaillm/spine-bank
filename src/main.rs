@@ -165,6 +165,27 @@ enum Cmd {
         #[command(subcommand)]
         cmd: ControlCmd,
     },
+    /// Единый архитектурный гейт репозитория: fitness (control check) +
+    /// гейт прямых правок спайна (delta guard) + анти-ослабление правил
+    /// (`rule_weakened`) + линтер спайна + трассировка; на маршрутах
+    /// Standard/Critical — количественные NFR и проверка evidence-бандлов.
+    /// Провал любой составляющей — exit 1 (механически, без разбора строк).
+    Gate {
+        /// Репозиторий (по умолчанию — текущий каталог).
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        /// Маршрут: auto (механически из git-диффа, дефолт) | fast |
+        /// standard | critical. Явное значение переопределяет авто-режим.
+        #[arg(long, default_value = "auto")]
+        route: String,
+        /// База git для диффа и сравнения правил (по умолчанию — рабочее
+        /// дерево против HEAD; для CI — напр. origin/main...HEAD).
+        #[arg(long)]
+        base: Option<String>,
+        /// Файл ограничений (по умолчанию <repo>/.arch-handoff/`CONSTRAINTS.yaml`).
+        #[arg(long)]
+        constraints: Option<PathBuf>,
+    },
     /// Реестр ADR: глобальная агрегация решений по набору проектов (ADR-036).
     Adr {
         #[command(subcommand)]
@@ -1360,6 +1381,38 @@ async fn main() -> Result<()> {
             }
         }
         Some(Cmd::Control { cmd }) => cmd_control(&cfg, cmd)?,
+        Some(Cmd::Gate {
+            repo,
+            route,
+            base,
+            constraints,
+        }) => {
+            let repo = repo.unwrap_or_else(|| PathBuf::from("."));
+            let route = match route.trim().to_ascii_lowercase().as_str() {
+                "auto" => None,
+                other => Some(
+                    other
+                        .parse::<arch_harness::control::Route>()
+                        .map_err(|e: String| anyhow::anyhow!(e))?,
+                ),
+            };
+            // Пороги маршрутов — из конфига ([significance], ADR-034).
+            let limits = cfg
+                .significance
+                .limits()
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let report = arch_harness::gate::run(
+                &repo,
+                route,
+                base.as_deref(),
+                constraints.as_deref(),
+                limits,
+            )?;
+            print!("{}", arch_harness::gate::render(&report));
+            if !report.passed {
+                std::process::exit(1);
+            }
+        }
         Some(Cmd::Adr { cmd }) => cmd_adr(cmd)?,
         Some(Cmd::Publish { cmd }) => cmd_publish(cmd)?,
         Some(Cmd::Model { cmd }) => cmd_model(cmd)?,

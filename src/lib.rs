@@ -52,6 +52,7 @@ pub mod evidence;
 pub mod export;
 pub mod failure_memory;
 pub mod fleet;
+pub mod gate;
 #[cfg(feature = "harness")]
 pub mod harness;
 pub mod hooks;

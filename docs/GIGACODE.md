@@ -66,7 +66,7 @@ MCP-сервер, скиллы, хуки-гейты. GigaCode CLI — форк Q
 
 3. Хук-гейт (информационный): в .qwen/settings.json можно добавить
    "hooks": {"SessionEnd": [{"hooks": [{"type": "command", "command":
-   "arch-be control check . 2>&1 | tail -3"}]}]}
+   "arch-be gate --route auto 2>&1 | tail -3"}]}]}
    ВНИМАНИЕ: в qwen-code 0.24 хуки управляются через `qwen hooks` (UI) и
    в headless-режиме не файрят — этот хук показывает вердикт гейта, но НЕ
    блокирует завершение. Если hooks не поддерживаются твоей версией —

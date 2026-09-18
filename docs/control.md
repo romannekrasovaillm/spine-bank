@@ -514,6 +514,82 @@ arch-be fleet audit --repo . --fail-on-dupes 50        # флот worktree бе�
 
 Живой мини-кейс обоих гейтов — `кейсы/fleet-spine-drift/` (007).
 
+## Единый гейт (`arch-be gate`)
+
+Одна команда прогоняет весь детерминированный контур контроля репозитория и
+сводит исходы в один exit-код: **провал любой составляющей → exit 1**
+(механически, по кодам возврата составляющих — без разбора строк вывода;
+это контракт для CI и для хуков `arch-be connect`, которые вызывают именно
+`arch-be gate`).
+
+```bash
+arch-be gate [--repo <path>] [--route auto|fast|standard|critical] [--base <git-ref>] [--constraints <file>]
+```
+
+Составляющие (на любом маршруте):
+
+| Составляющая | Что прогоняет | FAIL, когда |
+|---|---|---|
+| `fitness` | `control check` по `CONSTRAINTS.yaml` (дефолт `<repo>/.arch-handoff/CONSTRAINTS.yaml`, `--constraints` — другой файл) | находки severity error; файл есть, но не читается/не валиден |
+| `delta_guard` | `delta guard` (защищённые пути: `model/`, `ARCHITECTURE-SPINE.md`, `CONSTRAINTS.yaml`) | правки защищённых файлов без активной дельты |
+| `rule_weakened` | анти-ослабление реестра правил относительно git-базы (см. ниже) | правило удалено / `exclude_glob` расширен / severity понижен без активного override |
+| `spine_lint` | `control spine ARCHITECTURE-SPINE.md` | error-находки линтера |
+| `trace_check` | `trace check` (нужны `model/` и `CONSTRAINTS.yaml` в корне) | error-находки трассировки |
+
+На маршрутах **Standard/Critical** добавляются:
+
+| Составляющая | Что прогоняет | FAIL, когда |
+|---|---|---|
+| `nfr` | все четыре проверки `nfr` (budget/availability/capacity/cost) | error-находка хотя бы одной |
+| `evidence_verify` | `evidence verify` по каждому активному change-dir `changes/<name>/EVIDENCE.yaml` | бандл неполон или хэш сошёлся с дрейфом |
+
+**Fail-soft (SKIP, не падение):** у составляющей нет входа — нет
+`CONSTRAINTS.yaml`, не git-репозиторий, нет `model/`, нет активных бандлов.
+Сбой выполнения при наличии входа (битый YAML, неработающее правило) — FAIL
+с причиной: гейт, молча пропускающий поломку собственной конфигурации,
+не гейт.
+
+**Маршрут.** `--route auto` (дефолт) вычисляет маршрут механически из
+git-диффа (`detect_diff_triggers` + `score_with_sources` с пустым declared —
+тот же anti-bypass floor S-1, что у `control score --from-diff` и MCP
+`significance_from_diff`; `--base` задаёт git-ref, без него — рабочее дерево
+против HEAD). Дифф недоступен (не git-репозиторий, нет HEAD) — fail-safe
+маршрут Critical с пометкой причины в строке «Маршрут:». Явный
+`--route fast|standard|critical` переопределяет авто-режим.
+
+```bash
+arch-be gate --repo ~/work/payment-svc
+# Гейт: ~/work/payment-svc
+# Маршрут: Fast (auto: score 0 (триггеров нет))
+#   [PASS] fitness — Правил: 13, нарушений: 0 (error: 0, warn: 0)
+#   [PASS] delta_guard — изменённых файлов: 2, защищённых среди них: 0
+#   [PASS] rule_weakened — реестр правил не ослаблен относительно HEAD
+#   [PASS] spine_lint — находок: 0 (error: 0)
+#   [SKIP] trace_check — нет каталога model/
+# Итог: PASS
+```
+
+### Находка `rule_weakened` (анти-ослабление гейта)
+
+Сравнение текущего `CONSTRAINTS.yaml` с версией в git-базе (`--base`, дефолт
+HEAD). Error-находка с именем правила — за каждое из:
+
+- правило из базы **удалено** из текущего файла (по именам);
+- у правила появился или расширился **`exclude_glob`** (новые исключения);
+- **severity понижен** (error → warn; эквиваленты `critical`/`high`/`block` ≡
+  error ослаблением не считаются).
+
+Ослабление **узаконено** (находки нет), если в текущем файле есть активный
+override на это правило (по имени или `id`) с ADR — гейт «только через ADR»
+(`docs/corp-spine.md`): `overrides: [{rule, adr, until}]`, срок не истёк.
+Сравнение — по плоскому разбору файла (оба корня `rules:`/`constraints:`),
+`extends` не разворачивается. Входа нет (не git, файла нет в базовой
+ревизии, реестр новый) — SKIP.
+
+Типовой антикейс: агент под давлением красного гейта «чинит» его удалением
+правила — `rule_weakened` валит прогон, пока ослабление не оформлено через
+ADR-override.
+
 ## ADR-шаблон (`control adr`)
 
 ```bash

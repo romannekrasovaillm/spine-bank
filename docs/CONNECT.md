@@ -71,7 +71,7 @@ arch-be connect generic     # любой MCP-хост — все сниппет�
   мерджем и бэкапом делает `arch-be connect kimi --apply-global`;
 - TOML-блок Stop-хука для `~/.kimi-code/config.toml` (проектных хуков у
   Kimi Code нет): `[[hooks]]` с той же командой-гейтом
-  `arch-be control check .`, что у Claude Code (exit 2 = блок, stderr
+  `arch-be gate --route auto`, что у Claude Code (exit 2 = блок, stderr
   уходит модели).
 
 При первом запуске `kimi` в каталоге появится trust-диалог со списком
@@ -88,7 +88,7 @@ omp читает нативно из `.claude/skills/`: если такого к
 Code); каталог уже есть — не трогается, чтобы не перетирать вашу
 библиотеку. Хуков через connect нет: механизм хуков omp —
 TypeScript-расширения, подключаемые флагом `omp --hook <file.ts>`;
-команда-гейт для такого расширения — `arch-be control check .`.
+команда-гейт для такого расширения — `arch-be gate`.
 
 ## 2. Проверка подключения
 
@@ -117,14 +117,17 @@ project-scoped сервер из `.mcp.json` и доверие каталогу 
 
 А Stop-хук (записан в `.claude/settings.json`) не даёт агенту завершить
 работу, пока гейт красный: при попытке остановки хук запускает
-`arch-be control check .`, и при вердикте FAIL завершение блокируется
-(exit 2), находки уходят агенту как feedback:
+`arch-be gate --route auto` (единый гейт: fitness + delta guard +
+rule_weakened + spine + trace, на маршрутах Standard/Critical ещё nfr и
+evidence — см. `docs/control.md`), и при ненулевом коде возврата завершение
+блокируется (exit 2), находки уходят агенту как feedback:
 
 ![Stop-хук](screenshots/connect/05-stop-hook.png)
 
 Семантика хуков — **fail-soft на инфраструктуру** (нет `arch-be` в PATH или
-нет `.arch-handoff/CONSTRAINTS.yaml` — молча пропуск, exit 0) и
-**fail-hard на вердикт** (только «Итог: FAIL» блокирует). Дополнительный
+нет `.arch-handoff/CONSTRAINTS.yaml` — молча пропуск, exit 0; нет входа у
+составляющих гейта — внутренний SKIP) и **fail-hard на вердикт** (ненулевой
+код `arch-be gate` блокирует; строки вывода хук не разбирает). Дополнительный
 гейт на каждую правку (`PostToolUse` для Edit/Write) включается флагом
 `--strict-hooks` — учтите: если в CONSTRAINTS.yaml есть правила
 `command_succeeds` (например, `cargo test`), такой гейт будет дорогим.
@@ -174,7 +177,7 @@ k сырых ответов, считает медиану, проверяет �
 | Симптом | Причина и лечение |
 |---|---|
 | `claude mcp list`: «Pending approval» | Project-сервер не одобрен — запустите `claude` интерактивно и подтвердите, либо `claude mcp add spine --scope local -- arch-be mcp serve` |
-| Хук не срабатывает | Каталог не доверен (trust-диалог) или хуки отключены глобально; проверьте `arch-be control check .` вручную — должен печатать «Итог: PASS/FAIL» |
+| Хук не срабатывает | Каталог не доверен (trust-диалог) или хуки отключены глобально; проверьте `arch-be gate` вручную — должен печатать «Итог: PASS/FAIL» |
 | `command not found: arch-be` | Бинарь не в PATH: `ln -sf <путь>/arch-be ~/.local/bin/arch-be` |
 | `rubric_run` отвечает -32603 | Модель без `kind = "cli"` требует API-ключ; добавьте cli-модель (§5A) или используйте split-judge (§5B) |
 | Скиллы не видны агенту | Они в `.claude/skills/` проекта — проверьте, что агент читает project-скиллы (Claude Code: перезапуск) |

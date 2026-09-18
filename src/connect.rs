@@ -56,12 +56,13 @@
 //! Консервативный дефолт — fail-soft на инфраструктуру, fail-hard на
 //! вердикт: хук молча пропускается (exit 0), если `arch-be` не в PATH или
 //! в проекте нет `.arch-handoff/CONSTRAINTS.yaml` (гард); блок (exit 2) —
-//! только когда `arch-be control check .` завершился строкой «Итог: FAIL».
-//! Так инфраструктурные сбои (битый конфиг, ошибка запуска — в выводе
-//! «Error:», а не «Итог: FAIL») не останавливают сессию, а реальные
-//! нарушения fitness-правил — стопят её. `PostToolUse` в дефолт не входит:
-//! `control check` на репозитории с правилами `command_succeeds` может
-//! гонять сборки/тесты — для каждой правки это слишком дорого.
+//! когда `arch-be gate --route auto` завершился ненулевым кодом (провал
+//! любой составляющей: fitness, delta guard, `rule_weakened`, spine, trace).
+//! Так инфраструктурные сбои (нет входа у составляющих гейта — SKIP внутри
+//! `arch-be gate`) не останавливают сессию, а реальные нарушения — стопят
+//! её. `PostToolUse` в дефолт не входит: гейт на репозитории с правилами
+//! `command_succeeds` может гонять сборки/тесты — для каждой правки это
+//! слишком дорого.
 //!
 //! Идемпотентность: повторный запуск даёт тот же результат — JSON
 //! смерджен ключ-в-ключ, хуки не дублируются (поиск маркера
@@ -399,17 +400,18 @@ fn merge_mcp_servers_json(
     commit_file(path, old.as_deref(), &new, dry_run, report)
 }
 
-/// Команда Stop-хука Claude Code: fitness-гейт перед завершением сессии.
-/// Гард `command -v arch-be` + наличие `.arch-handoff/CONSTRAINTS.yaml`;
-/// блок (exit 2, stderr агенту) — только по строке «Итог: FAIL».
+/// Команда Stop-хука Claude Code: единый архитектурный гейт перед завершением
+/// сессии. Гард `command -v arch-be` + наличие `.arch-handoff/CONSTRAINTS.yaml`
+/// (fail-soft на инфраструктуру: нет бинаря/правил — молча exit 0); блок
+/// (exit 2, stderr агенту) — по коду возврата `arch-be gate` (ненулевой =
+/// провал хотя бы одной составляющей; строки вывода не разбираются).
 fn stop_hook_command() -> String {
     format!(
         "if command -v arch-be >/dev/null 2>&1 && [ -f .arch-handoff/CONSTRAINTS.yaml ]; then \
-         out=$(arch-be control check . 2>&1); \
-         case \"$out\" in *\"Итог: FAIL\"*) \
+         if ! out=$(arch-be gate --route auto 2>&1); then \
          printf '%s\\n\\n%s\\n' \"$out\" \
-         \"{HOOK_MARKER}: fitness-гейт FAIL — исправьте находки error перед завершением \
-         (подробности выше; гейт: arch-be control check .)\" >&2; exit 2;; esac; fi \
+         \"{HOOK_MARKER}: архитектурный гейт FAIL — исправьте находки error перед завершением \
+         (подробности выше; гейт: arch-be gate)\" >&2; exit 2; fi; fi \
          # {HOOK_MARKER}:stop"
     )
 }
@@ -419,11 +421,10 @@ fn stop_hook_command() -> String {
 fn post_tool_use_hook_command() -> String {
     format!(
         "if command -v arch-be >/dev/null 2>&1 && [ -f .arch-handoff/CONSTRAINTS.yaml ]; then \
-         out=$(arch-be control check . 2>&1); \
-         case \"$out\" in *\"Итог: FAIL\"*) \
+         if ! out=$(arch-be gate --route auto 2>&1); then \
          printf '%s\\n\\n%s\\n' \"$out\" \
-         \"{HOOK_MARKER}: правка нарушает fitness-правила (control check FAIL) — \
-         исправьте находки error\" >&2; exit 2;; esac; fi \
+         \"{HOOK_MARKER}: правка не проходит архитектурный гейт (arch-be gate FAIL) — \
+         исправьте находки error\" >&2; exit 2; fi; fi \
          # {HOOK_MARKER}:post-tool-use"
     )
 }
@@ -521,9 +522,12 @@ fn merge_claude_settings(
     }
     report.notes.push(
         "семантика хуков: fail-soft на инфраструктуру (нет arch-be или \
-         .arch-handoff/CONSTRAINTS.yaml — молча пропуск), блок (exit 2) — \
-         только при вердикте «Итог: FAIL»; PostToolUse-гейт на каждую правку — \
-         через --strict-hooks (дорого на репозиториях с command_succeeds-правилами)"
+         .arch-handoff/CONSTRAINTS.yaml — молча пропуск; нет входа у \
+         составляющих — SKIP), блок (exit 2) — по ненулевому коду \
+         `arch-be gate --route auto` (провал любой составляющей: fitness, \
+         delta guard, rule_weakened, spine, trace); PostToolUse-гейт на \
+         каждую правку — через --strict-hooks (дорого на репозиториях с \
+         command_succeeds-правилами)"
             .into(),
     );
     let new = match serde_json::to_string_pretty(&Value::Object(root)) {
@@ -978,8 +982,8 @@ fn connect_codex(opts: &ConnectOptions, report: &mut ConnectReport) -> Result<()
     }
     if opts.hooks {
         report.notes.push(
-            "у Codex нет lifecycle-хуков уровня PreToolUse/Stop — fitness-гейт \
-             остаётся ручным (`arch-be control check .`) или в CI"
+            "у Codex нет lifecycle-хуков уровня PreToolUse/Stop — архитектурный гейт \
+             остаётся ручным (`arch-be gate`) или в CI"
                 .into(),
         );
     }
@@ -1127,7 +1131,7 @@ fn connect_omp(opts: &ConnectOptions, report: &mut ConnectReport) -> Result<()> 
         report.notes.push(
             "хуков через connect нет: механизм хуков omp — TypeScript-расширения, \
              подключение: `omp --hook <file.ts>`; команда-гейт для такого \
-             расширения: `arch-be control check .`"
+             расширения: `arch-be gate`"
                 .into(),
         );
     }
@@ -1757,13 +1761,18 @@ mod tests {
         assert_eq!(text.matches(SPINE_BEGIN).count(), 1);
     }
 
-    /// Команды хуков: гард по бинарю и CONSTRAINTS.yaml, маркер, exit 2.
+    /// Команды хуков: гард по бинарю и CONSTRAINTS.yaml, маркер, exit 2 по
+    /// коду возврата `arch-be gate` (без разбора строк вывода).
     #[test]
     fn hook_commands_are_guarded_and_marked() {
         for cmd in [stop_hook_command(), post_tool_use_hook_command()] {
             assert!(cmd.contains("command -v arch-be"), "{cmd}");
             assert!(cmd.contains(".arch-handoff/CONSTRAINTS.yaml"), "{cmd}");
-            assert!(cmd.contains("Итог: FAIL"), "{cmd}");
+            assert!(cmd.contains("arch-be gate --route auto"), "{cmd}");
+            assert!(
+                !cmd.contains("Итог: FAIL"),
+                "детекция провала — по exit-коду, не по строке: {cmd}"
+            );
             assert!(cmd.contains("exit 2"), "{cmd}");
             assert!(cmd.contains(HOOK_MARKER), "{cmd}");
         }
@@ -1832,7 +1841,7 @@ mod tests {
             "{all_snippets}"
         );
         assert!(
-            all_snippets.contains("arch-be control check ."),
+            all_snippets.contains("arch-be gate --route auto"),
             "{all_snippets}"
         );
         assert!(

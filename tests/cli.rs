@@ -579,6 +579,162 @@ fn control_gate_unknown_gate_errors() {
     cmd.assert().failure().stderr(contains("только A4"));
 }
 
+/// git в каталоге с тестовой идентичностью коммиттера (образец —
+/// `src/delta.rs::make_guard_repo`).
+fn git(dir: &Path, args: &[&str]) {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("GIT_AUTHOR_NAME", "t")
+        .env("GIT_AUTHOR_EMAIL", "t@t")
+        .env("GIT_COMMITTER_NAME", "t")
+        .env("GIT_COMMITTER_EMAIL", "t@t")
+        .output()
+        .expect("git");
+    assert!(
+        out.status.success(),
+        "git {}: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// git-репозиторий с `.arch-handoff/CONSTRAINTS.yaml` (два error-правила) и
+/// обязательным файлом; один коммит.
+fn gate_repo(home: &Path) -> PathBuf {
+    let repo = home.join("gate-repo");
+    std::fs::create_dir_all(repo.join(".arch-handoff")).expect("mkdir .arch-handoff");
+    std::fs::write(
+        repo.join(".arch-handoff/CONSTRAINTS.yaml"),
+        "rules:\n  - name: spine_present\n    type: file_exists\n    path: \"ARCHITECTURE-SPINE.md\"\n    severity: error\n  - name: no_pan\n    type: must_not_contain\n    glob: \"**/*.py\"\n    pattern: 'PAN'\n    severity: error\n",
+    )
+    .expect("запись CONSTRAINTS.yaml");
+    std::fs::write(repo.join("ARCHITECTURE-SPINE.md"), "# Spine\n").expect("write spine");
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "init"]);
+    repo
+}
+
+/// Единый гейт `arch-be gate` на чистом репозитории: все составляющие
+/// PASS/SKIP, exit 0 (маршрут auto из пустого диффа → Fast).
+#[test]
+fn gate_clean_repo_exits_0() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = gate_repo(tmp.path());
+
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("gate").arg("--repo").arg(repo.as_os_str());
+    cmd.assert()
+        .success()
+        .stdout(contains("Маршрут: Fast (auto"))
+        .stdout(contains("[PASS] fitness"))
+        .stdout(contains("[PASS] rule_weakened"))
+        .stdout(contains("[SKIP] trace_check"))
+        .stdout(contains("Итог: PASS"));
+}
+
+/// Анти-ослабление: агент удалил правило `no_pan`, чтобы пройти гейт —
+/// `arch-be gate` падает exit 1 с находкой `rule_weakened` (бэклог п.4:
+/// детекция по коду возврата, не по строкам).
+#[test]
+fn gate_fails_when_agent_removes_rule_to_pass() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = gate_repo(tmp.path());
+    // «Позеленение»: правило no_pan удалено из реестра.
+    std::fs::write(
+        repo.join(".arch-handoff/CONSTRAINTS.yaml"),
+        "rules:\n  - name: spine_present\n    type: file_exists\n    path: \"ARCHITECTURE-SPINE.md\"\n    severity: error\n",
+    )
+    .expect("ослабленный CONSTRAINTS.yaml");
+
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("gate").arg("--repo").arg(repo.as_os_str());
+    cmd.assert()
+        .code(1)
+        .stdout(contains("[FAIL] rule_weakened"))
+        .stdout(contains("no_pan"))
+        .stdout(contains("удалено из реестра"))
+        .stdout(contains("Итог: FAIL"));
+}
+
+/// Ослабление, узаконенное активным override (ADR + срок), гейт пропускает;
+/// дельта покрывает правку для delta guard.
+#[test]
+fn gate_override_legalizes_weakening_exits_0() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = gate_repo(tmp.path());
+    std::fs::write(
+        repo.join(".arch-handoff/CONSTRAINTS.yaml"),
+        "rules:\n  - name: spine_present\n    type: file_exists\n    path: \"ARCHITECTURE-SPINE.md\"\n    severity: error\noverrides:\n  - rule: no_pan\n    adr: ADR-007\n    until: \"2999-01\"\n",
+    )
+    .expect("CONSTRAINTS.yaml с override");
+    let delta = repo.join("changes/drop-pan");
+    std::fs::create_dir_all(&delta).expect("mkdir delta");
+    std::fs::write(
+        delta.join("DELTA.md"),
+        "# Дельта\n\nСнимаем no_pan по ADR-007 (правка CONSTRAINTS.yaml).\n",
+    )
+    .expect("DELTA.md");
+
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("gate").arg("--repo").arg(repo.as_os_str());
+    cmd.assert()
+        .success()
+        .stdout(contains("[PASS] rule_weakened"))
+        .stdout(contains("Итог: PASS"));
+}
+
+/// Fail-soft: каталог без git и без ограничений — составляющие SKIP, exit 0
+/// (контракт хуков `arch-be connect`: нет входа — гейт молча пропускается).
+#[test]
+fn gate_without_git_and_constraints_is_skip_and_exits_0() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let plain = tmp.path().join("plain");
+    std::fs::create_dir_all(&plain).expect("mkdir plain");
+
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("gate").arg("--repo").arg(plain.as_os_str());
+    cmd.assert()
+        .success()
+        .stdout(contains("[SKIP] fitness"))
+        .stdout(contains("[SKIP] delta_guard"))
+        .stdout(contains("[SKIP] rule_weakened"))
+        .stdout(contains("fail-safe маршрут Critical"))
+        .stdout(contains("Итог: PASS"));
+}
+
+/// Явный `--route standard` добавляет составляющие nfr/evidence (здесь —
+/// SKIP за неимением model/ и бандлов); неизвестный маршрут — ошибка clap.
+#[test]
+fn gate_explicit_route_adds_standard_components() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = gate_repo(tmp.path());
+
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("gate")
+        .arg("--repo")
+        .arg(repo.as_os_str())
+        .arg("--route")
+        .arg("standard");
+    cmd.assert()
+        .success()
+        .stdout(contains("Маршрут: Standard (явный --route"))
+        .stdout(contains("[SKIP] nfr"))
+        .stdout(contains("[SKIP] evidence_verify"));
+
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("gate")
+        .arg("--repo")
+        .arg(repo.as_os_str())
+        .arg("--route")
+        .arg("ludicrous");
+    cmd.assert()
+        .failure()
+        .stderr(contains("неизвестный маршрут"));
+}
+
 /// `arch eval run`: встроенный сьют agent-config прогоняется герметично
 /// (временный дом, без ключей и сети), гейт 100% проходит, JSON-отчёт
 /// пишется в `<дом>/evals/` (docs/evals.md).
