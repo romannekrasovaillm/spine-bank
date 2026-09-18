@@ -143,7 +143,7 @@ ADR не «написан и забыт»: у него статусная маш
 | `arch-be archunit gen / check / fetch` | ArchUnit-мост (ADR-039): JVM-гейты из CONSTRAINTS.yaml настоящим ArchUnit |
 | `arch-be control rules-report` | инвентарь правил: владельцы, expiry, исключения |
 | `arch-be control score [--from-diff]` | маршрут значимости + anti-bypass |
-| `arch-be model validate / graph / export / landscape` | модель: проверки, диаграммы, обмен, ландшафт |
+| `arch-be model validate / graph / export / import / drift / landscape` | модель: проверки, диаграммы, обмен (вкл. импорт реестров csv/xlsx/backstage), дрейф «модель ↔ код», ландшафт |
 | `arch-be adr registry <root>` | глобальный реестр ADR по проектам |
 | `arch-be trace check <case>` | позвенная трассировка REQ → … → правило |
 | `arch-be survey <repo>` | reverse discovery: карта системы с confirmed/gaps |

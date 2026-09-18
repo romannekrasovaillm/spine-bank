@@ -123,6 +123,7 @@ mod tests {
             "archify_compare",
             "model_query",
             "model_validate",
+            "model_drift",
             "trace_check",
             "openapi_lint",
             "asyncapi_lint",

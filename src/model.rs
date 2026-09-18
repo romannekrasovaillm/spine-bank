@@ -19,13 +19,19 @@
 //!   `NFR` без проверки — `warn`), [`graph`] — текстовый/mermaid-граф,
 //!   [`project`] — проекция `ADR-*` в `.arch-handoff/adr/`,
 //!   [`exchange`] — обмен с отраслевыми форматами (экспорт Structurizr
-//!   DSL/PlantUML/drawio, импорт Structurizr DSL; ADR-009);
-//! - инструменты агента: `model_query`, `model_validate` ([`tools`]).
+//!   DSL/PlantUML/drawio, импорт Structurizr DSL; ADR-009),
+//!   [`drift`] — дрейф «модель ↔ код»: `code_roots` CMP без каталога —
+//!   `error`, манифест сборки без покрывающего CMP — `warn`, звено
+//!   `INT → контракт` в семантике `trace check` (ADR-035);
+//! - инструменты агента: `model_query`, `model_validate`, `model_drift`
+//!   ([`tools`]).
 
+pub mod drift;
 pub mod exchange;
 pub mod graph;
 pub mod parse;
 pub mod project;
+pub mod registry;
 pub mod validate;
 
 use std::fmt::Write as _;
@@ -40,10 +46,12 @@ use crate::error::{HarnessError, Result};
 use crate::llm::ToolSpec;
 use crate::tool::{Tool, ToolContext, ToolOutput};
 
+pub use drift::{DriftReport, ModelDriftTool, drift_check};
 pub use exchange::{ExportFormat, ImportReport, export_model, import_structurizr};
 pub use graph::{find_cycle, graph_mermaid, graph_text};
 pub use parse::{Entity, LinkKind, Model, load_model, parse_entity, split_frontmatter};
 pub use project::{ProjectReport, project_adr, render_adr};
+pub use registry::{RegistryFormat, RegistryImportOptions, RegistryImportReport, import_registry};
 pub use validate::{ModelIssue, Severity, ValidationReport, validate};
 
 /// Канонический паттерн идентификатора сущности модели (ADR-003).
@@ -246,10 +254,14 @@ pub fn card(model: &Model, e: &Entity) -> String {
     out
 }
 
-/// Инструменты домена: `model_query`, `model_validate`.
+/// Инструменты домена: `model_query`, `model_validate`, `model_drift`.
 #[must_use]
 pub fn tools() -> Vec<Arc<dyn Tool>> {
-    vec![Arc::new(ModelQueryTool), Arc::new(ModelValidateTool)]
+    vec![
+        Arc::new(ModelQueryTool),
+        Arc::new(ModelValidateTool),
+        Arc::new(ModelDriftTool),
+    ]
 }
 
 /// Инструмент `model_validate`: ссылочная целостность модели —

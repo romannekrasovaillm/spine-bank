@@ -109,7 +109,8 @@ exit 2, stderr уходит агенту; строки вывода хук не 
 опциональный `cwd`): `openapi_lint` (`path`), `asyncapi_lint` (`path`),
 `contract_diff`, `fleet_audit`, `agentsmd_lint` (`repo`),
 `archify_validate` (`type`, `path`), `rubric_list`, `plugin_list`,
-`nfr_check` (`path`, `kind`), `model_validate` (`dir`),
+`nfr_check` (`path`, `kind`), `model_validate` (`dir`), `model_drift`
+(`dir`),
 `delta_guard` (`path`, `base`, `protect`), `evidence_verify` (`change_dir`).
 Под `--rw` добавляются: `handoff_create`, `adr_new`, `agentsmd_generate`,
 `skill_distill`, `archify_deliver`, `archify_show`, `archify_compare`,
@@ -119,7 +120,7 @@ false`; `evidence_pack`/`delta_propose` политика R-уровней кла
 как `Mutating` — авто с R2, на R0/R1 вызов отклоняется с пояснением).
 
 Верификаторы транша 1 (`nfr_check`, `model_validate`, `delta_guard`,
-`evidence_verify`) возвращают в `content[0].text` (и в
+`evidence_verify`) и `model_drift` возвращают в `content[0].text` (и в
 `structuredContent.output` моста) JSON-вердикт `{passed, issues, summary}` —
 тот же контракт, что у ручных контрольных инструментов: `passed: false` —
 основание отказать изменению, перечислив находки.

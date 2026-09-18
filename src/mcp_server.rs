@@ -211,6 +211,7 @@ const BRIDGE_READ_ONLY: &[&str] = &[
     "delta_guard",
     "evidence_verify",
     "fleet_audit",
+    "model_drift",
     "model_validate",
     "nfr_check",
     "openapi_lint",
@@ -533,7 +534,8 @@ impl McpServe {
                                          Детерминированный контур реестра (openapi_lint, \
                                          asyncapi_lint, contract_diff, fleet_audit, \
                                          agentsmd_lint, archify_validate, rubric_list, \
-                                         plugin_list, nfr_check, model_validate, delta_guard, \
+                                         plugin_list, nfr_check, model_validate, \
+                                         model_drift, delta_guard, \
                                          evidence_verify) доступен напрямую; аргумент `cwd` — \
                                          рабочий каталог клиента для относительных путей. \
                                          Чтение знаний (read-only): kb_search — поиск по \

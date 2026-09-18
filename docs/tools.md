@@ -55,6 +55,7 @@
 | `fitness_check` | Машинно-проверяемые утверждения о репозитории (CONSTRAINTS.yaml) |
 | `model_query` | Запрос к типизированной модели архитектуры (`model/`) |
 | `model_validate` | Ссылочная целостность модели (битая ссылка/дубль/цикл — error) — JSON-вердикт |
+| `model_drift` | Дрейф «модель ↔ код»: code_roots CMP без каталога — error, манифест сборки без CMP — warn, INT без/с битым контрактом (ADR-035) — JSON-вердикт |
 | `nfr_check` | Количественные NFR: бюджет latency, доступность, ёмкость, стоимость — JSON-вердикт |
 | `delta_guard` / `delta_propose` | Гейт прямых правок спайна мимо дельты / скелет новой дельты |
 | `evidence_verify` / `evidence_pack` | Проверка / сборка Evidence Bundle (полнота + хэши) |
@@ -205,6 +206,7 @@ Archify CLI (`schemaVersion: 1`) — точка машинного потреб�
 | `spine_lint` | Линтер ARCHITECTURE-SPINE.md: дубли AD-id, пустые Binds/Prevents/Rule, заглушки, непиннутые версии | `path`* |
 | `fitness_check` | Fitness functions из CONSTRAINTS.yaml по репозиторию → PASS/FAIL с находками `file:line` | `repo`*; `constraints` (путь к YAML, иначе `<repo>/.arch-handoff/CONSTRAINTS.yaml`) |
 | `model_validate` | Ссылочная целостность модели (`model/`, ADR-003): битая ссылка / дубль ID / цикл `depends_on` — error; ADR без CMP, NFR без проверки, QAS без сценария — warn. Ответ — JSON `{passed, issues, summary}` (мост в MCP, read-only) | `dir` (каталог модели, по умолчанию `model`) |
+| `model_drift` | Дрейф «модель ↔ код» (корень кейса с `model/`): CMP с несуществующим путём `code_roots` (ADR-030) — error; каталог с манифестом сборки (тот же набор, что у `reverse_survey`) без покрывающего `code_roots` — warn; звено `INT → контракт` в семантике `trace_check` (ADR-035: битый путь `contract` — error, поле не задано — warn). Находки с `adr`/`rationale`/`fix_hint`. Ответ — JSON `{passed, issues, summary}` (мост в MCP, read-only). CLI-эквивалент: `arch-be model drift <dir> [--json]` | `dir` (корень кейса, по умолчанию текущий каталог) |
 | `nfr_check` | Количественные NFR поверх модели (ADR-007): `budget` (сумма бюджетов hop'ов INT против p99), `availability` (композиция против SLA + RTO/RPO), `capacity` (RPS против ёмкости), `cost` (TCO + цена выхода); `all` — все четыре. Ответ — JSON `{passed, issues (с виновными hop'ами/звеньями), summary}` (мост в MCP, read-only) | `path`* (корень кейса — каталог с `model/`); `kind` (вид проверки, по умолчанию `all`) |
 | `delta_guard` | Гейт прямых правок спайна мимо дельты (модель 5.2): изменённые защищённые файлы (дефолт `model/`, `ARCHITECTURE-SPINE.md`, `CONSTRAINTS.yaml`) обязаны упоминаться в активной дельте. Ответ — JSON `{passed, violations, covered, summary}` (мост в MCP, read-only) | `path` (репозиторий, по умолчанию `.`); `base` (база diff, по умолчанию HEAD); `protect` (список, заменяет дефолт) |
 | `delta_propose` | Скелет дельты `changes/<name>/DELTA.md` (Проблема / ADDED / MODIFIED / REMOVED / План отката / Критерии приёмки). **Пишущий** (политика — Mutating; в MCP — только под `--rw`) | `name`* (kebab-case); `path` (репозиторий, по умолчанию `.`) |
