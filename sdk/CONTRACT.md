@@ -56,6 +56,12 @@ stdout — ОДНА строка JSON (сериализация `FitnessReport`)
   либо ошибка запуска (тогда JSON нет, причина в stderr).
 - SDK различает «FAIL по правилам» (валидный JSON, `passed=false`) и
   «ошибку исполнения» (нет JSON / невалидный JSON + stderr).
+- Аддитивные поля (присутствуют только в соответствующих режимах):
+  `durations[]`, `inherited[]`, `overrides[]`, карточные поля `issues[]`
+  (`ad`/`adr`/`rationale`/`owner`/`fix_hint`/`skill`); режим baseline/ratchet
+  (`--baseline`) — `baseline: {path, updated, debt[], closed[], debt_total,
+  closed_total}`; режим среза (`--changed-since`) — `skipped[]`,
+  `changed_since`, `changed_files` (семантика — `docs/control.md`).
 
 ## 3. `archify` — диаграммы (validate / deliver / compare)
 

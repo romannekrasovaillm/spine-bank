@@ -22,7 +22,11 @@
 //!   ADR-030), `deny_dependency` (запрещённые пакеты в манифестах
 //!   Cargo.toml/pom.xml/requirements.txt — детектор тех-радара,
 //!   `docs/corp-spine.md`); итог PASS/FAIL + находки + длительность каждого
-//!   правила (per-rule timing, [`RuleDuration`]);
+//!   правила (per-rule timing, [`RuleDuration`]); baseline-режим (ratchet) для
+//!   brownfield — исторический долг не ломает гейт, ломают только новые
+//!   нарушения и рост счётчика правила, а `--changed-since` прогоняет файловые
+//!   правила на срезе изменённых файлов (модуль [`baseline`],
+//!   [`check_with_options`]);
 //! - наследование корпоративного контекста (`docs/corp-spine.md`): поле
 //!   верхнего уровня `extends: [<ref>@<version>]` подмешивает правила
 //!   родительских constraint-файлов с меткой источника и проверкой пина
@@ -57,6 +61,10 @@ use walkdir::WalkDir;
 use crate::error::{HarnessError, Result};
 use crate::llm::ToolSpec;
 use crate::tool::{Tool, ToolContext, ToolOutput};
+
+/// Baseline-режим (ratchet) для brownfield и срез изменённых файлов
+/// (`--baseline`/`--baseline-update`/`--changed-since`) — см. модуль.
+pub mod baseline;
 
 /// Маршрут изменения по значимости.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -909,6 +917,23 @@ pub struct FitnessReport {
     /// `docs/corp-spine.md`). Аддитивное поле SDK-контракта v1.
     #[serde(default)]
     pub overrides: Vec<OverrideInfo>,
+    /// Итог ratchet-сравнения с baseline (`--baseline`; модуль [`baseline`]).
+    /// `None` — прогон без baseline. Аддитивное поле SDK-контракта v1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline: Option<baseline::BaselineReport>,
+    /// Правила, пропущенные в режиме `--changed-since` (глобальные — по
+    /// дизайну, файловые — при пустом срезе их файлов), с причинами.
+    /// Аддитивное поле SDK-контракта v1.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<baseline::SkippedRule>,
+    /// Git-реф режима `--changed-since` (`None` — полный прогон).
+    /// Аддитивное поле SDK-контракта v1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changed_since: Option<String>,
+    /// Число изменённых файлов в срезе `--changed-since`.
+    /// Аддитивное поле SDK-контракта v1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changed_files: Option<usize>,
 }
 
 /// Тип fitness-правила из `CONSTRAINTS.yaml`.
@@ -972,6 +997,17 @@ impl RuleKind {
             Self::ArchUnit => "archunit",
             Self::DenyDependency => "deny_dependency",
         }
+    }
+
+    /// Файловое ли правило (content-правило по glob-набору файлов): только
+    /// они исполняются в режиме `--changed-since` — на срезе изменённых
+    /// файлов; глобальные и структурные правила на срезе лгут или дороги и
+    /// пропускаются с пометкой в отчёте (модуль [`baseline`]).
+    fn is_file_scoped(self) -> bool {
+        matches!(
+            self,
+            Self::MustContain | Self::MustNotContain | Self::EachFileMustContain
+        )
     }
 }
 
@@ -1729,12 +1765,68 @@ fn evaluate_overrides(
 /// правило некорректно (нет pattern/path/command, невалидный regex/severity),
 /// родитель из `extends` не найден, цикл наследования.
 pub fn check(repo: &Path, constraints: &Path) -> Result<FitnessReport> {
+    check_with_options(repo, constraints, &baseline::CheckOptions::default())
+}
+
+/// Полный вариант [`check`] с опциями ([`baseline::CheckOptions`], модуль
+/// [`baseline`], `docs/control.md`):
+///
+/// - `baseline` (путь) — режим ratchet: находки, присутствующие в
+///   baseline-файле, — исторический долг (в отчёт `baseline.debt`, гейт не
+///   ломают); НОВАЯ error-находка (нет отпечатка в baseline) — ломает гейт;
+///   рост счётчика error-находок правила против baseline — error-находка
+///   (страховка от коллизий отпечатков). Warn-находки и находки механики
+///   (`extends`/`override`) в ratchet не участвуют: первые гейт не ломают
+///   никогда, вторые — сломанная конфигурация, а не кодовый долг;
+/// - `baseline_update` — перезаписать baseline текущим состоянием
+///   ([`baseline::ensure_shrinks`]: принимается только при неухудшении долга,
+///   иначе — ошибка, файл не трогается); после принятого обновления весь
+///   текущий долг зафиксирован и гейт зелёный (кроме находок механики);
+/// - `changed_since` (git-реф) — файловые правила исполняются на срезе
+///   изменённых файлов ([`baseline::changed_files_since`]), глобальные
+///   пропускаются (отчёт `skipped`); закрытие долга в этом режиме не
+///   отслеживается, а `baseline_update` запрещён (срез уничтожил бы записи
+///   долга в нетронутых файлах).
+///
+/// # Errors
+/// Те же, что у [`check`]; плюс: baseline-файл не читается/невалиден (в
+/// режиме ratchet без обновления — обязан существовать), обновление при
+/// выросшем долге, `--baseline-update` в сочетании с `--changed-since`,
+/// некорректный git-реф.
+pub fn check_with_options(
+    repo: &Path,
+    constraints: &Path,
+    options: &baseline::CheckOptions,
+) -> Result<FitnessReport> {
     if !repo.is_dir() {
         return Err(HarnessError::Control(format!(
             "репозиторий недоступен: {}",
             repo.display()
         )));
     }
+    // Валидация сочетаний флагов — до любой работы.
+    if options.baseline_update && options.changed_since.is_some() {
+        return Err(HarnessError::Control(
+            "--baseline-update несовместим с --changed-since: обновление baseline требует полного \
+             прогона — срез изменённых файлов уничтожил бы записи долга в нетронутых файлах"
+                .to_string(),
+        ));
+    }
+    let baseline_path = if options.baseline_update {
+        Some(
+            options
+                .baseline
+                .clone()
+                .unwrap_or_else(|| repo.join(baseline::DEFAULT_BASELINE_PATH)),
+        )
+    } else {
+        options.baseline.clone()
+    };
+    let changed: Option<BTreeSet<String>> = match &options.changed_since {
+        Some(reference) => Some(baseline::changed_files_since(repo, reference)?),
+        None => None,
+    };
+
     let resolved = load_constraints_resolved(constraints)?;
     if resolved.rules.is_empty() {
         return Err(HarnessError::Control(format!(
@@ -1753,10 +1845,21 @@ pub fn check(repo: &Path, constraints: &Path) -> Result<FitnessReport> {
 
     let mut issues = resolved.findings;
     issues.extend(override_findings);
+    // Находки механики (наследование, overrides) — не кодовый долг: в baseline
+    // не зашиваются и ratchet их не прощает.
+    let mechanics_len = issues.len();
     let mut durations = Vec::new();
+    let mut skipped: Vec<baseline::SkippedRule> = Vec::new();
     for rule in &rule_refs {
         let started = Instant::now();
-        run_rule(rule, repo, &rule_refs, &mut issues)?;
+        run_rule(
+            rule,
+            repo,
+            &rule_refs,
+            changed.as_ref(),
+            &mut skipped,
+            &mut issues,
+        )?;
         // u128 → u64 с насыщением: переполнение недостижимо практически
         // (584 млн лет), насыщение — страховка вместо паники.
         let ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -1765,6 +1868,87 @@ pub fn check(repo: &Path, constraints: &Path) -> Result<FitnessReport> {
             ms,
         });
     }
+
+    // Ratchet: находки правил сверяются с baseline; долг уходит из `issues`
+    // в отчёт `baseline`, новые находки и рост счётчиков остаются error'ами.
+    let mut baseline_report: Option<baseline::BaselineReport> = None;
+    if let Some(path) = &baseline_path {
+        let rule_issues = issues.split_off(mechanics_len);
+        let mut error_issues = Vec::new();
+        let mut warn_issues = Vec::new();
+        for issue in rule_issues {
+            if issue.severity == "error" {
+                error_issues.push(issue);
+            } else {
+                warn_issues.push(issue);
+            }
+        }
+        if options.baseline_update {
+            let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+            let old = if path.is_file() {
+                Some(baseline::load(path)?)
+            } else {
+                None
+            };
+            let new_baseline = baseline::Baseline::from_issues(&error_issues, &today);
+            baseline::ensure_shrinks(old.as_ref(), &new_baseline)?;
+            baseline::save(path, &new_baseline)?;
+            let debt: Vec<baseline::RuleDebt> = new_baseline
+                .rules
+                .iter()
+                .map(baseline::RuleDebt::from_baseline_rule)
+                .collect();
+            let closed = match &old {
+                Some(old) => new_baseline.closed_since(old),
+                None => Vec::new(),
+            };
+            baseline_report = Some(baseline::BaselineReport {
+                path: path.clone(),
+                updated: true,
+                debt_total: debt.iter().map(|d| d.count).sum(),
+                closed_total: closed.len(),
+                debt,
+                closed,
+            });
+        } else {
+            if !path.is_file() {
+                return Err(HarnessError::Control(format!(
+                    "baseline: файл не найден: {} — сначала зафиксируйте долг: \
+                     arch-be control check <repo> --baseline {} --baseline-update",
+                    path.display(),
+                    path.display()
+                )));
+            }
+            let base = baseline::load(path)?;
+            let classification =
+                baseline::classify(&error_issues, &base, options.changed_since.is_none());
+            for grown in &classification.grown {
+                issues.push(LintIssue {
+                    file: path.clone(),
+                    line: 0,
+                    rule: grown.rule.clone(),
+                    message: format!(
+                        "baseline: нарушений правила '{}' стало {}, было {} — \
+                         долг может только убывать (ratchet)",
+                        grown.rule, grown.now, grown.was
+                    ),
+                    severity: "error".to_string(),
+                    ..LintIssue::default()
+                });
+            }
+            issues.extend(classification.new_issues);
+            baseline_report = Some(baseline::BaselineReport {
+                path: path.clone(),
+                updated: false,
+                debt_total: classification.debt.iter().map(|d| d.count).sum(),
+                closed_total: classification.closed.len(),
+                debt: classification.debt,
+                closed: classification.closed,
+            });
+        }
+        issues.extend(warn_issues);
+    }
+
     issues.sort_by(|a, b| {
         a.file
             .cmp(&b.file)
@@ -1786,11 +1970,29 @@ pub fn check(repo: &Path, constraints: &Path) -> Result<FitnessReport> {
 
     let errors = issues.iter().filter(|i| i.severity == "error").count();
     let warns = issues.len() - errors;
-    let summary = format!(
+    let mut summary = format!(
         "Правил: {}, нарушений: {} (error: {errors}, warn: {warns})",
         rule_refs.len(),
         issues.len()
     );
+    if let Some(report) = &baseline_report {
+        if report.updated {
+            let _ = write!(
+                summary,
+                "; baseline обновлён: долг {} находок",
+                report.debt_total
+            );
+        } else {
+            let _ = write!(
+                summary,
+                "; долг baseline: {} находок (закрыто: {})",
+                report.debt_total, report.closed_total
+            );
+        }
+    }
+    if let (Some(reference), Some(changed_set)) = (&options.changed_since, &changed) {
+        let _ = write!(summary, "; срез {reference}: файлов {}", changed_set.len());
+    }
     Ok(FitnessReport {
         repo: repo.to_path_buf(),
         passed: errors == 0,
@@ -1799,6 +2001,10 @@ pub fn check(repo: &Path, constraints: &Path) -> Result<FitnessReport> {
         durations,
         inherited,
         overrides: override_infos,
+        baseline: baseline_report,
+        skipped,
+        changed_since: options.changed_since.clone(),
+        changed_files: changed.as_ref().map(BTreeSet::len),
     })
 }
 
@@ -2398,10 +2604,16 @@ pub(crate) fn normalize_severity(raw: &str, rule_name: &str) -> Result<&'static 
 ///
 /// `all_rules` — все правила того же файла: нужны типу `archunit`
 /// (ADR-039), который исполняет java-правила всего `CONSTRAINTS.yaml`.
+///
+/// `changed` — срез режима `--changed-since` (модуль [`baseline`]): при
+/// `Some` глобальные правила пропускаются (запись в `skipped`), а файловые
+/// исполняются на подмножестве изменённых файлов.
 fn run_rule(
     rule: &FitnessRule,
     repo: &Path,
     all_rules: &[&FitnessRule],
+    changed: Option<&BTreeSet<String>>,
+    skipped: &mut Vec<baseline::SkippedRule>,
     issues: &mut Vec<LintIssue>,
 ) -> Result<()> {
     let severity = normalize_severity(&rule.severity, &rule.name)?;
@@ -2432,6 +2644,16 @@ fn run_rule(
             }
         }
     }
+    // Режим --changed-since: глобальные и структурные правила на срезе файлов
+    // лгут или неоправданно дороги (command_succeeds, archunit) — пропускаются
+    // с пометкой в отчёте; полный прогон остаётся истиной гейта.
+    if changed.is_some() && !rule.kind.is_file_scoped() {
+        skipped.push(baseline::SkippedRule {
+            rule: rule.name.clone(),
+            reason: "глобальное правило — исполняется в полном прогоне".to_string(),
+        });
+        return Ok(());
+    }
     // Карточный контекст правила (ad/adr/rationale/owner/fix_hint/skill)
     // проставляется в каждую находку — агент видит задетый инвариант и
     // подсказку исправления, а не только имя правила.
@@ -2450,6 +2672,9 @@ fn run_rule(
     match rule.kind {
         RuleKind::MustContain => {
             let (re, glob, files) = prep_content_rule(rule, repo)?;
+            let Some(files) = scope_files(rule, changed, files, &glob, skipped) else {
+                return Ok(());
+            };
             let pattern = rule.pattern.as_deref().unwrap_or_default();
             let mut found = false;
             for (_, abs) in &files {
@@ -2470,7 +2695,10 @@ fn run_rule(
             }
         }
         RuleKind::MustNotContain => {
-            let (re, _, files) = prep_content_rule(rule, repo)?;
+            let (re, glob, files) = prep_content_rule(rule, repo)?;
+            let Some(files) = scope_files(rule, changed, files, &glob, skipped) else {
+                return Ok(());
+            };
             let pattern = rule.pattern.as_deref().unwrap_or_default();
             for (rel, abs) in &files {
                 let bytes = std::fs::read(abs).map_err(|e| HarnessError::io(abs, e))?;
@@ -2489,6 +2717,9 @@ fn run_rule(
         }
         RuleKind::EachFileMustContain => {
             let (re, glob, files) = prep_content_rule(rule, repo)?;
+            let Some(files) = scope_files(rule, changed, files, &glob, skipped) else {
+                return Ok(());
+            };
             let pattern = rule.pattern.as_deref().unwrap_or_default();
             if files.is_empty() {
                 issue(
@@ -3154,6 +3385,33 @@ fn prep_content_rule(rule: &FitnessRule, repo: &Path) -> Result<PreparedContentR
         files.retain(|(rel, _)| !rule.exclude_glob.iter().any(|ex| glob_matches(ex, rel)));
     }
     Ok((re, globs.join(", "), files))
+}
+
+/// Срез `--changed-since` для файловых правил (модуль [`baseline`]):
+/// оставляет только изменённые файлы. Пустой срез — НЕ находка (в отличие от
+/// пустого полного набора у `each_file_must_contain`), а пропуск правила с
+/// пометкой в отчёте: нетронутые файлы проверит полный прогон.
+///
+/// `None` у `changed` — полный прогон: набор возвращается как есть.
+fn scope_files(
+    rule: &FitnessRule,
+    changed: Option<&BTreeSet<String>>,
+    mut files: Vec<(String, PathBuf)>,
+    glob: &str,
+    skipped: &mut Vec<baseline::SkippedRule>,
+) -> Option<Vec<(String, PathBuf)>> {
+    let Some(changed) = changed else {
+        return Some(files);
+    };
+    files.retain(|(rel, _)| changed.contains(rel));
+    if files.is_empty() {
+        skipped.push(baseline::SkippedRule {
+            rule: rule.name.clone(),
+            reason: format!("нет изменённых файлов по glob '{glob}'"),
+        });
+        return None;
+    }
+    Some(files)
 }
 
 /// Glob'ы правила с дефолтом `**/*`.

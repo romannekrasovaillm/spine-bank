@@ -705,6 +705,22 @@ enum ControlCmd {
         /// Машиночитаемый вывод: JSON-отчёт `FitnessReport` (SDK-контракт v1).
         #[arg(long)]
         json: bool,
+        /// Baseline-файл долга (JSON), режим ratchet для brownfield
+        /// (`docs/control.md`): находки из baseline — долг (гейт не ломают),
+        /// ломают только НОВЫЕ нарушения и рост счётчика правила.
+        #[arg(long, value_name = "PATH")]
+        baseline: Option<PathBuf>,
+        /// Перезаписать baseline текущим состоянием. Принимается только при
+        /// неухудшении долга (ratchet); без `--baseline` путь по умолчанию —
+        /// <repo>/.arch-handoff/baseline.json.
+        #[arg(long)]
+        baseline_update: bool,
+        /// Проверять только файлы, изменённые против `GIT_REF` (`git diff
+        /// --name-only GIT_REF` по рабочему дереву + untracked): файловые
+        /// правила — на срезе, глобальные — SKIP с пометкой. Для быстрых
+        /// прогонов (PostToolUse-хуки); полный прогон остаётся истиной гейта.
+        #[arg(long, value_name = "GIT_REF")]
+        changed_since: Option<String>,
     },
     /// Линтер ARCHITECTURE-SPINE.md.
     Spine {
@@ -2404,9 +2420,17 @@ fn cmd_control(cfg: &arch_harness::config::Config, cmd: ControlCmd) -> Result<()
             repo,
             constraints,
             json,
+            baseline,
+            baseline_update,
+            changed_since,
         } => {
             let c = constraints.unwrap_or_else(|| repo.join(".arch-handoff/CONSTRAINTS.yaml"));
-            let report = arch_harness::control::check(&repo, &c)?;
+            let options = arch_harness::control::baseline::CheckOptions {
+                baseline,
+                baseline_update,
+                changed_since,
+            };
+            let report = arch_harness::control::check_with_options(&repo, &c, &options)?;
             if json {
                 // SDK-контракт v1: машиночитаемый отчёт, exit code как в текстовом режиме.
                 println!(
@@ -2465,6 +2489,25 @@ fn cmd_control(cfg: &arch_harness::config::Config, cmd: ControlCmd) -> Result<()
                         }
                         println!("      ↳ {}", parts.join(" · "));
                     }
+                }
+                // Режим ratchet: долг по правилам и владельцам + закрытые
+                // находки (долг не попадает в список issues выше).
+                if let Some(baseline_report) = &report.baseline {
+                    print!(
+                        "{}",
+                        arch_harness::control::baseline::render_baseline_section(baseline_report)
+                    );
+                }
+                // Режим --changed-since: размер среза и пропущенные правила.
+                if let Some(reference) = &report.changed_since {
+                    print!(
+                        "{}",
+                        arch_harness::control::baseline::render_scope_section(
+                            reference,
+                            report.changed_files.unwrap_or(0),
+                            &report.skipped,
+                        )
+                    );
                 }
                 // Топ-5 самых медленных правил — только если есть правила > 1s.
                 let mut slow: Vec<&arch_harness::control::RuleDuration> =

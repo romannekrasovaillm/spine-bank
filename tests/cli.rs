@@ -986,3 +986,255 @@ fn connect_omp_writes_mcp_json_and_skills() {
         "dry-run ничего не записал"
     );
 }
+
+// --- Baseline / ratchet для brownfield (бэклог волны 2, п.6) ----------------
+
+/// CONSTRAINTS.yaml legacy-фикстуры: файловое правило `no_pan` (PAN в
+/// python-файлах, с owner) и глобальное `arch_doc` (обязательный файл) —
+/// оба уровня error, старт репозитория 100% красный.
+const LEGACY_CONSTRAINTS: &str = "rules:\n  - name: no_pan\n    type: must_not_contain\n    glob: \"src/**/*.py\"\n    pattern: '\\b\\d{16}\\b'\n    severity: error\n    owner: \"владелец legacy\"\n  - name: arch_doc\n    type: file_exists\n    path: \"docs/ARCH.md\"\n    severity: error\n";
+
+/// Legacy-репозиторий со 100% красным стартом: два файла с PAN
+/// (2 находки `no_pan`) и отсутствующий docs/ARCH.md (1 находка `arch_doc`).
+fn legacy_repo(home: &Path) -> PathBuf {
+    let repo = home.join("legacy");
+    std::fs::create_dir_all(repo.join(".arch-handoff")).expect("mkdir .arch-handoff");
+    std::fs::write(
+        repo.join(".arch-handoff/CONSTRAINTS.yaml"),
+        LEGACY_CONSTRAINTS,
+    )
+    .expect("запись CONSTRAINTS.yaml");
+    std::fs::create_dir_all(repo.join("src")).expect("mkdir src");
+    std::fs::write(repo.join("src/a.py"), "pan = \"4276550012345678\"\n").expect("a.py");
+    std::fs::write(repo.join("src/b.py"), "card = \"4276550099990001\"\n").expect("b.py");
+    repo
+}
+
+/// Ratchet-жизненный цикл на legacy-репозитории (приёмка п.6): красный старт
+/// → фиксация baseline → зелёный гейт → новое нарушение FAIL → отказ
+/// обновления при выросшем долге → исправление старого уменьшает baseline.
+#[test]
+fn control_check_baseline_ratchet_lifecycle() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = legacy_repo(tmp.path());
+    let baseline = repo.join(".arch-handoff/baseline.json");
+
+    // 1. Старт красный: 3 error-находки, exit 1.
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("control").arg("check").arg(repo.as_os_str());
+    cmd.assert().code(1).stdout(contains("Итог: FAIL"));
+
+    // 2. Фиксация baseline: exit 0, файл записан, долг 3 находки по 2 правилам.
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("control")
+        .arg("check")
+        .arg(repo.as_os_str())
+        .arg("--baseline")
+        .arg(baseline.as_os_str())
+        .arg("--baseline-update");
+    cmd.assert()
+        .success()
+        .stdout(contains("Baseline обновлён"))
+        .stdout(contains("Итог: PASS"));
+    let v: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&baseline).expect("baseline записан"))
+            .expect("baseline — JSON");
+    let rules = v["rules"].as_array().expect("rules");
+    let no_pan = rules
+        .iter()
+        .find(|r| r["name"] == "no_pan")
+        .expect("no_pan в baseline");
+    assert_eq!(no_pan["count"], 2);
+    assert_eq!(no_pan["owner"], "владелец legacy");
+
+    // 3. Прогон с baseline — зелёный; долг виден по правилам и владельцам.
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("control")
+        .arg("check")
+        .arg(repo.as_os_str())
+        .arg("--baseline")
+        .arg(baseline.as_os_str());
+    cmd.assert()
+        .success()
+        .stdout(contains(
+            "долг: no_pan — 2 находок (owner: владелец legacy)",
+        ))
+        .stdout(contains("долг: arch_doc — 1 находок"))
+        .stdout(contains("Итог: PASS"));
+
+    // 3b. --json: долг — в аддитивной секции baseline, issues пуст.
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("control")
+        .arg("check")
+        .arg(repo.as_os_str())
+        .arg("--baseline")
+        .arg(baseline.as_os_str())
+        .arg("--json");
+    let output = cmd.assert().success().get_output().clone();
+    let v: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("--json печатает JSON");
+    assert_eq!(v["passed"], true);
+    assert_eq!(v["issues"].as_array().expect("issues").len(), 0);
+    assert_eq!(v["baseline"]["debt_total"], 3);
+    assert_eq!(v["baseline"]["updated"], false);
+
+    // 4. Новое нарушение — гейт FAIL, несмотря на baseline.
+    std::fs::write(repo.join("src/c.py"), "pan2 = \"4276550011112222\"\n").expect("c.py");
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("control")
+        .arg("check")
+        .arg(repo.as_os_str())
+        .arg("--baseline")
+        .arg(baseline.as_os_str());
+    cmd.assert()
+        .code(1)
+        .stdout(contains("src/c.py"))
+        .stdout(contains("Итог: FAIL"));
+
+    // 5. Обновление при выросшем долге — отказ, baseline не тронут.
+    let before = std::fs::read(&baseline).expect("baseline до отказа");
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("control")
+        .arg("check")
+        .arg(repo.as_os_str())
+        .arg("--baseline")
+        .arg(baseline.as_os_str())
+        .arg("--baseline-update");
+    cmd.assert()
+        .failure()
+        .stderr(contains("обновление baseline отклонено"))
+        .stderr(contains("no_pan"));
+    let after = std::fs::read(&baseline).expect("baseline после отказа");
+    assert_eq!(before, after, "baseline не перезаписан при отказе");
+
+    // 6. Убираем новое (c.py) и одно старое (b.py) нарушение: обновление
+    // принимается, baseline убывает (no_pan 2 → 1).
+    std::fs::remove_file(repo.join("src/c.py")).expect("rm c.py");
+    std::fs::remove_file(repo.join("src/b.py")).expect("rm b.py");
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("control")
+        .arg("check")
+        .arg(repo.as_os_str())
+        .arg("--baseline")
+        .arg(baseline.as_os_str())
+        .arg("--baseline-update");
+    cmd.assert().success().stdout(contains("Итог: PASS"));
+    let v: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&baseline).expect("baseline")).expect("JSON");
+    let no_pan = v["rules"]
+        .as_array()
+        .expect("rules")
+        .iter()
+        .find(|r| r["name"] == "no_pan")
+        .expect("no_pan");
+    assert_eq!(no_pan["count"], 1, "baseline убыл после исправления");
+}
+
+/// Режим `--changed-since`: проверяются только затронутые файлы (изменённые
+/// против ref + untracked), глобальные правила пропускаются; нетронутый файл
+/// с долгом остаётся долгом, новое нарушение в untracked-файле — FAIL.
+#[test]
+fn control_check_changed_since_scopes_check_to_touched_files() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = legacy_repo(tmp.path());
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "init"]);
+    let baseline = repo.join(".arch-handoff/baseline.json");
+
+    // Фиксация baseline на полном прогоне (долг: no_pan ×2, arch_doc ×1);
+    // baseline.json коммитим, чтобы сам не попадал в срез untracked.
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("control")
+        .arg("check")
+        .arg(repo.as_os_str())
+        .arg("--baseline")
+        .arg(baseline.as_os_str())
+        .arg("--baseline-update");
+    cmd.assert().success();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "baseline"]);
+
+    // Чистое дерево: срез пуст — файловые правила тоже пропускаются.
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("control")
+        .arg("check")
+        .arg(repo.as_os_str())
+        .arg("--baseline")
+        .arg(baseline.as_os_str())
+        .arg("--changed-since")
+        .arg("HEAD");
+    cmd.assert()
+        .success()
+        .stdout(contains("изменённых файлов 0"))
+        .stdout(contains("skip: no_pan"))
+        .stdout(contains("skip: arch_doc"))
+        .stdout(contains("Итог: PASS"));
+
+    // Правка a.py строкой-комментарием сверху (сдвиг строки, сниппет PAN не
+    // изменился) — находка остаётся долгом: отпечаток не содержит строку.
+    std::fs::write(
+        repo.join("src/a.py"),
+        "# touched\npan = \"4276550012345678\"\n",
+    )
+    .expect("a.py v2");
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("control")
+        .arg("check")
+        .arg(repo.as_os_str())
+        .arg("--baseline")
+        .arg(baseline.as_os_str())
+        .arg("--changed-since")
+        .arg("HEAD");
+    cmd.assert()
+        .success()
+        .stdout(contains("изменённых файлов 1"))
+        .stdout(contains("долг: no_pan — 1 находок"))
+        .stdout(contains("skip: arch_doc"))
+        .stdout(contains("Итог: PASS"));
+
+    // Новое нарушение в untracked-файле ловится и в режиме среза.
+    std::fs::write(repo.join("src/new.py"), "pan = \"4276550022223333\"\n").expect("new.py");
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("control")
+        .arg("check")
+        .arg(repo.as_os_str())
+        .arg("--baseline")
+        .arg(baseline.as_os_str())
+        .arg("--changed-since")
+        .arg("HEAD");
+    cmd.assert()
+        .code(1)
+        .stdout(contains("src/new.py"))
+        .stdout(contains("Итог: FAIL"));
+
+    // --baseline-update с --changed-since — отказ (срез уничтожил бы долг).
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("control")
+        .arg("check")
+        .arg(repo.as_os_str())
+        .arg("--baseline")
+        .arg(baseline.as_os_str())
+        .arg("--baseline-update")
+        .arg("--changed-since")
+        .arg("HEAD");
+    cmd.assert().failure().stderr(contains("несовместим"));
+}
+
+/// Baseline-файл обязан существовать для ratchet-прогона (fail-closed):
+/// отсутствующий файл — понятная ошибка с подсказкой про --baseline-update.
+#[test]
+fn control_check_baseline_missing_file_errors_with_hint() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = legacy_repo(tmp.path());
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("control")
+        .arg("check")
+        .arg(repo.as_os_str())
+        .arg("--baseline")
+        .arg(repo.join(".arch-handoff/baseline.json").as_os_str());
+    cmd.assert()
+        .failure()
+        .stderr(contains("baseline: файл не найден"))
+        .stderr(contains("--baseline-update"));
+}
