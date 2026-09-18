@@ -194,6 +194,7 @@ Archify CLI (`schemaVersion: 1`) — точка машинного потреб�
 | Инструмент | Назначение | Параметры |
 |---|---|---|
 | `significance_score` | Score по 15 триггерам → маршрут Fast/Standard/Critical (в начале любой задачи проектирования) | `triggers`* — объект `{new_component: true, …}` |
+| `significance_from_diff` | Anti-bypass floor (S-1, ADR-034): маршрут из git-диффа (детекторы new_component/new_vendor/api_contract_change/irreversible_migration/new_datastore), fail-safe объединение с заявленными; в ответе — `sources` каждого триггера и `undeclared` с файлами-основаниями | `path` (git-репозиторий, по умолчанию cwd сервера); `base_ref` (иначе — рабочее дерево против HEAD); `declared` — объект `{new_component: true, …}` |
 | `model_query` | Запрос к типизированной модели архитектуры (`model/`, ADR-003): карточка сущности по ID со связями и обратными ссылками, либо список сущностей с фильтром по типу | `dir` (каталог модели, по умолчанию `model`); `id` (карточка); `type` (фильтр: `cmp`, `adr`, …) |
 | `trace_check` | Трассируемость как fitness-функция (ADR-006): покрытие звеньев REQ → NFR → AD/ADR → CMP → правило CONSTRAINTS.yaml, поимённые сироты, сверка модели со spine; AD без правила и без `unverifiable` — error. Отчёт markdown (годится для evidence bundle) | `dir` (корень кейса, по умолчанию текущий каталог) |
 | `adr_new` | ADR по шаблону AI-DLC в `docs/adr/` (очередной номер, kebab-title) | `title`* |

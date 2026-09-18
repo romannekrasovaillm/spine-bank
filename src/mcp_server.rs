@@ -17,6 +17,7 @@
 //!   `skill_distill`);
 //! - инструменты — два слоя. РУЧНЫЕ (оттестированная поверхность ADR-008):
 //!   контрольные `spine_lint`, `fitness_check`, `significance_score`,
+//!   `significance_from_diff` (маршрут из git-диффа, S-1 anti-bypass),
 //!   `trace_check`, `model_query`, `rubric_run` и чтение знаний (T4,
 //!   ADR-015): `kb_search`, `skill_search`, `skill_load`, `mermaid_render`;
 //!   плюс split-judge без LLM у сервера: `rubric_prompt` (промпты судьи +
@@ -186,6 +187,7 @@ const MANUAL_TOOLS: &[&str] = &[
     "spine_lint",
     "fitness_check",
     "significance_score",
+    "significance_from_diff",
     "trace_check",
     "model_query",
     "rubric_run",
@@ -511,6 +513,10 @@ impl McpServe {
             "significance_score" => {
                 Self::tool_significance_score(args).map(DispatchOutcome::Structured)
             }
+            "significance_from_diff" => self
+                .tool_significance_from_diff(args)
+                .await
+                .map(DispatchOutcome::Structured),
             "trace_check" => self
                 .tool_trace_check(args)
                 .await
@@ -674,6 +680,117 @@ impl McpServe {
             "route": s.route,
             "unknown_triggers": unknown,
             "summary": format!("Score: {} → маршрут {}", s.score, s.route),
+        }))
+    }
+
+    /// `significance_from_diff`: маршрут значимости, выведенный из git-диффа
+    /// репозитория (S-1 anti-bypass, ADR-034) в fail-safe объединении с
+    /// заявленными триггерами (`declared`) — детектор только добавляет.
+    /// Информационный инструмент, verdict `passed` не применим.
+    ///
+    /// В ответе: `route`/`score` по объединённому множеству, источник каждого
+    /// триггера (`sources`: declared/diff/declared+diff) и `undeclared` —
+    /// найденные диффом, но не заявленные триггеры с файлами-основаниями
+    /// (anti-bypass сигнал «заявлено vs видно по диффу»).
+    async fn tool_significance_from_diff(
+        &self,
+        args: Value,
+    ) -> std::result::Result<Value, CallError> {
+        #[derive(Deserialize)]
+        struct Args {
+            /// Корень git-репозитория (дефолт — рабочий каталог процесса
+            /// сервера, как у CLI `control score --from-diff`).
+            path: Option<String>,
+            /// Базовая точка диффа (`git diff BASE_REF...HEAD`); без неё —
+            /// рабочее дерево против HEAD (staged + unstaged + untracked).
+            base_ref: Option<String>,
+            /// Заявленные агентом триггеры (карта «триггер → сработал», как у
+            /// `significance_score`); объединяются с найденными по диффу.
+            declared: Option<BTreeMap<String, bool>>,
+        }
+        let args: Args = parse_args(args, "significance_from_diff")?;
+        let path = PathBuf::from(args.path.unwrap_or_else(|| ".".to_string()));
+        let declared = args.declared.unwrap_or_default();
+        // Пороги маршрутов — из конфига сервера ([significance], ADR-034);
+        // невалидные границы — понятный доменный сбой, не protocol error.
+        let (fast_max, standard_max) = self
+            .cfg
+            .significance
+            .limits()
+            .map_err(|e| CallError::execution("significance_from_diff", e))?;
+        let base_ref = args.base_ref;
+        let diff = blocking("significance_from_diff", move || {
+            control::detect_diff_triggers(&path, base_ref.as_deref())
+        })
+        .await?;
+        let scored = control::score_with_sources(&declared, &diff, fast_max, standard_max);
+
+        let sources: serde_json::Map<String, Value> = scored
+            .sources
+            .iter()
+            .map(|(t, s)| (t.clone(), json!(s.label())))
+            .collect();
+        // Основания срабатываний — строки вида «<trigger>: <файл-причина>»;
+        // имена канонических триггеров не содержат «: », разбиение по первому
+        // разделителю однозначно.
+        let undeclared: Vec<Value> = scored
+            .undeclared
+            .iter()
+            .map(|t| {
+                let evidence: Vec<&str> = diff
+                    .evidence
+                    .iter()
+                    .filter_map(|e| e.split_once(": "))
+                    .filter(|(name, _)| name == t)
+                    .map(|(_, reason)| reason)
+                    .collect();
+                json!({"trigger": t, "evidence": evidence})
+            })
+            .collect();
+        let fired: Vec<String> = scored
+            .significance
+            .fired
+            .iter()
+            .map(|f| {
+                scored
+                    .sources
+                    .get(f)
+                    .map_or_else(|| f.clone(), |s| format!("{f} ({})", s.label()))
+            })
+            .collect();
+        let unknown: Vec<&str> = declared
+            .iter()
+            .filter(|(_, fired)| **fired)
+            .map(|(k, _)| k.as_str())
+            .filter(|f| !control::SIGNIFICANCE_TRIGGERS.contains(f))
+            .collect();
+        let undeclared_note = if scored.undeclared.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "; ВНИМАНИЕ — не заявлены, но видны по диффу: {}",
+                scored.undeclared.join(", ")
+            )
+        };
+        let summary = format!(
+            "Score: {} ({}) → маршрут {}{}",
+            scored.significance.score,
+            if fired.is_empty() {
+                "триггеров нет".to_string()
+            } else {
+                fired.join(", ")
+            },
+            scored.significance.route,
+            undeclared_note,
+        );
+        Ok(json!({
+            "route": scored.significance.route,
+            "score": scored.significance.score,
+            "fired": scored.significance.fired,
+            "sources": sources,
+            "undeclared": undeclared,
+            "unknown_triggers": unknown,
+            "summary": summary,
         }))
     }
 
@@ -1564,6 +1681,39 @@ fn tool_specs() -> Vec<Value> {
                     "model": {"type": "string", "description": "Опц.: метка судьи для отчёта (имя модели хоста)"},
                 },
                 "required": ["rubric", "answers"],
+            },
+            "annotations": read_only,
+        }),
+        // Anti-bypass floor (S-1, ADR-034): маршрут из механики диффа, а не из
+        // самооценки агента. В конце vec — порядок первых 12 ручных
+        // инструментов зафиксирован тестами.
+        json!({
+            "name": "significance_from_diff",
+            "description": "Маршрут значимости Fast/Standard/Critical, выведенный из git-диффа \
+                            репозитория (anti-bypass S-1, ADR-034): детекторы new_component / \
+                            new_vendor / api_contract_change / irreversible_migration / \
+                            new_datastore объединяются с заявленными 'declared' (детектор \
+                            только добавляет). Ответ: route+score, sources каждого триггера \
+                            (declared/diff/declared+diff), undeclared — найденные диффом, но \
+                            не заявленные триггеры с файлами-основаниями. Информационный \
+                            инструмент (без passed)",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Корень git-репозитория (по умолчанию — рабочий каталог процесса сервера)",
+                    },
+                    "base_ref": {
+                        "type": "string",
+                        "description": "Опц.: база диффа (git diff BASE_REF...HEAD); без неё — рабочее дерево против HEAD (staged + unstaged + untracked)",
+                    },
+                    "declared": {
+                        "type": "object",
+                        "description": "Опц.: заявленные триггеры («триггер → true/false», ключи — из 15 канонических, как у significance_score)",
+                        "additionalProperties": {"type": "boolean"},
+                    },
+                },
             },
             "annotations": read_only,
         }),

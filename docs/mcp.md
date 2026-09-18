@@ -95,6 +95,7 @@ exit 0) и fail-hard на вердикт («Итог: FAIL» → exit 2, stderr 
 | `spine_lint` | `path` | линтер ARCHITECTURE-SPINE.md: `passed=false` при находках error (дубли AD-id, пустые Binds/Prevents/Rule, заглушки, непиннутые версии, битые ссылки AD) |
 | `fitness_check` | `repo`, `constraints?` | прогон CONSTRAINTS.yaml (дефолт `<repo>/.arch-handoff/CONSTRAINTS.yaml`): must_contain / must_not_contain / each_file_must_contain / file_exists / dir_must_have_file / max_age / command_succeeds; `passed=false` — правила нарушены |
 | `significance_score` | `triggers` | маршрут значимости Fast/Standard/Critical по 15 триггерам (информационный, без `passed`) |
+| `significance_from_diff` | `path?`, `base_ref?`, `declared?` | anti-bypass floor (S-1, ADR-034): триггеры выводятся из git-диффа `path` (без `base_ref` — рабочее дерево против `HEAD`, включая untracked; с `base_ref` — `git diff BASE_REF...HEAD`) и **объединяются** с заявленными `declared` (детектор только добавляет). Ответ: `route`+`score`, `sources` каждого триггера (`declared`/`diff`/`declared+diff`), `undeclared` — найденные диффом, но не заявленные триггеры с файлами-основаниями (`evidence`). Информационный, без `passed`; пороги — из `[significance]` конфига сервера |
 | `trace_check` | `case` | позвенная трассируемость `REQ → NFR → AD/ADR → CMP → правило`: AD без правила и без `unverifiable` — error; verdict + `report_markdown` для evidence bundle |
 | `model_query` | `dir?`, `id?`, `type?` | список сущностей модели (фильтр по типу) или карточка сущности со связями и обратными ссылками |
 | `rubric_run` | `rubric`, `target` \| `target_text`, `model?` | оценка документа рубрикой LLM-судьёй (ADR-004; нужен API-ключ из конфига arch-be; для моделей `kind = "cli"` ключ не нужен — судья — внешний CLI-харнесс) |
@@ -134,6 +135,27 @@ exit 0) и fail-hard на вердикт («Итог: FAIL» → exit 2, stderr 
 
 `passed: false` — основание **отказать изменению**, нарушающему `AD-*`,
 перечислив находки (эта инструкция отдаётся клиенту и в `initialize.instructions`).
+
+Контракт ответа `significance_from_diff` (информационный, `passed` не
+применим):
+
+```json
+{
+  "route": "Standard",
+  "score": 2,
+  "fired": ["new_component", "new_vendor"],
+  "sources": {"new_component": "declared+diff", "new_vendor": "diff"},
+  "undeclared": [
+    {"trigger": "new_vendor", "evidence": ["зависимость в services/risk/Cargo.toml: serde = \"1.0\""]}
+  ],
+  "unknown_triggers": [],
+  "summary": "Score: 2 (new_component (declared+diff), new_vendor (diff)) → маршрут Standard; ВНИМАНИЕ — не заявлены, но видны по диффу: new_vendor"
+}
+```
+
+`undeclared` — anti-bypass сигнал «заявлено агентом vs видно по диффу»:
+на маршрут влияет через объединённое множество (детектор только добавляет),
+блокирующего verdict нет — решение остаётся за гейтом маршрута.
 
 ### Ошибки
 

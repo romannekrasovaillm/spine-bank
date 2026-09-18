@@ -173,6 +173,7 @@ fn handshake_then_tools_list_over_stdio() {
         "spine_lint",
         "fitness_check",
         "significance_score",
+        "significance_from_diff",
         "trace_check",
         "model_query",
         "rubric_run",
@@ -201,8 +202,8 @@ fn handshake_then_tools_list_over_stdio() {
     }
     assert_eq!(
         tools.len(),
-        20,
-        "ровно 20 инструментов в ro-режиме (12 ручных + 8 read-only моста)"
+        21,
+        "ровно 21 инструмент в ro-режиме (13 ручных + 8 read-only моста)"
     );
     // rw-контур и write/exec-принадлежность хоста закрыты в ro-режиме.
     for banned in [
@@ -344,6 +345,151 @@ fn significance_score_routes_change() {
     let fast = structured(&responses[1], 2);
     assert_eq!(fast["route"], "Fast");
     assert_eq!(fast["score"], 0);
+}
+
+/// git в каталоге с тестовой идентичностью коммиттера
+/// (образец — `src/delta.rs::make_guard_repo`).
+fn git(dir: &Path, args: &[&str]) {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("GIT_AUTHOR_NAME", "t")
+        .env("GIT_AUTHOR_EMAIL", "t@t")
+        .env("GIT_COMMITTER_NAME", "t")
+        .env("GIT_COMMITTER_EMAIL", "t@t")
+        .output()
+        .expect("git");
+    assert!(
+        out.status.success(),
+        "git {}: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Репо-фикстура для `significance_from_diff`: один коммит с README.
+fn git_repo_fixture(home: &Path, name: &str) -> std::path::PathBuf {
+    let repo = home.join(name);
+    std::fs::create_dir_all(&repo).expect("mkdir");
+    git(&repo, &["init", "-q"]);
+    std::fs::write(repo.join("README.md"), "# t\n").expect("readme");
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "init"]);
+    repo
+}
+
+/// Критерий приёмки бэклога: агент, заявивший Fast (пустой `declared`) на
+/// диффе с новым каталогом и манифестом, получает Standard или выше с
+/// указанием файла-причины.
+#[test]
+fn significance_from_diff_overrides_fast_claim() {
+    let home = tempfile::tempdir().expect("tmp");
+    let repo = git_repo_fixture(home.path(), "diff-repo");
+    // Рабочее дерево: новый компонент untracked — каталог services/risk с
+    // манифестом (детектор new_component) и строкой зависимости (new_vendor).
+    std::fs::create_dir_all(repo.join("services/risk/src")).expect("mkdir svc");
+    std::fs::write(
+        repo.join("services/risk/Cargo.toml"),
+        "[package]\nname = \"risk\"\nversion = \"0.1.0\"\n\n[dependencies]\nserde = \"1.0\"\n",
+    )
+    .expect("manifest");
+    std::fs::write(repo.join("services/risk/src/lib.rs"), "pub fn f() {}\n").expect("src");
+    let repo_str = repo.display().to_string();
+
+    let responses = mcp_serve(
+        home.path(),
+        &batch(&[
+            // Пустой declared («заявили Fast»): дифф обязан поднять маршрут.
+            call(1, "significance_from_diff", &json!({"path": repo_str})),
+            // Частично заявлено: источник new_component — «declared+diff».
+            call(
+                2,
+                "significance_from_diff",
+                &json!({"path": repo_str, "declared": {"new_component": true}}),
+            ),
+            // Не git-репозиторий — доменный сбой (isError), не protocol error.
+            call(
+                3,
+                "significance_from_diff",
+                &json!({"path": home.path().join("ghost")}),
+            ),
+        ]),
+    );
+
+    let verdict = structured(&responses[0], 1);
+    assert_eq!(verdict["route"], "Standard", "{verdict}");
+    assert_eq!(verdict["score"], 2, "{verdict}");
+    assert_eq!(verdict["sources"]["new_component"], "diff", "{verdict}");
+    assert_eq!(verdict["sources"]["new_vendor"], "diff", "{verdict}");
+    let undeclared = verdict["undeclared"].as_array().expect("undeclared");
+    let nc = undeclared
+        .iter()
+        .find(|u| u["trigger"] == "new_component")
+        .expect("new_component в undeclared");
+    let evidence: Vec<&str> = nc["evidence"]
+        .as_array()
+        .expect("evidence")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(
+        evidence
+            .iter()
+            .any(|e| e.contains("services/risk/Cargo.toml")),
+        "файл-причина new_component: {evidence:?}"
+    );
+    assert!(
+        verdict["summary"]
+            .as_str()
+            .expect("summary")
+            .contains("не заявлены"),
+        "{verdict}"
+    );
+
+    let verdict = structured(&responses[1], 2);
+    assert_eq!(
+        verdict["sources"]["new_component"], "declared+diff",
+        "{verdict}"
+    );
+    // new_vendor остался незаявленным — anti-bypass сигнал сохраняется.
+    let undeclared = verdict["undeclared"].as_array().expect("undeclared");
+    assert!(
+        undeclared.iter().any(|u| u["trigger"] == "new_vendor"),
+        "{verdict}"
+    );
+
+    assert_eq!(responses[2]["result"]["isError"], true);
+    assert!(responses[2].get("error").is_none());
+}
+
+/// Режим `base_ref`: дифф `BASE_REF...HEAD` по закоммиченному компоненту.
+#[test]
+fn significance_from_diff_with_base_ref() {
+    let home = tempfile::tempdir().expect("tmp");
+    let repo = git_repo_fixture(home.path(), "ref-repo");
+    std::fs::create_dir_all(repo.join("services/risk")).expect("mkdir svc");
+    std::fs::write(
+        repo.join("services/risk/Cargo.toml"),
+        "[package]\nname = \"risk\"\nversion = \"0.1.0\"\n\n[dependencies]\nserde = \"1.0\"\n",
+    )
+    .expect("manifest");
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "add risk service"]);
+    let repo_str = repo.display().to_string();
+
+    let responses = mcp_serve(
+        home.path(),
+        &batch(&[call(
+            1,
+            "significance_from_diff",
+            &json!({"path": repo_str, "base_ref": "HEAD~1"}),
+        )]),
+    );
+    let verdict = structured(&responses[0], 1);
+    assert_eq!(verdict["route"], "Standard", "{verdict}");
+    assert_eq!(verdict["sources"]["new_component"], "diff", "{verdict}");
+    assert_eq!(verdict["sources"]["new_vendor"], "diff", "{verdict}");
 }
 
 #[test]
