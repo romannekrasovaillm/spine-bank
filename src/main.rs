@@ -338,11 +338,18 @@ enum Cmd {
         cmd: ArchunitCmd,
     },
     /// Подключить Spine к внешнему CLI-агенту (MCP-сервер + скиллы + хуки):
-    /// claude | qwen | gigacode | codex | kimi | omp | generic. (Инверсия харнесса,
-    /// шаг 3; называется `connect`, т.к. `export` занят экспортом журнала.)
+    /// claude | qwen | gigacode | codex | kimi | omp | generic. Особые значения —
+    /// гейты, не зависящие от хоста: `ci` (джоба архитектурного гейта под
+    /// `--provider gitlab|github|jenkins`) и `git-hooks` (pre-commit + pre-push).
+    /// (Инверсия харнесса, шаг 3; называется `connect`, т.к. `export` занят
+    /// экспортом журнала.)
     Connect {
-        /// Хост: claude | qwen | gigacode | codex | kimi | omp | generic.
+        /// Хост: claude | qwen | gigacode | codex | kimi | omp | generic |
+        /// ci | git-hooks.
         host: String,
+        /// CI-провайдер (только для `connect ci`): gitlab | github | jenkins.
+        #[arg(long, value_name = "PROVIDER")]
+        provider: Option<String>,
         /// Каталог проекта (по умолчанию — текущий).
         #[arg(long)]
         dir: Option<PathBuf>,
@@ -1589,6 +1596,7 @@ async fn main() -> Result<()> {
         Some(Cmd::Archunit { cmd }) => cmd_archunit(cmd).await?,
         Some(Cmd::Connect {
             host,
+            provider,
             dir,
             rw,
             no_skills,
@@ -1598,11 +1606,53 @@ async fn main() -> Result<()> {
             apply_global,
             dry_run,
         }) => {
-            let host = arch_harness::connect::Host::parse(&host).map_err(anyhow::Error::msg)?;
             let dir = match dir {
                 Some(d) => d,
                 None => std::env::current_dir().context("cwd")?,
             };
+            let special = host.trim().to_ascii_lowercase();
+            if special == "ci" || special == "git-hooks" || special == "githooks" {
+                // Гейты, не зависящие от хоста (волна 2, п.8): флаги агентных
+                // хостов здесь неприменимы — отклоняем явно, чтобы не
+                // молча игнорировать.
+                if rw || no_skills || no_hooks || no_agents_md || strict_hooks || apply_global {
+                    return Err(anyhow::anyhow!(
+                        "флаги --rw/--no-skills/--no-hooks/--no-agents-md/--strict-hooks/--apply-global применимы только к хостам агентов, не к `connect {special}`"
+                    ));
+                }
+                if special == "ci" {
+                    let raw = provider.as_deref().ok_or_else(|| {
+                        anyhow::anyhow!("connect ci: укажите --provider gitlab|github|jenkins")
+                    })?;
+                    let provider = arch_harness::connect::CiProvider::parse(raw)
+                        .map_err(anyhow::Error::msg)?;
+                    let report = arch_harness::connect::connect_ci(provider, &dir, dry_run)?;
+                    print!(
+                        "{}",
+                        arch_harness::connect::render_plan(
+                            &format!("CI-джоба Spine ({}) — {}", provider.name(), dir.display()),
+                            &report,
+                        )
+                    );
+                } else {
+                    if provider.is_some() {
+                        return Err(anyhow::anyhow!("--provider применим только к `connect ci`"));
+                    }
+                    let report = arch_harness::connect::connect_git_hooks(&dir, dry_run)?;
+                    print!(
+                        "{}",
+                        arch_harness::connect::render_plan(
+                            &format!("Git-хуки Spine — {}", dir.display()),
+                            &report,
+                        )
+                    );
+                }
+                return Ok(());
+            }
+            if provider.is_some() {
+                return Err(anyhow::anyhow!("--provider применим только к `connect ci`"));
+            }
+            let host = arch_harness::connect::Host::parse(&host).map_err(anyhow::Error::msg)?;
             let opts = arch_harness::connect::ConnectOptions {
                 host,
                 dir,

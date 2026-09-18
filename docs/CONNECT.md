@@ -60,6 +60,23 @@ arch-be connect generic     # любой MCP-хост — все сниппет�
 | `omp` | `.mcp.json` (мердж); скиллы в `.claude/skills/` — только если каталога ещё нет | автодискавери `.mcp.json`; хуки — TS-расширения `omp --hook <file.ts>` |
 | `generic` | ничего | все сниппеты для ручной установки |
 
+Особые значения host — не агенты, а **гейты, не зависящие от хоста** (хуки
+ненадёжны: у Qwen headless-срабатывание не подтверждено, у Codex
+lifecycle-хуков нет; CI и git-хуки — единственный гейт, который сработает
+всегда):
+
+| Хост | Что пишется в проект | Примечания |
+|---|---|---|
+| `ci --provider gitlab` | блок между `# spine-connect:begin/end` в `.gitlab-ci.yml` (мердж, чужие джобы сохраняются) | джоба `spine-gate`: `arch-be gate --route auto --format gitlab-codequality` в артефакт `reports.codequality` — **нарушения видны в интерфейсе merge request без ручной настройки** |
+| `ci --provider github` | новый `.github/workflows/spine-gate.yml` (существующий без маркера не затирается — отказ) | `gate --format sarif` артефактом прогона + markdown в Job Summary; загрузка в code scanning — закомментированным шагом (нужен Advanced Security) |
+| `ci --provider jenkins` | блок между `// spine-connect:begin/end` в `Jenkinsfile` | `gate --format junit` + публикация `junit(...)`; красный гейт — `error(...)` по коду возврата |
+| `git-hooks` | `.git/hooks/pre-commit` (быстрый `arch-be control check .`) и `pre-push` (полный `arch-be gate --route auto`); в worktree — в hooks основного git-каталога | блоки между маркерами, чужие строки хуков сохраняются; fail-soft: нет `arch-be` в PATH (у pre-commit — и `.arch-handoff/CONSTRAINTS.yaml`) — молча пропуск |
+
+Установка бинаря в CI-джобах — curl из релизов (`arch-be-linux-x86_64.tar.gz`)
+или офлайн-бандл из внутреннего хранилища: оба варианта закомментированы в
+тексте джобы (замените `<org>/<repo>` в `RELEASES_URL`). `--dry-run` печатает
+план без записи, повторный запуск дублей не плодит (маркерные блоки).
+
 ![Установка и подключение](screenshots/connect/01-connect.png)
 
 Команда **идемпотентна** (повторный запуск не плодит дубли), **не затирает

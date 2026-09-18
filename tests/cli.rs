@@ -1279,3 +1279,120 @@ fn contract_diff_cli_text_and_sarif() {
     cmd.assert().success().stdout(contains("Итог: PASS"));
 }
 
+/// `arch-be connect ci --dry-run` для трёх провайдеров: план с путём джобы,
+/// ничего не пишется; без `--provider` — понятная ошибка (exit 1).
+#[test]
+fn connect_ci_dry_run_for_all_providers() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path().join("proj");
+    std::fs::create_dir_all(&dir).expect("mkdir proj");
+
+    for (provider, rel) in [
+        ("gitlab", ".gitlab-ci.yml"),
+        ("github", ".github/workflows/spine-gate.yml"),
+        ("jenkins", "Jenkinsfile"),
+    ] {
+        let mut cmd = arch_cmd(tmp.path());
+        cmd.arg("connect")
+            .arg("ci")
+            .arg("--provider")
+            .arg(provider)
+            .arg("--dir")
+            .arg(dir.as_os_str())
+            .arg("--dry-run");
+        cmd.assert()
+            .success()
+            .stdout(contains("CI-джоба Spine"))
+            .stdout(contains("dry-run"))
+            .stdout(contains(rel));
+        assert!(!dir.join(rel).exists(), "{provider}: dry-run записал файл");
+    }
+
+    // Без --provider — ошибка с подсказкой.
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("connect")
+        .arg("ci")
+        .arg("--dir")
+        .arg(dir.as_os_str());
+    cmd.assert()
+        .code(1)
+        .stderr(contains("--provider gitlab|github|jenkins"));
+
+    // Реальный прогон gitlab: файл с маркерами; повтор — «без изменений».
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("connect")
+        .arg("ci")
+        .arg("--provider")
+        .arg("gitlab")
+        .arg("--dir")
+        .arg(dir.as_os_str());
+    cmd.assert().success().stdout(contains(".gitlab-ci.yml"));
+    let text = std::fs::read_to_string(dir.join(".gitlab-ci.yml")).expect("read");
+    assert!(text.contains("spine-connect:begin"), "{text}");
+    assert!(text.contains("reports"), "{text}");
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("connect")
+        .arg("ci")
+        .arg("--provider")
+        .arg("gitlab")
+        .arg("--dir")
+        .arg(dir.as_os_str());
+    cmd.assert().success().stdout(contains("Без изменений"));
+    assert_eq!(
+        std::fs::read_to_string(dir.join(".gitlab-ci.yml")).expect("read"),
+        text,
+        "повтор изменил файл"
+    );
+}
+
+/// `arch-be connect git-hooks` в git-репозитории: pre-commit + pre-push с
+/// маркерами и fail-soft гардами; повтор — без дублей.
+#[test]
+fn connect_git_hooks_writes_marked_hooks_idempotently() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("mkdir repo");
+    git(&repo, &["init", "-q"]);
+
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("connect")
+        .arg("git-hooks")
+        .arg("--dir")
+        .arg(repo.as_os_str());
+    cmd.assert()
+        .success()
+        .stdout(contains("Git-хуки Spine"))
+        .stdout(contains("pre-commit"))
+        .stdout(contains("pre-push"));
+
+    let pre_commit = std::fs::read_to_string(repo.join(".git/hooks/pre-commit")).expect("read");
+    assert!(pre_commit.contains("spine-connect:begin"), "{pre_commit}");
+    assert!(
+        pre_commit.contains("arch-be control check ."),
+        "{pre_commit}"
+    );
+    assert!(pre_commit.contains("command -v arch-be"), "{pre_commit}");
+    let pre_push = std::fs::read_to_string(repo.join(".git/hooks/pre-push")).expect("read");
+    assert!(pre_push.contains("arch-be gate --route auto"), "{pre_push}");
+
+    // Повтор: содержимое то же, маркеры по одному.
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("connect")
+        .arg("git-hooks")
+        .arg("--dir")
+        .arg(repo.as_os_str());
+    cmd.assert().success().stdout(contains("Без изменений"));
+    let again = std::fs::read_to_string(repo.join(".git/hooks/pre-commit")).expect("read");
+    assert_eq!(again, pre_commit, "повтор изменил pre-commit");
+    assert_eq!(again.matches("spine-connect:begin").count(), 1, "{again}");
+
+    // Вне git-репозитория — понятная ошибка (exit 1).
+    let plain = tmp.path().join("plain");
+    std::fs::create_dir_all(&plain).expect("mkdir plain");
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("connect")
+        .arg("git-hooks")
+        .arg("--dir")
+        .arg(plain.as_os_str());
+    cmd.assert().code(1).stderr(contains("не git-репозиторий"));
+}
