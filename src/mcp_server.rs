@@ -7,9 +7,18 @@
 //!   (как у клиента [`crate::mcp`], без `Content-Length`-фрейминга);
 //!   stdout — только протокол, логи — stderr (tracing в `main`);
 //! - методы: `initialize` (echo известной версии протокола, иначе наша),
-//!   `tools/list`, `tools/call`, `ping`; `notifications/*` — игнор без
-//!   ответа; неизвестный метод → `-32601`, битый JSON → `-32700`,
-//!   отсутствует `method` → `-32600`, битые аргументы/инструмент → `-32602`;
+//!   `tools/list`, `tools/call`, `prompts/list`, `prompts/get`, `ping`;
+//!   `notifications/*` — игнор без ответа; неизвестный метод → `-32601`,
+//!   битый JSON → `-32700`, отсутствует `method` → `-32600`, битые
+//!   аргументы/инструмент/промпт → `-32602`; `resources/*` не поддержаны
+//!   (`-32601`);
+//! - промпты (capability `prompts`): семь плейбуков встроенного плагина
+//!   spine-workflows как слэш-команды хоста ([`PLAYBOOK_PROMPTS`]) —
+//!   хосту не нужно знать формулу «действуй по скиллу …» и то, куда он
+//!   кладёт файлы скиллов: `prompts/get` возвращает user-сообщение с
+//!   инструкцией и полным текстом SKILL.md. Текст — пользовательская
+//!   копия из `plugins.dirs`, если есть (логика `skill_load`), иначе
+//!   встроенный ассет: работает из коробки без `arch-be init`;
 //! - режимы запуска ([`ServeMode`]): дефолт — строго read-only; флаг
 //!   `--rw` (`arch-be mcp serve --rw`) дополнительно открывает белый список
 //!   аддитивных записей ([`BRIDGE_READ_WRITE`]: `handoff_create`, `adr_new`,
@@ -61,6 +70,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -106,6 +116,88 @@ const BRIDGE_OUTPUT_MAX_CHARS: usize = 16_000;
 /// Потолок числа ответов хоста в `rubric_verify` (k сэмплов судьи из
 /// `[judge]` — единицы; лимит отсекает ошибочные гигантские пачки).
 const MAX_VERIFY_ANSWERS: usize = 32;
+
+/// Потолок символов значения аргумента промпта, эхом вставляемого в текст
+/// сообщения `prompts/get`: аргумент — короткий путь/имя/предмет, а не
+/// документ (длинный ввод хоста не должен раздувать сообщение-команду).
+const MAX_PROMPT_ARG_VALUE_CHARS: usize = 500;
+
+/// Статическая карточка плейбука-промпта (MCP prompts): имя (= имя скилла
+/// плагина spine-workflows), встроенный текст SKILL.md (запасной источник
+/// на машине без `arch-be init`) и объявление аргументов для `prompts/list`.
+struct PlaybookPrompt {
+    /// Имя промпта (= имя скилла-плейбука).
+    name: &'static str,
+    /// Встроенный полный текст SKILL.md (embedded-ассет [`crate::assets`]).
+    embedded: &'static str,
+    /// Аргументы промпта: (имя, описание). Объявляются, только если сценарий
+    /// плейбука параметризован (путь/файл/предмет); все необязательные —
+    /// слэш-команда обязана работать и без аргументов (цель уточняется из
+    /// контекста диалога).
+    arguments: &'static [(&'static str, &'static str)],
+}
+
+/// Плейбуки плагина spine-workflows как MCP-промпты (слэш-команды хоста,
+/// пункт 11 бэклога волны 3). Порядок фиксирован: стабильный `prompts/list`,
+/// та же последовательность в `docs/mcp.md`.
+const PLAYBOOK_PROMPTS: &[PlaybookPrompt] = &[
+    PlaybookPrompt {
+        name: "spine-quickstart",
+        embedded: crate::assets::PLUGIN_SPINE_WORKFLOWS_SKILLS_SPINE_QUICKSTART_SKILL_MD,
+        arguments: &[],
+    },
+    PlaybookPrompt {
+        name: "spine-content-bootstrap",
+        embedded: crate::assets::PLUGIN_SPINE_WORKFLOWS_SKILLS_SPINE_CONTENT_BOOTSTRAP_SKILL_MD,
+        arguments: &[],
+    },
+    PlaybookPrompt {
+        name: "spine-architect-review",
+        embedded: crate::assets::PLUGIN_SPINE_WORKFLOWS_SKILLS_SPINE_ARCHITECT_REVIEW_SKILL_MD,
+        arguments: &[],
+    },
+    PlaybookPrompt {
+        name: "spine-adr-judge",
+        embedded: crate::assets::PLUGIN_SPINE_WORKFLOWS_SKILLS_SPINE_ADR_JUDGE_SKILL_MD,
+        arguments: &[
+            (
+                "target",
+                "Опц.: путь к документу для оценки (ADR, дизайн, спека) — \
+                 подставляется в `target` вызовов rubric_prompt/rubric_verify",
+            ),
+            (
+                "rubric",
+                "Опц.: имя рубрики (по умолчанию выбирается по `rubric_list`, \
+                 обычно `adr_quality`)",
+            ),
+        ],
+    },
+    PlaybookPrompt {
+        name: "spine-contracts-gate",
+        embedded: crate::assets::PLUGIN_SPINE_WORKFLOWS_SKILLS_SPINE_CONTRACTS_GATE_SKILL_MD,
+        arguments: &[
+            (
+                "path",
+                "Опц.: путь к файлу контракта (OpenAPI/AsyncAPI) для линта",
+            ),
+            ("old", "Опц.: путь к старой версии контракта для diff"),
+            ("new", "Опц.: путь к новой версии контракта для diff"),
+        ],
+    },
+    PlaybookPrompt {
+        name: "spine-archify-viz",
+        embedded: crate::assets::PLUGIN_SPINE_WORKFLOWS_SKILLS_SPINE_ARCHIFY_VIZ_SKILL_MD,
+        arguments: &[(
+            "subject",
+            "Опц.: что визуализируем (система/поток/контракты) и имя диаграммы",
+        )],
+    },
+    PlaybookPrompt {
+        name: "spine-fitness-gate",
+        embedded: crate::assets::PLUGIN_SPINE_WORKFLOWS_SKILLS_SPINE_FITNESS_GATE_SKILL_MD,
+        arguments: &[],
+    },
+];
 
 /// Белый список read-only моста в реестр инструментов ([`crate::tools::full_registry`]):
 /// детерминированный контур контроля и чтения, не покрытый ручными
@@ -418,7 +510,10 @@ impl McpServe {
                     id,
                     &json!({
                         "protocolVersion": version,
-                        "capabilities": {"tools": {"listChanged": false}},
+                        "capabilities": {
+                            "tools": {"listChanged": false},
+                            "prompts": {"listChanged": false},
+                        },
                         "serverInfo": {
                             "name": "arch-harness",
                             "version": env!("CARGO_PKG_VERSION"),
@@ -444,13 +539,18 @@ impl McpServe {
                                          Чтение знаний (read-only): kb_search — поиск по \
                                          базе знаний архитектора; skill_search/skill_load — \
                                          библиотека скиллов; mermaid_render — диаграмма \
-                                         mermaid (code/path) в ASCII-арт.",
+                                         mermaid (code/path) в ASCII-арт. Плейбуки spine-* \
+                                         (подключение, гейты, разбор, судья рубрик, визуализация) \
+                                         доступны как промпты (prompts/list, prompts/get) — \
+                                         слэш-команды хоста с полным сценарием в сообщении.",
                     }),
                 )
             }
             "ping" => ok_response(id, &json!({})),
             "tools/list" => ok_response(id, &json!({"tools": self.all_tool_specs()})),
             "tools/call" => self.handle_tool_call(id, &params).await,
+            "prompts/list" => self.handle_prompts_list(id).await,
+            "prompts/get" => self.handle_prompts_get(id, &params).await,
             other => error_response(id, METHOD_NOT_FOUND, format!("неизвестный метод '{other}'")),
         }
     }
@@ -502,6 +602,123 @@ impl McpServe {
                     "isError": true,
                 }),
             ),
+            Err(CallError::Protocol { code, message }) => error_response(id, code, message),
+        }
+    }
+
+    /// `prompts/list`: семь плейбуков [`PLAYBOOK_PROMPTS`] с описаниями из
+    /// frontmatter и объявлениями аргументов. Пагинация не нужна (список
+    /// фиксирован и мал) — `cursor` из params принимается и игнорируется.
+    async fn handle_prompts_list(&self, id: &Value) -> Value {
+        let dirs = self.cfg.plugins.dirs.clone();
+        let listed = blocking("prompts/list", move || -> Result<Value> {
+            let prompts: Vec<Value> = PLAYBOOK_PROMPTS
+                .iter()
+                .map(|pb| {
+                    let (_, description) = resolve_playbook(&dirs, pb);
+                    json!({
+                        "name": pb.name,
+                        "description": description,
+                        "arguments": pb.arguments.iter().map(|(an, ad)| json!({
+                            "name": an,
+                            "description": ad,
+                            "required": false,
+                        })).collect::<Vec<_>>(),
+                    })
+                })
+                .collect();
+            Ok(json!({"prompts": prompts}))
+        })
+        .await;
+        match listed {
+            Ok(result) => ok_response(id, &result),
+            // Доменных сбоев тут нет (fallback встроенный) — только срыв
+            // blocking-задачи: внутренняя ошибка сервера.
+            Err(CallError::Execution(message)) => error_response(id, INTERNAL_ERROR, message),
+            Err(CallError::Protocol { code, message }) => error_response(id, code, message),
+        }
+    }
+
+    /// `prompts/get`: слэш-команда хоста — одно user-сообщение с инструкцией
+    /// «действуй по этому плейбуку», полным текстом SKILL.md и эхом переданных
+    /// (объявленных) аргументов. Неизвестное имя и битые аргументы → `-32602`.
+    async fn handle_prompts_get(&self, id: &Value, params: &Value) -> Value {
+        let Some(name) = params.get("name").and_then(Value::as_str) else {
+            return error_response(
+                id,
+                INVALID_PARAMS,
+                "prompts/get: нет строкового поля 'name'",
+            );
+        };
+        let Some(pb) = PLAYBOOK_PROMPTS.iter().find(|p| p.name == name) else {
+            return error_response(
+                id,
+                INVALID_PARAMS,
+                format!("prompts/get: неизвестный промпт '{name}'; список — prompts/list"),
+            );
+        };
+        let arguments = params
+            .get("arguments")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        let Some(arg_obj) = arguments.as_object() else {
+            return error_response(
+                id,
+                INVALID_PARAMS,
+                format!(
+                    "prompts/get: 'arguments' должен быть объектом «имя → строка», получено: {arguments}"
+                ),
+            );
+        };
+        // Эхом подставляются только объявленные аргументы (незнакомые ключи
+        // хоста игнорируются — форвард-совместимость); значения — строки по
+        // спецификации PromptArgument, иное → -32602.
+        let mut provided: Vec<(&str, String)> = Vec::new();
+        for (an, _) in pb.arguments {
+            if let Some(v) = arg_obj.get(*an) {
+                let Some(s) = v.as_str() else {
+                    return error_response(
+                        id,
+                        INVALID_PARAMS,
+                        format!("prompts/get: аргумент '{an}' должен быть строкой, получено: {v}"),
+                    );
+                };
+                provided.push((*an, s.chars().take(MAX_PROMPT_ARG_VALUE_CHARS).collect()));
+            }
+        }
+        let dirs = self.cfg.plugins.dirs.clone();
+        let built = blocking("prompts/get", move || -> Result<Value> {
+            let (mut body, description) = resolve_playbook(&dirs, pb);
+            if body.chars().count() > SKILL_TEXT_MAX_CHARS {
+                let cut: String = body.chars().take(SKILL_TEXT_MAX_CHARS).collect();
+                body = format!("{cut}\n… [усечено: {SKILL_TEXT_MAX_CHARS} символов]");
+            }
+            let mut text = format!(
+                "Действуй по этому плейбуку — скилл `{}` плагина spine-workflows \
+                 (MCP-сервер Spine): выполняй его шаги по порядку, вызывая \
+                 инструменты этого сервера; вердикты (`passed`, находки) \
+                 докладывай архитектору.\n\n{body}",
+                pb.name
+            );
+            if !provided.is_empty() {
+                text.push_str("\n\nАргументы запуска (подставь в шаги плейбука):");
+                for (an, av) in &provided {
+                    // write! в String не падает — игнор результата безопасен.
+                    let _ = write!(text, "\n- {an} = \"{av}\"");
+                }
+            }
+            Ok(json!({
+                "description": description,
+                "messages": [{
+                    "role": "user",
+                    "content": {"type": "text", "text": text},
+                }],
+            }))
+        })
+        .await;
+        match built {
+            Ok(result) => ok_response(id, &result),
+            Err(CallError::Execution(message)) => error_response(id, INTERNAL_ERROR, message),
             Err(CallError::Protocol { code, message }) => error_response(id, code, message),
         }
     }
@@ -1285,6 +1502,24 @@ impl McpServe {
     }
 }
 
+/// Текст и описание плейбука-промпта: сначала пользовательская копия из
+/// `plugins.dirs` (та же логика, что у `skill_load`, — правки пользователя
+/// в силе), иначе встроенный ассет (чистая машина без `arch-be init`).
+/// Ошибка чтения пользовательской копии не фатальна — откат на встроенный
+/// текст: сервер не падает из-за одного битого файла.
+fn resolve_playbook(dirs: &[PathBuf], pb: &PlaybookPrompt) -> (String, String) {
+    let plugins = plugin::discover(dirs);
+    if let Some(meta) = plugin::skill_by_name(&plugins, pb.name) {
+        if let Ok(text) = plugin::load_skill(meta) {
+            return (text, meta.description.clone());
+        }
+    }
+    let description = plugin::parse_frontmatter_text(pb.embedded)
+        .map(|(_, d)| d)
+        .unwrap_or_default();
+    (pb.embedded.to_string(), description)
+}
+
 /// Рендерит код диаграммы в JSON-ответ `mermaid_render` (общий для inline-кода
 /// и файла): арт + вид диаграммы. Ошибки парсера — [`HarnessError::Mermaid`]
 /// с номером строки, как у агентного инструмента.
@@ -1920,6 +2155,10 @@ mod tests {
             assert_eq!(result["protocolVersion"], want, "версия для {asked}");
             assert_eq!(result["serverInfo"]["name"], "arch-harness");
             assert!(result["capabilities"]["tools"].is_object());
+            assert!(
+                result["capabilities"]["prompts"].is_object(),
+                "capability prompts (плейбуки spine-* как слэш-команды)"
+            );
         }
     }
 
@@ -2346,6 +2585,155 @@ mod tests {
             text.contains("не найден") && text.contains("нет-такого"),
             "{text}"
         );
+    }
+
+    #[tokio::test]
+    async fn prompts_list_has_seven_playbooks_with_frontmatter_descriptions() {
+        // Пустой plugins-каталог → встроенные ассеты (чистая машина).
+        let tmp = tempfile::tempdir().expect("tmp");
+        let server = server_with_dirs(tmp.path(), tmp.path());
+        let responses = run_lines_on(
+            server,
+            &[r#"{"jsonrpc":"2.0","id":1,"method":"prompts/list","params":{}}"#],
+        )
+        .await;
+        let prompts = responses[0]["result"]["prompts"]
+            .as_array()
+            .expect("prompts");
+        let names: Vec<&str> = prompts
+            .iter()
+            .map(|p| p["name"].as_str().expect("name"))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "spine-quickstart",
+                "spine-content-bootstrap",
+                "spine-architect-review",
+                "spine-adr-judge",
+                "spine-contracts-gate",
+                "spine-archify-viz",
+                "spine-fitness-gate",
+            ],
+            "семь плейбуков в зафиксированном порядке"
+        );
+        for p in prompts {
+            assert!(
+                p["description"].as_str().is_some_and(|d| !d.is_empty()),
+                "description из frontmatter: {p}"
+            );
+            assert!(p["arguments"].is_array(), "arguments — массив: {p}");
+        }
+        // Аргументы объявлены только у параметризованных плейбуков.
+        let arg_count = |name: &str| {
+            prompts.iter().find(|p| p["name"] == name).expect("промпт")["arguments"]
+                .as_array()
+                .expect("args")
+                .len()
+        };
+        assert_eq!(arg_count("spine-quickstart"), 0);
+        assert_eq!(arg_count("spine-adr-judge"), 2, "target + rubric");
+        assert_eq!(arg_count("spine-contracts-gate"), 3, "path + old + new");
+        assert_eq!(arg_count("spine-archify-viz"), 1, "subject");
+    }
+
+    #[tokio::test]
+    async fn prompts_get_renders_every_embedded_playbook() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        for pb in PLAYBOOK_PROMPTS {
+            let server = server_with_dirs(tmp.path(), tmp.path());
+            let line = format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"prompts/get","params":{{"name":"{}"}}}}"#,
+                pb.name
+            );
+            let responses = run_lines_on(server, &[&line]).await;
+            let result = &responses[0]["result"];
+            assert!(
+                result["description"]
+                    .as_str()
+                    .is_some_and(|d| !d.is_empty()),
+                "{}: description из frontmatter",
+                pb.name
+            );
+            let messages = result["messages"].as_array().expect("messages");
+            assert_eq!(messages.len(), 1, "{}: одно user-сообщение", pb.name);
+            assert_eq!(messages[0]["role"], "user", "{}", pb.name);
+            assert_eq!(messages[0]["content"]["type"], "text", "{}", pb.name);
+            let text = messages[0]["content"]["text"].as_str().expect("text");
+            assert!(
+                text.starts_with("Действуй по этому плейбуку"),
+                "{}: инструкция-команда",
+                pb.name
+            );
+            assert!(
+                text.contains(pb.embedded),
+                "{}: полный текст встроенного SKILL.md в сообщении",
+                pb.name
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn prompts_get_prefers_user_copy_and_echoes_declared_arguments() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        // Пользовательская копия плейбука в plugins.dirs (логика skill_load).
+        let skill_md = tmp
+            .path()
+            .join("spine-workflows/skills/spine-fitness-gate/SKILL.md");
+        std::fs::create_dir_all(skill_md.parent().expect("parent")).expect("dirs");
+        std::fs::write(
+            &skill_md,
+            "---\nname: spine-fitness-gate\ndescription: ПОЛЬЗОВАТЕЛЬСКИЙ плейбук гейта.\n---\n\n\
+             # Мой гейт\n\nТело пользователя.\n",
+        )
+        .expect("SKILL.md");
+        let server = server_with_dirs(tmp.path(), tmp.path());
+        let responses = run_lines_on(
+            server,
+            &[
+                r#"{"jsonrpc":"2.0","id":1,"method":"prompts/get","params":{"name":"spine-fitness-gate"}}"#,
+                r#"{"jsonrpc":"2.0","id":2,"method":"prompts/get","params":{"name":"spine-adr-judge","arguments":{"target":"docs/adr/0001.md","rubric":"adr_quality","чужой":"игнор"}}}"#,
+            ],
+        )
+        .await;
+        // Пользовательская копия побеждает встроенную.
+        let first = &responses[0]["result"];
+        assert_eq!(first["description"], "ПОЛЬЗОВАТЕЛЬСКИЙ плейбук гейта.");
+        let text = first["messages"][0]["content"]["text"]
+            .as_str()
+            .expect("text");
+        assert!(text.contains("Тело пользователя."), "{text}");
+        // Эхо — только объявленных аргументов, в порядке объявления.
+        let text2 = responses[1]["result"]["messages"][0]["content"]["text"]
+            .as_str()
+            .expect("text");
+        assert!(text2.contains("- target = \"docs/adr/0001.md\""), "{text2}");
+        assert!(text2.contains("- rubric = \"adr_quality\""), "{text2}");
+        assert!(!text2.contains("чужой"), "{text2}");
+    }
+
+    #[tokio::test]
+    async fn prompts_get_invalid_params_and_resources_stay_guarded() {
+        // Имена валидны только в id=3/4, но ошибки параметров ловятся до
+        // резолва текста — тест не зависит от реального дома.
+        let responses = run_lines(&[
+            r#"{"jsonrpc":"2.0","id":1,"method":"prompts/get","params":{}}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"prompts/get","params":{"name":"ghost"}}"#,
+            r#"{"jsonrpc":"2.0","id":3,"method":"prompts/get","params":{"name":"spine-quickstart","arguments":["x"]}}"#,
+            r#"{"jsonrpc":"2.0","id":4,"method":"prompts/get","params":{"name":"spine-adr-judge","arguments":{"target":42}}}"#,
+            r#"{"jsonrpc":"2.0","id":5,"method":"resources/list","params":{}}"#,
+            r#"{"jsonrpc":"2.0","id":6,"method":"resources/templates/list","params":{}}"#,
+        ])
+        .await;
+        for (i, resp) in responses.iter().enumerate() {
+            if i < 4 {
+                assert_eq!(resp["error"]["code"], INVALID_PARAMS, "ответ {i}: {resp}");
+            } else {
+                assert_eq!(resp["error"]["code"], METHOD_NOT_FOUND, "ответ {i}: {resp}");
+            }
+        }
+        let msg = responses[1]["error"]["message"].as_str().expect("message");
+        assert!(msg.contains("ghost"), "{msg}");
     }
 
     #[tokio::test]

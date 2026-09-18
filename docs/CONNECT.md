@@ -115,6 +115,13 @@ project-scoped сервер из `.mcp.json` и доверие каталогу 
 
 ![fitness FAIL → fix → PASS](screenshots/connect/04-fitness.png)
 
+Готовые сценарии работы со Spine доступны как **слэш-команды хоста**: сервер
+отдаёт семь плейбуков `spine-*` (`spine-architect-review`, `spine-fitness-gate`
+и др.) через MCP-промпты (`prompts/list`, `prompts/get`) — в Claude Code это
+команды вида `/mcp__spine__spine-architect-review` из меню `/`. Текст сценария
+встроен в бинарь сервера, поэтому команды работают независимо от того, куда
+хост раскладывает файлы скиллов. Подробности — в `docs/mcp.md` («Промпты»).
+
 А Stop-хук (записан в `.claude/settings.json`) не даёт агенту завершить
 работу, пока гейт красный: при попытке остановки хук запускает
 `arch-be gate --route auto` (единый гейт: fitness + delta guard +

@@ -8,6 +8,7 @@
 | 1. `CliHarnessProvider` (судья через `claude -p`/…, `kind="cli"`) | ✅ | `src/llm/harness_cli.rs`; прогон: `rubric run` через подписку Claude Code — [скриншот](screenshots/connect/06-rubric-cli-judge.png) |
 | 2. MCP: итерация по реестру инструментов, read-only дефолт, `--rw`, never-список | ✅ | `src/mcp_server.rs` (мост поверх `tools::full_registry`, белые списки, охранные тесты) |
 | 2+. Split-judge (`rubric_prompt`/`rubric_verify`) | ✅ | там же; проверено на Claude Code и Qwen Code 0.24.0 |
+| Бэклог волны 3, п. 11: MCP prompts — плейбуки `spine-*` как слэш-команды хоста | ✅ серверная сторона (живые проверки хостов — отдельно) | `src/mcp_server.rs`: capability `prompts`, `prompts/list`/`prompts/get` (7 плейбуков spine-workflows; текст — пользовательская копия из `plugins.dirs`, иначе встроенный ассет); `resources/*` по-прежнему не поддержаны (`-32601`) |
 | 3. `export <host>` → реализовано как **`arch-be connect <host>`** (имя `export` было занято журнальным экспортом) | ✅ | `src/connect.rs`: claude / qwen / kimi / omp / codex / generic |
 | 4. Cargo-фичи `core`/`harness` + сторожок в CONSTRAINTS/CI | ✅ | `Cargo.toml` (`default=["harness"]`), CONSTRAINTS.yaml C-29/C-30, CI-джоба `core-build` |
 | 5. Регресс кейсов 004–007 | ✅ частично | 006 (drift-control): A exit 1 / B exit 0; 007 (fleet-spine-drift): exit 1. 004/005 — флоты Claude Code не перепрогонялись; вместо них живой E2E на одном агенте ([HARNESSES.md](HARNESSES.md)) |
