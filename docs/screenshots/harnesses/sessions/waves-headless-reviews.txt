@@ -1,0 +1,10 @@
+Headless-прогоны architect_review (MCP): omp 15.10.3 · OpenClaw 2026.7.1 · Qwen Code 0.24.0 (дословно)
+$ omp -p "…architect_review (path: \".\")…" --no-session
+! Маршрут: Standard (auto из диффа) · Итог гейта: FAIL — 3 составляющих
+- fitness: src/money.rs:2 no_float_for_money (f64 в деньгах)
+- nfr: budget-no-chain (NFR-001 без affects → INT-*) · contracts: OA-003 (POST без Idempotency-Key)
++ PASS: delta_guard, rule_weakened, model_validate · SKIP: spine_lint/trace_check/evidence_verify
+$ openclaw agent --local -m "…architect_review…"   # MCP: mcp set spine {command: arch-be mcp serve}
+! Ревью не прошло: f64 для денег · незамкнутый latency-бюджет NFR · неидемпотентный post
+$ qwen --yolo "…architect_review…"  # + наблюдение: SKIP spine_lint/trace_check — пути артефактов
+# все три — один и тот же механический вердикт механики Spine, LLM только пересказывает

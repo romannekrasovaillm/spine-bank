@@ -19,9 +19,16 @@
 //!   (создаётся краткий либо блок между маркерами
 //!   `<!-- SPINE:BEGIN -->`/`<!-- SPINE:END -->`; рукописное не затирается);
 //! - `qwen`: `.qwen/settings.json` (мердж `mcpServers`; Qwen Code — форк
-//!   gemini-cli, ключ `mcpServers` верхнего уровня подтверждён). Скиллы и
-//!   хуки НЕ пишутся: layout скиллов и схема хуков Qwen Code не
-//!   подтверждены — печатаются сниппеты с заметкой (поведение `generic`);
+//!   gemini-cli, ключ `mcpServers` верхнего уровня подтверждён) + скиллы в
+//!   `.qwen/skills/` (нативный project-scope в qwen-code ≥ 0.24; существующий
+//!   каталог скиллов не перетирается). Хуки НЕ пишутся: схема хуков Qwen Code
+//!   не подтверждена — печатается сниппет-референс;
+//! - `gigacode` (`GigaCode` — форк Qwen Code): автоопределение каталога
+//!   настроек проекта — существующий `.gigacode/`; иначе существующий
+//!   `.qwen/` (совместимость layout форка); иначе создаётся `.gigacode/`.
+//!   Дальше механика qwen (мердж `mcpServers.spine` в `<каталог>/settings.json`),
+//!   скиллы — как у `claude` (раскладка в `<каталог>/skills/` с обновлением
+//!   встроенных версий), хуки — печать сниппета (как у qwen);
 //! - `codex`: MCP у Codex — только пользовательский `~/.codex/config.toml`
 //!   (`[mcp_servers.spine]`); молча в дом пользователя не пишем: печать
 //!   готового TOML-блока, запись с мерджем — только по явному
@@ -49,6 +56,24 @@
 //! - `generic`: только печать — сниппеты `.mcp.json` и хуков, куда что
 //!   вставить вручную.
 //!
+//! Особые значения host — не агенты, а гейты, не зависящие от хоста
+//! (бэклог волны 2, п.8: хуки ненадёжны — у qwen headless-файринг не
+//! подтверждён, у Codex lifecycle-хуков нет):
+//! - `ci` (`--provider gitlab|github|jenkins`): готовая джоба архитектурного
+//!   гейта — `.gitlab-ci.yml` (мердж-блок между маркерами
+//!   `# spine-connect:begin/end`, чужое не затирается; нарушения видны в
+//!   интерфейсе merge request из артефакта `reports.codequality`),
+//!   `.github/workflows/spine-gate.yml` (новый файл; существующий без
+//!   маркера — отказ), `Jenkinsfile` (мердж-блок, `junit(...)`). Джоба
+//!   запускает `arch-be gate --route auto --format <нативный формат
+//!   площадки>`; установка бинаря — curl из релизов (linux-x86_64) или
+//!   офлайн-бандл (оба варианта — в комментарии джобы);
+//! - `git-hooks`: `.git/hooks/pre-commit` (быстрый `arch-be control check .`)
+//!   и `pre-push` (полный `arch-be gate --route auto`); блоки между маркерами,
+//!   идемпотентно, чужие хуки не затираются; оба хука fail-soft — при
+//!   отсутствии `arch-be` в PATH (а у pre-commit ещё и при отсутствии
+//!   `.arch-handoff/CONSTRAINTS.yaml`) молча пропускаются, как хуки connect.
+//!
 //! Хуки (для `claude` — запись в `settings.json`; для остальных — печать).
 //! События Claude Code: `Stop` (дефолт) и `PostToolUse` с matcher
 //! `Edit|Write|MultiEdit` (только под `--strict-hooks`). Семантика
@@ -56,12 +81,13 @@
 //! Консервативный дефолт — fail-soft на инфраструктуру, fail-hard на
 //! вердикт: хук молча пропускается (exit 0), если `arch-be` не в PATH или
 //! в проекте нет `.arch-handoff/CONSTRAINTS.yaml` (гард); блок (exit 2) —
-//! только когда `arch-be control check .` завершился строкой «Итог: FAIL».
-//! Так инфраструктурные сбои (битый конфиг, ошибка запуска — в выводе
-//! «Error:», а не «Итог: FAIL») не останавливают сессию, а реальные
-//! нарушения fitness-правил — стопят её. `PostToolUse` в дефолт не входит:
-//! `control check` на репозитории с правилами `command_succeeds` может
-//! гонять сборки/тесты — для каждой правки это слишком дорого.
+//! когда `arch-be gate --route auto` завершился ненулевым кодом (провал
+//! любой составляющей: fitness, delta guard, `rule_weakened`, spine, trace).
+//! Так инфраструктурные сбои (нет входа у составляющих гейта — SKIP внутри
+//! `arch-be gate`) не останавливают сессию, а реальные нарушения — стопят
+//! её. `PostToolUse` в дефолт не входит: гейт на репозитории с правилами
+//! `command_succeeds` может гонять сборки/тесты — для каждой правки это
+//! слишком дорого.
 //!
 //! Идемпотентность: повторный запуск даёт тот же результат — JSON
 //! смерджен ключ-в-ключ, хуки не дублируются (поиск маркера
@@ -71,6 +97,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use serde_json::{Value, json};
 
@@ -109,14 +136,18 @@ pub enum Host {
     /// oh-my-pi: `.mcp.json` (автодискавери) + скиллы в `.claude/skills/`,
     /// если того каталога ещё нет.
     Omp,
+    /// `GigaCode` (форк Qwen Code): автоопределение каталога настроек
+    /// (`.gigacode/` → `.qwen/` → новый `.gigacode/`), мердж `mcpServers` в
+    /// `<каталог>/settings.json`, скиллы в `<каталог>/skills/`, хуки — печать.
+    GigaCode,
     /// Любой другой агент: только печать сниппетов.
     Generic,
 }
 
 impl Host {
-    /// Разбор значения CLI: `claude` | `qwen` | `codex` | `kimi` | `omp` |
-    /// `generic` (допускаются составные алиасы `claude-code`, `qwen-code`,
-    /// `kimi-code`, `oh-my-pi`).
+    /// Разбор значения CLI: `claude` | `qwen` | `gigacode` | `codex` | `kimi` |
+    /// `omp` | `generic` (допускаются составные алиасы `claude-code`,
+    /// `qwen-code`, `kimi-code`, `giga-code`, `gcode`, `oh-my-pi`).
     ///
     /// # Errors
     /// Неизвестное имя хоста — сообщение со списком допустимых.
@@ -124,12 +155,13 @@ impl Host {
         match raw.trim().to_ascii_lowercase().as_str() {
             "claude" | "claude-code" => Ok(Self::Claude),
             "qwen" | "qwen-code" => Ok(Self::Qwen),
+            "gigacode" | "giga-code" | "gcode" => Ok(Self::GigaCode),
             "codex" => Ok(Self::Codex),
             "kimi" | "kimi-code" => Ok(Self::Kimi),
             "omp" | "oh-my-pi" => Ok(Self::Omp),
             "generic" => Ok(Self::Generic),
             other => Err(format!(
-                "неизвестный хост '{other}' (допустимы: claude, qwen, codex, kimi, omp, generic)"
+                "неизвестный хост '{other}' (допустимы: claude, qwen, gigacode, codex, kimi, omp, generic)"
             )),
         }
     }
@@ -140,6 +172,7 @@ impl Host {
         match self {
             Self::Claude => "claude",
             Self::Qwen => "qwen",
+            Self::GigaCode => "gigacode",
             Self::Codex => "codex",
             Self::Kimi => "kimi",
             Self::Omp => "omp",
@@ -260,6 +293,7 @@ pub fn connect(opts: &ConnectOptions) -> Result<ConnectReport> {
     match opts.host {
         Host::Claude => connect_claude(opts, &mut report)?,
         Host::Qwen => connect_qwen(opts, &mut report)?,
+        Host::GigaCode => connect_gigacode(opts, &mut report)?,
         Host::Codex => connect_codex(opts, &mut report)?,
         Host::Kimi => connect_kimi(opts, &mut report)?,
         Host::Omp => connect_omp(opts, &mut report)?,
@@ -399,17 +433,18 @@ fn merge_mcp_servers_json(
     commit_file(path, old.as_deref(), &new, dry_run, report)
 }
 
-/// Команда Stop-хука Claude Code: fitness-гейт перед завершением сессии.
-/// Гард `command -v arch-be` + наличие `.arch-handoff/CONSTRAINTS.yaml`;
-/// блок (exit 2, stderr агенту) — только по строке «Итог: FAIL».
+/// Команда Stop-хука Claude Code: единый архитектурный гейт перед завершением
+/// сессии. Гард `command -v arch-be` + наличие `.arch-handoff/CONSTRAINTS.yaml`
+/// (fail-soft на инфраструктуру: нет бинаря/правил — молча exit 0); блок
+/// (exit 2, stderr агенту) — по коду возврата `arch-be gate` (ненулевой =
+/// провал хотя бы одной составляющей; строки вывода не разбираются).
 fn stop_hook_command() -> String {
     format!(
         "if command -v arch-be >/dev/null 2>&1 && [ -f .arch-handoff/CONSTRAINTS.yaml ]; then \
-         out=$(arch-be control check . 2>&1); \
-         case \"$out\" in *\"Итог: FAIL\"*) \
+         if ! out=$(arch-be gate --route auto 2>&1); then \
          printf '%s\\n\\n%s\\n' \"$out\" \
-         \"{HOOK_MARKER}: fitness-гейт FAIL — исправьте находки error перед завершением \
-         (подробности выше; гейт: arch-be control check .)\" >&2; exit 2;; esac; fi \
+         \"{HOOK_MARKER}: архитектурный гейт FAIL — исправьте находки error перед завершением \
+         (подробности выше; гейт: arch-be gate)\" >&2; exit 2; fi; fi \
          # {HOOK_MARKER}:stop"
     )
 }
@@ -419,11 +454,10 @@ fn stop_hook_command() -> String {
 fn post_tool_use_hook_command() -> String {
     format!(
         "if command -v arch-be >/dev/null 2>&1 && [ -f .arch-handoff/CONSTRAINTS.yaml ]; then \
-         out=$(arch-be control check . 2>&1); \
-         case \"$out\" in *\"Итог: FAIL\"*) \
+         if ! out=$(arch-be gate --route auto 2>&1); then \
          printf '%s\\n\\n%s\\n' \"$out\" \
-         \"{HOOK_MARKER}: правка нарушает fitness-правила (control check FAIL) — \
-         исправьте находки error\" >&2; exit 2;; esac; fi \
+         \"{HOOK_MARKER}: правка не проходит архитектурный гейт (arch-be gate FAIL) — \
+         исправьте находки error\" >&2; exit 2; fi; fi \
          # {HOOK_MARKER}:post-tool-use"
     )
 }
@@ -521,9 +555,12 @@ fn merge_claude_settings(
     }
     report.notes.push(
         "семантика хуков: fail-soft на инфраструктуру (нет arch-be или \
-         .arch-handoff/CONSTRAINTS.yaml — молча пропуск), блок (exit 2) — \
-         только при вердикте «Итог: FAIL»; PostToolUse-гейт на каждую правку — \
-         через --strict-hooks (дорого на репозиториях с command_succeeds-правилами)"
+         .arch-handoff/CONSTRAINTS.yaml — молча пропуск; нет входа у \
+         составляющих — SKIP), блок (exit 2) — по ненулевому коду \
+         `arch-be gate --route auto` (провал любой составляющей: fitness, \
+         delta guard, rule_weakened, spine, trace); PostToolUse-гейт на \
+         каждую правку — через --strict-hooks (дорого на репозиториях с \
+         command_succeeds-правилами)"
             .into(),
     );
     let new = match serde_json::to_string_pretty(&Value::Object(root)) {
@@ -951,6 +988,105 @@ fn connect_qwen(opts: &ConnectOptions, report: &mut ConnectReport) -> Result<()>
     Ok(())
 }
 
+/// Исход автоопределения каталога настроек `GigaCode` в проекте.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GigacodeDirOrigin {
+    /// В проекте уже есть `.gigacode/` — он и используется.
+    ExistingGigacode,
+    /// `.gigacode/` нет, но есть `.qwen/`: `GigaCode` — форк Qwen Code,
+    /// layout совместим — пишем в него.
+    FromQwen,
+    /// Ни того ни другого — создаётся `.gigacode/`.
+    NewGigacode,
+}
+
+/// Автоопределение каталога настроек `GigaCode`: существующий `.gigacode/`
+/// (приоритет), иначе существующий `.qwen/`, иначе — новый `.gigacode/`.
+/// Используется и `connect gigacode`, и `doctor --host gigacode` (проверка
+/// смотрит в тот же каталог, куда писал connect).
+#[must_use]
+pub fn gigacode_settings_dir(project_dir: &Path) -> (PathBuf, GigacodeDirOrigin) {
+    let gigacode = project_dir.join(".gigacode");
+    if gigacode.is_dir() {
+        return (gigacode, GigacodeDirOrigin::ExistingGigacode);
+    }
+    let qwen = project_dir.join(".qwen");
+    if qwen.is_dir() {
+        return (qwen, GigacodeDirOrigin::FromQwen);
+    }
+    (gigacode, GigacodeDirOrigin::NewGigacode)
+}
+
+/// `arch-be connect gigacode` (`GigaCode` — форк Qwen Code): каталог настроек
+/// определяется автоматически ([`gigacode_settings_dir`]); в него пишется
+/// `settings.json` (мердж `mcpServers.spine`, как у qwen) и раскладываются
+/// скиллы в `<каталог>/skills/` (как у claude — с обновлением встроенных
+/// версий: целевой хост `GigaCode` освоил project-скиллы по layout Qwen Code
+/// 0.24). Хуки не пишутся (подтверждённой схемы файла хуков у форка нет —
+/// в qwen-code 0.24 хуки управляются UI `qwen hooks` и в headless не файрят)
+/// — печатается сниппет-референс, как у qwen.
+fn connect_gigacode(opts: &ConnectOptions, report: &mut ConnectReport) -> Result<()> {
+    let (settings_dir, origin) = gigacode_settings_dir(&opts.dir);
+    match origin {
+        GigacodeDirOrigin::ExistingGigacode => report.notes.push(format!(
+            "каталог настроек автоопределён: {} (существующий .gigacode/)",
+            settings_dir.display()
+        )),
+        GigacodeDirOrigin::FromQwen => report.notes.push(format!(
+            "каталог настроек автоопределён: {} (`.gigacode/` нет, найден `.qwen/` — \
+             GigaCode — форк Qwen Code, layout совместим)",
+            settings_dir.display()
+        )),
+        GigacodeDirOrigin::NewGigacode => report.notes.push(format!(
+            "каталога настроек в проекте нет — {} (ни .gigacode/, ни .qwen/)",
+            if opts.dry_run {
+                format!("будет создан {}", settings_dir.display())
+            } else {
+                format!("создан {}", settings_dir.display())
+            }
+        )),
+    }
+    merge_mcp_servers_json(
+        &settings_dir.join("settings.json"),
+        opts.rw,
+        false,
+        opts.dry_run,
+        report,
+    )?;
+    if opts.skills {
+        install_skills(&settings_dir.join("skills"), opts.dry_run, report)?;
+        report.notes.push(
+            "скиллы разложены в <каталог настроек>/skills/ — layout project-скиллов \
+             Qwen Code ≥ 0.24, унаследован форком"
+                .into(),
+        );
+    }
+    if opts.hooks {
+        report.notes.push(
+            "хуки не записаны: подтверждённой схемы файла хуков у GigaCode нет \
+             (в qwen-code 0.24 хуки управляются через `qwen hooks` (UI) и в \
+             headless-режиме не файрят). Информационный вариант из docs/GIGACODE.md — \
+             вручную в settings.json: \"hooks\": {\"SessionEnd\": [{\"hooks\": \
+             [{\"type\": \"command\", \"command\": \"arch-be gate --route auto 2>&1 | \
+             tail -3\"}]}]} (показывает вердикт гейта, но НЕ блокирует завершение). \
+             Блокирующие гейты есть у Claude Code/Kimi/omp"
+                .into(),
+        );
+        report.snippets.push((
+            "Хуки (формат Claude Code, референс)".to_string(),
+            hooks_snippet(opts.strict_hooks),
+        ));
+    }
+    report.next_steps.extend([
+        "перезапустите GigaCode в этом каталоге".to_string(),
+        "одобрите project-сервер, если хост попросит (в Qwen Code: \
+         `qwen mcp approve spine`; в GigaCode — аналог вашей сборки)"
+            .to_string(),
+        "проверьте подключение: `arch-be doctor --host gigacode`".to_string(),
+    ]);
+    Ok(())
+}
+
 /// `arch-be connect codex`: MCP — пользовательский `~/.codex/config.toml`;
 /// по умолчанию только печать TOML-блока (в дом молча не пишем).
 fn connect_codex(opts: &ConnectOptions, report: &mut ConnectReport) -> Result<()> {
@@ -978,8 +1114,8 @@ fn connect_codex(opts: &ConnectOptions, report: &mut ConnectReport) -> Result<()
     }
     if opts.hooks {
         report.notes.push(
-            "у Codex нет lifecycle-хуков уровня PreToolUse/Stop — fitness-гейт \
-             остаётся ручным (`arch-be control check .`) или в CI"
+            "у Codex нет lifecycle-хуков уровня PreToolUse/Stop — архитектурный гейт \
+             остаётся ручным (`arch-be gate`) или в CI"
                 .into(),
         );
     }
@@ -1127,7 +1263,7 @@ fn connect_omp(opts: &ConnectOptions, report: &mut ConnectReport) -> Result<()> 
         report.notes.push(
             "хуков через connect нет: механизм хуков omp — TypeScript-расширения, \
              подключение: `omp --hook <file.ts>`; команда-гейт для такого \
-             расширения: `arch-be control check .`"
+             расширения: `arch-be gate`"
                 .into(),
         );
     }
@@ -1186,17 +1322,508 @@ fn connect_generic(opts: &ConnectOptions, report: &mut ConnectReport) {
     ]);
 }
 
-/// Рендерит отчёт команды по-русски: файлы, скиллы, заметки, сниппеты,
-/// следующие шаги.
-#[must_use]
-pub fn render_report(opts: &ConnectOptions, report: &ConnectReport) -> String {
-    let mut out = String::new();
-    let _ = writeln!(
-        out,
-        "Подключение Spine к хосту «{}» — {}",
-        opts.host.name(),
-        opts.dir.display()
+// ---------------------------------------------------------------------------
+// `connect ci` и `connect git-hooks` — гейты, не зависящие от хоста
+// ---------------------------------------------------------------------------
+
+/// Маркер начала нашего блока в файле CI/хуке (комментарий; префикс `#`/`//`
+/// зависит от файла — ищется голая подстрока маркера).
+const BLOCK_BEGIN: &str = "spine-connect:begin";
+/// Маркер конца нашего блока.
+const BLOCK_END: &str = "spine-connect:end";
+
+/// CI-провайдер для `arch-be connect ci --provider …`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CiProvider {
+    /// GitLab CI: мердж-блок в `.gitlab-ci.yml`, артефакт `reports.codequality`.
+    GitLab,
+    /// GitHub Actions: новый `.github/workflows/spine-gate.yml`, SARIF-артефакт.
+    GitHub,
+    /// Jenkins: мердж-блок в `Jenkinsfile`, публикация `junit(...)`.
+    Jenkins,
+}
+
+impl CiProvider {
+    /// Разбор значения CLI: `gitlab` | `github` | `jenkins`.
+    ///
+    /// # Errors
+    /// Неизвестный провайдер — сообщение со списком допустимых.
+    pub fn parse(raw: &str) -> std::result::Result<Self, String> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "gitlab" | "git-lab" => Ok(Self::GitLab),
+            "github" | "git-hub" => Ok(Self::GitHub),
+            "jenkins" => Ok(Self::Jenkins),
+            other => Err(format!(
+                "неизвестный CI-провайдер '{other}' (допустимы: gitlab, github, jenkins)"
+            )),
+        }
+    }
+
+    /// Каноничное имя для вывода.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::GitLab => "gitlab",
+            Self::GitHub => "github",
+            Self::Jenkins => "jenkins",
+        }
+    }
+
+    /// Путь целевого файла джобы в проекте.
+    fn job_file(self, dir: &Path) -> PathBuf {
+        match self {
+            Self::GitLab => dir.join(".gitlab-ci.yml"),
+            Self::GitHub => dir.join(".github/workflows/spine-gate.yml"),
+            Self::Jenkins => dir.join("Jenkinsfile"),
+        }
+    }
+
+    /// Текст джобы (между маркерами [`BLOCK_BEGIN`]/[`BLOCK_END`]).
+    fn job_block(self) -> String {
+        match self {
+            Self::GitLab => gitlab_ci_block(),
+            Self::GitHub => github_workflow_block(),
+            Self::Jenkins => jenkinsfile_block(),
+        }
+    }
+}
+
+/// Подстановка версии крейта в шаблоны CI (токен `@ARCH_BE_VERSION@` —
+/// `format!` не подходит: в шаблонах есть `${{ … }}` GitHub Actions).
+fn with_version(template: &str) -> String {
+    template.replace("@ARCH_BE_VERSION@", env!("CARGO_PKG_VERSION"))
+}
+
+/// Джоба GitLab CI: `arch-be gate` с нативным форматом `gitlab-codequality`
+/// в артефакт `reports.codequality` (нарушения появляются в интерфейсе merge
+/// request без ручной настройки) + текстовая сводка в лог джобы.
+fn gitlab_ci_block() -> String {
+    with_version(
+        "# spine-connect:begin — архитектурный гейт Spine (arch-be)\n\
+         # Блок перегенерируется: `arch-be connect ci --provider gitlab`; свои правки — вне маркеров.\n\
+         # Нарушения видны в интерфейсе merge request (Code Quality) из артефакта\n\
+         # reports.codequality — ручной настройки не нужно.\n\
+         spine-gate:\n\
+         \x20 stage: test\n\
+         \x20 image: debian:bookworm-slim\n\
+         \x20 variables:\n\
+         \x20   ARCH_BE_VERSION: \"@ARCH_BE_VERSION@\"\n\
+         \x20   # Откуда брать бинарь arch-be (linux-x86_64):\n\
+         \x20   #   A) релизы: ${RELEASES_URL}/v${ARCH_BE_VERSION}/arch-be-linux-x86_64.tar.gz\n\
+         \x20   #   B) закрытый контур: офлайн-бандл во внутреннем хранилище артефактов —\n\
+         \x20   #      замените RELEASES_URL на его адрес (тот же tar.gz кладёт релизная процедура).\n\
+         \x20   RELEASES_URL: \"https://github.com/<org>/<repo>/releases/download\"\n\
+         \x20   GIT_DEPTH: \"0\"   # полная история: гейту нужна база диффа origin/<целевая ветка>\n\
+         \x20 before_script:\n\
+         \x20   - apt-get update -qq && apt-get install -y -qq curl ca-certificates git > /dev/null\n\
+         \x20   - curl -fsSL \"${RELEASES_URL}/v${ARCH_BE_VERSION}/arch-be-linux-x86_64.tar.gz\" | tar -xz -C /usr/local/bin\n\
+         \x20   - arch-be --version\n\
+         \x20 script:\n\
+         \x20   # Машинный отчёт — в файл артефакта; при провале гейта джоба красная (exit 1).\n\
+         \x20   - arch-be gate --route auto --base \"origin/${CI_MERGE_REQUEST_TARGET_BRANCH_NAME:-main}...HEAD\" --format gitlab-codequality > codequality-spine.json || GATE_EXIT=$?\n\
+         \x20   # Текстовая сводка в лог джобы (при дорогих правилах command_succeeds строку можно убрать).\n\
+         \x20   - arch-be gate --route auto --base \"origin/${CI_MERGE_REQUEST_TARGET_BRANCH_NAME:-main}...HEAD\" || true\n\
+         \x20   - exit ${GATE_EXIT:-0}\n\
+         \x20 artifacts:\n\
+         \x20   when: always\n\
+         \x20   reports:\n\
+         \x20     codequality: codequality-spine.json   # → виджет Code Quality в merge request\n\
+         # spine-connect:end",
+    )
+}
+
+/// Workflow GitHub Actions: `arch-be gate` с SARIF (артефакт прогона; при
+/// включённом Advanced Security — загрузка в code scanning, вариант в
+/// комментарии) + markdown-сводка в Job Summary. Внешних действий сверх
+/// официальных `actions/checkout` и `actions/upload-artifact` нет.
+fn github_workflow_block() -> String {
+    with_version(
+        "# spine-connect:begin — архитектурный гейт Spine (arch-be)\n\
+         # Файл целиком генерируется `arch-be connect ci --provider github`; перегенерация — той же командой.\n\
+         name: spine-gate\n\
+         on:\n\
+         \x20 pull_request:\n\
+         \x20 push:\n\
+         \x20   branches: [main]\n\
+         permissions: {}\n\
+         jobs:\n\
+         \x20 gate:\n\
+         \x20   runs-on: ubuntu-latest\n\
+         \x20   steps:\n\
+         \x20     - uses: actions/checkout@v4\n\
+         \x20       with:\n\
+         \x20         fetch-depth: 0   # полная история для --base (дифф к целевой ветке)\n\
+         \x20     - name: Установка arch-be\n\
+         \x20       env:\n\
+         \x20         ARCH_BE_VERSION: \"@ARCH_BE_VERSION@\"\n\
+         \x20         # A) релизы (linux-x86_64); B) закрытый контур — URL офлайн-бандла\n\
+         \x20         # из внутреннего хранилища артефактов.\n\
+         \x20         RELEASES_URL: \"https://github.com/<org>/<repo>/releases/download\"\n\
+         \x20       run: |\n\
+         \x20         curl -fsSL \"${RELEASES_URL}/v${ARCH_BE_VERSION}/arch-be-linux-x86_64.tar.gz\" | sudo tar -xz -C /usr/local/bin\n\
+         \x20         arch-be --version\n\
+         \x20     - name: Архитектурный гейт\n\
+         \x20       run: |\n\
+         \x20         BASE=\"origin/${{ github.base_ref || 'main' }}\"\n\
+         \x20         arch-be gate --route auto --base \"${BASE}...HEAD\" --format sarif > spine-gate.sarif || GATE_EXIT=$?\n\
+         \x20         arch-be gate --route auto --base \"${BASE}...HEAD\" --format markdown >> \"$GITHUB_STEP_SUMMARY\" || true\n\
+         \x20         exit ${GATE_EXIT:-0}\n\
+         \x20     - name: Отчёт SARIF артефактом\n\
+         \x20       if: always()\n\
+         \x20       uses: actions/upload-artifact@v4\n\
+         \x20       with:\n\
+         \x20         name: spine-gate-sarif\n\
+         \x20         path: spine-gate.sarif\n\
+         \x20     # Вариант для code scanning (Security → Code scanning), если включён\n\
+         \x20     # GitHub Advanced Security:\n\
+         \x20     # - name: Загрузка SARIF\n\
+         \x20     #   if: always()\n\
+         \x20     #   uses: github/codeql-action/upload-sarif@v3\n\
+         \x20     #   with: { sarif_file: spine-gate.sarif }\n\
+         # spine-connect:end",
+    )
+}
+
+/// Джоба Jenkins (declarative pipeline): `arch-be gate --format junit` в файл,
+/// публикация `junit(...)` (находки — как упавшие тесты) и `error(...)` по
+/// коду возврата гейта.
+fn jenkinsfile_block() -> String {
+    with_version(
+        "// spine-connect:begin — архитектурный гейт Spine (arch-be)\n\
+         // Блок перегенерируется: `arch-be connect ci --provider jenkins`; свои правки — вне маркеров.\n\
+         pipeline {\n\
+         \x20   agent any\n\
+         \x20   stages {\n\
+         \x20       stage('Spine gate') {\n\
+         \x20           steps {\n\
+         \x20               // Бинарь arch-be (linux-x86_64): A) curl из релизов (ниже);\n\
+         \x20               // B) закрытый контур — офлайн-бандл из внутреннего хранилища\n\
+         \x20               // (укажите его адрес в RELEASES_URL).\n\
+         \x20               sh '''\n\
+         \x20                 if ! command -v arch-be >/dev/null 2>&1; then\n\
+         \x20                   curl -fsSL \"${RELEASES_URL:-https://github.com/<org>/<repo>/releases/download}/v@ARCH_BE_VERSION@/arch-be-linux-x86_64.tar.gz\" | tar -xz -C /usr/local/bin\n\
+         \x20                 fi\n\
+         \x20                 arch-be --version\n\
+         \x20               '''\n\
+         \x20               script {\n\
+         \x20                   // Код возврата сохраняем: junit() публикуем даже при красном гейте.\n\
+         \x20                   env.SPINE_GATE_EXIT = sh(script: 'arch-be gate --route auto --format junit > spine-gate.xml', returnStatus: true).toString()\n\
+         \x20                   sh 'arch-be gate --route auto || true'   // текстовая сводка в лог\n\
+         \x20               }\n\
+         \x20           }\n\
+         \x20           post {\n\
+         \x20               always {\n\
+         \x20                   junit testResults: 'spine-gate.xml', allowEmptyResults: true\n\
+         \x20                   archiveArtifacts artifacts: 'spine-gate.xml', allowEmptyArchive: true\n\
+         \x20                   script {\n\
+         \x20                       if (env.SPINE_GATE_EXIT != '0') {\n\
+         \x20                           error('Spine gate FAIL — находки в spine-gate.xml и в логе джобы')\n\
+         \x20                       }\n\
+         \x20                   }\n\
+         \x20               }\n\
+         \x20           }\n\
+         \x20       }\n\
+         \x20   }\n\
+         }\n\
+         // spine-connect:end",
+    )
+}
+
+/// Заменяет зону между маркерами [`BLOCK_BEGIN`]/[`BLOCK_END`] в существующем
+/// файле; маркеров нет — дописка блока в конец (чужое содержимое сохраняется).
+/// Детерминировано: повторный прогон побайтово совпадает.
+fn splice_marked_block(existing: &str, block: &str) -> String {
+    let trimmed = block.trim_end();
+    match (existing.find(BLOCK_BEGIN), existing.find(BLOCK_END)) {
+        (Some(b), Some(e)) if b < e => {
+            // Границы — по строкам: начало строки с маркером begin и конец
+            // строки с маркером end.
+            let start = existing[..b].rfind('\n').map_or(0, |i| i + 1);
+            let end = existing[e..]
+                .find('\n')
+                .map_or(existing.len(), |i| e + i + 1);
+            let pre = existing[..start].trim_end();
+            let tail = existing[end..].trim();
+            // Те же разделители, что в ветке дописки (пустая строка между
+            // зонами) — иначе повторный прогон менял бы файл после дописки.
+            match (pre.is_empty(), tail.is_empty()) {
+                (true, true) => format!("{trimmed}\n"),
+                (true, false) => format!("{trimmed}\n\n{tail}\n"),
+                (false, true) => format!("{pre}\n\n{trimmed}\n"),
+                (false, false) => format!("{pre}\n\n{trimmed}\n\n{tail}\n"),
+            }
+        }
+        _ => format!("{}\n\n{trimmed}\n", existing.trim_end()),
+    }
+}
+
+/// Создаёт файл джобы либо встраивает блок в существующий (мердж маркерный —
+/// чужие джобы/этапы сохраняются). GitHub — особый: `spine-gate.yml` —
+/// целиком наш файл, существующий без маркера не затираем (отказ).
+fn upsert_ci_job(
+    provider: CiProvider,
+    dir: &Path,
+    dry_run: bool,
+    report: &mut ConnectReport,
+) -> Result<()> {
+    let path = provider.job_file(dir);
+    let block = provider.job_block();
+    let old = match std::fs::read_to_string(&path) {
+        Ok(text) => Some(text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(HarnessError::io(&path, e)),
+    };
+    let new = match old.as_deref() {
+        None => format!("{block}\n"),
+        Some(existing) => {
+            if provider == CiProvider::GitHub && !existing.contains(BLOCK_BEGIN) {
+                return Err(HarnessError::Config(format!(
+                    "{}: файл существует и не помечен маркером «{BLOCK_BEGIN}» — не затираю; \
+                     переименуйте его или удалите вручную",
+                    path.display()
+                )));
+            }
+            if existing.contains(BLOCK_BEGIN) {
+                report.notes.push(format!(
+                    "{}: блок между маркерами «{BLOCK_BEGIN}/{BLOCK_END}» обновлён, \
+                     содержимое вне маркеров сохранено",
+                    path.display()
+                ));
+            } else {
+                report.notes.push(format!(
+                    "{}: джоба дописана блоком с маркерами «{BLOCK_BEGIN}/{BLOCK_END}» в конец \
+                     файла; свои секции проверьте на конфликт имён (job `spine-gate`)",
+                    path.display()
+                ));
+            }
+            splice_marked_block(existing, &block)
+        }
+    };
+    commit_file(&path, old.as_deref(), &new, dry_run, report)
+}
+
+/// `arch-be connect ci --provider …`: пишет готовую джобу архитектурного
+/// гейта под площадку (см. [`CiProvider`]).
+///
+/// # Errors
+/// Целевой файл GitHub существует без нашего маркера; ошибки чтения/записи.
+pub fn connect_ci(provider: CiProvider, dir: &Path, dry_run: bool) -> Result<ConnectReport> {
+    let mut report = ConnectReport {
+        dry_run,
+        ..ConnectReport::default()
+    };
+    upsert_ci_job(provider, dir, dry_run, &mut report)?;
+    match provider {
+        CiProvider::GitLab => {
+            report.notes.push(
+                "нарушения появятся в интерфейсе merge request (Code Quality) из артефакта \
+                 reports.codequality — ручной настройки площадки не нужно"
+                    .into(),
+            );
+            report.next_steps.extend([
+                "закоммитьте .gitlab-ci.yml и откройте merge request — джоба spine-gate \
+                 появится в пайплайне MR"
+                    .to_string(),
+                "замените <org>/<repo> в RELEASES_URL на адрес релизов/хранилища, где лежит \
+                 arch-be-linux-x86_64.tar.gz"
+                    .to_string(),
+            ]);
+        }
+        CiProvider::GitHub => {
+            report.notes.push(
+                "SARIF складывается артефактом прогона (actions/upload-artifact); загрузка в \
+                 code scanning (вкладка Security) — закомментированным шагом в файле (нужен \
+                 GitHub Advanced Security)"
+                    .into(),
+            );
+            report.next_steps.extend([
+                "закоммитьте .github/workflows/spine-gate.yml — workflow spine-gate появится \
+                 на pull_request и push в main"
+                    .to_string(),
+                "замените <org>/<repo> в RELEASES_URL на адрес релизов/хранилища, где лежит \
+                 arch-be-linux-x86_64.tar.gz"
+                    .to_string(),
+            ]);
+        }
+        CiProvider::Jenkins => {
+            report.next_steps.extend([
+                "закоммитьте Jenkinsfile (или перенесите блок в свой) — этап 'Spine gate' \
+                 публикует находки через junit(...)"
+                    .to_string(),
+                "бинарь arch-be: готовый в PATH агента Jenkins или curl из релизов/бандла \
+                 (варианты — в комментарии этапа)"
+                    .to_string(),
+            ]);
+        }
+    }
+    Ok(report)
+}
+
+/// Общий git-каталог репозитория (`git rev-parse --git-common-dir`): в
+/// worktree хуки живут в основном `.git`, поэтому голый `dir/.git` не подходит.
+///
+/// # Errors
+/// `dir` — не git-репозиторий или git недоступен.
+fn git_common_dir(dir: &Path) -> Result<PathBuf> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", "--git-common-dir"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .map_err(|e| HarnessError::Config(format!("git не запустился: {e}")))?;
+    if !out.status.success() {
+        return Err(HarnessError::Config(format!(
+            "{}: не git-репозиторий — хуки ставятся только в git-проект",
+            dir.display()
+        )));
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let raw = text.trim();
+    let path = PathBuf::from(raw);
+    Ok(if path.is_absolute() {
+        path
+    } else {
+        dir.join(path)
+    })
+}
+
+/// Блок pre-commit: быстрый гейт fitness-правил. Fail-soft: нет `arch-be`
+/// или `.arch-handoff/CONSTRAINTS.yaml` — молча пропуск (exit 0), как хуки
+/// connect хостов; красный гейт — exit 1 (коммит отменяется).
+fn pre_commit_hook_block() -> String {
+    "# spine-connect:begin — быстрый архитектурный гейт перед коммитом (arch-be)\n\
+     # Fail-soft: нет arch-be в PATH или .arch-handoff/CONSTRAINTS.yaml — пропуск.\n\
+     if command -v arch-be >/dev/null 2>&1 && [ -f .arch-handoff/CONSTRAINTS.yaml ]; then\n\
+     \x20 if ! arch-be control check .; then\n\
+     \x20   echo \"spine-connect: pre-commit FAIL — исправьте находки error (отчёт выше)\" >&2\n\
+     \x20   exit 1\n\
+     \x20 fi\n\
+     fi\n\
+     # spine-connect:end"
+        .to_string()
+}
+
+/// Блок pre-push: полный единый гейт (fitness + delta guard + анти-ослабление
+/// правил + линтер спайна + трассировка; маршрут — из диффа). Fail-soft при
+/// отсутствии `arch-be`; без входа гейт сам уходит в SKIP и пропускает пуш.
+fn pre_push_hook_block() -> String {
+    "# spine-connect:begin — полный архитектурный гейт перед пушем (arch-be)\n\
+     # Fail-soft: нет arch-be в PATH — пропуск; нет входа у составляющих — SKIP внутри гейта.\n\
+     if command -v arch-be >/dev/null 2>&1; then\n\
+     \x20 if ! arch-be gate --route auto; then\n\
+     \x20   echo \"spine-connect: pre-push FAIL — arch-be gate не пройден (находки выше)\" >&2\n\
+     \x20   exit 1\n\
+     \x20 fi\n\
+     fi\n\
+     # spine-connect:end"
+        .to_string()
+}
+
+/// Право на исполнение для hook-файла (unix); вне unix — no-op.
+#[cfg(unix)]
+fn make_executable(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+    let mut perms = std::fs::metadata(path)
+        .map_err(|e| HarnessError::io(path, e))?
+        .permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(path, perms).map_err(|e| HarnessError::io(path, e))
+}
+
+/// Право на исполнение для hook-файла: вне unix не требуется.
+#[cfg(not(unix))]
+fn make_executable(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+/// Встраивает блок в один hook-файл: новый файл — с shebang `#!/bin/sh`;
+/// существующий с маркерами — замена блока; существующий без маркеров —
+/// дописка (с заметкой про ранний `exit` чужого скрипта). После записи
+/// файл делается исполняемым.
+fn upsert_git_hook(
+    hooks_dir: &Path,
+    name: &str,
+    block: &str,
+    dry_run: bool,
+    report: &mut ConnectReport,
+) -> Result<()> {
+    let path = hooks_dir.join(name);
+    let old = match std::fs::read_to_string(&path) {
+        Ok(text) => Some(text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(HarnessError::io(&path, e)),
+    };
+    let new = match old.as_deref() {
+        None => format!("#!/bin/sh\n\n{block}\n"),
+        Some(existing) => {
+            if !existing.contains(BLOCK_BEGIN) {
+                report.notes.push(format!(
+                    "{}: существующий хук без наших маркеров — блок дописан в конец; если ваш \
+                     скрипт завершается `exit`, перенесите наш блок выше него",
+                    path.display()
+                ));
+            }
+            splice_marked_block(existing, block)
+        }
+    };
+    commit_file(&path, old.as_deref(), &new, dry_run, report)?;
+    // Исполняемость гарантируем и при «без изменений»: git молча игнорирует
+    // хук без +x, а connect обязан оставить рабочее состояние.
+    if !dry_run && path.is_file() {
+        make_executable(&path)?;
+    }
+    Ok(())
+}
+
+/// `arch-be connect git-hooks`: pre-commit (быстрый `control check`) и
+/// pre-push (полный `gate --route auto`) в `.git/hooks` (в worktree — в
+/// hooks основного git-каталога). Идемпотентно (маркерные блоки), чужие
+/// строки хуков сохраняются, `--dry-run` печатает план.
+///
+/// # Errors
+/// `dir` — не git-репозиторий; ошибки чтения/записи файлов хуков.
+pub fn connect_git_hooks(dir: &Path, dry_run: bool) -> Result<ConnectReport> {
+    let mut report = ConnectReport {
+        dry_run,
+        ..ConnectReport::default()
+    };
+    let hooks_dir = git_common_dir(dir)?.join("hooks");
+    upsert_git_hook(
+        &hooks_dir,
+        "pre-commit",
+        &pre_commit_hook_block(),
+        dry_run,
+        &mut report,
+    )?;
+    upsert_git_hook(
+        &hooks_dir,
+        "pre-push",
+        &pre_push_hook_block(),
+        dry_run,
+        &mut report,
+    )?;
+    report.notes.push(
+        "семантика: fail-soft на инфраструктуру (нет arch-be/ограничений — пропуск), \
+         блок (exit 1) — по коду возврата arch-be; строки вывода хуки не разбирают"
+            .into(),
     );
+    report.next_steps.extend([
+        "сделайте тестовый коммит: pre-commit прогонит `arch-be control check .`".to_string(),
+        "проверьте pre-push: `git push --dry-run` (или `arch-be gate --route auto` вручную)"
+            .to_string(),
+    ]);
+    Ok(report)
+}
+
+/// Общий рендер отчёта connect: файлы, скиллы, заметки, сниппеты, следующие
+/// шаги. Заголовок произвольный — у хостов агентов он строится в
+/// [`render_report`], у `connect ci`/`connect git-hooks` — свой.
+#[must_use]
+pub fn render_plan(title: &str, report: &ConnectReport) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "{title}");
     if report.dry_run {
         let _ = writeln!(out, "(dry-run: ничего не записано — ниже план)");
     }
@@ -1253,6 +1880,20 @@ pub fn render_report(opts: &ConnectOptions, report: &ConnectReport) -> String {
         }
     }
     out
+}
+
+/// Рендерит отчёт команды по-русски: файлы, скиллы, заметки, сниппеты,
+/// следующие шаги.
+#[must_use]
+pub fn render_report(opts: &ConnectOptions, report: &ConnectReport) -> String {
+    render_plan(
+        &format!(
+            "Подключение Spine к хосту «{}» — {}",
+            opts.host.name(),
+            opts.dir.display()
+        ),
+        report,
+    )
 }
 
 #[cfg(test)]
@@ -1757,13 +2398,18 @@ mod tests {
         assert_eq!(text.matches(SPINE_BEGIN).count(), 1);
     }
 
-    /// Команды хуков: гард по бинарю и CONSTRAINTS.yaml, маркер, exit 2.
+    /// Команды хуков: гард по бинарю и CONSTRAINTS.yaml, маркер, exit 2 по
+    /// коду возврата `arch-be gate` (без разбора строк вывода).
     #[test]
     fn hook_commands_are_guarded_and_marked() {
         for cmd in [stop_hook_command(), post_tool_use_hook_command()] {
             assert!(cmd.contains("command -v arch-be"), "{cmd}");
             assert!(cmd.contains(".arch-handoff/CONSTRAINTS.yaml"), "{cmd}");
-            assert!(cmd.contains("Итог: FAIL"), "{cmd}");
+            assert!(cmd.contains("arch-be gate --route auto"), "{cmd}");
+            assert!(
+                !cmd.contains("Итог: FAIL"),
+                "детекция провала — по exit-коду, не по строке: {cmd}"
+            );
             assert!(cmd.contains("exit 2"), "{cmd}");
             assert!(cmd.contains(HOOK_MARKER), "{cmd}");
         }
@@ -1832,7 +2478,7 @@ mod tests {
             "{all_snippets}"
         );
         assert!(
-            all_snippets.contains("arch-be control check ."),
+            all_snippets.contains("arch-be gate --route auto"),
             "{all_snippets}"
         );
         assert!(
@@ -2014,5 +2660,463 @@ mod tests {
         assert!(text.contains("dry-run"), "{text}");
         assert!(text.contains("Следующие шаги"), "{text}");
         assert!(text.contains("claude mcp list"), "{text}");
+    }
+
+    /// gigacode: автоопределение каталога настроек — приоритет существующего
+    /// `.gigacode/`, затем `.qwen/` (форк), иначе новый `.gigacode/`.
+    #[test]
+    fn gigacode_autodetect_priorities() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path().join("proj");
+        // Ни одного каталога — новый .gigacode/.
+        let (path, origin) = gigacode_settings_dir(&dir);
+        assert_eq!(origin, GigacodeDirOrigin::NewGigacode);
+        assert_eq!(path, dir.join(".gigacode"));
+        // Есть только .qwen/ — пишем в него.
+        std::fs::create_dir_all(dir.join(".qwen")).expect("mkdir .qwen");
+        let (path, origin) = gigacode_settings_dir(&dir);
+        assert_eq!(origin, GigacodeDirOrigin::FromQwen);
+        assert_eq!(path, dir.join(".qwen"));
+        // Есть оба — приоритет .gigacode/.
+        std::fs::create_dir_all(dir.join(".gigacode")).expect("mkdir .gigacode");
+        let (path, origin) = gigacode_settings_dir(&dir);
+        assert_eq!(origin, GigacodeDirOrigin::ExistingGigacode);
+        assert_eq!(path, dir.join(".gigacode"));
+    }
+
+    /// gigacode в пустом проекте: создаётся `.gigacode/settings.json` (мердж
+    /// mcpServers.spine), скиллы — в `.gigacode/skills/` (как у claude, с
+    /// обновлением встроенных); хуки — только сниппет; заметка про создание
+    /// каталога; повтор идемпотентен.
+    #[test]
+    fn gigacode_scaffolds_new_settings_dir() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path().join("proj");
+        std::fs::create_dir_all(&dir).expect("mkdir proj");
+        let report = connect(&ConnectOptions::new(Host::GigaCode, dir.clone())).expect("connect");
+
+        let settings: Value =
+            serde_json::from_str(&read(&dir.join(".gigacode/settings.json"))).expect("json");
+        assert_eq!(settings["mcpServers"]["spine"]["command"], "arch-be");
+        assert_eq!(
+            settings["mcpServers"]["spine"]["args"],
+            json!(["mcp", "serve"])
+        );
+        assert!(
+            dir.join(".gigacode/skills/adr-authoring/SKILL.md")
+                .is_file(),
+            "скиллы разложены в .gigacode/skills"
+        );
+        assert!(!dir.join(".qwen").exists(), "каталога .qwen не появилось");
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|n| n.contains("создан") && n.contains(".gigacode")),
+            "заметка про создание каталога: {:?}",
+            report.notes
+        );
+        assert!(
+            report.snippets.iter().any(|(t, _)| t.contains("Хуки")),
+            "сниппет хуков напечатан: {:?}",
+            report.snippets
+        );
+        assert!(
+            report
+                .next_steps
+                .iter()
+                .any(|s| s.contains("doctor --host gigacode")),
+            "{:?}",
+            report.next_steps
+        );
+
+        // Идемпотентность: повторный прогон побайтово тот же.
+        let first = snapshot(&dir);
+        let report = connect(&ConnectOptions::new(Host::GigaCode, dir.clone())).expect("повтор");
+        assert_eq!(first, snapshot(&dir), "повторный запуск изменил файлы");
+        assert!(report.created.is_empty() && report.merged.is_empty());
+    }
+
+    /// gigacode в проекте с существующим `.qwen/`: пишет в него (чужой сервер
+    /// сохранён), `.gigacode/` не создаётся; существующий чужой скилл в
+    /// `.qwen/skills/` не трогается, встроенные докладываются рядом.
+    #[test]
+    fn gigacode_reuses_existing_qwen_dir() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path().join("proj");
+        std::fs::create_dir_all(dir.join(".qwen/skills/foreign")).expect("mkdir");
+        std::fs::write(
+            dir.join(".qwen/settings.json"),
+            "{\n  \"mcpServers\": {\n    \"other\": {\"command\": \"uvx\", \"args\": [\"x\"]}\n  }\n}\n",
+        )
+        .expect("write settings");
+        std::fs::write(
+            dir.join(".qwen/skills/foreign/SKILL.md"),
+            "---\nname: foreign\ndescription: чужой\n---\n",
+        )
+        .expect("write foreign skill");
+
+        let report = connect(&ConnectOptions::new(Host::GigaCode, dir.clone())).expect("connect");
+
+        let settings: Value =
+            serde_json::from_str(&read(&dir.join(".qwen/settings.json"))).expect("json");
+        assert_eq!(settings["mcpServers"]["spine"]["command"], "arch-be");
+        assert_eq!(
+            settings["mcpServers"]["other"]["command"], "uvx",
+            "чужой сервер цел"
+        );
+        assert!(
+            !dir.join(".gigacode").exists(),
+            ".gigacode не создаётся при живом .qwen"
+        );
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|n| n.contains(".qwen/") && n.contains("совместим")),
+            "заметка про наследование .qwen: {:?}",
+            report.notes
+        );
+        assert_eq!(
+            read(&dir.join(".qwen/skills/foreign/SKILL.md")),
+            "---\nname: foreign\ndescription: чужой\n---\n",
+            "чужой скилл не тронут"
+        );
+        assert!(
+            dir.join(".qwen/skills/adr-authoring/SKILL.md").is_file(),
+            "встроенные скиллы доложены в .qwen/skills"
+        );
+    }
+
+    /// gigacode --dry-run: только план, ничего не создаётся.
+    #[test]
+    fn gigacode_dry_run_writes_nothing() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path().join("proj");
+        std::fs::create_dir_all(&dir).expect("mkdir proj");
+        let opts = ConnectOptions {
+            dry_run: true,
+            ..ConnectOptions::new(Host::GigaCode, dir.clone())
+        };
+        let report = connect(&opts).expect("dry-run");
+        assert!(!report.created.is_empty(), "план непустой");
+        assert!(!report.skills.is_empty(), "план по скиллам непустой");
+        assert!(
+            report.notes.iter().any(|n| n.contains("будет создан")),
+            "заметка про будущее создание каталога: {:?}",
+            report.notes
+        );
+        assert_eq!(
+            std::fs::read_dir(&dir).expect("read dir").count(),
+            0,
+            "dry-run ничего не записал"
+        );
+    }
+
+    /// Разбор имён хостов: gigacode и его алиасы.
+    #[test]
+    fn host_parse_accepts_gigacode_aliases() {
+        assert_eq!(Host::parse("gigacode"), Ok(Host::GigaCode));
+        assert_eq!(Host::parse("GigaCode"), Ok(Host::GigaCode));
+        assert_eq!(Host::parse("giga-code"), Ok(Host::GigaCode));
+        assert_eq!(Host::parse("gcode"), Ok(Host::GigaCode));
+        assert_eq!(Host::GigaCode.name(), "gigacode");
+        let err = Host::parse("cursor").expect_err("неизвестный хост");
+        assert!(err.contains("gigacode"), "{err}");
+    }
+
+    // --- connect ci / connect git-hooks (волна 2, п.8) ----------------------
+
+    /// git в каталоге с тестовой идентичностью коммиттера (для git-hooks).
+    fn git(dir: &Path, args: &[&str]) {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .expect("git");
+        assert!(
+            out.status.success(),
+            "git {}: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// Разбор CI-провайдеров: алиасы, регистр, ошибка со списком допустимых.
+    #[test]
+    fn ci_provider_parse_accepts_aliases_and_rejects_unknown() {
+        assert_eq!(CiProvider::parse("gitlab"), Ok(CiProvider::GitLab));
+        assert_eq!(CiProvider::parse("GitHub"), Ok(CiProvider::GitHub));
+        assert_eq!(CiProvider::parse("jenkins"), Ok(CiProvider::Jenkins));
+        let err = CiProvider::parse("gitlab-ci").expect_err("неизвестный провайдер");
+        assert!(err.contains("gitlab"), "{err}");
+        assert!(err.contains("jenkins"), "{err}");
+    }
+
+    /// Джобы всех трёх провайдеров: файл с маркерами и нативной командой
+    /// гейта; сухой прогон ничего не пишет; повтор — без дублей.
+    #[test]
+    fn ci_scaffolds_job_per_provider_idempotently() {
+        for (provider, rel, native) in [
+            (
+                CiProvider::GitLab,
+                ".gitlab-ci.yml",
+                "--format gitlab-codequality",
+            ),
+            (
+                CiProvider::GitHub,
+                ".github/workflows/spine-gate.yml",
+                "--format sarif",
+            ),
+            (CiProvider::Jenkins, "Jenkinsfile", "--format junit"),
+        ] {
+            let tmp = tempfile::tempdir().expect("tmp");
+            let dir = tmp.path().join("proj");
+            std::fs::create_dir_all(&dir).expect("mkdir");
+
+            // --dry-run: план есть, файла нет.
+            let report = connect_ci(provider, &dir, true).expect("dry-run");
+            assert!(report.dry_run);
+            assert!(
+                report.created.iter().any(|p| p.ends_with(rel)),
+                "{}: план без {rel}: {:?}",
+                provider.name(),
+                report.created
+            );
+            assert!(
+                !dir.join(rel).exists(),
+                "{}: dry-run записал файл",
+                provider.name()
+            );
+
+            // Реальный прогон.
+            let report = connect_ci(provider, &dir, false).expect("connect ci");
+            let text = read(&dir.join(rel));
+            assert!(text.contains(BLOCK_BEGIN), "{}: {text}", provider.name());
+            assert!(text.contains(BLOCK_END), "{}: {text}", provider.name());
+            assert!(
+                text.contains("arch-be gate --route auto"),
+                "{}: {text}",
+                provider.name()
+            );
+            assert!(
+                text.contains(native),
+                "{}: нативный формат {native}: {text}",
+                provider.name()
+            );
+            assert!(
+                text.contains("arch-be-linux-x86_64.tar.gz"),
+                "{}: установка бинаря: {text}",
+                provider.name()
+            );
+            assert!(
+                report.created.iter().any(|p| p.ends_with(rel)),
+                "{:?}",
+                report.created
+            );
+
+            // Повтор — без изменений и без дублей маркеров.
+            let report = connect_ci(provider, &dir, false).expect("повтор");
+            assert_eq!(
+                read(&dir.join(rel)),
+                text,
+                "{}: повтор изменил файл",
+                provider.name()
+            );
+            assert!(
+                report.unchanged.iter().any(|p| p.ends_with(rel)),
+                "{}: {:?}",
+                provider.name(),
+                report.unchanged
+            );
+            assert_eq!(text.matches(BLOCK_BEGIN).count(), 1, "дубль маркера");
+        }
+    }
+
+    /// GitLab: существующий `.gitlab-ci.yml` с чужой джобой — блок дописывается,
+    /// чужое сохраняется; повтор заменяет блок без дублей.
+    #[test]
+    fn ci_gitlab_merges_into_existing_pipeline() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path().join("proj");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::write(
+            dir.join(".gitlab-ci.yml"),
+            "stages: [test]\n\nunit-tests:\n  stage: test\n  script: cargo test\n",
+        )
+        .expect("write .gitlab-ci.yml");
+
+        connect_ci(CiProvider::GitLab, &dir, false).expect("connect ci");
+        let text = read(&dir.join(".gitlab-ci.yml"));
+        assert!(text.contains("unit-tests:"), "чужая джоба цела: {text}");
+        assert!(text.contains("spine-gate:"), "наша джоба: {text}");
+        assert!(
+            text.contains("codequality: codequality-spine.json"),
+            "{text}"
+        );
+
+        // Повтор: блок заменяется, чужая зона не трогается, дублей нет.
+        connect_ci(CiProvider::GitLab, &dir, false).expect("повтор");
+        let again = read(&dir.join(".gitlab-ci.yml"));
+        assert_eq!(again, text, "повтор изменил файл");
+        assert_eq!(again.matches("spine-gate:").count(), 1, "{again}");
+    }
+
+    /// GitHub: существующий workflow без нашего маркера — отказ без затирания;
+    /// с маркером — обновление блока.
+    #[test]
+    fn ci_github_refuses_foreign_workflow_file() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path().join("proj");
+        let wf = dir.join(".github/workflows/spine-gate.yml");
+        std::fs::create_dir_all(wf.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&wf, "name: mine\non: [push]\n").expect("write workflow");
+
+        let err = connect_ci(CiProvider::GitHub, &dir, false).expect_err("отказ");
+        assert!(err.to_string().contains("не затираю"), "{err}");
+        assert_eq!(read(&wf), "name: mine\non: [push]\n", "файл цел");
+
+        // Наш файл (с маркером) обновляется.
+        std::fs::write(
+            &wf,
+            "# spine-connect:begin\nname: spine-gate\n# spine-connect:end\n",
+        )
+        .expect("write marked");
+        connect_ci(CiProvider::GitHub, &dir, false).expect("обновление нашего файла");
+        let text = read(&wf);
+        assert!(text.contains("--format sarif"), "{text}");
+        assert_eq!(text.matches(BLOCK_BEGIN).count(), 1, "{text}");
+    }
+
+    /// Маркерный сплайс: замена зоны между маркерами, рукописное снаружи цело.
+    #[test]
+    fn splice_marked_block_preserves_handwritten_zones() {
+        let block = "# spine-connect:begin\nA\n# spine-connect:end";
+        let existing =
+            "голова\n\n# spine-connect:begin\nстарая зона\n# spine-connect:end\n\nхвост\n";
+        let out = splice_marked_block(existing, block);
+        assert!(out.contains("голова"), "{out}");
+        assert!(out.contains("хвост"), "{out}");
+        assert!(out.contains("\nA\n"), "{out}");
+        assert!(!out.contains("старая зона"), "{out}");
+        // Повтор детерминирован.
+        assert_eq!(splice_marked_block(&out, block), out);
+        // Без маркеров — дописка.
+        let appended = splice_marked_block("чужое\n", block);
+        assert!(appended.starts_with("чужое\n\n"), "{appended}");
+        assert!(appended.contains(BLOCK_BEGIN), "{appended}");
+    }
+
+    /// git-hooks: pre-commit и pre-push с маркерами, исполняемые, fail-soft
+    /// гарды; повтор без дублей; чужой хук не затирается.
+    #[test]
+    fn git_hooks_scaffold_in_git_repo_idempotently() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path().join("repo");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        git(&dir, &["init", "-q"]);
+        // Чужой pre-push уже есть — не затираем.
+        std::fs::write(dir.join(".git/hooks/pre-push"), "#!/bin/sh\necho mine\n")
+            .expect("чужой pre-push");
+
+        let report = connect_git_hooks(&dir, false).expect("connect git-hooks");
+        let pre_commit = read(&dir.join(".git/hooks/pre-commit"));
+        assert!(pre_commit.starts_with("#!/bin/sh\n"), "{pre_commit}");
+        assert!(pre_commit.contains(BLOCK_BEGIN), "{pre_commit}");
+        assert!(
+            pre_commit.contains("command -v arch-be"),
+            "fail-soft гард: {pre_commit}"
+        );
+        assert!(
+            pre_commit.contains("arch-be control check ."),
+            "быстрый гейт: {pre_commit}"
+        );
+        let pre_push = read(&dir.join(".git/hooks/pre-push"));
+        assert!(pre_push.contains("echo mine"), "чужой хук цел: {pre_push}");
+        assert!(
+            pre_push.contains("arch-be gate --route auto"),
+            "полный гейт: {pre_push}"
+        );
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|n| n.contains("pre-push") && n.contains("дописан")),
+            "заметка про чужой хук: {:?}",
+            report.notes
+        );
+
+        // Исполняемость (unix): git молча игнорирует хук без +x.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            for hook in ["pre-commit", "pre-push"] {
+                let mode = std::fs::metadata(dir.join(".git/hooks").join(hook))
+                    .expect("stat")
+                    .permissions()
+                    .mode();
+                assert_eq!(mode & 0o111, 0o111, "{hook} не исполняемый");
+            }
+        }
+
+        // Повтор: побайтово то же, маркеров по одному.
+        let first = snapshot(&dir);
+        connect_git_hooks(&dir, false).expect("повтор");
+        assert_eq!(first, snapshot(&dir), "повторный запуск изменил файлы");
+        assert_eq!(
+            read(&dir.join(".git/hooks/pre-push"))
+                .matches(BLOCK_BEGIN)
+                .count(),
+            1,
+            "дубль маркера"
+        );
+
+        // --dry-run поверх — ничего не пишет.
+        let report = connect_git_hooks(&dir, true).expect("dry-run");
+        assert!(report.dry_run);
+        assert_eq!(first, snapshot(&dir), "dry-run что-то записал");
+    }
+
+    /// git-hooks вне git-репозитория — понятная ошибка.
+    #[test]
+    fn git_hooks_outside_git_repo_is_error() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path().join("plain");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let err = connect_git_hooks(&dir, false).expect_err("не git");
+        assert!(err.to_string().contains("не git-репозиторий"), "{err}");
+    }
+
+    /// git-hooks в worktree: хуки кладутся в hooks ОСНОВНОГО git-каталога
+    /// (`git rev-parse --git-common-dir`), а не в файл-указатель worktree.
+    #[test]
+    fn git_hooks_in_worktree_target_common_dir() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let main = tmp.path().join("main");
+        std::fs::create_dir_all(&main).expect("mkdir");
+        git(&main, &["init", "-q"]);
+        std::fs::write(main.join("f"), "x").expect("write f");
+        git(&main, &["add", "."]);
+        git(&main, &["commit", "-q", "-m", "init"]);
+        let wt = tmp.path().join("wt");
+        git(
+            &main,
+            &["worktree", "add", "-q", wt.to_str().expect("utf8")],
+        );
+
+        connect_git_hooks(&wt, false).expect("connect git-hooks в worktree");
+        assert!(
+            main.join(".git/hooks/pre-commit").is_file(),
+            "хук в основном .git"
+        );
+        assert!(
+            !wt.join(".git/hooks").exists(),
+            "у worktree .git — файл, каталога hooks в нём нет"
+        );
     }
 }

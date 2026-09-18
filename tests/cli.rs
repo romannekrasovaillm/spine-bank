@@ -154,6 +154,40 @@ fn control_check_passing_constraints_exits_0() {
     cmd.assert().success().stdout(contains("Итог: PASS"));
 }
 
+/// Карточный контекст правила (`ad`/`fix_hint`/`skill` из CONSTRAINTS.yaml) виден
+/// в текстовом выводе (строкой-отступом) и в `--json` (аддитивные поля).
+#[test]
+fn control_check_shows_card_context_in_text_and_json() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = repo_with_constraints(
+        tmp.path(),
+        "rules:\n  - name: spine_present\n    type: file_exists\n    path: \"docs/ARCHITECTURE-SPINE.md\"\n    severity: error\n    ad: AD-9\n    rationale: \"гейт, а не документация задним числом\"\n    fix_hint: \"вернуть spine на место\"\n    skill: spine-invariants\n",
+    );
+
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("control").arg("check").arg(repo.as_os_str());
+    cmd.assert()
+        .code(1)
+        .stdout(contains("spine_present"))
+        .stdout(contains("↳ AD-9"))
+        .stdout(contains("как чинить: вернуть spine на место"))
+        .stdout(contains("скилл: spine-invariants"));
+
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("control")
+        .arg("check")
+        .arg(repo.as_os_str())
+        .arg("--json");
+    let output = cmd.assert().code(1).get_output().clone();
+    let v: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("--json печатает JSON даже при exit 1");
+    let issue = &v["issues"][0];
+    assert_eq!(issue["ad"], "AD-9");
+    assert_eq!(issue["fix_hint"], "вернуть spine на место");
+    assert_eq!(issue["skill"], "spine-invariants");
+    assert_eq!(issue["rationale"], "гейт, а не документация задним числом");
+}
+
 /// `arch-be control spine` на чистом spine-файле → exit 0.
 #[test]
 fn control_spine_clean_exits_0() {
@@ -545,6 +579,162 @@ fn control_gate_unknown_gate_errors() {
     cmd.assert().failure().stderr(contains("только A4"));
 }
 
+/// git в каталоге с тестовой идентичностью коммиттера (образец —
+/// `src/delta.rs::make_guard_repo`).
+fn git(dir: &Path, args: &[&str]) {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("GIT_AUTHOR_NAME", "t")
+        .env("GIT_AUTHOR_EMAIL", "t@t")
+        .env("GIT_COMMITTER_NAME", "t")
+        .env("GIT_COMMITTER_EMAIL", "t@t")
+        .output()
+        .expect("git");
+    assert!(
+        out.status.success(),
+        "git {}: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// git-репозиторий с `.arch-handoff/CONSTRAINTS.yaml` (два error-правила) и
+/// обязательным файлом; один коммит.
+fn gate_repo(home: &Path) -> PathBuf {
+    let repo = home.join("gate-repo");
+    std::fs::create_dir_all(repo.join(".arch-handoff")).expect("mkdir .arch-handoff");
+    std::fs::write(
+        repo.join(".arch-handoff/CONSTRAINTS.yaml"),
+        "rules:\n  - name: spine_present\n    type: file_exists\n    path: \"ARCHITECTURE-SPINE.md\"\n    severity: error\n  - name: no_pan\n    type: must_not_contain\n    glob: \"**/*.py\"\n    pattern: 'PAN'\n    severity: error\n",
+    )
+    .expect("запись CONSTRAINTS.yaml");
+    std::fs::write(repo.join("ARCHITECTURE-SPINE.md"), "# Spine\n").expect("write spine");
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "init"]);
+    repo
+}
+
+/// Единый гейт `arch-be gate` на чистом репозитории: все составляющие
+/// PASS/SKIP, exit 0 (маршрут auto из пустого диффа → Fast).
+#[test]
+fn gate_clean_repo_exits_0() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = gate_repo(tmp.path());
+
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("gate").arg("--repo").arg(repo.as_os_str());
+    cmd.assert()
+        .success()
+        .stdout(contains("Маршрут: Fast (auto"))
+        .stdout(contains("[PASS] fitness"))
+        .stdout(contains("[PASS] rule_weakened"))
+        .stdout(contains("[SKIP] trace_check"))
+        .stdout(contains("Итог: PASS"));
+}
+
+/// Анти-ослабление: агент удалил правило `no_pan`, чтобы пройти гейт —
+/// `arch-be gate` падает exit 1 с находкой `rule_weakened` (бэклог п.4:
+/// детекция по коду возврата, не по строкам).
+#[test]
+fn gate_fails_when_agent_removes_rule_to_pass() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = gate_repo(tmp.path());
+    // «Позеленение»: правило no_pan удалено из реестра.
+    std::fs::write(
+        repo.join(".arch-handoff/CONSTRAINTS.yaml"),
+        "rules:\n  - name: spine_present\n    type: file_exists\n    path: \"ARCHITECTURE-SPINE.md\"\n    severity: error\n",
+    )
+    .expect("ослабленный CONSTRAINTS.yaml");
+
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("gate").arg("--repo").arg(repo.as_os_str());
+    cmd.assert()
+        .code(1)
+        .stdout(contains("[FAIL] rule_weakened"))
+        .stdout(contains("no_pan"))
+        .stdout(contains("удалено из реестра"))
+        .stdout(contains("Итог: FAIL"));
+}
+
+/// Ослабление, узаконенное активным override (ADR + срок), гейт пропускает;
+/// дельта покрывает правку для delta guard.
+#[test]
+fn gate_override_legalizes_weakening_exits_0() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = gate_repo(tmp.path());
+    std::fs::write(
+        repo.join(".arch-handoff/CONSTRAINTS.yaml"),
+        "rules:\n  - name: spine_present\n    type: file_exists\n    path: \"ARCHITECTURE-SPINE.md\"\n    severity: error\noverrides:\n  - rule: no_pan\n    adr: ADR-007\n    until: \"2999-01\"\n",
+    )
+    .expect("CONSTRAINTS.yaml с override");
+    let delta = repo.join("changes/drop-pan");
+    std::fs::create_dir_all(&delta).expect("mkdir delta");
+    std::fs::write(
+        delta.join("DELTA.md"),
+        "# Дельта\n\nСнимаем no_pan по ADR-007 (правка CONSTRAINTS.yaml).\n",
+    )
+    .expect("DELTA.md");
+
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("gate").arg("--repo").arg(repo.as_os_str());
+    cmd.assert()
+        .success()
+        .stdout(contains("[PASS] rule_weakened"))
+        .stdout(contains("Итог: PASS"));
+}
+
+/// Fail-soft: каталог без git и без ограничений — составляющие SKIP, exit 0
+/// (контракт хуков `arch-be connect`: нет входа — гейт молча пропускается).
+#[test]
+fn gate_without_git_and_constraints_is_skip_and_exits_0() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let plain = tmp.path().join("plain");
+    std::fs::create_dir_all(&plain).expect("mkdir plain");
+
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("gate").arg("--repo").arg(plain.as_os_str());
+    cmd.assert()
+        .success()
+        .stdout(contains("[SKIP] fitness"))
+        .stdout(contains("[SKIP] delta_guard"))
+        .stdout(contains("[SKIP] rule_weakened"))
+        .stdout(contains("fail-safe маршрут Critical"))
+        .stdout(contains("Итог: PASS"));
+}
+
+/// Явный `--route standard` добавляет составляющие nfr/evidence (здесь —
+/// SKIP за неимением model/ и бандлов); неизвестный маршрут — ошибка clap.
+#[test]
+fn gate_explicit_route_adds_standard_components() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = gate_repo(tmp.path());
+
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("gate")
+        .arg("--repo")
+        .arg(repo.as_os_str())
+        .arg("--route")
+        .arg("standard");
+    cmd.assert()
+        .success()
+        .stdout(contains("Маршрут: Standard (явный --route"))
+        .stdout(contains("[SKIP] nfr"))
+        .stdout(contains("[SKIP] evidence_verify"));
+
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("gate")
+        .arg("--repo")
+        .arg(repo.as_os_str())
+        .arg("--route")
+        .arg("ludicrous");
+    cmd.assert()
+        .failure()
+        .stderr(contains("неизвестный маршрут"));
+}
+
 /// `arch eval run`: встроенный сьют agent-config прогоняется герметично
 /// (временный дом, без ключей и сети), гейт 100% проходит, JSON-отчёт
 /// пишется в `<дом>/evals/` (docs/evals.md).
@@ -795,4 +985,1025 @@ fn connect_omp_writes_mcp_json_and_skills() {
         0,
         "dry-run ничего не записал"
     );
+}
+
+// --- Baseline / ratchet для brownfield (бэклог волны 2, п.6) ----------------
+
+/// CONSTRAINTS.yaml legacy-фикстуры: файловое правило `no_pan` (PAN в
+/// python-файлах, с owner) и глобальное `arch_doc` (обязательный файл) —
+/// оба уровня error, старт репозитория 100% красный.
+const LEGACY_CONSTRAINTS: &str = "rules:\n  - name: no_pan\n    type: must_not_contain\n    glob: \"src/**/*.py\"\n    pattern: '\\b\\d{16}\\b'\n    severity: error\n    owner: \"владелец legacy\"\n  - name: arch_doc\n    type: file_exists\n    path: \"docs/ARCH.md\"\n    severity: error\n";
+
+/// Legacy-репозиторий со 100% красным стартом: два файла с PAN
+/// (2 находки `no_pan`) и отсутствующий docs/ARCH.md (1 находка `arch_doc`).
+fn legacy_repo(home: &Path) -> PathBuf {
+    let repo = home.join("legacy");
+    std::fs::create_dir_all(repo.join(".arch-handoff")).expect("mkdir .arch-handoff");
+    std::fs::write(
+        repo.join(".arch-handoff/CONSTRAINTS.yaml"),
+        LEGACY_CONSTRAINTS,
+    )
+    .expect("запись CONSTRAINTS.yaml");
+    std::fs::create_dir_all(repo.join("src")).expect("mkdir src");
+    std::fs::write(repo.join("src/a.py"), "pan = \"4276550012345678\"\n").expect("a.py");
+    std::fs::write(repo.join("src/b.py"), "card = \"4276550099990001\"\n").expect("b.py");
+    repo
+}
+
+/// Ratchet-жизненный цикл на legacy-репозитории (приёмка п.6): красный старт
+/// → фиксация baseline → зелёный гейт → новое нарушение FAIL → отказ
+/// обновления при выросшем долге → исправление старого уменьшает baseline.
+#[test]
+fn control_check_baseline_ratchet_lifecycle() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = legacy_repo(tmp.path());
+    let baseline = repo.join(".arch-handoff/baseline.json");
+
+    // 1. Старт красный: 3 error-находки, exit 1.
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("control").arg("check").arg(repo.as_os_str());
+    cmd.assert().code(1).stdout(contains("Итог: FAIL"));
+
+    // 2. Фиксация baseline: exit 0, файл записан, долг 3 находки по 2 правилам.
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("control")
+        .arg("check")
+        .arg(repo.as_os_str())
+        .arg("--baseline")
+        .arg(baseline.as_os_str())
+        .arg("--baseline-update");
+    cmd.assert()
+        .success()
+        .stdout(contains("Baseline обновлён"))
+        .stdout(contains("Итог: PASS"));
+    let v: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&baseline).expect("baseline записан"))
+            .expect("baseline — JSON");
+    let rules = v["rules"].as_array().expect("rules");
+    let no_pan = rules
+        .iter()
+        .find(|r| r["name"] == "no_pan")
+        .expect("no_pan в baseline");
+    assert_eq!(no_pan["count"], 2);
+    assert_eq!(no_pan["owner"], "владелец legacy");
+
+    // 3. Прогон с baseline — зелёный; долг виден по правилам и владельцам.
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("control")
+        .arg("check")
+        .arg(repo.as_os_str())
+        .arg("--baseline")
+        .arg(baseline.as_os_str());
+    cmd.assert()
+        .success()
+        .stdout(contains(
+            "долг: no_pan — 2 находок (owner: владелец legacy)",
+        ))
+        .stdout(contains("долг: arch_doc — 1 находок"))
+        .stdout(contains("Итог: PASS"));
+
+    // 3b. --json: долг — в аддитивной секции baseline, issues пуст.
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("control")
+        .arg("check")
+        .arg(repo.as_os_str())
+        .arg("--baseline")
+        .arg(baseline.as_os_str())
+        .arg("--json");
+    let output = cmd.assert().success().get_output().clone();
+    let v: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("--json печатает JSON");
+    assert_eq!(v["passed"], true);
+    assert_eq!(v["issues"].as_array().expect("issues").len(), 0);
+    assert_eq!(v["baseline"]["debt_total"], 3);
+    assert_eq!(v["baseline"]["updated"], false);
+
+    // 4. Новое нарушение — гейт FAIL, несмотря на baseline.
+    std::fs::write(repo.join("src/c.py"), "pan2 = \"4276550011112222\"\n").expect("c.py");
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("control")
+        .arg("check")
+        .arg(repo.as_os_str())
+        .arg("--baseline")
+        .arg(baseline.as_os_str());
+    cmd.assert()
+        .code(1)
+        .stdout(contains("src/c.py"))
+        .stdout(contains("Итог: FAIL"));
+
+    // 5. Обновление при выросшем долге — отказ, baseline не тронут.
+    let before = std::fs::read(&baseline).expect("baseline до отказа");
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("control")
+        .arg("check")
+        .arg(repo.as_os_str())
+        .arg("--baseline")
+        .arg(baseline.as_os_str())
+        .arg("--baseline-update");
+    cmd.assert()
+        .failure()
+        .stderr(contains("обновление baseline отклонено"))
+        .stderr(contains("no_pan"));
+    let after = std::fs::read(&baseline).expect("baseline после отказа");
+    assert_eq!(before, after, "baseline не перезаписан при отказе");
+
+    // 6. Убираем новое (c.py) и одно старое (b.py) нарушение: обновление
+    // принимается, baseline убывает (no_pan 2 → 1).
+    std::fs::remove_file(repo.join("src/c.py")).expect("rm c.py");
+    std::fs::remove_file(repo.join("src/b.py")).expect("rm b.py");
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("control")
+        .arg("check")
+        .arg(repo.as_os_str())
+        .arg("--baseline")
+        .arg(baseline.as_os_str())
+        .arg("--baseline-update");
+    cmd.assert().success().stdout(contains("Итог: PASS"));
+    let v: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&baseline).expect("baseline")).expect("JSON");
+    let no_pan = v["rules"]
+        .as_array()
+        .expect("rules")
+        .iter()
+        .find(|r| r["name"] == "no_pan")
+        .expect("no_pan");
+    assert_eq!(no_pan["count"], 1, "baseline убыл после исправления");
+}
+
+/// Режим `--changed-since`: проверяются только затронутые файлы (изменённые
+/// против ref + untracked), глобальные правила пропускаются; нетронутый файл
+/// с долгом остаётся долгом, новое нарушение в untracked-файле — FAIL.
+#[test]
+fn control_check_changed_since_scopes_check_to_touched_files() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = legacy_repo(tmp.path());
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "init"]);
+    let baseline = repo.join(".arch-handoff/baseline.json");
+
+    // Фиксация baseline на полном прогоне (долг: no_pan ×2, arch_doc ×1);
+    // baseline.json коммитим, чтобы сам не попадал в срез untracked.
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("control")
+        .arg("check")
+        .arg(repo.as_os_str())
+        .arg("--baseline")
+        .arg(baseline.as_os_str())
+        .arg("--baseline-update");
+    cmd.assert().success();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "baseline"]);
+
+    // Чистое дерево: срез пуст — файловые правила тоже пропускаются.
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("control")
+        .arg("check")
+        .arg(repo.as_os_str())
+        .arg("--baseline")
+        .arg(baseline.as_os_str())
+        .arg("--changed-since")
+        .arg("HEAD");
+    cmd.assert()
+        .success()
+        .stdout(contains("изменённых файлов 0"))
+        .stdout(contains("skip: no_pan"))
+        .stdout(contains("skip: arch_doc"))
+        .stdout(contains("Итог: PASS"));
+
+    // Правка a.py строкой-комментарием сверху (сдвиг строки, сниппет PAN не
+    // изменился) — находка остаётся долгом: отпечаток не содержит строку.
+    std::fs::write(
+        repo.join("src/a.py"),
+        "# touched\npan = \"4276550012345678\"\n",
+    )
+    .expect("a.py v2");
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("control")
+        .arg("check")
+        .arg(repo.as_os_str())
+        .arg("--baseline")
+        .arg(baseline.as_os_str())
+        .arg("--changed-since")
+        .arg("HEAD");
+    cmd.assert()
+        .success()
+        .stdout(contains("изменённых файлов 1"))
+        .stdout(contains("долг: no_pan — 1 находок"))
+        .stdout(contains("skip: arch_doc"))
+        .stdout(contains("Итог: PASS"));
+
+    // Новое нарушение в untracked-файле ловится и в режиме среза.
+    std::fs::write(repo.join("src/new.py"), "pan = \"4276550022223333\"\n").expect("new.py");
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("control")
+        .arg("check")
+        .arg(repo.as_os_str())
+        .arg("--baseline")
+        .arg(baseline.as_os_str())
+        .arg("--changed-since")
+        .arg("HEAD");
+    cmd.assert()
+        .code(1)
+        .stdout(contains("src/new.py"))
+        .stdout(contains("Итог: FAIL"));
+
+    // --baseline-update с --changed-since — отказ (срез уничтожил бы долг).
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("control")
+        .arg("check")
+        .arg(repo.as_os_str())
+        .arg("--baseline")
+        .arg(baseline.as_os_str())
+        .arg("--baseline-update")
+        .arg("--changed-since")
+        .arg("HEAD");
+    cmd.assert().failure().stderr(contains("несовместим"));
+}
+
+/// Baseline-файл обязан существовать для ratchet-прогона (fail-closed):
+/// отсутствующий файл — понятная ошибка с подсказкой про --baseline-update.
+#[test]
+fn control_check_baseline_missing_file_errors_with_hint() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = legacy_repo(tmp.path());
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("control")
+        .arg("check")
+        .arg(repo.as_os_str())
+        .arg("--baseline")
+        .arg(repo.join(".arch-handoff/baseline.json").as_os_str());
+    cmd.assert()
+        .failure()
+        .stderr(contains("baseline: файл не найден"))
+        .stderr(contains("--baseline-update"));
+}
+
+/// `control fp mark` пишет регистр ложных срабатываний: файл
+/// `evidence/fp-register.md` создаётся с шапкой таблицы, пометка — строкой
+/// с датой/правилом/файлом/примечанием (пункт 9, docs/outcome-metrics.md §2).
+#[test]
+fn control_fp_mark_appends_to_register() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("control")
+        .arg("fp")
+        .arg("mark")
+        .arg("no-pan")
+        .arg("src/a.rs:10")
+        .arg("--note")
+        .arg("crate::… в строковом литерале");
+    cmd.assert()
+        .success()
+        .stdout(contains("Пометка FP записана"));
+
+    let register = tmp.path().join("evidence/fp-register.md");
+    let text = std::fs::read_to_string(&register).expect("регистр создан");
+    assert!(
+        text.contains("| Дата | Правило | Файл | Примечание |"),
+        "шапка таблицы: {text}"
+    );
+    assert!(
+        text.contains("| no-pan | src/a.rs:10 | crate::… в строковом литерале |"),
+        "строка пометки: {text}"
+    );
+    // Вторая пометка — append, шапка не дублируется.
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("control")
+        .arg("fp")
+        .arg("mark")
+        .arg("msrv")
+        .arg("Cargo.toml");
+    cmd.assert().success();
+    let text = std::fs::read_to_string(&register).expect("регистр на месте");
+    assert_eq!(text.matches("| Дата |").count(), 1, "шапка одна: {text}");
+    assert!(text.contains("| msrv | Cargo.toml | — |"), "{text}");
+}
+
+/// `arch-be digest` на фикстуре журнала: итерации FAIL→PASS, топ правил,
+/// истекающие overrides; `--json` — машиночитаемый контракт (пункт 9).
+#[test]
+fn digest_reads_journal_and_register() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let handoff = tmp.path().join(".arch-handoff");
+    std::fs::create_dir_all(&handoff).expect("mkdir .arch-handoff");
+    // Штампы «сейчас» (дайджест в бинаре берёт Local::now): fail → pass.
+    let ts = chrono::Local::now().to_rfc3339();
+    std::fs::write(
+        handoff.join("mcp-calls.jsonl"),
+        format!(
+            "{{\"ts\":\"{ts}\",\"tool\":\"fitness_check\",\"verdict\":\"fail\",\"duration_ms\":7,\"rules\":[\"no-pan\"]}}\n\
+             {{\"ts\":\"{ts}\",\"tool\":\"fitness_check\",\"verdict\":\"pass\",\"duration_ms\":5}}\n"
+        ),
+    )
+    .expect("журнал-фикстура");
+    // Override истекает завтра — должен попасть в дайджест.
+    let tomorrow = (chrono::Local::now() + chrono::Duration::days(1))
+        .format("%Y-%m-%d")
+        .to_string();
+    std::fs::write(
+        handoff.join("CONSTRAINTS.yaml"),
+        format!(
+            "rules:\n  - name: no-pan\n    type: must_not_contain\n    glob: \"src/**\"\n    pattern: 'PAN'\n    severity: error\n\
+             overrides:\n  - rule: no-pan\n    adr: ADR-001\n    until: {tomorrow}\n"
+        ),
+    )
+    .expect("constraints");
+
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("digest");
+    cmd.assert()
+        .success()
+        .stdout(contains("## Итерации FAIL→PASS"))
+        .stdout(contains("fitness_check: 1"))
+        .stdout(contains("no-pan: 1"))
+        .stdout(contains("истекает через 1 дн."));
+
+    // Машиночитаемый контракт.
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("digest").arg("--json");
+    let out = cmd.assert().success();
+    let json: serde_json::Value =
+        serde_json::from_slice(&out.get_output().stdout).expect("stdout — валидный JSON");
+    assert_eq!(json["calls_total"], 2);
+    assert_eq!(json["fail_pass_iterations"]["fitness_check"], 1);
+    assert_eq!(
+        json["top_failed_rules"][0],
+        serde_json::json!(["no-pan", 1])
+    );
+    assert_eq!(json["expiring"][0]["rule"], "no-pan");
+}
+
+/// Кейс-фикстура для составного ревью и радиуса изменения (бэклог волны 3,
+/// п.13): git-репо (один коммит), model/ с цепочкой CMP→INT→AD→OWNER,
+/// корневой CONSTRAINTS.yaml (карточка C-001 с владельцем), spine,
+/// контракт contracts/api.yaml и .arch-handoff/CONSTRAINTS.yaml.
+fn review_case(home: &Path) -> PathBuf {
+    let case = home.join("review-case");
+    let model = case.join("model");
+    std::fs::create_dir_all(&model).expect("mkdir model");
+    for (name, fm) in [
+        (
+            "AD-1.md",
+            "---\nid: AD-1\ntype: ad\ntitle: Точные деньги\nstatus: ADOPTED\nverified_by: [C-001]\n---\n\nПравило.\n",
+        ),
+        (
+            "CMP-001.md",
+            "---\nid: CMP-001\ntype: cmp\ntitle: Платёжный шлюз\nstatus: designed\nimplements: [AD-1]\ndepends_on: [INT-001]\naffects: [OWNER-1]\ncode_roots: [services/pay]\n---\n\nТело.\n",
+        ),
+        (
+            "INT-001.md",
+            "---\nid: INT-001\ntype: int\ntitle: Рельс процессинга\nstatus: accepted\ncontract: contracts/api.yaml\n---\n\nТело.\n",
+        ),
+        (
+            "OWNER-1.md",
+            "---\nid: OWNER-1\ntype: owner\ntitle: Команда процессинга\nstatus: active\n---\n\nТело.\n",
+        ),
+    ] {
+        std::fs::write(model.join(name), fm).expect("сущность");
+    }
+    std::fs::write(
+        case.join("CONSTRAINTS.yaml"),
+        "constraints:\n  - id: C-001\n    name: no_float_money\n    owner: Команда платежей\n",
+    )
+    .expect("constraints");
+    std::fs::write(
+        case.join("ARCHITECTURE-SPINE.md"),
+        "# Spine\n\n### AD-1. Точные деньги\n- Binds: денежные суммы\n- Prevents: потеря копеек\n- Rule: суммы в minor units\n",
+    )
+    .expect("spine");
+    std::fs::create_dir_all(case.join("contracts")).expect("mkdir contracts");
+    std::fs::write(
+        case.join("contracts/api.yaml"),
+        "openapi: 3.0.3\ninfo:\n  title: Processing API\n  version: 1.0.0\npaths:\n  /v1/charges:\n    get:\n      operationId: listCharges\n      responses:\n        '200':\n          description: ok\n",
+    )
+    .expect("контракт");
+    std::fs::create_dir_all(case.join(".arch-handoff")).expect("mkdir handoff");
+    std::fs::write(
+        case.join(".arch-handoff/CONSTRAINTS.yaml"),
+        "rules:\n  - name: spine_present\n    type: file_exists\n    path: \"ARCHITECTURE-SPINE.md\"\n    severity: error\n",
+    )
+    .expect("handoff constraints");
+    git(&case, &["init", "-q"]);
+    git(&case, &["add", "."]);
+    git(&case, &["commit", "-q", "-m", "init"]);
+    case
+}
+
+/// `arch-be review <dir>`: единое ревью одной командой — все секции
+/// PASS, exit 0; `--json` — валидный JSON-вердикт с составом секций.
+#[test]
+fn review_clean_case_exits_0_text_and_json() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let case = review_case(tmp.path());
+
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("review").arg(case.as_os_str());
+    cmd.assert()
+        .success()
+        .stdout(contains("Ревью:"))
+        .stdout(contains("Маршрут: Fast (auto"))
+        .stdout(contains("[PASS] fitness"))
+        .stdout(contains("[PASS] trace_check"))
+        .stdout(contains("[PASS] model_validate"))
+        .stdout(contains("[PASS] contracts"))
+        .stdout(contains("Итог: PASS"));
+
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("review").arg(case.as_os_str()).arg("--json");
+    let out = cmd.assert().success();
+    let json: serde_json::Value =
+        serde_json::from_slice(&out.get_output().stdout).expect("stdout — валидный JSON");
+    assert_eq!(json["passed"], true);
+    assert_eq!(json["route"], "Fast");
+    let names: Vec<&str> = json["components"]
+        .as_array()
+        .expect("components")
+        .iter()
+        .filter_map(|c| c["name"].as_str())
+        .collect();
+    for want in ["fitness", "trace_check", "model_validate", "contracts"] {
+        assert!(names.contains(&want), "нет секции {want}: {names:?}");
+    }
+}
+
+/// `arch-be review` на кейсе с битой ссылкой модели: секция `model_validate`
+/// FAIL, exit 1 (гейт-семантика единого ревью).
+#[test]
+fn review_broken_model_exits_1() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let case = review_case(tmp.path());
+    std::fs::write(
+        case.join("model/ADR-002-bad.md"),
+        "---\nid: ADR-002\ntype: adr\ntitle: Битое\nstatus: Accepted\naffects: [CMP-999]\n---\n\nТело.\n",
+    )
+    .expect("битый ADR");
+
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("review").arg(case.as_os_str());
+    cmd.assert()
+        .code(1)
+        .stdout(contains("[FAIL] model_validate"))
+        .stdout(contains("broken-link"))
+        .stdout(contains("Итог: FAIL"));
+}
+
+/// `arch-be model impact <dir> --id`: радиус изменения — затронутые сущности,
+/// правило с владельцем, контракт INT, «с кем согласовывать»; exit 0
+/// (отчёт, не гейт). `--json` — машиночитаемая форма.
+#[test]
+fn model_impact_by_id_lists_rules_contracts_owners() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let case = review_case(tmp.path());
+
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("model")
+        .arg("impact")
+        .arg(case.as_os_str())
+        .arg("--id")
+        .arg("CMP-001");
+    cmd.assert()
+        .success()
+        .stdout(contains("Радиус изменения:"))
+        .stdout(contains("CMP-001"))
+        .stdout(contains("INT-001"))
+        .stdout(contains("OWNER-1"))
+        .stdout(contains(
+            "C-001 (no_float_money; владелец: Команда платежей)",
+        ))
+        .stdout(contains("contracts/api.yaml"))
+        .stdout(contains("Согласовать с владельцами:"));
+
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("model")
+        .arg("impact")
+        .arg(case.as_os_str())
+        .arg("--paths")
+        .arg("services/pay/src/main.rs")
+        .arg("--paths")
+        .arg("docs/notes.md")
+        .arg("--json");
+    let out = cmd.assert().success();
+    let json: serde_json::Value =
+        serde_json::from_slice(&out.get_output().stdout).expect("stdout — валидный JSON");
+    assert_eq!(json["seeds"], serde_json::json!(["CMP-001"]));
+    assert_eq!(json["gaps"], serde_json::json!(["docs/notes.md"]));
+    assert_eq!(json["contracts"], serde_json::json!(["contracts/api.yaml"]));
+}
+
+/// `arch-be model impact` с неизвестным id — честная ошибка (exit != 0),
+/// без источника — тоже.
+#[test]
+fn model_impact_unknown_id_and_no_source_fail() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let case = review_case(tmp.path());
+
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("model")
+        .arg("impact")
+        .arg(case.as_os_str())
+        .arg("--id")
+        .arg("CMP-999");
+    cmd.assert().failure().stderr(contains("не найдена"));
+
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("model").arg("impact").arg(case.as_os_str());
+    cmd.assert()
+        .failure()
+        .stderr(contains("id сущности или paths"));
+}
+
+/// `arch-be contract-diff` (бэклог волны 3, п.14): .proto с ломающим диффом
+/// (удалено поле без reserved) → exit 1; с `--model` в выводе — потребители
+/// и владельцы из радиуса изменения (`INT.contract` → `change_impact`, ADR-035).
+#[test]
+fn contract_diff_proto_breaking_exits_1_with_consumers() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let case = tmp.path().join("contract-case");
+    let model = case.join("model");
+    std::fs::create_dir_all(&model).expect("mkdir model");
+    for (name, fm) in [
+        (
+            "CMP-001.md",
+            "---\nid: CMP-001\ntype: cmp\ntitle: Платёжный шлюз\nstatus: designed\ndepends_on: [INT-001]\n---\n\nТело.\n",
+        ),
+        (
+            "INT-001.md",
+            "---\nid: INT-001\ntype: int\ntitle: Рельс процессинга\nstatus: accepted\ncontract: contracts/pay-new.proto\naffects: [OWNER-1]\n---\n\nТело.\n",
+        ),
+        (
+            "OWNER-1.md",
+            "---\nid: OWNER-1\ntype: owner\ntitle: Команда процессинга\nstatus: active\n---\n\nТело.\n",
+        ),
+    ] {
+        std::fs::write(model.join(name), fm).expect("сущность");
+    }
+    let contracts = case.join("contracts");
+    std::fs::create_dir_all(&contracts).expect("mkdir contracts");
+    let proto_v1 = "syntax = \"proto3\";\n\npackage acme.payments.v1;\n\nmessage ChargeRequest {\n  string id = 1;\n  int64 amount_minor = 2;\n  optional string currency = 3;\n}\n";
+    let proto_v2 = proto_v1.replace("  optional string currency = 3;\n", "");
+    std::fs::write(contracts.join("pay-old.proto"), proto_v1).expect("old");
+    std::fs::write(contracts.join("pay-new.proto"), proto_v2).expect("new");
+
+    // Без --model: breaking → exit 1, находки CD-P02/CD-P06.
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("contract-diff")
+        .arg(contracts.join("pay-old.proto").as_os_str())
+        .arg(contracts.join("pay-new.proto").as_os_str());
+    cmd.assert()
+        .code(1)
+        .stdout(contains("Формат: proto"))
+        .stdout(contains("CD-P02"))
+        .stdout(contains("CD-P06"))
+        .stdout(contains("Итог: FAIL"));
+
+    // С --model: та же ломающая пара отдаёт потребителя и владельца.
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("contract-diff")
+        .arg(contracts.join("pay-old.proto").as_os_str())
+        .arg(contracts.join("pay-new.proto").as_os_str())
+        .arg("--model")
+        .arg(case.as_os_str());
+    cmd.assert()
+        .code(1)
+        .stdout(contains("Связь с моделью: INT-001"))
+        .stdout(contains("CMP-001 · Платёжный шлюз"))
+        .stdout(contains("OWNER-1 · Команда процессинга"));
+
+    // Не-breaking пара (добавлено поле) — exit 0.
+    let proto_v3 = proto_v1.replace(
+        "  optional string currency = 3;\n",
+        "  optional string currency = 3;\n  string trace_id = 4;\n",
+    );
+    std::fs::write(contracts.join("pay-v3.proto"), proto_v3).expect("v3");
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("contract-diff")
+        .arg(contracts.join("pay-old.proto").as_os_str())
+        .arg(contracts.join("pay-v3.proto").as_os_str())
+        .arg("--json");
+    let out = cmd.assert().success();
+    let json: serde_json::Value =
+        serde_json::from_slice(&out.get_output().stdout).expect("stdout — валидный JSON");
+    assert_eq!(json["passed"], true);
+    assert_eq!(json["format"], "proto");
+    assert_eq!(json["breaking"], 0);
+
+    // Неизвестный формат — ошибка clap-края (exit 2) или anyhow (exit 1).
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("contract-diff")
+        .arg(contracts.join("pay-old.proto").as_os_str())
+        .arg(contracts.join("pay-new.proto").as_os_str())
+        .arg("--contract-format")
+        .arg("xml");
+    cmd.assert().failure();
+}
+
+/// `arch-be connect gigacode --dir <проект>`: автоопределение каталога
+/// настроек (пустой проект → новый `.gigacode/`), settings.json с
+/// mcpServers.spine + скиллы в `.gigacode/skills/`; `--dry-run` ничего не
+/// пишет. Проверка подключения — `arch-be doctor --host gigacode`.
+#[test]
+fn connect_gigacode_scaffolds_and_doctor_host_verifies() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let proj = tmp.path().join("proj");
+    std::fs::create_dir_all(&proj).expect("mkdir proj");
+
+    // dry-run: план без записи.
+    let mut dry = arch_cmd(tmp.path());
+    dry.arg("connect")
+        .arg("gigacode")
+        .arg("--dir")
+        .arg(proj.as_os_str())
+        .arg("--dry-run");
+    dry.assert()
+        .success()
+        .stdout(contains("dry-run"))
+        .stdout(contains(".gigacode"));
+    assert!(
+        !proj.join(".gigacode").exists(),
+        "dry-run ничего не записал"
+    );
+
+    // Реальный прогон: settings.json + скиллы + сниппет хуков.
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("connect")
+        .arg("gigacode")
+        .arg("--dir")
+        .arg(proj.as_os_str());
+    cmd.assert()
+        .success()
+        .stdout(contains("Подключение Spine к хосту «gigacode»"))
+        .stdout(contains("создан"))
+        .stdout(contains("doctor --host gigacode"));
+    let settings = proj.join(".gigacode/settings.json");
+    assert!(settings.is_file(), "settings.json создан");
+    let text = std::fs::read_to_string(&settings).expect("read settings");
+    assert!(text.contains("\"command\": \"arch-be\""), "{text}");
+    assert!(
+        proj.join(".gigacode/skills/adr-authoring/SKILL.md")
+            .is_file(),
+        "скиллы разложены"
+    );
+
+    // doctor --host: на подключённом проекте settings/skills — ✓.
+    // (Проверки «arch-be»/«host» зависят от PATH машины — их вердикты не
+    // ассертим; итоговый код здесь не проверяем по той же причине.)
+    let mut doctor = arch_cmd(tmp.path());
+    doctor
+        .arg("doctor")
+        .arg("--host")
+        .arg("gigacode")
+        .arg("--dir")
+        .arg(proj.as_os_str());
+    doctor
+        .assert()
+        .stdout(contains("arch-be doctor --host gigacode"))
+        .stdout(contains("settings"))
+        .stdout(contains("mcpServers.spine"))
+        .stdout(contains("Итог:"));
+
+    // doctor --host на неподключённом проекте — проблема и код 1.
+    let empty = tmp.path().join("empty");
+    std::fs::create_dir_all(&empty).expect("mkdir empty");
+    let mut bad = arch_cmd(tmp.path());
+    bad.arg("doctor")
+        .arg("--host")
+        .arg("qwen")
+        .arg("--dir")
+        .arg(empty.as_os_str());
+    bad.assert()
+        .code(1)
+        .stdout(contains("не найден или не JSON"));
+}
+
+// ---------------------------------------------------------------------------
+// Машинные форматы отчётов (--format) и connect ci/git-hooks (волна 2, п.8)
+// ---------------------------------------------------------------------------
+
+/// `arch-be gate --format sarif` на репозитории с находкой: exit 1, в stdout —
+/// валидный SARIF 2.1.0 с result'ом (ruleId, level, location, fingerprint).
+#[test]
+fn gate_format_sarif_emits_valid_sarif_with_result() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = gate_repo(tmp.path());
+    // Находка fitness: файл с запрещённым паттерном PAN.
+    std::fs::create_dir_all(repo.join("src")).expect("mkdir src");
+    std::fs::write(repo.join("src/hotfix.py"), "pan = 'PAN'\n").expect("write hotfix");
+
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("gate")
+        .arg("--repo")
+        .arg(repo.as_os_str())
+        .arg("--format")
+        .arg("sarif");
+    let assert = cmd.assert().code(1);
+    let out = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8");
+    let doc: serde_json::Value = serde_json::from_str(&out).expect("валидный SARIF JSON");
+    assert_eq!(doc["version"], "2.1.0");
+    let run = &doc["runs"][0];
+    assert_eq!(run["tool"]["driver"]["name"], "arch-be gate");
+    let results = run["results"].as_array().expect("results");
+    assert!(
+        !results.is_empty(),
+        "находка fitness обязана попасть в results"
+    );
+    let hit = results
+        .iter()
+        .find(|r| r["ruleId"] == "no_pan")
+        .expect("result по правилу no_pan");
+    assert_eq!(hit["level"], "error");
+    assert!(
+        hit["locations"][0]["physicalLocation"]["artifactLocation"]["uri"]
+            .as_str()
+            .expect("uri")
+            .ends_with("src/hotfix.py"),
+        "{hit}"
+    );
+    assert!(
+        hit["partialFingerprints"]["spine/v1"].as_str().is_some(),
+        "partialFingerprints: {hit}"
+    );
+}
+
+/// `arch-be gate --format gitlab-codequality`: массив Code Quality с
+/// обязательными полями (`description`/`check_name`/`fingerprint`/`severity`/`location`).
+#[test]
+fn gate_format_gitlab_codequality_emits_cq_entries() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = gate_repo(tmp.path());
+    std::fs::create_dir_all(repo.join("src")).expect("mkdir src");
+    std::fs::write(repo.join("src/hotfix.py"), "pan = 'PAN'\n").expect("write hotfix");
+
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("gate")
+        .arg("--repo")
+        .arg(repo.as_os_str())
+        .arg("--format")
+        .arg("gitlab-codequality");
+    let assert = cmd.assert().code(1);
+    let out = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8");
+    let doc: serde_json::Value = serde_json::from_str(&out).expect("валидный JSON");
+    let arr = doc.as_array().expect("массив Code Quality");
+    let hit = arr
+        .iter()
+        .find(|e| {
+            e["check_name"]
+                .as_str()
+                .is_some_and(|n| n.contains("no_pan"))
+        })
+        .expect("запись по no_pan");
+    assert_eq!(hit["severity"], "major");
+    assert!(
+        hit["location"]["path"]
+            .as_str()
+            .expect("path")
+            .ends_with("src/hotfix.py"),
+        "{hit}"
+    );
+    assert!(hit["fingerprint"].as_str().is_some(), "{hit}");
+}
+
+/// `arch-be control check --format junit` на репо с находкой: exit 1, в
+/// stdout — `JUnit` XML с `<failure>`; `--json` и `--format` несовместимы.
+#[test]
+fn control_check_format_junit_emits_failure_xml() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = gate_repo(tmp.path());
+    std::fs::create_dir_all(repo.join("src")).expect("mkdir src");
+    std::fs::write(repo.join("src/hotfix.py"), "pan = 'PAN'\n").expect("write hotfix");
+
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("control")
+        .arg("check")
+        .arg(repo.as_os_str())
+        .arg("--format")
+        .arg("junit");
+    cmd.assert()
+        .code(1)
+        .stdout(contains("<?xml version=\"1.0\" encoding=\"UTF-8\"?>"))
+        .stdout(contains("<testsuite name=\"no_pan\""))
+        .stdout(contains("<failure message="));
+
+    // Зелёный прогон: pass-группы без failure, exit 0.
+    let clean = gate_repo(&tmp.path().join("clean-home"));
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("control")
+        .arg("check")
+        .arg(clean.as_os_str())
+        .arg("--format")
+        .arg("junit");
+    cmd.assert()
+        .success()
+        .stdout(contains("<testsuite name=\"spine_present\""))
+        .stdout(predicate::str::contains("<failure").not());
+
+    // --json конфликтует с --format (ошибка clap, exit 2).
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("control")
+        .arg("check")
+        .arg(repo.as_os_str())
+        .arg("--json")
+        .arg("--format")
+        .arg("sarif");
+    cmd.assert().code(2);
+}
+
+/// `arch-be trace check --format gitlab-codequality`: error-находка (AD без
+/// правила) — exit 1 и запись с путём-заглушкой (у трассировки нет адреса).
+#[test]
+fn trace_check_format_gitlab_codequality_on_error() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let case = tmp.path().join("case");
+    std::fs::create_dir_all(case.join("model")).expect("mkdir model");
+    std::fs::write(
+        case.join("model/AD-1.md"),
+        "---\nid: AD-1\ntype: ad\ntitle: Инвариант\nstatus: ADOPTED\n---\n\nТело.\n",
+    )
+    .expect("write AD");
+    std::fs::write(case.join("CONSTRAINTS.yaml"), "rules: []\n").expect("write constraints");
+
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("trace")
+        .arg("check")
+        .arg(case.as_os_str())
+        .arg("--format")
+        .arg("gitlab-codequality");
+    let assert = cmd.assert().code(1);
+    let out = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8");
+    let doc: serde_json::Value = serde_json::from_str(&out).expect("валидный JSON");
+    let arr = doc.as_array().expect("массив Code Quality");
+    let hit = arr
+        .iter()
+        .find(|e| {
+            e["check_name"]
+                .as_str()
+                .is_some_and(|n| n.contains("ad-not-verified"))
+        })
+        .expect("запись ad-not-verified");
+    assert_eq!(hit["severity"], "major");
+    assert_eq!(hit["location"]["path"], "(repository)");
+}
+
+/// `arch-be contract-diff <old> <new>`: breaking-изменение — exit 1 (текст
+/// «Итог: FAIL»); `--format sarif` — валидный SARIF с ruleId CD-001;
+/// одинаковые контракты — exit 0.
+#[test]
+fn contract_diff_cli_text_and_sarif() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let old = tmp.path().join("old.yaml");
+    let new = tmp.path().join("new.yaml");
+    std::fs::write(
+        &old,
+        "openapi: 3.0.3\ninfo: {title: T, version: '1'}\npaths:\n  /v1/pets:\n    get:\n      responses:\n        '200': {description: ok}\n",
+    )
+    .expect("write old");
+    std::fs::write(
+        &new,
+        "openapi: 3.0.3\ninfo: {title: T, version: '1'}\npaths: {}\n",
+    )
+    .expect("write new");
+
+    // Текст по умолчанию: как у инструмента contract_diff.
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("contract-diff").arg(&old).arg(&new);
+    cmd.assert()
+        .code(1)
+        .stdout(contains("[error]"))
+        .stdout(contains("CD-001"))
+        .stdout(contains("Итог: FAIL"));
+
+    // Алиас с подчёркиванием (имя MCP-инструмента) тоже работает.
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("contract_diff")
+        .arg(&old)
+        .arg(&new)
+        .arg("--format")
+        .arg("sarif");
+    let assert = cmd.assert().code(1);
+    let out = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8");
+    let doc: serde_json::Value = serde_json::from_str(&out).expect("валидный SARIF JSON");
+    assert_eq!(doc["runs"][0]["results"][0]["ruleId"], "CD-001");
+
+    // Без изменений — PASS, exit 0.
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("contract-diff").arg(&old).arg(&old);
+    cmd.assert().success().stdout(contains("Итог: PASS"));
+}
+
+/// `arch-be connect ci --dry-run` для трёх провайдеров: план с путём джобы,
+/// ничего не пишется; без `--provider` — понятная ошибка (exit 1).
+#[test]
+fn connect_ci_dry_run_for_all_providers() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path().join("proj");
+    std::fs::create_dir_all(&dir).expect("mkdir proj");
+
+    for (provider, rel) in [
+        ("gitlab", ".gitlab-ci.yml"),
+        ("github", ".github/workflows/spine-gate.yml"),
+        ("jenkins", "Jenkinsfile"),
+    ] {
+        let mut cmd = arch_cmd(tmp.path());
+        cmd.arg("connect")
+            .arg("ci")
+            .arg("--provider")
+            .arg(provider)
+            .arg("--dir")
+            .arg(dir.as_os_str())
+            .arg("--dry-run");
+        cmd.assert()
+            .success()
+            .stdout(contains("CI-джоба Spine"))
+            .stdout(contains("dry-run"))
+            .stdout(contains(rel));
+        assert!(!dir.join(rel).exists(), "{provider}: dry-run записал файл");
+    }
+
+    // Без --provider — ошибка с подсказкой.
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("connect")
+        .arg("ci")
+        .arg("--dir")
+        .arg(dir.as_os_str());
+    cmd.assert()
+        .code(1)
+        .stderr(contains("--provider gitlab|github|jenkins"));
+
+    // Реальный прогон gitlab: файл с маркерами; повтор — «без изменений».
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("connect")
+        .arg("ci")
+        .arg("--provider")
+        .arg("gitlab")
+        .arg("--dir")
+        .arg(dir.as_os_str());
+    cmd.assert().success().stdout(contains(".gitlab-ci.yml"));
+    let text = std::fs::read_to_string(dir.join(".gitlab-ci.yml")).expect("read");
+    assert!(text.contains("spine-connect:begin"), "{text}");
+    assert!(text.contains("reports"), "{text}");
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("connect")
+        .arg("ci")
+        .arg("--provider")
+        .arg("gitlab")
+        .arg("--dir")
+        .arg(dir.as_os_str());
+    cmd.assert().success().stdout(contains("Без изменений"));
+    assert_eq!(
+        std::fs::read_to_string(dir.join(".gitlab-ci.yml")).expect("read"),
+        text,
+        "повтор изменил файл"
+    );
+}
+
+/// `arch-be connect git-hooks` в git-репозитории: pre-commit + pre-push с
+/// маркерами и fail-soft гардами; повтор — без дублей.
+#[test]
+fn connect_git_hooks_writes_marked_hooks_idempotently() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("mkdir repo");
+    git(&repo, &["init", "-q"]);
+
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("connect")
+        .arg("git-hooks")
+        .arg("--dir")
+        .arg(repo.as_os_str());
+    cmd.assert()
+        .success()
+        .stdout(contains("Git-хуки Spine"))
+        .stdout(contains("pre-commit"))
+        .stdout(contains("pre-push"));
+
+    let pre_commit = std::fs::read_to_string(repo.join(".git/hooks/pre-commit")).expect("read");
+    assert!(pre_commit.contains("spine-connect:begin"), "{pre_commit}");
+    assert!(
+        pre_commit.contains("arch-be control check ."),
+        "{pre_commit}"
+    );
+    assert!(pre_commit.contains("command -v arch-be"), "{pre_commit}");
+    let pre_push = std::fs::read_to_string(repo.join(".git/hooks/pre-push")).expect("read");
+    assert!(pre_push.contains("arch-be gate --route auto"), "{pre_push}");
+
+    // Повтор: содержимое то же, маркеры по одному.
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("connect")
+        .arg("git-hooks")
+        .arg("--dir")
+        .arg(repo.as_os_str());
+    cmd.assert().success().stdout(contains("Без изменений"));
+    let again = std::fs::read_to_string(repo.join(".git/hooks/pre-commit")).expect("read");
+    assert_eq!(again, pre_commit, "повтор изменил pre-commit");
+    assert_eq!(again.matches("spine-connect:begin").count(), 1, "{again}");
+
+    // Вне git-репозитория — понятная ошибка (exit 1).
+    let plain = tmp.path().join("plain");
+    std::fs::create_dir_all(&plain).expect("mkdir plain");
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("connect")
+        .arg("git-hooks")
+        .arg("--dir")
+        .arg(plain.as_os_str());
+    cmd.assert().code(1).stderr(contains("не git-репозиторий"));
 }

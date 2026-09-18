@@ -189,6 +189,19 @@ CI-шаг (условный): `arch-be control check . --json > fitness-report.j
 артефактом; дальше `jq '.passed'`/`jq '.issues[]'` — схема отчёта в
 `sdk/CONTRACT.md` §2.
 
+Нативные форматы площадок (волна 2, п.8) — `--format
+sarif|junit|gitlab-codequality|markdown` у команд `gate`, `control check`,
+`trace check`, `contract-diff` (`docs/control.md` «Форматы CI»): машинный
+отчёт строго в stdout, exit-коды как у текста. Готовые джобы раскладывает
+`arch-be connect ci --provider gitlab|github|jenkins`, локальные git-хуки —
+`arch-be connect git-hooks` (`docs/CONNECT.md`):
+
+```bash
+arch-be gate --format gitlab-codequality > codequality-spine.json
+# .gitlab-ci.yml: artifacts:reports:codequality — нарушения видны
+# в интерфейсе merge request без ручной настройки
+```
+
 ## 4. Детерминированные команды без LLM
 
 Работают без ключей и сети (сборка + конфиг; archify — ещё Node ≥18);
@@ -196,7 +209,10 @@ CI-шаг (условный): `arch-be control check . --json > fitness-report.j
 
 | Команда | Что делает | stdout | Exit-контракт | Гайд |
 |---|---|---|---|---|
-| `arch-be control check <REPO> [--constraints F] [--json]` | Fitness-контроль репозитория по `CONSTRAINTS.yaml` | сводка «Правил/нарушений, Итог PASS/FAIL»; с `--json` — одна строка JSON `FitnessReport` | 0 — PASS, 1 — FAIL (JSON печатается и при FAIL) или ошибка исполнения | `docs/control.md` |
+| `arch-be gate [--repo R] [--route auto\|fast\|standard\|critical] [--base REF] [--constraints F] [--format FMT]` | Единый архитектурный гейт: fitness + delta guard + rule_weakened (анти-ослабление правил) + spine-линт + трассировка; на маршрутах Standard/Critical — ещё nfr и evidence | по каждой составляющей PASS/FAIL/SKIP + причина, строка маршрута, «Итог: PASS/FAIL»; с `--format sarif\|junit\|gitlab-codequality\|markdown` — машинный отчёт для CI (нативный формат площадки, артефакт) | 0 — все PASS/SKIP; 1 — провал любой составляющей (механически, без разбора строк; машинный отчёт при FAIL печатается полностью) | `docs/control.md` |
+| `arch-be control check <REPO> [--constraints F] [--json] [--format FMT]` | Fitness-контроль репозитория по `CONSTRAINTS.yaml` | сводка «Правил/нарушений, Итог PASS/FAIL»; с `--json` — одна строка JSON `FitnessReport`; с `--format` — SARIF/JUnit/GitLab Code Quality/markdown (несовместим с `--json`) | 0 — PASS, 1 — FAIL (отчёт печатается и при FAIL) или ошибка исполнения | `docs/control.md` |
+| `arch-be trace check <DIR> [--format FMT]` | Позвенная трассируемость кейса (REQ → NFR → AD/ADR → CMP → правило) | markdown-отчёт звеньев; с `--format` — машинные форматы (у находок нет адреса — в Code Quality путь-заглушка `(repository)`) | 0 — нет error-находок; 1 — есть | `docs/control.md` |
+| `arch-be contract-diff <OLD> <NEW> [--format FMT]` (алиас `contract_diff`) | Breaking changes двух версий контракта `OpenAPI` 3.x (CD-001..CD-006) | сводка + строки находок + «Итог: PASS/FAIL»; с `--format` — машинные форматы | 0 — нет breaking; 1 — есть breaking (error) или ошибка разбора | `docs/control.md` |
 | `arch-be archify validate\|deliver\|compare … [--json]` | Приёмка диаграмм JSON IR → HTML/SVG (9 checks + composition), атомарная доставка с SHA-256 receipt | сводка receipt; с `--json` — pretty JSON, `schemaVersion: 1` | 0 — `ok:true`; 1 — провал валидации/ошибка использования/таймаут (исходный код CLI в stderr) | `docs/archify.md` |
 | `arch-be mermaid <FILE\|->` | Черновой Unicode/ASCII-рендер mermaid (читается из stdin при `-`) | ASCII-арт диаграммы | 0 — рендер; 1 — файл не читается / ошибка разбора (`Error: mermaid: строка N: …`) | ADR-009 (`docs/adr/`) |
 | `arch-be kb <QUERY> [--limit N]` | Поиск по локальной базе знаний (`[knowledge].dirs`) | выжимки с `файл:строка` и score; нет совпадений — `Ничего не найдено.` | 0 — поиск выполнен (в т.ч. без совпадений, живой прогон); 1 — ошибка конфигурации kb | `docs/web_kb.md` |

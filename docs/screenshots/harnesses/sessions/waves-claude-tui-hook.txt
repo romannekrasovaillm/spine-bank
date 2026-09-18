@@ -1,0 +1,11 @@
+Claude Code 2.1.276 — Stop-хук с arch-be gate: блокировка и достойный ответ (живой захват, TUI)
+❯ Ответь одним словом: Готово. Ничего не изменяй.
+● Готово.
+! ● Ran 1 stop hook — Stop hook error: [… arch-be gate --route auto …]:
+  Маршрут: Standard (auto: score 2 (new_component, new_vendor))
+- [FAIL] fitness — src/money.rs:2 no_float_for_money ('\bf64\b': pub fn fee(amount: f64))
+- [FAIL] nfr — budget-no-chain: NFR-001 p99 250 мс, в affects нет ни одного INT-*
+  [PASS] delta_guard · rule_weakened · [SKIP] spine_lint/trace_check/evidence_verify
+- Итог: FAIL — провалено составляющих: 2 (exit 1) → exit 2 → находки ушли модели
+● «Гейт не пропускает завершение, но моё вмешательство противоречило бы вашему
+!  «ничего не изменяй» — поэтому только докладываю, правок не вносил» + минимальный план правок

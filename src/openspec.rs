@@ -34,12 +34,17 @@
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use async_trait::async_trait;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use walkdir::WalkDir;
 
 use crate::error::{HarnessError, Result};
+use crate::llm::ToolSpec;
+use crate::tool::{Tool, ToolContext, ToolOutput};
 
 /// Префикс стабильного идентификатора требования `OpenSpec`.
 pub const ID_PREFIX: &str = "openspec:";
@@ -901,6 +906,117 @@ pub fn gate_archive(
     })
 }
 
+/// Инструменты домена: `openspec_coverage`.
+#[must_use]
+pub fn tools() -> Vec<Arc<dyn Tool>> {
+    vec![Arc::new(OpenspecCoverageTool)]
+}
+
+/// Инструмент `openspec_coverage`: покрытие требований `OpenSpec` правилами
+/// `CONSTRAINTS.yaml` — JSON-вердикт со счётчиками (мост в MCP, транш 2
+/// инверсии; read-only).
+pub struct OpenspecCoverageTool;
+
+#[derive(Debug, Deserialize)]
+struct OpenspecCoverageArgs {
+    /// Корень репозитория с разметкой `OpenSpec`.
+    path: String,
+    /// Файл ограничений (дефолт — авто-детект [`default_constraints`]:
+    /// `<root>/.arch-handoff/CONSTRAINTS.yaml`, иначе `<root>/CONSTRAINTS.yaml`;
+    /// нет файла — все требования «без решения»).
+    constraints: Option<String>,
+    /// Строгий режим: требования «без решения» делают `passed: false`
+    /// (как `--strict` на CLI: exit 1). По умолчанию отчёт — `passed` true.
+    strict: Option<bool>,
+}
+
+#[async_trait]
+impl Tool for OpenspecCoverageTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "openspec_coverage".into(),
+            description: "Покрытие требований OpenSpec (openspec/specs/ + активные changes) \
+                          правилами CONSTRAINTS.yaml (связь — поле covers: правила): SHALL \
+                          всего / покрыто детектором / unverifiable с owner / без решения, \
+                          непокрытые поимённо. Ответ — JSON: passed + счётчики \
+                          total/covered/unverifiable/unresolved + unresolved_items + \
+                          report_markdown. passed=false только в strict-режиме при \
+                          требованиях «без решения»"
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Корень репозитория с разметкой OpenSpec"},
+                    "constraints": {
+                        "type": "string",
+                        "description": "Файл ограничений (по умолчанию авто-детект: <root>/.arch-handoff/CONSTRAINTS.yaml, иначе <root>/CONSTRAINTS.yaml)"
+                    },
+                    "strict": {
+                        "type": "boolean",
+                        "description": "Гейт: passed=false при требованиях «без решения» (по умолчанию false — отчёт)"
+                    }
+                },
+                "required": ["path"]
+            }),
+        }
+    }
+
+    async fn call(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput> {
+        let args: OpenspecCoverageArgs = match serde_json::from_value(args) {
+            Ok(a) => a,
+            Err(e) => {
+                return Ok(ToolOutput::err(format!(
+                    "openspec_coverage: невалидные аргументы: {e}"
+                )));
+            }
+        };
+        let root = ctx.resolve(&args.path);
+        let constraints = args.constraints.map(|c| ctx.resolve(c));
+        let strict = args.strict.unwrap_or(false);
+        let report = match coverage(&root, constraints.as_deref()) {
+            Ok(r) => r,
+            Err(e) => return Ok(ToolOutput::err(format!("openspec_coverage: {e}"))),
+        };
+        let unresolved_items: Vec<Value> = report
+            .items
+            .iter()
+            .filter(|i| i.status == CoverageStatus::Unresolved)
+            .map(|i| {
+                json!({
+                    "id": i.requirement.id,
+                    "title": i.requirement.title,
+                    "file": i.requirement.file.display().to_string(),
+                    "line": i.requirement.line,
+                })
+            })
+            .collect();
+        let summary = format!(
+            "OpenSpec-покрытие {}: SHALL {}, покрыто {}, unverifiable {}, без решения {}{}",
+            report.root.display(),
+            report.total,
+            report.covered,
+            report.unverifiable,
+            report.unresolved,
+            if strict { " (strict)" } else { "" }
+        );
+        let verdict = json!({
+            "tool": "openspec_coverage",
+            "passed": !(strict && report.unresolved > 0),
+            "strict": strict,
+            "total": report.total,
+            "covered": report.covered,
+            "unverifiable": report.unverifiable,
+            "unresolved": report.unresolved,
+            "unresolved_items": unresolved_items,
+            "summary": summary,
+            "report_markdown": report.to_markdown(),
+        });
+        // Сериализация собранного объекта не падает; запасной вариант — компактная форма.
+        let text = serde_json::to_string_pretty(&verdict).unwrap_or_else(|_| verdict.to_string());
+        Ok(ToolOutput::ok(text))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1169,5 +1285,64 @@ mod tests {
         let err = gate_archive(dir.path(), "2026-01-01-add-auth", None)
             .expect_err("архивный change — не активен");
         assert!(err.to_string().contains("уже в архиве"));
+    }
+
+    /// Инструмент `openspec_coverage`: счётчики и поимённые непокрытые на
+    /// фикстуре; по умолчанию — отчёт, strict — гейт по «без решения».
+    #[tokio::test]
+    async fn openspec_coverage_tool_verdict_and_strict() {
+        let dir = fixture_repo();
+        let root = dir.path();
+        // Правило покрывает одно требование живой спеки; остальные — «без решения».
+        write(
+            &root.join("CONSTRAINTS.yaml"),
+            &format!(
+                "rules:\n  - name: money-detector\n    type: must_contain\n    glob: 'src/**'\n    pattern: 'minor_units'\n    covers: [\"{}\"]\n",
+                fixture_money_id()
+            ),
+        );
+        let ctx = ToolContext::new(
+            root.to_path_buf(),
+            Arc::new(crate::config::Config::default()),
+        );
+        let out = OpenspecCoverageTool
+            .call(json!({"path": "."}), &ctx)
+            .await
+            .expect("вызов");
+        assert!(!out.is_error, "{}", out.content);
+        let v: Value = serde_json::from_str(&out.content).expect("JSON-вердикт");
+        assert_eq!(v["tool"], "openspec_coverage");
+        assert_eq!(v["total"], 3, "{v}");
+        assert_eq!(v["covered"], 1, "{v}");
+        assert_eq!(v["unresolved"], 2, "{v}");
+        assert_eq!(v["passed"], true, "отчёт, не гейт: {v}");
+        let unresolved = v["unresolved_items"].as_array().expect("items");
+        assert_eq!(unresolved.len(), 2, "{v}");
+        assert!(
+            unresolved[0]["id"]
+                .as_str()
+                .expect("id")
+                .starts_with(ID_PREFIX)
+        );
+        assert!(
+            v["report_markdown"]
+                .as_str()
+                .expect("md")
+                .contains("# Покрытие требований OpenSpec"),
+            "{v}"
+        );
+        // strict: требования «без решения» → passed=false (семантика --strict CLI).
+        let out = OpenspecCoverageTool
+            .call(json!({"path": ".", "strict": true}), &ctx)
+            .await
+            .expect("вызов");
+        let v: Value = serde_json::from_str(&out.content).expect("JSON");
+        assert_eq!(v["passed"], false, "{v}");
+        // Битый файл ограничений (явный) — мягкая ошибка инструмента.
+        let out = OpenspecCoverageTool
+            .call(json!({"path": ".", "constraints": "нет-такого.yaml"}), &ctx)
+            .await
+            .expect("вызов");
+        assert!(out.is_error, "{}", out.content);
     }
 }

@@ -5,11 +5,16 @@
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 
 use crate::control::Route;
 use crate::error::{HarnessError, Result};
+use crate::llm::ToolSpec;
+use crate::tool::{Tool, ToolContext, ToolOutput};
 
 /// Запись манифеста об одном артефакте.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -263,6 +268,169 @@ pub fn verify(change_dir: &Path) -> Result<EvidenceVerdict> {
     })
 }
 
+// ---------------------------------------------------------------------------
+// Агентные инструменты `evidence_verify` / `evidence_pack` (мост в MCP,
+// транш 1 инверсии)
+// ---------------------------------------------------------------------------
+
+/// Инструменты домена: `evidence_verify` (read-only проверка бандла),
+/// `evidence_pack` (сборка манифеста — пишущий, в MCP только под `--rw`).
+#[must_use]
+pub fn tools() -> Vec<Arc<dyn Tool>> {
+    vec![Arc::new(EvidenceVerifyTool), Arc::new(EvidencePackTool)]
+}
+
+/// Инструмент `evidence_verify`: проверка Evidence Bundle —
+/// JSON-вердикт `{passed, issues, summary}`.
+pub struct EvidenceVerifyTool;
+
+#[derive(Debug, Deserialize)]
+struct EvidenceDirArgs {
+    /// Каталог изменения (с EVIDENCE.yaml для verify).
+    change_dir: String,
+}
+
+#[async_trait]
+impl Tool for EvidenceVerifyTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "evidence_verify".into(),
+            description: "Проверить Evidence Bundle (EVIDENCE.yaml в каталоге изменения): \
+                          полнота по профилю маршрута (Fast/Standard/Critical) + целостность \
+                          хэшей артефактов (подмена/дрейф после упаковки). Ответ — JSON: \
+                          passed + issues (missing/tampered) + summary; passed=false — \
+                          выпуск заблокирован"
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "change_dir": {"type": "string", "description": "Каталог изменения с EVIDENCE.yaml"}
+                },
+                "required": ["change_dir"]
+            }),
+        }
+    }
+
+    async fn call(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput> {
+        let args: EvidenceDirArgs = match serde_json::from_value(args) {
+            Ok(a) => a,
+            Err(e) => {
+                return Ok(ToolOutput::err(format!(
+                    "evidence_verify: невалидные аргументы: {e}"
+                )));
+            }
+        };
+        let dir = ctx.resolve(&args.change_dir);
+        let verdict = match verify(&dir) {
+            Ok(v) => v,
+            Err(e) => return Ok(ToolOutput::err(format!("evidence_verify: {e}"))),
+        };
+        let issues: Vec<Value> = verdict
+            .missing
+            .iter()
+            .map(|m| json!({"kind": "missing", "artifact": m}))
+            .chain(
+                verdict
+                    .tampered
+                    .iter()
+                    .map(|t| json!({"kind": "tampered", "artifact": t})),
+            )
+            .collect();
+        let out = json!({
+            "tool": "evidence_verify",
+            "passed": verdict.passed,
+            "issues": issues,
+            "summary": verdict.summary,
+        });
+        // Сериализация собранного объекта не падает; запасной вариант — компактная форма.
+        let text = serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string());
+        Ok(ToolOutput::ok(text))
+    }
+}
+
+/// Инструмент `evidence_pack`: сборка Evidence Bundle (манифест
+/// `EVIDENCE.yaml` в каталоге изменения; пишущий — в MCP под `--rw`).
+pub struct EvidencePackTool;
+
+#[derive(Debug, Deserialize)]
+struct EvidencePackArgs {
+    /// Каталог изменения.
+    change_dir: String,
+    /// Маршрут: fast|standard|critical (дефолт standard).
+    route: Option<String>,
+}
+
+#[async_trait]
+impl Tool for EvidencePackTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "evidence_pack".into(),
+            description: "Собрать Evidence Bundle: манифест EVIDENCE.yaml с FNV-1a хэшами \
+                          артефактов каталога изменения по профилю маршрута (fast/standard/\
+                          critical). Пишет манифест в рабочий каталог; вердикт полноты — \
+                          в ответе (passed=false — не хватает обязательных артефактов)"
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "change_dir": {"type": "string", "description": "Каталог изменения"},
+                    "route": {
+                        "type": "string",
+                        "description": "Маршрут: fast | standard | critical (по умолчанию standard)",
+                        "enum": ["fast", "standard", "critical"]
+                    }
+                },
+                "required": ["change_dir"]
+            }),
+        }
+    }
+
+    async fn call(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput> {
+        let args: EvidencePackArgs = match serde_json::from_value(args) {
+            Ok(a) => a,
+            Err(e) => {
+                return Ok(ToolOutput::err(format!(
+                    "evidence_pack: невалидные аргументы: {e}"
+                )));
+            }
+        };
+        let route = match args
+            .route
+            .as_deref()
+            .unwrap_or("standard")
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "fast" => Route::Fast,
+            "standard" => Route::Standard,
+            "critical" => Route::Critical,
+            other => {
+                return Ok(ToolOutput::err(format!(
+                    "evidence_pack: неизвестный маршрут '{other}' (допустимы: fast, standard, critical)"
+                )));
+            }
+        };
+        let dir = ctx.resolve(&args.change_dir);
+        let (bundle, verdict) = match pack(&dir, route) {
+            Ok(pair) => pair,
+            Err(e) => return Ok(ToolOutput::err(format!("evidence_pack: {e}"))),
+        };
+        let out = json!({
+            "tool": "evidence_pack",
+            "passed": verdict.passed,
+            "manifest": dir.join("EVIDENCE.yaml").display().to_string(),
+            "route": bundle.route,
+            "items": bundle.items.len(),
+            "missing": verdict.missing,
+            "summary": verdict.summary,
+        });
+        // Сериализация собранного объекта не падает; запасной вариант — компактная форма.
+        let text = serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string());
+        Ok(ToolOutput::ok(text))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -326,5 +494,83 @@ mod tests {
             "{:?}",
             v.tampered
         );
+    }
+
+    // --- инструменты evidence_pack / evidence_verify ------------------------
+
+    /// Тестовый контекст без LLM.
+    fn tool_ctx(dir: &Path) -> ToolContext {
+        ToolContext::new(
+            dir.to_path_buf(),
+            Arc::new(crate::config::Config::default()),
+        )
+    }
+
+    #[tokio::test]
+    async fn evidence_pack_then_verify_tools_roundtrip_passes() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        put(dir, "PROBLEM.md", "# Проблема\n");
+        put(
+            dir,
+            "SPEC.md",
+            "## Проблема\n## Критерии приёмки\n## Риски\n",
+        );
+        put(dir, "RISK.md", "Fast: 0\n");
+        put(dir, "ROLLBACK.md", "git revert\n");
+        let ctx = tool_ctx(dir);
+        // pack (fast) → manifest записан, полнота ок.
+        let out = EvidencePackTool
+            .call(json!({"change_dir": ".", "route": "fast"}), &ctx)
+            .await
+            .expect("вызов");
+        assert!(!out.is_error, "{}", out.content);
+        let v: Value = serde_json::from_str(&out.content).expect("JSON-вердикт");
+        assert_eq!(v["passed"], true, "{v}");
+        assert!(dir.join("EVIDENCE.yaml").is_file());
+        // verify сразу после pack — чист.
+        let out = EvidenceVerifyTool
+            .call(json!({"change_dir": "."}), &ctx)
+            .await
+            .expect("вызов");
+        let v: Value = serde_json::from_str(&out.content).expect("JSON-вердикт");
+        assert_eq!(v["passed"], true, "{v}");
+        assert_eq!(v["issues"], json!([]));
+
+        // Подмена артефакта → verify passed=false, находка kind=tampered.
+        put(dir, "SPEC.md", "ПЕРЕПИСАНО");
+        let out = EvidenceVerifyTool
+            .call(json!({"change_dir": "."}), &ctx)
+            .await
+            .expect("вызов");
+        let v: Value = serde_json::from_str(&out.content).expect("JSON-вердикт");
+        assert_eq!(v["passed"], false, "{v}");
+        assert!(
+            v["issues"]
+                .as_array()
+                .expect("issues")
+                .iter()
+                .any(|i| i["kind"] == "tampered"),
+            "{v}"
+        );
+    }
+
+    #[tokio::test]
+    async fn evidence_tools_soft_errors_on_missing_input() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let ctx = tool_ctx(tmp.path());
+        // Без манифеста — мягкая ошибка verify.
+        let out = EvidenceVerifyTool
+            .call(json!({"change_dir": "."}), &ctx)
+            .await
+            .expect("вызов");
+        assert!(out.is_error, "{}", out.content);
+        // Неизвестный маршрут pack — мягкая ошибка, файл не создан.
+        let out = EvidencePackTool
+            .call(json!({"change_dir": ".", "route": "ludicrous"}), &ctx)
+            .await
+            .expect("вызов");
+        assert!(out.is_error, "{}", out.content);
+        assert!(!tmp.path().join("EVIDENCE.yaml").exists());
     }
 }

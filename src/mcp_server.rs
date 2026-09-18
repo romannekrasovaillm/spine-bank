@@ -7,16 +7,26 @@
 //!   (как у клиента [`crate::mcp`], без `Content-Length`-фрейминга);
 //!   stdout — только протокол, логи — stderr (tracing в `main`);
 //! - методы: `initialize` (echo известной версии протокола, иначе наша),
-//!   `tools/list`, `tools/call`, `ping`; `notifications/*` — игнор без
-//!   ответа; неизвестный метод → `-32601`, битый JSON → `-32700`,
-//!   отсутствует `method` → `-32600`, битые аргументы/инструмент → `-32602`;
+//!   `tools/list`, `tools/call`, `prompts/list`, `prompts/get`, `ping`;
+//!   `notifications/*` — игнор без ответа; неизвестный метод → `-32601`,
+//!   битый JSON → `-32700`, отсутствует `method` → `-32600`, битые
+//!   аргументы/инструмент/промпт → `-32602`; `resources/*` не поддержаны
+//!   (`-32601`);
+//! - промпты (capability `prompts`): семь плейбуков встроенного плагина
+//!   spine-workflows как слэш-команды хоста ([`PLAYBOOK_PROMPTS`]) —
+//!   хосту не нужно знать формулу «действуй по скиллу …» и то, куда он
+//!   кладёт файлы скиллов: `prompts/get` возвращает user-сообщение с
+//!   инструкцией и полным текстом SKILL.md. Текст — пользовательская
+//!   копия из `plugins.dirs`, если есть (логика `skill_load`), иначе
+//!   встроенный ассет: работает из коробки без `arch-be init`;
 //! - режимы запуска ([`ServeMode`]): дефолт — строго read-only; флаг
 //!   `--rw` (`arch-be mcp serve --rw`) дополнительно открывает белый список
 //!   аддитивных записей ([`BRIDGE_READ_WRITE`]: `handoff_create`, `adr_new`,
 //!   `agentsmd_generate`, `archify_deliver/show/compare`, `reverse_survey`,
-//!   `skill_distill`);
+//!   `skill_distill`, `evidence_pack`, `delta_propose`);
 //! - инструменты — два слоя. РУЧНЫЕ (оттестированная поверхность ADR-008):
 //!   контрольные `spine_lint`, `fitness_check`, `significance_score`,
+//!   `significance_from_diff` (маршрут из git-диффа, S-1 anti-bypass),
 //!   `trace_check`, `model_query`, `rubric_run` и чтение знаний (T4,
 //!   ADR-015): `kb_search`, `skill_search`, `skill_load`, `mermaid_render`;
 //!   плюс split-judge без LLM у сервера: `rubric_prompt` (промпты судьи +
@@ -26,11 +36,22 @@
 //!   под `--rw`), не пересекающиеся с ручными, маршрутизируются в
 //!   [`crate::tools::full_registry`] (`dispatch` — с политикой R-уровней;
 //!   контекст БЕЗ LLM); спеки генерируются из `Tool::spec()`, annotations —
-//!   из членства в списке + [`crate::policy::classify_tool`]. В core-сборке
-//!   (без фичи `harness`) домены `harness`/`distill`/`subagent`/`ralph`/
-//!   `worktree`/`web` в реестре отсутствуют — мост их имена из белых списков
-//!   молча пропускает (спеки строятся от реестра), `handoff_create` и
-//!   `skill_distill` там недоступны;
+//!   из членства в списке + [`crate::policy::classify_tool`]. Транш 1
+//!   инверсии в мосте: `nfr_check`, `model_validate`, `delta_guard`,
+//!   `evidence_verify` (read-only верификаторы, JSON-вердикт
+//!   passed/issues/summary в тексте вывода) и под `--rw` — `evidence_pack`,
+//!   `delta_propose`. Транш 2: `landscape_report`, `adr_registry`,
+//!   `rules_report`, `openspec_coverage`, `model_graph` (read-only отчёты:
+//!   счётчики + markdown/mermaid в JSON; `passed=false` только у strict-гейтов
+//!   `adr_registry`/`openspec_coverage`). Транш 3: `architect_review`,
+//!   `change_impact` (составные инструменты — единое ревью репозитория и
+//!   радиус изменения по графу модели; `src/review.rs`). В core-сборке (без
+//!   фичи `harness`) домены
+//!   `harness`/`distill`/`subagent`/`ralph`/`worktree`/`web` в реестре
+//!   отсутствуют — мост их имена из белых списков молча пропускает (спеки
+//!   строятся от реестра), `skill_distill` там недоступен;
+//!   `handoff_create` — доступен и в core (генерация пакета — чисто
+//!   файловая, модуль `crate::handoff`, волна 2 п.10);
 //! - НИКОГДА не отдаются (даже под `--rw`) — [`BRIDGE_NEVER`]: write/exec/
 //!   веб/субагенты (`bash`, `read_file`/`write_file`/`edit_file`, `glob`,
 //!   `grep`, `propose_options`, `screenshot*`, `harness_run`, `subagent_*`,
@@ -48,6 +69,11 @@
 //! - доменный сбой выполнения (файл не читается, сущность не найдена) —
 //!   `result` с `isError: true`, не protocol error; сервер не падает ни на
 //!   каком вводе, цикл живёт до EOF stdin;
+//! - каждый вызов `tools/call` журналируется в проектный append-only журнал
+//!   `<cwd сервера>/.arch-handoff/mcp-calls.jsonl` (модуль
+//!   [`crate::mcp_journal`]: инструмент, вердикт, длительность, имена правил
+//!   error-находок — БЕЗ содержимого аргументов; fail-soft, ротация по
+//!   размеру) — источник outcome-данных для `arch-be digest`;
 //! - `rubric_run` требует LLM-ключ из конфига: предпроверка доступности
 //!   ключа (env задана / файл ключа существует; содержимое не печатается)
 //!   → без ключа понятная JSON-RPC ошибка `-32603`; для моделей с
@@ -56,6 +82,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -102,32 +129,130 @@ const BRIDGE_OUTPUT_MAX_CHARS: usize = 16_000;
 /// `[judge]` — единицы; лимит отсекает ошибочные гигантские пачки).
 const MAX_VERIFY_ANSWERS: usize = 32;
 
+/// Потолок символов значения аргумента промпта, эхом вставляемого в текст
+/// сообщения `prompts/get`: аргумент — короткий путь/имя/предмет, а не
+/// документ (длинный ввод хоста не должен раздувать сообщение-команду).
+const MAX_PROMPT_ARG_VALUE_CHARS: usize = 500;
+
+/// Статическая карточка плейбука-промпта (MCP prompts): имя (= имя скилла
+/// плагина spine-workflows), встроенный текст SKILL.md (запасной источник
+/// на машине без `arch-be init`) и объявление аргументов для `prompts/list`.
+struct PlaybookPrompt {
+    /// Имя промпта (= имя скилла-плейбука).
+    name: &'static str,
+    /// Встроенный полный текст SKILL.md (embedded-ассет [`crate::assets`]).
+    embedded: &'static str,
+    /// Аргументы промпта: (имя, описание). Объявляются, только если сценарий
+    /// плейбука параметризован (путь/файл/предмет); все необязательные —
+    /// слэш-команда обязана работать и без аргументов (цель уточняется из
+    /// контекста диалога).
+    arguments: &'static [(&'static str, &'static str)],
+}
+
+/// Плейбуки плагина spine-workflows как MCP-промпты (слэш-команды хоста,
+/// пункт 11 бэклога волны 3). Порядок фиксирован: стабильный `prompts/list`,
+/// та же последовательность в `docs/mcp.md`.
+const PLAYBOOK_PROMPTS: &[PlaybookPrompt] = &[
+    PlaybookPrompt {
+        name: "spine-quickstart",
+        embedded: crate::assets::PLUGIN_SPINE_WORKFLOWS_SKILLS_SPINE_QUICKSTART_SKILL_MD,
+        arguments: &[],
+    },
+    PlaybookPrompt {
+        name: "spine-content-bootstrap",
+        embedded: crate::assets::PLUGIN_SPINE_WORKFLOWS_SKILLS_SPINE_CONTENT_BOOTSTRAP_SKILL_MD,
+        arguments: &[],
+    },
+    PlaybookPrompt {
+        name: "spine-architect-review",
+        embedded: crate::assets::PLUGIN_SPINE_WORKFLOWS_SKILLS_SPINE_ARCHITECT_REVIEW_SKILL_MD,
+        arguments: &[],
+    },
+    PlaybookPrompt {
+        name: "spine-adr-judge",
+        embedded: crate::assets::PLUGIN_SPINE_WORKFLOWS_SKILLS_SPINE_ADR_JUDGE_SKILL_MD,
+        arguments: &[
+            (
+                "target",
+                "Опц.: путь к документу для оценки (ADR, дизайн, спека) — \
+                 подставляется в `target` вызовов rubric_prompt/rubric_verify",
+            ),
+            (
+                "rubric",
+                "Опц.: имя рубрики (по умолчанию выбирается по `rubric_list`, \
+                 обычно `adr_quality`)",
+            ),
+        ],
+    },
+    PlaybookPrompt {
+        name: "spine-contracts-gate",
+        embedded: crate::assets::PLUGIN_SPINE_WORKFLOWS_SKILLS_SPINE_CONTRACTS_GATE_SKILL_MD,
+        arguments: &[
+            (
+                "path",
+                "Опц.: путь к файлу контракта (OpenAPI/AsyncAPI) для линта",
+            ),
+            ("old", "Опц.: путь к старой версии контракта для diff"),
+            ("new", "Опц.: путь к новой версии контракта для diff"),
+        ],
+    },
+    PlaybookPrompt {
+        name: "spine-archify-viz",
+        embedded: crate::assets::PLUGIN_SPINE_WORKFLOWS_SKILLS_SPINE_ARCHIFY_VIZ_SKILL_MD,
+        arguments: &[(
+            "subject",
+            "Опц.: что визуализируем (система/поток/контракты) и имя диаграммы",
+        )],
+    },
+    PlaybookPrompt {
+        name: "spine-fitness-gate",
+        embedded: crate::assets::PLUGIN_SPINE_WORKFLOWS_SKILLS_SPINE_FITNESS_GATE_SKILL_MD,
+        arguments: &[],
+    },
+];
+
 /// Белый список read-only моста в реестр инструментов ([`crate::tools::full_registry`]):
 /// детерминированный контур контроля и чтения, не покрытый ручными
 /// инструментами. Все перечисленные — без записи в рабочий каталог клиента
 /// и без LLM. Доступны в обоих режимах [`ServeMode`].
 const BRIDGE_READ_ONLY: &[&str] = &[
+    "adr_registry",
     "agentsmd_lint",
     "archify_validate",
+    "architect_review",
     "asyncapi_lint",
+    "change_impact",
     "contract_diff",
+    "delta_guard",
+    "evidence_verify",
     "fleet_audit",
+    "landscape_report",
+    "model_drift",
+    "model_graph",
+    "model_validate",
+    "nfr_check",
     "openapi_lint",
+    "openspec_coverage",
     "plugin_list",
     "rubric_list",
+    "rules_report",
 ];
 
 /// Дополнительный белый список режима `--rw` ([`ServeMode::ReadWrite`]):
 /// аддитивные записи в рабочий каталог клиента (handoff-пакет, новый ADR,
 /// AGENTS.md, HTML-артефакты Archify, карта обследования, дистиллированный
-/// скилл). `archify_*`/`skill_distill`/`reverse_survey` классифицируются
-/// политикой как `ReadOnly`, но пишут файлы — поэтому только под `--rw`.
+/// скилл, evidence-манифест, скелет дельты). `archify_*`/`skill_distill`/
+/// `reverse_survey` классифицируются политикой как `ReadOnly`, но пишут
+/// файлы — поэтому только под `--rw` (как и `evidence_pack`/`delta_propose`,
+/// для которых политика честно даёт `Mutating`).
 const BRIDGE_READ_WRITE: &[&str] = &[
     "adr_new",
     "agentsmd_generate",
     "archify_compare",
     "archify_deliver",
     "archify_show",
+    "delta_propose",
+    "evidence_pack",
     "handoff_create",
     "reverse_survey",
     "skill_distill",
@@ -165,9 +290,10 @@ const BRIDGE_NEVER: &[&str] = &[
 /// `harness` (кодовые харнессы, субагенты, ralph, worktree, веб, distill).
 /// В core-сборке их нет в реестре — мост их молча пропускает (спеки
 /// строятся от реестра). Используется тестами согласованности списков.
+/// (`handoff_create` здесь намеренно НЕТ: с волны 2 (п.10) генерация
+/// пакета — core-модуль `crate::handoff`, инструмент собирается везде.)
 #[cfg(test)]
 const HARNESS_ONLY_TOOLS: &[&str] = &[
-    "handoff_create",
     "skill_distill",
     "harness_run",
     "ralph_run",
@@ -186,6 +312,7 @@ const MANUAL_TOOLS: &[&str] = &[
     "spine_lint",
     "fitness_check",
     "significance_score",
+    "significance_from_diff",
     "trace_check",
     "model_query",
     "rubric_run",
@@ -313,6 +440,27 @@ where
     }
 }
 
+/// Вердикт журнала по структурированному ответу ручного инструмента:
+/// `pass`/`fail` — по `passed`, `ok` — успех без `passed`. У `fail`
+/// извлекаются имена правил error-находок (источник — verdict, не аргументы).
+fn verdict_from_structured(v: &Value) -> (&'static str, Vec<String>) {
+    match v.get("passed").and_then(Value::as_bool) {
+        Some(true) => ("pass", Vec::new()),
+        Some(false) => ("fail", crate::mcp_journal::failed_rule_names(v)),
+        None => ("ok", Vec::new()),
+    }
+}
+
+/// Вердикт журнала по текстовому выводу мостового инструмента: верификаторы
+/// реестра несут в text JSON `{passed, issues, summary}` — разбираем его;
+/// не-JSON вывод (markdown-отчёты) журналируется как `ok` без разбора.
+fn verdict_from_bridge_text(text: &str) -> (&'static str, Vec<String>) {
+    match serde_json::from_str::<Value>(text) {
+        Ok(v) => verdict_from_structured(&v),
+        Err(_) => ("ok", Vec::new()),
+    }
+}
+
 impl McpServe {
     /// Сервер поверх конфигурации харнесса в режиме read-only (дефолт).
     #[must_use]
@@ -404,7 +552,10 @@ impl McpServe {
                     id,
                     &json!({
                         "protocolVersion": version,
-                        "capabilities": {"tools": {"listChanged": false}},
+                        "capabilities": {
+                            "tools": {"listChanged": false},
+                            "prompts": {"listChanged": false},
+                        },
                         "serverInfo": {
                             "name": "arch-harness",
                             "version": env!("CARGO_PKG_VERSION"),
@@ -424,18 +575,31 @@ impl McpServe {
                                          Детерминированный контур реестра (openapi_lint, \
                                          asyncapi_lint, contract_diff, fleet_audit, \
                                          agentsmd_lint, archify_validate, rubric_list, \
-                                         plugin_list) доступен напрямую; аргумент `cwd` — \
+                                         plugin_list, nfr_check, model_validate, model_drift, \
+                                         delta_guard, evidence_verify) доступен напрямую; \
+                                         отчёты реестров (landscape_report, adr_registry, \
+                                         rules_report, openspec_coverage, model_graph) — \
+                                         read-only JSON со счётчиками; составные инструменты: \
+                                         architect_review (всё ревью одним вызовом — маршрут, \
+                                         контур контроля, модель, контракты) и change_impact \
+                                         (что заденет изменение и с кем согласовывать); \
+                                         аргумент `cwd` — \
                                          рабочий каталог клиента для относительных путей. \
                                          Чтение знаний (read-only): kb_search — поиск по \
                                          базе знаний архитектора; skill_search/skill_load — \
                                          библиотека скиллов; mermaid_render — диаграмма \
-                                         mermaid (code/path) в ASCII-арт.",
+                                         mermaid (code/path) в ASCII-арт. Плейбуки spine-* \
+                                         (подключение, гейты, разбор, судья рубрик, визуализация) \
+                                         доступны как промпты (prompts/list, prompts/get) — \
+                                         слэш-команды хоста с полным сценарием в сообщении.",
                     }),
                 )
             }
             "ping" => ok_response(id, &json!({})),
             "tools/list" => ok_response(id, &json!({"tools": self.all_tool_specs()})),
             "tools/call" => self.handle_tool_call(id, &params).await,
+            "prompts/list" => self.handle_prompts_list(id).await,
+            "prompts/get" => self.handle_prompts_get(id, &params).await,
             other => error_response(id, METHOD_NOT_FOUND, format!("неизвестный метод '{other}'")),
         }
     }
@@ -457,7 +621,10 @@ impl McpServe {
                 format!("tools/call: 'arguments' должен быть объектом, получено: {args}"),
             );
         }
-        match self.dispatch_tool(name, args).await {
+        let started = std::time::Instant::now();
+        let outcome = self.dispatch_tool(name, args).await;
+        self.journal_call(name, started.elapsed(), &outcome);
+        match outcome {
             Ok(DispatchOutcome::Structured(structured)) => {
                 // Клиент нашего же mcp.rs читает только text-части — дублируем
                 // verdict pretty-JSON; structuredContent — для MCP-клиентов.
@@ -491,6 +658,150 @@ impl McpServe {
         }
     }
 
+    /// Журналирует вызов в проектный журнал `.arch-handoff/mcp-calls.jsonl`
+    /// (модуль [`crate::mcp_journal`]): инструмент, вердикт, длительность,
+    /// имена правил из error-находок — БЕЗ содержимого аргументов. Здесь
+    /// проходят и ручные, и мостовые вызовы (единая точка `tools/call`).
+    /// Fail-soft: журнал — аудит, а не часть вызова; его сбой (каталог не
+    /// создать, ФС только на чтение) не должен ломать инструмент.
+    fn journal_call(
+        &self,
+        name: &str,
+        duration: std::time::Duration,
+        outcome: &std::result::Result<DispatchOutcome, CallError>,
+    ) {
+        let (verdict, rules) = match outcome {
+            Ok(DispatchOutcome::Structured(v)) => verdict_from_structured(v),
+            Ok(DispatchOutcome::Text { text, .. }) => verdict_from_bridge_text(text),
+            Err(CallError::Execution(_)) => ("error", Vec::new()),
+            Err(CallError::Protocol { .. }) => ("invalid", Vec::new()),
+        };
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        // Ошибка записи журнала осознанно глушится (fail-soft по контракту
+        // mcp_journal): аудит не должен ломать вызовы инструментов.
+        let _ = crate::mcp_journal::append(
+            &cwd,
+            &crate::mcp_journal::JournalEntry::new(name, verdict, duration, rules),
+        );
+    }
+
+    /// `prompts/list`: семь плейбуков [`PLAYBOOK_PROMPTS`] с описаниями из
+    /// frontmatter и объявлениями аргументов. Пагинация не нужна (список
+    /// фиксирован и мал) — `cursor` из params принимается и игнорируется.
+    async fn handle_prompts_list(&self, id: &Value) -> Value {
+        let dirs = self.cfg.plugins.dirs.clone();
+        let listed = blocking("prompts/list", move || -> Result<Value> {
+            let prompts: Vec<Value> = PLAYBOOK_PROMPTS
+                .iter()
+                .map(|pb| {
+                    let (_, description) = resolve_playbook(&dirs, pb);
+                    json!({
+                        "name": pb.name,
+                        "description": description,
+                        "arguments": pb.arguments.iter().map(|(an, ad)| json!({
+                            "name": an,
+                            "description": ad,
+                            "required": false,
+                        })).collect::<Vec<_>>(),
+                    })
+                })
+                .collect();
+            Ok(json!({"prompts": prompts}))
+        })
+        .await;
+        match listed {
+            Ok(result) => ok_response(id, &result),
+            // Доменных сбоев тут нет (fallback встроенный) — только срыв
+            // blocking-задачи: внутренняя ошибка сервера.
+            Err(CallError::Execution(message)) => error_response(id, INTERNAL_ERROR, message),
+            Err(CallError::Protocol { code, message }) => error_response(id, code, message),
+        }
+    }
+
+    /// `prompts/get`: слэш-команда хоста — одно user-сообщение с инструкцией
+    /// «действуй по этому плейбуку», полным текстом SKILL.md и эхом переданных
+    /// (объявленных) аргументов. Неизвестное имя и битые аргументы → `-32602`.
+    async fn handle_prompts_get(&self, id: &Value, params: &Value) -> Value {
+        let Some(name) = params.get("name").and_then(Value::as_str) else {
+            return error_response(
+                id,
+                INVALID_PARAMS,
+                "prompts/get: нет строкового поля 'name'",
+            );
+        };
+        let Some(pb) = PLAYBOOK_PROMPTS.iter().find(|p| p.name == name) else {
+            return error_response(
+                id,
+                INVALID_PARAMS,
+                format!("prompts/get: неизвестный промпт '{name}'; список — prompts/list"),
+            );
+        };
+        let arguments = params
+            .get("arguments")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        let Some(arg_obj) = arguments.as_object() else {
+            return error_response(
+                id,
+                INVALID_PARAMS,
+                format!(
+                    "prompts/get: 'arguments' должен быть объектом «имя → строка», получено: {arguments}"
+                ),
+            );
+        };
+        // Эхом подставляются только объявленные аргументы (незнакомые ключи
+        // хоста игнорируются — форвард-совместимость); значения — строки по
+        // спецификации PromptArgument, иное → -32602.
+        let mut provided: Vec<(&str, String)> = Vec::new();
+        for (an, _) in pb.arguments {
+            if let Some(v) = arg_obj.get(*an) {
+                let Some(s) = v.as_str() else {
+                    return error_response(
+                        id,
+                        INVALID_PARAMS,
+                        format!("prompts/get: аргумент '{an}' должен быть строкой, получено: {v}"),
+                    );
+                };
+                provided.push((*an, s.chars().take(MAX_PROMPT_ARG_VALUE_CHARS).collect()));
+            }
+        }
+        let dirs = self.cfg.plugins.dirs.clone();
+        let built = blocking("prompts/get", move || -> Result<Value> {
+            let (mut body, description) = resolve_playbook(&dirs, pb);
+            if body.chars().count() > SKILL_TEXT_MAX_CHARS {
+                let cut: String = body.chars().take(SKILL_TEXT_MAX_CHARS).collect();
+                body = format!("{cut}\n… [усечено: {SKILL_TEXT_MAX_CHARS} символов]");
+            }
+            let mut text = format!(
+                "Действуй по этому плейбуку — скилл `{}` плагина spine-workflows \
+                 (MCP-сервер Spine): выполняй его шаги по порядку, вызывая \
+                 инструменты этого сервера; вердикты (`passed`, находки) \
+                 докладывай архитектору.\n\n{body}",
+                pb.name
+            );
+            if !provided.is_empty() {
+                text.push_str("\n\nАргументы запуска (подставь в шаги плейбука):");
+                for (an, av) in &provided {
+                    // write! в String не падает — игнор результата безопасен.
+                    let _ = write!(text, "\n- {an} = \"{av}\"");
+                }
+            }
+            Ok(json!({
+                "description": description,
+                "messages": [{
+                    "role": "user",
+                    "content": {"type": "text", "text": text},
+                }],
+            }))
+        })
+        .await;
+        match built {
+            Ok(result) => ok_response(id, &result),
+            Err(CallError::Execution(message)) => error_response(id, INTERNAL_ERROR, message),
+            Err(CallError::Protocol { code, message }) => error_response(id, code, message),
+        }
+    }
+
     /// Маршрутизация вызова по имени инструмента: сначала ручные
     /// реализации (оттестированная поверхность ADR-008), затем мост в
     /// реестр по белым спискам режима, иначе — `-32602`.
@@ -511,6 +822,10 @@ impl McpServe {
             "significance_score" => {
                 Self::tool_significance_score(args).map(DispatchOutcome::Structured)
             }
+            "significance_from_diff" => self
+                .tool_significance_from_diff(args)
+                .await
+                .map(DispatchOutcome::Structured),
             "trace_check" => self
                 .tool_trace_check(args)
                 .await
@@ -674,6 +989,117 @@ impl McpServe {
             "route": s.route,
             "unknown_triggers": unknown,
             "summary": format!("Score: {} → маршрут {}", s.score, s.route),
+        }))
+    }
+
+    /// `significance_from_diff`: маршрут значимости, выведенный из git-диффа
+    /// репозитория (S-1 anti-bypass, ADR-034) в fail-safe объединении с
+    /// заявленными триггерами (`declared`) — детектор только добавляет.
+    /// Информационный инструмент, verdict `passed` не применим.
+    ///
+    /// В ответе: `route`/`score` по объединённому множеству, источник каждого
+    /// триггера (`sources`: declared/diff/declared+diff) и `undeclared` —
+    /// найденные диффом, но не заявленные триггеры с файлами-основаниями
+    /// (anti-bypass сигнал «заявлено vs видно по диффу»).
+    async fn tool_significance_from_diff(
+        &self,
+        args: Value,
+    ) -> std::result::Result<Value, CallError> {
+        #[derive(Deserialize)]
+        struct Args {
+            /// Корень git-репозитория (дефолт — рабочий каталог процесса
+            /// сервера, как у CLI `control score --from-diff`).
+            path: Option<String>,
+            /// Базовая точка диффа (`git diff BASE_REF...HEAD`); без неё —
+            /// рабочее дерево против HEAD (staged + unstaged + untracked).
+            base_ref: Option<String>,
+            /// Заявленные агентом триггеры (карта «триггер → сработал», как у
+            /// `significance_score`); объединяются с найденными по диффу.
+            declared: Option<BTreeMap<String, bool>>,
+        }
+        let args: Args = parse_args(args, "significance_from_diff")?;
+        let path = PathBuf::from(args.path.unwrap_or_else(|| ".".to_string()));
+        let declared = args.declared.unwrap_or_default();
+        // Пороги маршрутов — из конфига сервера ([significance], ADR-034);
+        // невалидные границы — понятный доменный сбой, не protocol error.
+        let (fast_max, standard_max) = self
+            .cfg
+            .significance
+            .limits()
+            .map_err(|e| CallError::execution("significance_from_diff", e))?;
+        let base_ref = args.base_ref;
+        let diff = blocking("significance_from_diff", move || {
+            control::detect_diff_triggers(&path, base_ref.as_deref())
+        })
+        .await?;
+        let scored = control::score_with_sources(&declared, &diff, fast_max, standard_max);
+
+        let sources: serde_json::Map<String, Value> = scored
+            .sources
+            .iter()
+            .map(|(t, s)| (t.clone(), json!(s.label())))
+            .collect();
+        // Основания срабатываний — строки вида «<trigger>: <файл-причина>»;
+        // имена канонических триггеров не содержат «: », разбиение по первому
+        // разделителю однозначно.
+        let undeclared: Vec<Value> = scored
+            .undeclared
+            .iter()
+            .map(|t| {
+                let evidence: Vec<&str> = diff
+                    .evidence
+                    .iter()
+                    .filter_map(|e| e.split_once(": "))
+                    .filter(|(name, _)| name == t)
+                    .map(|(_, reason)| reason)
+                    .collect();
+                json!({"trigger": t, "evidence": evidence})
+            })
+            .collect();
+        let fired: Vec<String> = scored
+            .significance
+            .fired
+            .iter()
+            .map(|f| {
+                scored
+                    .sources
+                    .get(f)
+                    .map_or_else(|| f.clone(), |s| format!("{f} ({})", s.label()))
+            })
+            .collect();
+        let unknown: Vec<&str> = declared
+            .iter()
+            .filter(|(_, fired)| **fired)
+            .map(|(k, _)| k.as_str())
+            .filter(|f| !control::SIGNIFICANCE_TRIGGERS.contains(f))
+            .collect();
+        let undeclared_note = if scored.undeclared.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "; ВНИМАНИЕ — не заявлены, но видны по диффу: {}",
+                scored.undeclared.join(", ")
+            )
+        };
+        let summary = format!(
+            "Score: {} ({}) → маршрут {}{}",
+            scored.significance.score,
+            if fired.is_empty() {
+                "триггеров нет".to_string()
+            } else {
+                fired.join(", ")
+            },
+            scored.significance.route,
+            undeclared_note,
+        );
+        Ok(json!({
+            "route": scored.significance.route,
+            "score": scored.significance.score,
+            "fired": scored.significance.fired,
+            "sources": sources,
+            "undeclared": undeclared,
+            "unknown_triggers": unknown,
+            "summary": summary,
         }))
     }
 
@@ -1155,6 +1581,24 @@ impl McpServe {
     }
 }
 
+/// Текст и описание плейбука-промпта: сначала пользовательская копия из
+/// `plugins.dirs` (та же логика, что у `skill_load`, — правки пользователя
+/// в силе), иначе встроенный ассет (чистая машина без `arch-be init`).
+/// Ошибка чтения пользовательской копии не фатальна — откат на встроенный
+/// текст: сервер не падает из-за одного битого файла.
+fn resolve_playbook(dirs: &[PathBuf], pb: &PlaybookPrompt) -> (String, String) {
+    let plugins = plugin::discover(dirs);
+    if let Some(meta) = plugin::skill_by_name(&plugins, pb.name) {
+        if let Ok(text) = plugin::load_skill(meta) {
+            return (text, meta.description.clone());
+        }
+    }
+    let description = plugin::parse_frontmatter_text(pb.embedded)
+        .map(|(_, d)| d)
+        .unwrap_or_default();
+    (pb.embedded.to_string(), description)
+}
+
 /// Рендерит код диаграммы в JSON-ответ `mermaid_render` (общий для inline-кода
 /// и файла): арт + вид диаграммы. Ошибки парсера — [`HarnessError::Mermaid`]
 /// с номером строки, как у агентного инструмента.
@@ -1567,6 +2011,39 @@ fn tool_specs() -> Vec<Value> {
             },
             "annotations": read_only,
         }),
+        // Anti-bypass floor (S-1, ADR-034): маршрут из механики диффа, а не из
+        // самооценки агента. В конце vec — порядок первых 12 ручных
+        // инструментов зафиксирован тестами.
+        json!({
+            "name": "significance_from_diff",
+            "description": "Маршрут значимости Fast/Standard/Critical, выведенный из git-диффа \
+                            репозитория (anti-bypass S-1, ADR-034): детекторы new_component / \
+                            new_vendor / api_contract_change / irreversible_migration / \
+                            new_datastore объединяются с заявленными 'declared' (детектор \
+                            только добавляет). Ответ: route+score, sources каждого триггера \
+                            (declared/diff/declared+diff), undeclared — найденные диффом, но \
+                            не заявленные триггеры с файлами-основаниями. Информационный \
+                            инструмент (без passed)",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Корень git-репозитория (по умолчанию — рабочий каталог процесса сервера)",
+                    },
+                    "base_ref": {
+                        "type": "string",
+                        "description": "Опц.: база диффа (git diff BASE_REF...HEAD); без неё — рабочее дерево против HEAD (staged + unstaged + untracked)",
+                    },
+                    "declared": {
+                        "type": "object",
+                        "description": "Опц.: заявленные триггеры («триггер → true/false», ключи — из 15 канонических, как у significance_score)",
+                        "additionalProperties": {"type": "boolean"},
+                    },
+                },
+            },
+            "annotations": read_only,
+        }),
     ]
 }
 
@@ -1757,6 +2234,10 @@ mod tests {
             assert_eq!(result["protocolVersion"], want, "версия для {asked}");
             assert_eq!(result["serverInfo"]["name"], "arch-harness");
             assert!(result["capabilities"]["tools"].is_object());
+            assert!(
+                result["capabilities"]["prompts"].is_object(),
+                "capability prompts (плейбуки spine-* как слэш-команды)"
+            );
         }
     }
 
@@ -2186,6 +2667,155 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn prompts_list_has_seven_playbooks_with_frontmatter_descriptions() {
+        // Пустой plugins-каталог → встроенные ассеты (чистая машина).
+        let tmp = tempfile::tempdir().expect("tmp");
+        let server = server_with_dirs(tmp.path(), tmp.path());
+        let responses = run_lines_on(
+            server,
+            &[r#"{"jsonrpc":"2.0","id":1,"method":"prompts/list","params":{}}"#],
+        )
+        .await;
+        let prompts = responses[0]["result"]["prompts"]
+            .as_array()
+            .expect("prompts");
+        let names: Vec<&str> = prompts
+            .iter()
+            .map(|p| p["name"].as_str().expect("name"))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "spine-quickstart",
+                "spine-content-bootstrap",
+                "spine-architect-review",
+                "spine-adr-judge",
+                "spine-contracts-gate",
+                "spine-archify-viz",
+                "spine-fitness-gate",
+            ],
+            "семь плейбуков в зафиксированном порядке"
+        );
+        for p in prompts {
+            assert!(
+                p["description"].as_str().is_some_and(|d| !d.is_empty()),
+                "description из frontmatter: {p}"
+            );
+            assert!(p["arguments"].is_array(), "arguments — массив: {p}");
+        }
+        // Аргументы объявлены только у параметризованных плейбуков.
+        let arg_count = |name: &str| {
+            prompts.iter().find(|p| p["name"] == name).expect("промпт")["arguments"]
+                .as_array()
+                .expect("args")
+                .len()
+        };
+        assert_eq!(arg_count("spine-quickstart"), 0);
+        assert_eq!(arg_count("spine-adr-judge"), 2, "target + rubric");
+        assert_eq!(arg_count("spine-contracts-gate"), 3, "path + old + new");
+        assert_eq!(arg_count("spine-archify-viz"), 1, "subject");
+    }
+
+    #[tokio::test]
+    async fn prompts_get_renders_every_embedded_playbook() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        for pb in PLAYBOOK_PROMPTS {
+            let server = server_with_dirs(tmp.path(), tmp.path());
+            let line = format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"prompts/get","params":{{"name":"{}"}}}}"#,
+                pb.name
+            );
+            let responses = run_lines_on(server, &[&line]).await;
+            let result = &responses[0]["result"];
+            assert!(
+                result["description"]
+                    .as_str()
+                    .is_some_and(|d| !d.is_empty()),
+                "{}: description из frontmatter",
+                pb.name
+            );
+            let messages = result["messages"].as_array().expect("messages");
+            assert_eq!(messages.len(), 1, "{}: одно user-сообщение", pb.name);
+            assert_eq!(messages[0]["role"], "user", "{}", pb.name);
+            assert_eq!(messages[0]["content"]["type"], "text", "{}", pb.name);
+            let text = messages[0]["content"]["text"].as_str().expect("text");
+            assert!(
+                text.starts_with("Действуй по этому плейбуку"),
+                "{}: инструкция-команда",
+                pb.name
+            );
+            assert!(
+                text.contains(pb.embedded),
+                "{}: полный текст встроенного SKILL.md в сообщении",
+                pb.name
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn prompts_get_prefers_user_copy_and_echoes_declared_arguments() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        // Пользовательская копия плейбука в plugins.dirs (логика skill_load).
+        let skill_md = tmp
+            .path()
+            .join("spine-workflows/skills/spine-fitness-gate/SKILL.md");
+        std::fs::create_dir_all(skill_md.parent().expect("parent")).expect("dirs");
+        std::fs::write(
+            &skill_md,
+            "---\nname: spine-fitness-gate\ndescription: ПОЛЬЗОВАТЕЛЬСКИЙ плейбук гейта.\n---\n\n\
+             # Мой гейт\n\nТело пользователя.\n",
+        )
+        .expect("SKILL.md");
+        let server = server_with_dirs(tmp.path(), tmp.path());
+        let responses = run_lines_on(
+            server,
+            &[
+                r#"{"jsonrpc":"2.0","id":1,"method":"prompts/get","params":{"name":"spine-fitness-gate"}}"#,
+                r#"{"jsonrpc":"2.0","id":2,"method":"prompts/get","params":{"name":"spine-adr-judge","arguments":{"target":"docs/adr/0001.md","rubric":"adr_quality","чужой":"игнор"}}}"#,
+            ],
+        )
+        .await;
+        // Пользовательская копия побеждает встроенную.
+        let first = &responses[0]["result"];
+        assert_eq!(first["description"], "ПОЛЬЗОВАТЕЛЬСКИЙ плейбук гейта.");
+        let text = first["messages"][0]["content"]["text"]
+            .as_str()
+            .expect("text");
+        assert!(text.contains("Тело пользователя."), "{text}");
+        // Эхо — только объявленных аргументов, в порядке объявления.
+        let text2 = responses[1]["result"]["messages"][0]["content"]["text"]
+            .as_str()
+            .expect("text");
+        assert!(text2.contains("- target = \"docs/adr/0001.md\""), "{text2}");
+        assert!(text2.contains("- rubric = \"adr_quality\""), "{text2}");
+        assert!(!text2.contains("чужой"), "{text2}");
+    }
+
+    #[tokio::test]
+    async fn prompts_get_invalid_params_and_resources_stay_guarded() {
+        // Имена валидны только в id=3/4, но ошибки параметров ловятся до
+        // резолва текста — тест не зависит от реального дома.
+        let responses = run_lines(&[
+            r#"{"jsonrpc":"2.0","id":1,"method":"prompts/get","params":{}}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"prompts/get","params":{"name":"ghost"}}"#,
+            r#"{"jsonrpc":"2.0","id":3,"method":"prompts/get","params":{"name":"spine-quickstart","arguments":["x"]}}"#,
+            r#"{"jsonrpc":"2.0","id":4,"method":"prompts/get","params":{"name":"spine-adr-judge","arguments":{"target":42}}}"#,
+            r#"{"jsonrpc":"2.0","id":5,"method":"resources/list","params":{}}"#,
+            r#"{"jsonrpc":"2.0","id":6,"method":"resources/templates/list","params":{}}"#,
+        ])
+        .await;
+        for (i, resp) in responses.iter().enumerate() {
+            if i < 4 {
+                assert_eq!(resp["error"]["code"], INVALID_PARAMS, "ответ {i}: {resp}");
+            } else {
+                assert_eq!(resp["error"]["code"], METHOD_NOT_FOUND, "ответ {i}: {resp}");
+            }
+        }
+        let msg = responses[1]["error"]["message"].as_str().expect("message");
+        assert!(msg.contains("ghost"), "{msg}");
+    }
+
+    #[tokio::test]
     async fn mermaid_render_returns_ascii_art_for_flowchart() {
         let server = server();
         let responses = run_lines_on(
@@ -2364,8 +2994,8 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().expect("имя"))
             .collect();
-        // Инструменты доменов сборки `harness` (handoff_create, skill_distill)
-        // в core-сборке в реестре отсутствуют — мост их пропускает.
+        // Инструменты доменов сборки `harness` (skill_distill и др.) в
+        // core-сборке в реестре отсутствуют — мост их пропускает.
         let expected_rw: Vec<&str> = BRIDGE_READ_WRITE
             .iter()
             .copied()
@@ -2398,17 +3028,18 @@ mod tests {
             "rw-режим: ручные + оба белых списка (в core — без harness-доменов)"
         );
         // Аннотации: mutating по классификации политики → destructiveHint.
-        // (handoff_create живёт в домене сборки `harness`.)
+        // handoff_create — в обеих сборках (core-модуль crate::handoff).
+        let handoff = tools
+            .iter()
+            .find(|t| t["name"] == "handoff_create")
+            .expect("handoff_create");
+        assert_eq!(handoff["annotations"]["readOnlyHint"], false);
+        assert_eq!(handoff["annotations"]["destructiveHint"], true);
+        // Аддитивная запись (политика — ReadOnly): readOnlyHint=false по
+        // членству в rw-списке, destructiveHint=false по классу риска.
+        // (skill_distill живёт в домене сборки `harness`.)
         #[cfg(feature = "harness")]
         {
-            let handoff = tools
-                .iter()
-                .find(|t| t["name"] == "handoff_create")
-                .expect("handoff_create");
-            assert_eq!(handoff["annotations"]["readOnlyHint"], false);
-            assert_eq!(handoff["annotations"]["destructiveHint"], true);
-            // Аддитивная запись (политика — ReadOnly): readOnlyHint=false по
-            // членству в rw-списке, destructiveHint=false по классу риска.
             let distill = tools
                 .iter()
                 .find(|t| t["name"] == "skill_distill")

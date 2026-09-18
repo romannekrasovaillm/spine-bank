@@ -166,10 +166,14 @@ rules:
     severity: error             # error | block (синонимы) | warn (дефолт error)
     # Карточка правила (опциональные метаданные, движок не enforce'ит):
     trigger: "признак применимости"
-    rationale: "какой отказ предотвращается"
+    rationale: "какой отказ предотвращается"      # → в находки (issues[].rationale)
     evidence: "артефакт после проверки"
     reversibility: "обратимо | дорого | необратимо"
-    owner: "владелец правила"
+    owner: "владелец правила"                     # → в находки (issues[].owner)
+    ad: "AD-6"                     # задетый инвариант spine → в находки (issues[].ad)
+    adr: "ADR-012"                 # связанное решение → в находки (issues[].adr)
+    fix_hint: "что сделать вместо нарушения"      # → в находки (issues[].fix_hint)
+    skill: "fitness-functions"     # скилл исправления (skill_load) → в находки (issues[].skill)
     expiry: "2027-01-01"         # дата пересмотра; просроченное правило — warn-находка
     effort_hours: 4.5            # оценка стоимости сопровождения (чел.-часы);
                                  # метаданные — суммируется в rules-report
@@ -303,6 +307,17 @@ Per-rule timing (M-1a): длительность каждого правила �
   2.1s cargo-clippy-deny-warnings
 ```
 
+**Находки с архитектурным смыслом.** Если у сработавшего правила в карточке
+заполнены `ad`/`adr`/`rationale`/`owner`/`fix_hint`/`skill`, движок переносит
+их в находку: видно задетый инвариант и путь исправления, а не только имя
+правила. В текстовом выводе контекст печатается одной строкой-отступом под
+находкой (только при наличии `rationale`/`fix_hint`):
+
+```
+  [error] src/main.rs:12 no_unsafe — must_not_contain: запрещённый паттерн 'unsafe\s*(\{|fn|impl)': …
+      ↳ AD-6 · зачем: unsafe снимает гарантии памяти · как чинить: убрать unsafe-блок · скилл: fitness-functions
+```
+
 ### Машинный вывод `--json` (SDK-контракт v1)
 
 Флаг `--json` печатает в stdout одну строку JSON — сериализацию
@@ -330,13 +345,158 @@ arch-be control check banking/demos/cli-from-claude-code/scenario3-gate/fixtures
 `rule` (имя правила), `message` (тип проверки + сниппет), `severity`
 (`"error"` | `"warn"`). Аддитивное поле `durations[]` — `{rule, ms}` на каждое
 правило (per-rule timing; добавление полей контракт v1 не ломает, клиенты без
-него работают как раньше).
+него работают как раньше). Аддитивные карточные поля `issues[]` — `ad`,
+`adr`, `rationale`, `owner`, `fix_hint`, `skill` — присутствуют, только если
+заполнены в карточке правила (`skip_serializing_if`; у находок линтера
+spine/наследования/overrides их нет). Те же поля несёт и MCP-инструмент
+`fitness_check` (`structuredContent.issues[]`).
 
 **Семантика exit-кодов**: 0 — `passed=true`; 1 — `passed=false`, при этом
 **JSON всё равно напечатан** (красный гейт — это данные отчёта, а не сбой
 инструмента); ошибка запуска (нет репозитория/файла ограничений) — ненулевой
 exit **без** JSON, причина в stderr. Потребитель (SDK, CI-скрипт) обязан
 различать второй и третий случаи: парсить JSON даже при exit 1.
+
+Режим baseline добавляет в отчёт аддитивные поля (контракт v1 не ломается):
+`baseline` (`{path, updated, debt[], closed[], debt_total, closed_total}`),
+`skipped[]` (`{rule, reason}`), `changed_since`, `changed_files` — см. следующий
+раздел.
+
+## Baseline / ratchet для brownfield (`control check --baseline`)
+
+Проблема brownfield: на репозитории с сотней исторических нарушений гейт
+красный всегда — его отключат в первый день. Режим baseline (ratchet,
+«храповик») фиксирует текущее состояние как **исторический долг**: гейт падает
+только на новых нарушениях, а счётчик долга по каждому правилу может лишь
+убывать. Отличие от overrides (`docs/corp-spine.md`): override — осознанное
+исключение целого правила через ADR со сроком; baseline — численный долг по
+действующим правилам, который команда обязана монотонно рассасывать.
+
+```bash
+# Первый контакт с legacy-репо: фиксируем долг (гейт зелёный, файл записан)
+arch-be control check . --baseline .arch-handoff/baseline.json --baseline-update
+# Дальше — обычный гейт в ratchet-режиме (CI, хуки):
+arch-be control check . --baseline .arch-handoff/baseline.json
+# Команда исправила часть старых нарушений — рассасываем baseline:
+arch-be control check . --baseline .arch-handoff/baseline.json --baseline-update
+```
+
+Семантика ratchet-прогона:
+
+- находка, присутствующая в baseline, — **долг**: в отчёт `baseline.debt`
+  (текстом — секция «долг: <правило> — N находок (owner: …)»), гейт не ломает;
+- **новая** error-находка (отпечатка нет в baseline) — обычный `[error]` в
+  `issues`, итог FAIL, exit 1;
+- **счётчик** error-находок правила вырос против baseline — error-находка
+  «долг может только убывать» (страховка от коллизий отпечатков: две находки
+  одного правила в одном файле, различающиеся только числами в сниппете,
+  делят отпечаток);
+- исправленные старые находки — список «закрыто с прошлого baseline: N»;
+- `--baseline-update` перезаписывает baseline текущим состоянием, но **только
+  при неухудшении долга**: рост хотя бы по одному правилу (включая новое
+  правило с находками) — отказ с ошибкой, файл не трогается. Без `--baseline`
+  путь по умолчанию — `<repo>/.arch-handoff/baseline.json`;
+- `--baseline` на несуществующий файл без `--baseline-update` — ошибка с
+  подсказкой (fail-closed: молчаливый «пустой baseline» превратил бы весь
+  долг в новые нарушения или наоборот).
+
+В ratchet участвуют только error-находки правил: warn-находки гейт не ломают
+и долгом не считаются, а находки механики (`extends`, `override`) — сломанная
+конфигурация губернанса, а не кодовый долг, — в baseline не зашиваются и
+гейт ломают всегда.
+
+**Формат файла** (JSON, версия `1`; читается строго — несовпадение `count` с
+числом записей или чужая версия = ошибка, ручная правка видна сразу).
+Держите файл в `.arch-handoff/` (путь по умолчанию): этот каталог исключён из
+обхода правил — при пути снаружи сохранённые тексты находок сами попадут под
+сканирование content-правил с широким glob.
+
+```json
+{
+  "version": 1,
+  "updated_at": "2026-09-18",
+  "rules": [
+    {
+      "name": "no-pan",
+      "owner": "владелец legacy",
+      "count": 2,
+      "findings": [
+        {"fingerprint": "3fa9c1e7b2d05e88", "file": "src/a.py", "line": 12,
+         "message": "must_not_contain: запрещённый паттерн …"}
+      ]
+    }
+  ]
+}
+```
+
+**Отпечаток находки** — первые 16 hex-символов SHA-256 от
+`rule \n file \n normalize(message)`. Номер строки в отпечаток **не входит**:
+строки плывут при любых правках файла, и baseline не должен ломаться от
+сдвига. Нормализация текста: пробельные последовательности (включая переводы
+строк — у `command_succeeds` многострочные хвосты) схлопываются в один пробел,
+серии цифр заменяются на `#` (значения, id, счётчики в сниппетах дрейфуют, не
+делая находку «новой»). Поля `line`/`message` в файле — информативные, для
+код-ревью baseline.
+
+## Проверка только затронутых файлов (`--changed-since`)
+
+Для быстрых прогонов (PostToolUse-хуки, локальная проверка перед коммитом):
+
+```bash
+arch-be control check . --changed-since HEAD          # рабочее дерево против HEAD
+arch-be control check . --changed-since origin/main   # ветка против main
+```
+
+Срез файлов — `git diff --name-only <ref>` по рабочему дереву (покрывает и
+закоммиченное после рефа, и незакоммиченное) плюс untracked-файлы
+(`git ls-files --others`). Правила делятся так:
+
+- **файловые** (`must_contain`, `must_not_contain`, `each_file_must_contain`)
+  исполняются на подмножестве изменённых файлов; пустое подмножество — не
+  находка, а пропуск правила (`нет изменённых файлов по glob …`);
+- **глобальные** (`file_exists`, `dir_must_have_file`, `max_age`,
+  `command_succeeds`, `dependency_direction`, `context_boundary`, `archunit`,
+  `deny_dependency`) пропускаются с пометкой в отчёте (`skipped[]` и секция
+  «Пропущены правила»): на срезе файлов они дают ложные срабатывания или
+  неоправданно дороги.
+
+Режим совместим с `--baseline` (новое нарушение в изменённом файле — FAIL,
+долг в нетронутых файлах молчит), но: закрытие долга в срезе **не
+отслеживается** (`closed` пуст — нетронутые файлы не проверялись), а
+`--baseline-update` с `--changed-since` **запрещён** (обновление по срезу
+уничтожило бы записи долга в нетронутых файлах). Полный прогон остаётся
+истиной гейта — срез это ускоритель, не замена CI.
+### Форматы CI (`--format`): SARIF / JUnit / GitLab Code Quality / markdown
+
+Флаг `--format sarif|junit|gitlab-codequality|markdown` (дефолт `text`;
+несовместим с `--json`) печатает отчёт в нативном формате площадок CI —
+тем же контрактом каналов, что `--json`: машинный отчёт строго в stdout
+(годен для редиректа в файл-артефакт), exit-коды не меняются (FAIL — отчёт
+напечатан полностью, exit 1). Рендеры — чистые функции над отчётами,
+`src/report_fmt.rs`; тот же флаг есть у `arch-be gate`, `arch-be trace check`
+и `arch-be contract-diff`:
+
+| Формат | Стандарт | Назначение |
+|---|---|---|
+| `sarif` | SARIF 2.1.0 (`rules` + `results` с `level` error/warning, `locations`, стабильные `partialFingerprints`) | code scanning GitHub, импорт сторонних сканеров в GitLab |
+| `junit` | JUnit XML (`testsuite` на составляющую/правило, `testcase` на находку, `failure` только у error; SKIP — `<skipped/>`) | Jenkins `junit(...)`, виджеты тестов площадок |
+| `gitlab-codequality` | GitLab Code Quality JSON (`description`, `check_name`, `fingerprint` по правилу+файлу+строке, `severity` error→major/warn→minor, `location`) | артефакт `reports.codequality` — нарушения в интерфейсе merge request без ручной настройки |
+| `markdown` | таблица находок + сводка + статусы групп | job summary, комментарий к MR |
+
+Ограничения: у GitLab Code Quality `location.path`/`lines.begin` обязательны —
+находки без адреса (трассировка, составляющие гейта) получают путь-заглушку
+`(repository)` и строку 1; потолок находок в машинном отчёте — 1000 (полный
+список — текстовым выводом). Fingerprint стабилен между прогонами (FNV-1a по
+правилу+пути+строке, без текста сообщения — правка формулировки не плодит
+«новые» находки в MR). Готовые джобы под площадки раскладывает
+`arch-be connect ci --provider gitlab|github|jenkins` (`docs/CONNECT.md`).
+
+```bash
+arch-be gate --format gitlab-codequality > codequality-spine.json   # артефакт MR
+arch-be control check . --format junit > fitness.xml                # junit(...) в Jenkins
+arch-be trace check кейсы/legacy-survey --format markdown           # сводка в job summary
+```
+
 
 ## Реестр правил (`control rules-report`)
 
@@ -374,6 +534,55 @@ arch-be control rules-report . --constraints CONSTRAINTS.yaml
   git-репозитория (или без git) — строка «недоступно», не ошибка;
 - `effort_hours` из карточек суммируется в итоговой строке (метаданные,
   движок не enforce'ит).
+
+## Регистр ложных срабатываний (`control fp mark`)
+
+Категория 2 протокола `docs/outcome-metrics.md` §2 — правило сработало на
+корректный код по ошибке эвристики. Такие случаи помечаются в регистр
+`evidence/fp-register.md` проекта (создаётся с шапкой таблицы при первой
+пометке; append, ничего не затирается):
+
+```bash
+arch-be control fp mark no-pan src/a.rs:10 --note "crate::… в строковом литерале"
+# Пометка FP записана: evidence/fp-register.md
+```
+
+Строка регистра — `| дата | правило | файл | примечание |`. `--repo` —
+проект (по умолчанию текущий каталог). Пометки читает `arch-be digest`
+(доля FP за окно) и rules-report пересмотра: FP без решения дольше 30 дней —
+тема пересмотра правила.
+
+## Дайджест outcome-данных (`arch-be digest`)
+
+Недельный дайджест по журналу MCP-вызовов (см. `docs/mcp.md` — «Журнал
+вызовов»), регистру FP и срокам CONSTRAINTS.yaml — протокол
+`docs/outcome-metrics.md` заполняется из данных, а не вручную:
+
+```bash
+arch-be digest                 # неделя (по умолчанию; --week — синоним)
+arch-be digest --days 30       # произвольное окно
+arch-be digest --repo /path/to/project --json
+```
+
+Секции вывода:
+
+- **Вызовы MCP** — счёт по инструментам и вердиктам (pass/fail/ok/error/
+  invalid) за окно;
+- **Итерации FAIL→PASS** — пары соседних по журналу fail→pass одного
+  инструмента: одна итерация «починил находки и перепроверил»;
+- **Топ нарушаемых правил** — имена правил из error-находок fail-вызовов
+  (поле `rules` журнала);
+- **Ложные срабатывания** — пометки регистра `evidence/fp-register.md` за
+  окно и ориентировочная доля FP = пометки / fail-вызовы (грубая оценка:
+  вызов может нести несколько находок, пометка может относиться к находке
+  вне окна; цель < 10%);
+- **Истекающие overrides и expiry** — `until` overrides и `expiry` правил
+  в горизонте 14 дней, включая просроченные (счёт «N дн. назад»).
+
+Источники: журнал `<repo>/.arch-handoff/mcp-calls.jsonl` (пусто/нет файла —
+честный «вызовов за окно нет», не ошибка), регистр FP, файл ограничений
+(`.arch-handoff/CONSTRAINTS.yaml`, иначе корневой; нет — сроки не читаются).
+Записи журнала вне окна и с битым штампом времени считаются в `skipped`.
 
 ## Гейт A4: репетиция отката (`control gate`)
 
@@ -494,6 +703,169 @@ arch-be fleet audit --repo . --fail-on-dupes 50        # флот worktree бе�
 ```
 
 Живой мини-кейс обоих гейтов — `кейсы/fleet-spine-drift/` (007).
+
+## Единый гейт (`arch-be gate`)
+
+Одна команда прогоняет весь детерминированный контур контроля репозитория и
+сводит исходы в один exit-код: **провал любой составляющей → exit 1**
+(механически, по кодам возврата составляющих — без разбора строк вывода;
+это контракт для CI и для хуков `arch-be connect`, которые вызывают именно
+`arch-be gate`).
+
+```bash
+arch-be gate [--repo <path>] [--route auto|fast|standard|critical] [--base <git-ref>] [--constraints <file>] [--format text|sarif|junit|gitlab-codequality|markdown]
+```
+
+`--format` (волна 2, п.8) — машинные форматы для CI в stdout (см. «Форматы CI»
+выше): для GitLab merge request — `gitlab-codequality` (артефакт
+`reports.codequality`), для Jenkins — `junit`, для GitHub — `sarif`, сводка в
+job summary — `markdown`. Текстовый вывод не меняется; exit-код общий: провал
+любой составляющей → exit 1. Готовые джобы — `arch-be connect ci --provider …`.
+
+Составляющие (на любом маршруте):
+
+| Составляющая | Что прогоняет | FAIL, когда |
+|---|---|---|
+| `fitness` | `control check` по `CONSTRAINTS.yaml` (дефолт `<repo>/.arch-handoff/CONSTRAINTS.yaml`, `--constraints` — другой файл) | находки severity error; файл есть, но не читается/не валиден |
+| `delta_guard` | `delta guard` (защищённые пути: `model/`, `ARCHITECTURE-SPINE.md`, `CONSTRAINTS.yaml`) | правки защищённых файлов без активной дельты |
+| `rule_weakened` | анти-ослабление реестра правил относительно git-базы (см. ниже) | правило удалено / `exclude_glob` расширен / severity понижен без активного override |
+| `spine_lint` | `control spine ARCHITECTURE-SPINE.md` | error-находки линтера |
+| `trace_check` | `trace check` (нужны `model/` и `CONSTRAINTS.yaml` в корне) | error-находки трассировки |
+
+На маршрутах **Standard/Critical** добавляются:
+
+| Составляющая | Что прогоняет | FAIL, когда |
+|---|---|---|
+| `nfr` | все четыре проверки `nfr` (budget/availability/capacity/cost) | error-находка хотя бы одной |
+| `evidence_verify` | `evidence verify` по каждому активному change-dir `changes/<name>/EVIDENCE.yaml` | бандл неполон или хэш сошёлся с дрейфом |
+
+**Fail-soft (SKIP, не падение):** у составляющей нет входа — нет
+`CONSTRAINTS.yaml`, не git-репозиторий, нет `model/`, нет активных бандлов.
+Сбой выполнения при наличии входа (битый YAML, неработающее правило) — FAIL
+с причиной: гейт, молча пропускающий поломку собственной конфигурации,
+не гейт.
+
+**Маршрут.** `--route auto` (дефолт) вычисляет маршрут механически из
+git-диффа (`detect_diff_triggers` + `score_with_sources` с пустым declared —
+тот же anti-bypass floor S-1, что у `control score --from-diff` и MCP
+`significance_from_diff`; `--base` задаёт git-ref, без него — рабочее дерево
+против HEAD). Дифф недоступен (не git-репозиторий, нет HEAD) — fail-safe
+маршрут Critical с пометкой причины в строке «Маршрут:». Явный
+`--route fast|standard|critical` переопределяет авто-режим.
+
+```bash
+arch-be gate --repo ~/work/payment-svc
+# Гейт: ~/work/payment-svc
+# Маршрут: Fast (auto: score 0 (триггеров нет))
+#   [PASS] fitness — Правил: 13, нарушений: 0 (error: 0, warn: 0)
+#   [PASS] delta_guard — изменённых файлов: 2, защищённых среди них: 0
+#   [PASS] rule_weakened — реестр правил не ослаблен относительно HEAD
+#   [PASS] spine_lint — находок: 0 (error: 0)
+#   [SKIP] trace_check — нет каталога model/
+# Итог: PASS
+```
+
+### Находка `rule_weakened` (анти-ослабление гейта)
+
+Сравнение текущего `CONSTRAINTS.yaml` с версией в git-базе (`--base`, дефолт
+HEAD). Error-находка с именем правила — за каждое из:
+
+- правило из базы **удалено** из текущего файла (по именам);
+- у правила появился или расширился **`exclude_glob`** (новые исключения);
+- **severity понижен** (error → warn; эквиваленты `critical`/`high`/`block` ≡
+  error ослаблением не считаются).
+
+Ослабление **узаконено** (находки нет), если в текущем файле есть активный
+override на это правило (по имени или `id`) с ADR — гейт «только через ADR»
+(`docs/corp-spine.md`): `overrides: [{rule, adr, until}]`, срок не истёк.
+Сравнение — по плоскому разбору файла (оба корня `rules:`/`constraints:`),
+`extends` не разворачивается. Входа нет (не git, файла нет в базовой
+ревизии, реестр новый) — SKIP.
+
+Типовой антикейс: агент под давлением красного гейта «чинит» его удалением
+правила — `rule_weakened` валит прогон, пока ослабление не оформлено через
+ADR-override.
+
+## Составное ревью (`arch-be review`) и радиус изменения (`model impact`)
+
+Два составных инструмента (бэклог волны 3, п.13) — для хостов с
+BM25-активацией инструментов (omp) и локальных моделей, которым серия из
+шести точечных вызовов ненадёжна: один вызов — один полный ответ.
+
+```bash
+arch-be review <dir> [--base <git-ref>] [--constraints <file>] [--json]
+```
+
+`arch-be review` — это `arch-be gate` (маршрут `auto` из git-диффа) плюс две
+дополнительные секции, дописанные в конец отчёта:
+
+| Секция | Что прогоняет | FAIL, когда |
+|---|---|---|
+| `model_validate` | ссылочная целостность `model/` (битая ссылка/дубль ID/цикл) | error-находки валидации; модель есть, но не разбирается |
+| `contracts` | линт контрактов OpenAPI/AsyncAPI (`openapi_lint`/`asyncapi_lint`) по файлам из полей `contract` сущностей INT (ADR-035) и каталога `contracts/*.{yaml,yml,json}` | error-находка линтера или файл распознан, но не разбирается |
+
+Семантика SKIP/FAIL и итоговый exit-код — как у гейта (провал любой секции →
+exit 1). Контракты прочих форматов (proto, avsc, sql, JSON Schema) секция
+распознаёт, но не линтует — их эволюцию проверяет `contract_diff`
+(см. ниже «Дифф контрактов»).
+
+```bash
+arch-be model impact <dir> --id CMP-001
+arch-be model impact <dir> --paths services/pay/src/main.rs --paths docs/x.md [--json]
+```
+
+`model impact` отвечает на вопрос «что я задену и с кем согласовывать»: от
+сущности (`--id`) или файлов (`--paths` → CMP по `code_roots`, ADR-030)
+делается транзитивный обход графа связей модели **в обе стороны** (меняя
+сущность, вы затрагиваете и тех, кто на неё ссылается, и тех, на кого
+ссылается она). Ответ: затронутые сущности по типам, правила
+`CONSTRAINTS.yaml` (ссылки `C-NNN` из `verified_by`, с именами и владельцами
+из карточек правил), контракты достигнутых INT, владельцы OWNER. Пути без
+CMP-покрытия попадают в `gaps` (сигнал дописать модель, не ошибка).
+Неизвестный `--id` — честная ошибка. Это отчёт, а не гейт: exit 0 при любом
+радиусе.
+
+Те же вызовы доступны агенту как инструменты `architect_review` и
+`change_impact` (read-only мост MCP, `docs/mcp.md`).
+
+## Дифф контрактов (`arch-be contract-diff`)
+
+Сравнение двух версий контракта на ломающие изменения (бэклог волны 3, п.14;
+первая версия — транш T1, ADR-015). Ломающее изменение (error-находка) —
+**exit 1** (гейт для CI):
+
+```bash
+arch-be contract-diff <old> <new> [--format auto|openapi|proto|avro|jsonschema|ddl] [--model <кейс>] [--json]
+```
+
+Формат определяется автоматически (расширение, затем содержимое) либо
+принудительно `--format`; оба файла обязаны быть одного формата.
+
+| Формат | Файлы | Breaking (error) | Non-breaking (warn) |
+|---|---|---|---|
+| `OpenAPI` 3.x | yaml/json | CD-001 удалённый путь, CD-002 операция, CD-003 обязательный параметр удалён/стал required, CD-004 код ответа, CD-006 смена типа поля схемы, **CD-007 ломающий дифф без смены major `info.version`** | CD-005 добавленные пути/операции/необязательные параметры/коды |
+| protobuf/gRPC | `.proto` | CD-P01 удалённое message, CD-P02 поле удалено без `reserved`/переименовано/перенумеровано, CD-P03 смена типа поля, CD-P04 удалённый rpc/service, **CD-P06 ломающий дифф без смены суффикса `.vN` пакета** | CD-P05 добавления; удаление поля, покрытое `reserved` в новой версии |
+| Avro | `.avsc` | CD-A01 удалённый record, CD-A02 удалённое поле без `default`, CD-A03 несовместимая смена типа, CD-A04 добавленное поле без `default` | CD-A05: поле с `default` (удалено/добавлено), промоушены типов Avro (`int→long→float→double`), расширение union |
+| JSON Schema (топики) | json/yaml | CD-J01 удалённое свойство, CD-J02 стало required / добавлено сразу required, CD-J03 сужение/смена типа | CD-J04 снятие required, CD-J05 добавленное необязательное свойство / расширение типа |
+| DDL-миграции | `.sql` | CD-S01 `DROP TABLE`, CD-S02 `DROP COLUMN`, CD-S03 несовместимый `ALTER TYPE`, CD-S04 `NOT NULL` без `DEFAULT` (у существующей или новой колонки) | CD-S05 добавленная таблица/колонка (nullable или с default), расширение типа (`varchar(N→M≥N)`, `int→bigint`, …), снятие `NOT NULL` |
+
+Правило «ломающий дифф без смены major — error» работает там, где major
+механически определим: OpenAPI (`info.version`, CD-007) и proto
+(суффикс пакета `.vN`, CD-P06). У Avro, JSON Schema и DDL номера версии в
+формате нет — там правило не применяется (осознанное ограничение). DDL-файл
+приводится к итоговому состоянию (`CREATE TABLE` + `ALTER TABLE` +
+`DROP TABLE`), дифф — по состояниям; разбор консервативный (по `;`,
+процедурные блоки не поддерживаются). У proto не сравниваются значения
+enum'ов; у JSON Schema не резолвится `$ref` (рекурсия по `properties` с
+потолком 16).
+
+**Связка с моделью (ADR-035):** `--model <корень кейса>` добавляет в ответ
+секцию «Связь с моделью»: INT, чьё поле `contract` совпало с путём old/new
+(нормализация относительно корня кейса), и радиус изменения от них
+(`change_impact`) — затронутые потребители (CMP/SYS), правила
+CONSTRAINTS.yaml и владельцы OWNER. Ни одного совпадения — честная пометка
+gap (контракт вне модели). Тот же аргумент есть у инструмента
+`contract_diff` (`model`), инструмент read-only, в MCP отдаётся мостом.
 
 ## ADR-шаблон (`control adr`)
 

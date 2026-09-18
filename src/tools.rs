@@ -7,9 +7,10 @@
 //! - [`core_registry`] — реестр ядерных инструментов;
 //! - [`full_registry`] — ядро + доменные инструменты (`mermaid::tools()`,
 //!   `rubric::tools()`, `kb::tools()`, `control::tools()`,
-//!   `openapi::tools()`, `model::tools()`, `trace::tools()` и др.;
-//!   под фичей `harness` дополнительно `web::tools()`, `harness::tools()`,
-//!   `subagent`, `ralph`, `worktree`, `distill`).
+//!   `openapi::tools()`, `model::tools()`, `trace::tools()`,
+//!   `handoff::tools()` и др.; под фичей `harness` дополнительно
+//!   `web::tools()`, `harness::tools()` (прогон `harness_run`), `subagent`,
+//!   `ralph`, `worktree`, `distill`).
 
 use std::sync::Arc;
 
@@ -75,8 +76,25 @@ fn domain_tools(cfg: &Config) -> Vec<Arc<dyn Tool>> {
     out.extend(crate::contract_diff::tools());
     out.extend(crate::model::tools());
     out.extend(crate::trace::tools());
-    // Домены агентного цикла — только в сборке `harness` (инверсия, шаг 4):
-    // кодовые харнессы, субагенты, ralph, worktree, дистилляция скиллов.
+    // Количественные NFR, дельта-протокол и evidence-бандлы (транш 1
+    // инверсии — read-only верификаторы + пишущие pack/propose; мост MCP
+    // отдаёт их по белым спискам `mcp_server.rs`).
+    out.extend(crate::nfr::tools());
+    out.extend(crate::delta::tools());
+    out.extend(crate::evidence::tools());
+    // Отчётный контур (транш 2 инверсии — read-only реестры и отчёты;
+    // мост MCP отдаёт их по белому списку `mcp_server.rs`).
+    out.extend(crate::landscape::tools());
+    out.extend(crate::adr_registry::tools());
+    out.extend(crate::openspec::tools());
+    // Составные инструменты (транш 3 инверсии): единое ревью и радиус
+    // изменения — read-only, мост MCP по белому списку.
+    out.extend(crate::review::tools());
+    // Генерация handoff-пакета — чисто файловая: в обеих сборках (core и
+    // harness). Прогон пакета кодовым харнессом (harness_run) и домены
+    // агентного цикла — только в сборке `harness` (инверсия, шаг 4;
+    // handoff_create в core — волна 2, п.10).
+    out.extend(crate::handoff::tools(cfg));
     #[cfg(feature = "harness")]
     out.extend(crate::harness::tools(cfg));
     out.extend(crate::plugin::tools(cfg));
@@ -116,10 +134,25 @@ mod tests {
             "archify_show",
             "archify_compare",
             "model_query",
+            "model_validate",
+            "model_graph",
+            "model_drift",
             "trace_check",
             "openapi_lint",
             "asyncapi_lint",
             "contract_diff",
+            "nfr_check",
+            "delta_guard",
+            "delta_propose",
+            "evidence_verify",
+            "evidence_pack",
+            "landscape_report",
+            "adr_registry",
+            "rules_report",
+            "openspec_coverage",
+            "architect_review",
+            "change_impact",
+            "handoff_create",
         ] {
             assert!(
                 names.iter().any(|n| n == expected),

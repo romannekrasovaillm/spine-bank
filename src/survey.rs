@@ -61,7 +61,9 @@ const CHURN_COMMITS: usize = 500;
 const TOP_CHURN_FILES: usize = 5;
 
 /// Служебные/производные каталоги, исключаемые из сканирования.
-const SKIP_DIRS: [&str; 9] = [
+/// `pub(crate)`: тот же контур обхода использует проверка дрейфа
+/// «модель ↔ код» (`model::drift`).
+pub(crate) const SKIP_DIRS: [&str; 9] = [
     ".git",
     "target",
     "node_modules",
@@ -344,6 +346,25 @@ fn scan_stack(snap: &RepoSnapshot) -> Vec<Finding> {
         }
     }
     out
+}
+
+/// Манифест сборки ли имя файла (тот же набор, что у [`scan_stack`]):
+/// корень каталога с таким файлом — корень компонента кода.
+/// Переиспользуется проверкой дрейфа «модель ↔ код» (`model::drift`),
+/// чтобы покрытие манифестов не расходилось с картой обследования.
+pub(crate) fn is_manifest_file(file_name: &str) -> bool {
+    const MANIFESTS: [&str; 7] = [
+        "Cargo.toml",
+        "pom.xml",
+        "build.gradle",
+        "build.gradle.kts",
+        "package.json",
+        "go.mod",
+        "pyproject.toml",
+    ];
+    MANIFESTS.contains(&file_name)
+        || file_name == "requirements.txt"
+        || file_name.ends_with(".csproj")
 }
 
 /// Находка добавляется, если такой текст уже не встречался (ссылки дополняются).

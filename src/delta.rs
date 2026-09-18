@@ -10,9 +10,16 @@
 //! `CONSTRAINTS.yaml`) обязаны упоминаться в активной дельте, иначе FAIL.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use serde::Deserialize;
+use serde_json::{Value, json};
 
 use crate::control::LintIssue;
 use crate::error::{HarnessError, Result};
+use crate::llm::ToolSpec;
+use crate::tool::{Tool, ToolContext, ToolOutput};
 
 /// Шаблон дельты.
 const DELTA_TEMPLATE: &str = "# Дельта: {name}
@@ -139,6 +146,7 @@ pub fn validate(repo: &Path, name: &str) -> Result<Vec<LintIssue>> {
                 rule: "missing_section".into(),
                 message: format!("нет секции «{section}»"),
                 severity: "error".into(),
+                ..LintIssue::default()
             });
         }
     }
@@ -155,6 +163,7 @@ pub fn validate(repo: &Path, name: &str) -> Result<Vec<LintIssue>> {
                     t.chars().take(60).collect::<String>()
                 ),
                 severity: "warn".into(),
+                ..LintIssue::default()
             });
         }
     }
@@ -171,6 +180,7 @@ pub fn validate(repo: &Path, name: &str) -> Result<Vec<LintIssue>> {
             rule: "empty_delta".into(),
             message: "ADDED/MODIFIED/REMOVED пусты — дельта без содержания".into(),
             severity: "error".into(),
+            ..LintIssue::default()
         });
     }
     Ok(issues)
@@ -396,6 +406,156 @@ pub fn render_guard(report: &GuardReport) -> String {
     out
 }
 
+// ---------------------------------------------------------------------------
+// Агентные инструменты `delta_guard` / `delta_propose` (мост в MCP, транш 1)
+// ---------------------------------------------------------------------------
+
+/// Инструменты домена: `delta_guard` (read-only гейт), `delta_propose`
+/// (создание скелета дельты — пишущий, в MCP только под `--rw`).
+#[must_use]
+pub fn tools() -> Vec<Arc<dyn Tool>> {
+    vec![Arc::new(DeltaGuardTool), Arc::new(DeltaProposeTool)]
+}
+
+/// Инструмент `delta_guard`: гейт прямых правок спайна мимо дельты —
+/// JSON-вердикт `{passed, violations, covered, summary}`.
+pub struct DeltaGuardTool;
+
+#[derive(Debug, Deserialize)]
+struct DeltaGuardArgs {
+    /// Репозиторий (дефолт — текущий каталог).
+    path: Option<String>,
+    /// База diff (по умолчанию HEAD — staged+unstaged рабочего дерева).
+    base: Option<String>,
+    /// Защищаемые пути/префиксы (заменяют дефолт [`DEFAULT_PROTECTED`]).
+    protect: Option<Vec<String>>,
+}
+
+#[async_trait]
+impl Tool for DeltaGuardTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "delta_guard".into(),
+            description: "Гейт прямых правок спайна мимо дельты (модель 5.2): каждый изменённый \
+                          файл под защищёнными путями (по умолчанию model/, \
+                          ARCHITECTURE-SPINE.md, CONSTRAINTS.yaml) обязан упоминаться в активной \
+                          дельте changes/<name>/DELTA.md. Ответ — JSON: passed + violations \
+                          (непокрытые правки) + covered + summary; passed=false — основание \
+                          отказать изменению"
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Репозиторий (по умолчанию — текущий каталог)"},
+                    "base": {"type": "string", "description": "База diff (по умолчанию HEAD; для CI — напр. origin/main...HEAD)"},
+                    "protect": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Защищаемые пути/префиксы (непустой список заменяет дефолт целиком)"
+                    }
+                }
+            }),
+        }
+    }
+
+    async fn call(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput> {
+        let args: DeltaGuardArgs = match serde_json::from_value(args) {
+            Ok(a) => a,
+            Err(e) => {
+                return Ok(ToolOutput::err(format!(
+                    "delta_guard: невалидные аргументы: {e}"
+                )));
+            }
+        };
+        let repo = ctx.resolve(args.path.as_deref().unwrap_or("."));
+        let protect = args.protect.unwrap_or_default();
+        let report = match guard(&repo, args.base.as_deref(), &protect) {
+            Ok(r) => r,
+            Err(e) => return Ok(ToolOutput::err(format!("delta_guard: {e}"))),
+        };
+        let summary = format!(
+            "Гейт прямых правок спайна (база: {}): изменённых файлов {}, защищённых {}, \
+             непокрытых нарушений {}",
+            report.base,
+            report.changed,
+            report.protected_changed.len(),
+            report.violations.len()
+        );
+        let verdict = json!({
+            "tool": "delta_guard",
+            "passed": report.passed,
+            "base": report.base,
+            "changed": report.changed,
+            "protected_changed": report.protected_changed,
+            "covered": report.covered.iter().map(|(f, d)| json!({"file": f, "delta": d})).collect::<Vec<_>>(),
+            "violations": report.violations,
+            "summary": summary,
+        });
+        // Сериализация собранного объекта не падает; запасной вариант — компактная форма.
+        let text = serde_json::to_string_pretty(&verdict).unwrap_or_else(|_| verdict.to_string());
+        Ok(ToolOutput::ok(text))
+    }
+}
+
+/// Инструмент `delta_propose`: скелет новой дельты `changes/<name>/DELTA.md`
+/// (пишущий: в MCP-режиме отдаётся только под `--rw`).
+pub struct DeltaProposeTool;
+
+#[derive(Debug, Deserialize)]
+struct DeltaProposeArgs {
+    /// Имя изменения (kebab-case).
+    name: String,
+    /// Репозиторий (дефолт — текущий каталог).
+    path: Option<String>,
+}
+
+#[async_trait]
+impl Tool for DeltaProposeTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "delta_propose".into(),
+            description: "Создать скелет дельты changes/<name>/DELTA.md (шаблон: Проблема, \
+                          ADDED/MODIFIED/REMOVED, План отката, Критерии приёмки) — начало \
+                          change-центричного изменения спайна. Пишет в рабочий каталог"
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Имя изменения (kebab-case)"},
+                    "path": {"type": "string", "description": "Репозиторий (по умолчанию — текущий каталог)"}
+                },
+                "required": ["name"]
+            }),
+        }
+    }
+
+    async fn call(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput> {
+        let args: DeltaProposeArgs = match serde_json::from_value(args) {
+            Ok(a) => a,
+            Err(e) => {
+                return Ok(ToolOutput::err(format!(
+                    "delta_propose: невалидные аргументы: {e}"
+                )));
+            }
+        };
+        let repo = ctx.resolve(args.path.as_deref().unwrap_or("."));
+        match new(&repo, &args.name) {
+            Ok(path) => {
+                let verdict = json!({
+                    "tool": "delta_propose",
+                    "created": path.display().to_string(),
+                    "summary": format!("Дельта '{}' создана: {}", args.name, path.display()),
+                });
+                // Сериализация собранного объекта не падает; запасной вариант — компактная форма.
+                let text =
+                    serde_json::to_string_pretty(&verdict).unwrap_or_else(|_| verdict.to_string());
+                Ok(ToolOutput::ok(text))
+            }
+            Err(e) => Ok(ToolOutput::err(format!("delta_propose: {e}"))),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -564,5 +724,75 @@ mod tests {
         // Не репозиторий — внятная ошибка, не паника.
         let err = guard(tmp.path(), None, &[]).expect_err("не git");
         assert!(err.to_string().contains("git diff"), "{err}");
+    }
+
+    // --- инструменты delta_guard / delta_propose ----------------------------
+
+    /// Тестовый контекст без LLM.
+    fn tool_ctx(dir: &Path) -> crate::tool::ToolContext {
+        crate::tool::ToolContext::new(
+            dir.to_path_buf(),
+            Arc::new(crate::config::Config::default()),
+        )
+    }
+
+    #[tokio::test]
+    async fn delta_guard_tool_verdict_pass_and_violation() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("repo");
+        make_guard_repo(&repo);
+        let ctx = tool_ctx(&repo);
+        // Чистое дерево — PASS-вердикт JSON.
+        let out = DeltaGuardTool
+            .call(json!({"path": "."}), &ctx)
+            .await
+            .expect("вызов");
+        assert!(!out.is_error, "{}", out.content);
+        let v: Value = serde_json::from_str(&out.content).expect("JSON-вердикт");
+        assert_eq!(v["passed"], true, "{v}");
+        assert_eq!(v["violations"], json!([]));
+
+        // Прямая правка model/ без дельты — passed=false, файл в violations.
+        std::fs::write(repo.join("model/adr/ADR-003.md"), "# ADR-003 v2\n").expect("edit");
+        let out = DeltaGuardTool
+            .call(json!({"path": "."}), &ctx)
+            .await
+            .expect("вызов");
+        let v: Value = serde_json::from_str(&out.content).expect("JSON-вердикт");
+        assert_eq!(v["passed"], false, "{v}");
+        assert_eq!(v["violations"], json!(["model/adr/ADR-003.md"]));
+
+        // Не git-репозиторий — мягкая ошибка инструмента.
+        let out = DeltaGuardTool
+            .call(json!({"path": "."}), &tool_ctx(tmp.path()))
+            .await
+            .expect("вызов");
+        assert!(out.is_error, "{}", out.content);
+    }
+
+    #[tokio::test]
+    async fn delta_propose_tool_creates_skeleton_and_refuses_duplicate() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let ctx = tool_ctx(tmp.path());
+        let out = DeltaProposeTool
+            .call(json!({"name": "saga-pilot", "path": "."}), &ctx)
+            .await
+            .expect("вызов");
+        assert!(!out.is_error, "{}", out.content);
+        let v: Value = serde_json::from_str(&out.content).expect("JSON-вердикт");
+        let created = v["created"].as_str().expect("created");
+        assert!(
+            created.ends_with("changes/saga-pilot/DELTA.md"),
+            "{created}"
+        );
+        assert!(tmp.path().join("changes/saga-pilot/DELTA.md").is_file());
+
+        // Повторное создание — мягкая ошибка (имя занято).
+        let out = DeltaProposeTool
+            .call(json!({"name": "saga-pilot", "path": "."}), &ctx)
+            .await
+            .expect("вызов");
+        assert!(out.is_error, "{}", out.content);
+        assert!(out.content.contains("уже существует"), "{}", out.content);
     }
 }

@@ -34,6 +34,7 @@ Spine Banking Edition — доменный харнесс solution-архите�
 | [mcp.md](mcp.md) | MCP-серверы: подключение, вызовы, server-mode (ADR-001/008) |
 | [web_kb.md](web_kb.md) | Веб-поиск/фетч и локальная база знаний |
 | [plugins_and_skills.md](plugins_and_skills.md) | Плагины и библиотека скиллов: структура, загрузка, доверие |
+| [skills_for_architects.md](skills_for_architects.md) | Обзор содержимого библиотеки: все 62 скилла в 9 плагинах, разбор самого интересного |
 | [agents_md.md](agents_md.md) | Генерация AGENTS.md для репозиториев команд из архитектурных артефактов |
 
 ## Архитектурный контур

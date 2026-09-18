@@ -1,0 +1,8 @@
+Kimi Code 0.42.0 — Stop-хук (user-level [[hooks]]): FAIL → модель чинит → PASS (headless, дословно)
+$ kimi -p "Ответь одним словом: Готово. Ничего не изменяй."   # проект под красным гейтом
++ ● Готово.
+! ход завершается → Stop-хук: arch-be gate --route auto → FAIL → exit 2 → находки уходят модели
+- FAIL: delta_guard (model/NFR-001.md мимо дельты) + nfr budget-exceeded (300 мс > p99 250 мс)
+# модель без подсказок: arch-be delta new → DELTA.md на обе правки; INT-001 бюджет 300→250
++ arch-be nfr budget: Сумма 250 мс · OK; arch-be gate: Итог PASS (fitness 4/4, delta_guard PASS)
++ ● Гейт зелёный. Обе error-находки закрыты… (+ честное замечание: резерв latency 0 мс)

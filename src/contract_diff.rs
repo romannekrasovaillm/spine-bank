@@ -1,30 +1,64 @@
-//! Сравнение двух версий контракта `OpenAPI` 3.x — агентный инструмент `contract_diff`.
+//! Сравнение двух версий контракта — агентный инструмент `contract_diff`.
 //!
-//! Третий инструмент контрактного контура (транш T1, ADR-015): сравнение двух
-//! версий контракта `OpenAPI` 3.x на breaking changes. Правила CD-001..CD-006 —
-//! удалённые пути (CD-001), операции (CD-002), обязательные параметры и
-//! параметры, ставшие required (CD-003), коды ответов (CD-004) — breaking
-//! (error); добавленные пути/операции/необязательные параметры/коды ответов
-//! (CD-005) — non-breaking (warn, информирование); смена типа поля схемы
-//! (CD-006) — breaking (error). Вывод — в стиле `spine_lint`: сводка, строки
-//! `[severity] локация rule — message`, «Итог: PASS/FAIL» (PASS при отсутствии
-//! breaking-изменений).
+//! Третий инструмент контрактного контура (транш T1, ADR-015; расширен
+//! бэклогом волны 3, п.14). Форматы:
+//! - `OpenAPI` 3.x (CD-001..CD-007): удалённые пути (CD-001), операции
+//!   (CD-002), обязательные параметры / ставшие required (CD-003), коды
+//!   ответов (CD-004) — breaking (error); добавленные пути/операции/
+//!   необязательные параметры/коды ответов (CD-005) — non-breaking (warn);
+//!   смена типа поля схемы (CD-006) — breaking; **CD-007: ломающий дифф без
+//!   смены major-компонента `info.version`** (error);
+//! - protobuf/gRPC (`.proto`, CD-P01..CD-P06): удалённое message (CD-P01),
+//!   удалённое/перенумерованное/переименованное поле (CD-P02; удаление,
+//!   покрытое `reserved` в новой версии, — допустимо, warn CD-P05), смена
+//!   типа поля (CD-P03), удалённый rpc/service (CD-P04) — breaking;
+//!   добавления — warn (CD-P05); **CD-P06: ломающий дифф без смены
+//!   major-суффикса пакета (`…​.vN`)** (error; суффикса нет — major не
+//!   определим, правило молчит — ограничение);
+//! - Avro (`.avsc`, CD-A01..CD-A05): удалённый record (CD-A01), удалённое
+//!   поле без `default` (CD-A02), несовместимая смена типа (CD-A03),
+//!   добавленное поле без `default` (CD-A04) — breaking; удалённое поле с
+//!   `default`, добавленное поле с `default`, расширение типа по таблице
+//!   промоушенов Avro (`int→long→float→double`) или расширение union —
+//!   warn (CD-A05). Версии в Avro нет — правила major нет (ограничение);
+//! - JSON Schema (топики/тела сообщений; `.json`/yaml с `$schema`
+//!   json-schema или `properties`/`required`, CD-J01..CD-J05): удалённое
+//!   свойство (CD-J01), свойство стало обязательным / добавлено сразу
+//!   обязательным (CD-J02), сужение или смена типа (CD-J03) — breaking;
+//!   снятие обязательности (CD-J04), добавленное необязательное свойство /
+//!   расширение типа (CD-J05) — warn. Рекурсия по вложенным `properties`
+//!   с потолком [`MAX_JSONSCHEMA_DEPTH`]; `$ref` не резолвится
+//!   (ограничение, как у OpenAPI-скелета);
+//! - DDL-миграции (`.sql`, CD-S01..CD-S05): файл приводится к итоговому
+//!   состоянию (`CREATE TABLE` + `ALTER TABLE` + `DROP TABLE`), дифф —
+//!   по состояниям: удалённая таблица (CD-S01), колонка (CD-S02),
+//!   несовместимая смена типа (CD-S03), `NOT NULL` без `DEFAULT` (у
+//!   существующей или добавленной колонки) (CD-S04) — breaking; добавленные
+//!   таблица/колонка (nullable или с default), расширение типа
+//!   (`varchar(N→M>N)`, `int→bigint`, …), снятие `NOT NULL` — warn (CD-S05).
+//!   Процедурные блоки и `$$`-тела не поддерживаются (консервативно —
+//!   разбор по `;`); версии в DDL нет — правила major нет (ограничение).
 //!
-//! Парсинг — без новых зависимостей: `serde_json` (JSON) и `serde_yaml_ng`
-//! (YAML) уже в Cargo.toml; документ представляется как `serde_json::Value`
-//! (формат определяется по первому непробельному символу: `{` — JSON, иначе
-//! YAML), навигация — по JSON Pointer. Generic-инструмент MIT-ядра (AD-BE1):
-//! банковской зоны не касается.
+//! Формат определяется автоматически (расширение, затем содержимое) либо
+//! явно (`format`: `auto`|`openapi`|`proto`|`avro`|`jsonschema`|`ddl`);
+//! оба файла обязаны быть одного формата. Парсинг — без новых
+//! зависимостей: `serde_json`/`serde_yaml_ng`/`regex` уже в Cargo.toml.
 //!
-//! Известные ограничения скелета (Deferred — резолюция `$ref` и глубокая
-//! рекурсия следующей итерацией T1): CD-006 сравнивает только прямое поле
-//! `type` у `components.schemas.*.properties.*`; обязательность параметра — по
-//! полю `required` (неявная обязательность path-параметров не учитывается);
-//! удаление необязательного параметра и добавление обязательного параметра
-//! вне CD-001..CD-006 и не флагаются. Локализация находок — JSON Pointer,
-//! параметры адресуются по имени (а не по индексу массива).
+//! Связка с моделью (ADR-035, п.14): при заданном `model` (корень кейса с
+//! `model/`) по полю `contract` сущностей INT находятся интеграции, чей
+//! контракт совпал с путём `old`/`new`, и через [`crate::review::impact_from_ids`]
+//! в ответ включается секция `impact`: затронутые потребители (CMP/SYS),
+//! правила и владельцы — «ломающее изменение сразу возвращает потребителей
+//! и владельцев». Ни одного совпадения — честная пометка gap.
+//!
+//! Известные ограничения скелета `OpenAPI` (Deferred): CD-006 сравнивает
+//! только прямое поле `type` у `components.schemas.*.properties.*`;
+//! обязательность параметра — по полю `required`; удаление необязательного
+//! параметра и добавление обязательного не флагаются. Локализация находок —
+//! JSON Pointer (`#/…`) для OpenAPI/JSON Schema, псевдо-поинтеры
+//! `#/proto/…`, `#/avro/…`, `#/ddl/…` для остальных форматов.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::Path;
 use std::sync::Arc;
@@ -35,6 +69,7 @@ use serde_json::{Value, json};
 
 use crate::error::{HarnessError, Result};
 use crate::llm::ToolSpec;
+use crate::model::{EntityKind, load_model};
 use crate::tool::{Tool, ToolContext, ToolOutput};
 
 /// Находка диффа контракта.
@@ -42,41 +77,482 @@ use crate::tool::{Tool, ToolContext, ToolOutput};
 pub struct Finding {
     /// Критичность: `error` (breaking) | `warn` (non-breaking).
     pub severity: String,
-    /// Код правила (`CD-001`..`CD-006`).
+    /// Код правила (`CD-001`..`CD-007`, `CD-P01`.., `CD-A01`.., `CD-J01`..,
+    /// `CD-S01`..).
     pub rule: String,
-    /// JSON Pointer (`#/paths/~1v1~1pets/post`).
+    /// JSON Pointer (`#/paths/~1v1~1pets/post`) либо псевдо-поинтер формата
+    /// (`#/proto/message/Payment/field/3`).
     pub location: String,
     /// Сообщение.
     pub message: String,
 }
+
+/// Потолок рекурсии по вложенным `properties` JSON Schema (защита от
+/// патологически глубоких схем; `$ref` всё равно не резолвится).
+const MAX_JSONSCHEMA_DEPTH: usize = 16;
+
+/// Потолок операторов в одном DDL-файле (защита от гигантских дампов;
+/// реальные миграции на порядки меньше).
+const MAX_DDL_STATEMENTS: usize = 10_000;
+
+/// Потолок строк в одном `.proto`-файле (та же защита).
+const MAX_PROTO_LINES: usize = 200_000;
+
+/// Формат контракта (`format` инструмента/CLI; `auto` — детектор).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContractFormat {
+    /// `OpenAPI` 3.x (yaml/json).
+    OpenApi,
+    /// protobuf/gRPC (`.proto`).
+    Proto,
+    /// Avro (`.avsc`, JSON).
+    Avro,
+    /// JSON Schema (топики/тела сообщений; json/yaml).
+    JsonSchema,
+    /// DDL-миграции (`.sql`).
+    Ddl,
+}
+
+impl ContractFormat {
+    /// Имя формата (как в аргументе `format`, без `auto`).
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::OpenApi => "openapi",
+            Self::Proto => "proto",
+            Self::Avro => "avro",
+            Self::JsonSchema => "jsonschema",
+            Self::Ddl => "ddl",
+        }
+    }
+
+    /// Формат по имени (`auto` здесь не разбирается — это режим детектора).
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "openapi" => Some(Self::OpenApi),
+            "proto" | "protobuf" | "grpc" => Some(Self::Proto),
+            "avro" => Some(Self::Avro),
+            "jsonschema" | "json-schema" | "json_schema" => Some(Self::JsonSchema),
+            "ddl" | "sql" => Some(Self::Ddl),
+            _ => None,
+        }
+    }
+}
+
+/// Отчёт диффа: формат, находки, опциональная связка с моделью.
+#[derive(Debug)]
+pub struct DiffReport {
+    /// Формат, по которому прогнан дифф (после детекции/override).
+    pub format: ContractFormat,
+    /// Находки.
+    pub findings: Vec<Finding>,
+    /// Связка с моделью (`--model`): INT, чей `contract` совпал с путями
+    /// диффа, и радиус изменения от них. `None` — модель не задана.
+    pub impact: Option<ContractImpact>,
+}
+
+impl DiffReport {
+    /// Есть ли breaking-находки (exit code 1 у CLI).
+    #[must_use]
+    pub fn has_breaking(&self) -> bool {
+        self.findings.iter().any(|f| f.severity == "error")
+    }
+}
+
+/// Связка диффа с моделью кейса (ADR-035): совпавшие INT и радиус от них.
+#[derive(Debug)]
+pub struct ContractImpact {
+    /// INT, чьё поле `contract` совпало с путём `old`/`new` (пусто — gap:
+    /// контракт вне модели).
+    pub matched_int: Vec<String>,
+    /// Пути диффа, как их видела сверка (относительно корня кейса).
+    pub matched_paths: Vec<String>,
+    /// Затронутые потребители: CMP/SYS из радиуса (`ID · заголовок`).
+    pub consumers: Vec<String>,
+    /// Затронутые правила CONSTRAINTS.yaml (`C-001 (name; владелец: …)`).
+    pub rules: Vec<String>,
+    /// Владельцы для согласования (`OWNER-* · заголовок`).
+    pub owners: Vec<String>,
+    /// Сводка радиуса (пусто, если совпадений нет).
+    pub summary: String,
+}
+
+// ---------------------------------------------------------------------------
+// Точка входа и детектор формата
+// ---------------------------------------------------------------------------
+
+/// Читает файл контракта текстом.
+///
+/// # Errors
+/// Файл не читается.
+fn read_text(path: &Path) -> Result<String> {
+    std::fs::read_to_string(path).map_err(|e| HarnessError::io(path, e))
+}
+
+/// Детектор формата: расширение файла, затем содержимое.
+///
+/// Расширения: `.proto` → proto, `.avsc` → avro, `.sql` → ddl;
+/// `.json`/`.yaml`/`.yml` и прочие — по содержимому: маркер `openapi`
+/// (`OpenAPI`), `$schema` c «json-schema»/«draft» или парный набор
+/// `properties`/`required`/`type` (JSON Schema), `type: record` + `fields`
+/// в JSON (Avro), `syntax = "proto…"` / строки `message ` / `service `
+/// (protobuf), первый оператор `CREATE`/`ALTER`/`DROP` (DDL).
+///
+/// # Errors
+/// Формат не распознан (сообщение перечисляет проверенные признаки) либо
+/// файл — `AsyncAPI` (дифф `AsyncAPI` не поддержан — только линт).
+pub fn detect_format(path: &Path, content: &str) -> Result<ContractFormat> {
+    if let Some(format) = match path.extension().and_then(|e| e.to_str()) {
+        Some("proto") => Some(ContractFormat::Proto),
+        Some("avsc") => Some(ContractFormat::Avro),
+        Some("sql") => Some(ContractFormat::Ddl),
+        _ => None,
+    } {
+        return Ok(format);
+    }
+    let unknown = || {
+        HarnessError::Tool(format!(
+            "{}: не удалось определить формат контракта: не OpenAPI 3.x (нет поля openapi \
+             вида «3.x.y»), не JSON Schema (нет $schema json-schema / properties+required), \
+             не Avro record, не proto (нет syntax/message/service), не DDL (нет \
+             CREATE/ALTER/DROP) — задайте format явно (openapi|proto|avro|jsonschema|ddl)",
+            path.display()
+        ))
+    };
+    let trimmed = content.trim_start();
+    // Текстовые признаки proto/DDL — до JSON/YAML-разбора (они не парсеры).
+    if trimmed.starts_with("syntax") && trimmed.contains("proto") {
+        return Ok(ContractFormat::Proto);
+    }
+    let upper = trimmed.to_ascii_uppercase();
+    if upper.starts_with("CREATE ") || upper.starts_with("ALTER ") || upper.starts_with("DROP ") {
+        return Ok(ContractFormat::Ddl);
+    }
+    // JSON/YAML-семейство: разбираем и смотрим маркерные поля.
+    let doc: Value = if trimmed.starts_with('{') {
+        match serde_json::from_str(trimmed) {
+            Ok(v) => v,
+            Err(_) => {
+                // Невалидный JSON: последний шанс — голые текстовые маркеры.
+                return detect_by_markers(content, &unknown);
+            }
+        }
+    } else {
+        match serde_yaml_ng::from_str(trimmed) {
+            Ok(v) => v,
+            Err(_) => return detect_by_markers(content, &unknown),
+        }
+    };
+    if doc.get("asyncapi").is_some() {
+        return Err(HarnessError::Tool(format!(
+            "{}: это AsyncAPI — contract_diff его не сравнивает (только линт asyncapi_lint)",
+            path.display()
+        )));
+    }
+    if doc.get("openapi").is_some() {
+        return Ok(ContractFormat::OpenApi);
+    }
+    if is_avro_record(&doc) {
+        return Ok(ContractFormat::Avro);
+    }
+    if is_json_schema(&doc) {
+        return Ok(ContractFormat::JsonSchema);
+    }
+    detect_by_markers(content, &unknown)
+}
+
+/// Признак Avro-схемы: JSON-объект с `type: "record"` и массивом `fields`.
+fn is_avro_record(doc: &Value) -> bool {
+    doc.get("type").and_then(Value::as_str) == Some("record") && doc.get("fields").is_some()
+}
+
+/// Признак JSON Schema: `$schema` с «json-schema»/«draft», либо типовой
+/// набор ключей схемы (`properties`/`required`/`type`/`items`).
+fn is_json_schema(doc: &Value) -> bool {
+    if let Some(schema) = doc.get("$schema").and_then(Value::as_str) {
+        if schema.contains("json-schema") || schema.contains("draft") {
+            return true;
+        }
+    }
+    doc.get("properties").is_some()
+        || doc.get("required").is_some()
+        || doc.get("type").is_some()
+        || doc.get("items").is_some()
+}
+
+/// Последний шанс детектора — голые текстовые маркеры (битый JSON/YAML,
+/// но читаемые маркеры формата).
+fn detect_by_markers(content: &str, unknown: &dyn Fn() -> HarnessError) -> Result<ContractFormat> {
+    let mut protoish = false;
+    for line in content.lines() {
+        let t = line.trim_start();
+        if t.starts_with("message ") || t.starts_with("service ") || t.starts_with("package ") {
+            protoish = true;
+            break;
+        }
+    }
+    if protoish {
+        return Ok(ContractFormat::Proto);
+    }
+    if content.contains("\"openapi\"")
+        || content
+            .lines()
+            .any(|l| l.trim_start().starts_with("openapi:"))
+    {
+        return Ok(ContractFormat::OpenApi);
+    }
+    Err(unknown())
+}
+
+/// Сравнивает два контракта: авто-детект формата, без связки с моделью.
+///
+/// Совместимость транша T1: пара OpenAPI-документов ведёт себя ровно как
+/// раньше (те же CD-001..CD-006; CD-007 добавлен п.14 — см. заголовок
+/// модуля).
+///
+/// # Errors
+/// Файл не читается, формат не распознан, форматы файлов разные.
+pub fn diff_contracts(old: &Path, new: &Path) -> Result<Vec<Finding>> {
+    Ok(diff_report(old, new, None, None)?.findings)
+}
+
+/// Полный дифф: явный формат (`None` — авто-детект) + опциональная связка
+/// с моделью (`model_case` — корень кейса с `model/`).
+///
+/// # Errors
+/// Файл не читается/не парсится, формат не распознан или различается между
+/// файлами, модель задана, но не читается.
+pub fn diff_report(
+    old: &Path,
+    new: &Path,
+    format_override: Option<ContractFormat>,
+    model_case: Option<&Path>,
+) -> Result<DiffReport> {
+    let old_text = read_text(old)?;
+    let new_text = read_text(new)?;
+    let format = if let Some(f) = format_override {
+        f
+    } else {
+        let f_old = detect_format(old, &old_text)?;
+        let f_new = detect_format(new, &new_text)?;
+        if f_old != f_new {
+            return Err(HarnessError::Tool(format!(
+                "форматы различаются: {} — {}, {} — {} (сравнивать нужно одноформатное)",
+                old.display(),
+                f_old.name(),
+                new.display(),
+                f_new.name()
+            )));
+        }
+        f_old
+    };
+    let mut findings = match format {
+        ContractFormat::OpenApi => diff_openapi(&old_text, &new_text, old, new)?,
+        ContractFormat::Proto => diff_proto(&old_text, &new_text),
+        ContractFormat::Avro => diff_avro(&old_text, &new_text, old, new)?,
+        ContractFormat::JsonSchema => diff_jsonschema(&old_text, &new_text, old, new)?,
+        ContractFormat::Ddl => diff_ddl(&old_text, &new_text),
+    };
+    major_rule(format, &old_text, &new_text, &mut findings);
+    let impact = match model_case {
+        Some(case) => Some(build_impact(case, old, new)?),
+        None => None,
+    };
+    Ok(DiffReport {
+        format,
+        findings,
+        impact,
+    })
+}
+
+/// Правило «ломающий дифф без смены major — error», где major определим:
+/// `OpenAPI` — major-компонент semver `info.version` (CD-007); proto —
+/// суффикс `.vN` пакета (CD-P06). Major не определим (нет поля/суффикса) —
+/// правило молчит (задокументированное ограничение; у Avro/JSON Schema/DDL
+/// версии нет вовсе).
+fn major_rule(format: ContractFormat, old: &str, new: &str, out: &mut Vec<Finding>) {
+    let breaking = out.iter().filter(|f| f.severity == "error").count();
+    if breaking == 0 {
+        return;
+    }
+    let versions: Option<(String, String)> = match format {
+        ContractFormat::OpenApi => {
+            let old_v = parse_contract(old, Path::new("<old>"))
+                .ok()
+                .and_then(|d| d.get("info")?.get("version")?.as_str().map(str::to_string));
+            let new_v = parse_contract(new, Path::new("<new>"))
+                .ok()
+                .and_then(|d| d.get("info")?.get("version")?.as_str().map(str::to_string));
+            old_v.zip(new_v)
+        }
+        ContractFormat::Proto => {
+            let old_p = parse_proto(old).package;
+            let new_p = parse_proto(new).package;
+            old_p.zip(new_p)
+        }
+        _ => None,
+    };
+    let Some((old_v, new_v)) = versions else {
+        return;
+    };
+    let majors = match format {
+        ContractFormat::OpenApi => (semver_major(&old_v), semver_major(&new_v)),
+        ContractFormat::Proto => (proto_package_major(&old_v), proto_package_major(&new_v)),
+        _ => (None, None),
+    };
+    let (Some(old_m), Some(new_m)) = majors else {
+        return;
+    };
+    if old_m == new_m {
+        let (rule, location, what) = match format {
+            ContractFormat::OpenApi => ("CD-007", "#/info/version", "info.version"),
+            ContractFormat::Proto => ("CD-P06", "#/proto/package", "major-суффикс пакета (.vN)"),
+            _ => unreachable!("major_rule вызывается только для openapi/proto"),
+        };
+        out.push(Finding {
+            severity: "error".into(),
+            rule: rule.into(),
+            location: location.into(),
+            message: format!(
+                "ломающих изменений: {breaking}, а {what} не изменился ({old_v} → {new_v}) — \
+                 ломающий дифф требует смены major"
+            ),
+        });
+    }
+}
+
+/// Major-компонент semver (`1.2.3` → 1).
+fn semver_major(version: &str) -> Option<u64> {
+    version.trim().split('.').next()?.parse().ok()
+}
+
+/// Major proto-пакета: число суффикса `.vN` (`acme.payments.v2` → 2).
+fn proto_package_major(package: &str) -> Option<u64> {
+    package.rsplit('.').next()?.strip_prefix('v')?.parse().ok()
+}
+
+// ---------------------------------------------------------------------------
+// Связка с моделью (ADR-035, п.14)
+// ---------------------------------------------------------------------------
+
+/// Нормализация пути для сверки с `INT.contract`: относительно корня кейса,
+/// без `./` и обратных слэшей.
+fn normalize_contract_path(case: &Path, raw: &Path) -> String {
+    let stripped = if raw.is_absolute() {
+        raw.strip_prefix(case).unwrap_or(raw).to_path_buf()
+    } else {
+        raw.to_path_buf()
+    };
+    let mut s = stripped.to_string_lossy().replace('\\', "/");
+    while let Some(rest) = s.strip_prefix("./") {
+        s = rest.to_string();
+    }
+    s
+}
+
+/// Строит связку диффа с моделью: INT, чьё поле `contract` совпало с путём
+/// `old`/`new` (относительно корня кейса), и радиус изменения от них
+/// ([`crate::review::impact_from_ids`]). Нет совпадений — `matched_int`
+/// пуст (gap, а не ошибка: контракт может легитимно жить вне модели).
+///
+/// # Errors
+/// Модель задана, но `model/` не читается/не разбирается.
+fn build_impact(case: &Path, old: &Path, new: &Path) -> Result<ContractImpact> {
+    let model_dir = case.join("model");
+    if !model_dir.is_dir() {
+        return Err(HarnessError::Model(format!(
+            "contract_diff --model: нет каталога модели {}",
+            model_dir.display()
+        )));
+    }
+    let model = load_model(&model_dir)?;
+    let old_rel = normalize_contract_path(case, old);
+    let new_rel = normalize_contract_path(case, new);
+    let mut matched_int: Vec<String> = Vec::new();
+    let mut matched_paths: BTreeSet<String> = BTreeSet::new();
+    for e in &model.entities {
+        if e.kind != EntityKind::Int {
+            continue;
+        }
+        let Some(contract) = e.contract.as_deref().map(str::trim) else {
+            continue;
+        };
+        if contract.is_empty() {
+            continue;
+        }
+        let norm = contract.replace('\\', "/");
+        let norm = norm.strip_prefix("./").unwrap_or(&norm).to_string();
+        if norm == old_rel || norm == new_rel {
+            matched_int.push(e.id.clone());
+            matched_paths.insert(norm);
+        }
+    }
+    matched_int.sort();
+    if matched_int.is_empty() {
+        return Ok(ContractImpact {
+            matched_int,
+            matched_paths: Vec::new(),
+            consumers: Vec::new(),
+            rules: Vec::new(),
+            owners: Vec::new(),
+            summary: String::new(),
+        });
+    }
+    let impact = crate::review::impact_from_ids(case, &matched_int)?;
+    let matched: BTreeSet<&str> = matched_int.iter().map(String::as_str).collect();
+    let consumers: Vec<String> = impact
+        .affected
+        .iter()
+        .filter(|a| (a.kind == "cmp" || a.kind == "sys") && !matched.contains(a.id.as_str()))
+        .map(|a| format!("{} · {}", a.id, a.title))
+        .collect();
+    let rules: Vec<String> = impact
+        .rules
+        .iter()
+        .map(|r| {
+            let name = r.name.as_deref().unwrap_or("?");
+            match &r.owner {
+                Some(owner) => format!("{} ({name}; владелец: {owner})", r.id),
+                None => format!("{} ({name})", r.id),
+            }
+        })
+        .collect();
+    Ok(ContractImpact {
+        matched_int,
+        matched_paths: matched_paths.into_iter().collect(),
+        consumers,
+        rules,
+        owners: impact.owners,
+        summary: impact.summary,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// OpenAPI 3.x (транш T1 — без изменений семантики CD-001..CD-006)
+// ---------------------------------------------------------------------------
 
 /// Методы операций `OpenAPI` (остальные ключи path item — служебные).
 const OPERATION_METHODS: [&str; 8] = [
     "get", "put", "post", "delete", "options", "head", "patch", "trace",
 ];
 
-/// Сравнивает два контракта `OpenAPI` 3.x на breaking changes.
-///
-/// Читает оба файла, определяет формат (JSON, если первый непробельный символ —
-/// `{`, иначе YAML), парсит в [`Value`] и проверяет признак `OpenAPI` 3.x.
-/// Находки — данные отчёта, не ошибки выполнения: диф отработал, если оба
-/// документа прочитаны и распознаны.
+/// Дифф двух текстов `OpenAPI` 3.x (JSON или YAML).
 ///
 /// # Errors
-/// Файл не читается, JSON/YAML не парсится, документ не `OpenAPI` 3.x.
-pub fn diff_contracts(old: &Path, new: &Path) -> Result<Vec<Finding>> {
-    let old_doc = read_contract(old)?;
-    let new_doc = read_contract(new)?;
+/// Текст не парсится, документ не `OpenAPI` 3.x.
+fn diff_openapi(old_text: &str, new_text: &str, old: &Path, new: &Path) -> Result<Vec<Finding>> {
+    let old_doc = read_openapi(old_text, old)?;
+    let new_doc = read_openapi(new_text, new)?;
     Ok(diff_documents(&old_doc, &new_doc))
 }
 
 /// Читает и распознаёт один контракт `OpenAPI` 3.x.
 ///
 /// # Errors
-/// Файл не читается, JSON/YAML не парсится, документ не `OpenAPI` 3.x.
-fn read_contract(path: &Path) -> Result<Value> {
-    let content = std::fs::read_to_string(path).map_err(|e| HarnessError::io(path, e))?;
-    let doc = parse_contract(&content, path)?;
+/// Текст не парсится, документ не `OpenAPI` 3.x.
+fn read_openapi(content: &str, path: &Path) -> Result<Value> {
+    let doc = parse_contract(content, path)?;
     if !is_openapi3(&doc) {
         return Err(HarnessError::Tool(format!(
             "{}: не OpenAPI 3.x: ожидается поле openapi вида «3.x.y»",
@@ -206,8 +682,11 @@ fn diff_operation(
 /// Эффективный набор параметров операции: `path_item.parameters` +
 /// `operation.parameters` (операция перекрывает path item по ключу `name`+`in`).
 /// Параметр за `$ref` не резолвится (Deferred) — пропускается.
-fn effective_parameters(path_item: &Value, op: &Value) -> HashMap<(String, String), Value> {
-    let mut map = HashMap::new();
+fn effective_parameters(
+    path_item: &Value,
+    op: &Value,
+) -> std::collections::HashMap<(String, String), Value> {
+    let mut map = std::collections::HashMap::new();
     for level in [path_item.get("parameters"), op.get("parameters")]
         .into_iter()
         .flatten()
@@ -392,6 +871,1191 @@ fn diff_schema_properties(
     }
 }
 
+// ---------------------------------------------------------------------------
+// protobuf/gRPC (.proto)
+// ---------------------------------------------------------------------------
+
+/// Поле сообщения proto (идентичность — тег).
+#[derive(Debug, Clone)]
+struct ProtoField {
+    /// Имя поля.
+    name: String,
+    /// Тип как написан (`string`, `map<string, int64>`, `acme.Money`).
+    typ: String,
+}
+
+/// Сообщение proto: поля по тегу + резервирование (удаление, покрытое
+/// `reserved`, — допустимая эволюция, warn вместо error).
+#[derive(Debug, Default)]
+struct ProtoMessage {
+    /// Поля по тегу.
+    fields: BTreeMap<u64, ProtoField>,
+    /// Зарезервированные теги (`reserved 2, 5 to 8;`).
+    reserved_tags: BTreeSet<u64>,
+    /// Зарезервированные имена (`reserved "foo", "bar";`).
+    reserved_names: BTreeSet<String>,
+}
+
+/// Разобранный `.proto`-файл (консервативный построчный разбор: сообщения
+/// с вложенностью `Outer.Inner`, сервисы с rpc, package; enum'ы и их
+/// значения не сравниваются — ограничение скелета).
+#[derive(Debug, Default)]
+struct ProtoDoc {
+    /// `package a.b.v1;`.
+    package: Option<String>,
+    /// Сообщения по полному имени (`Outer.Inner`).
+    messages: BTreeMap<String, ProtoMessage>,
+    /// Сервисы: имя → набор rpc.
+    services: BTreeMap<String, BTreeSet<String>>,
+}
+
+/// Разбирает `.proto` построчно. Невалидные/незнакомые строки пропускаются
+/// (консервативный скелет: лучше пропустить, чем упасть).
+fn parse_proto(text: &str) -> ProtoDoc {
+    let field_re = regex::Regex::new(
+        r"^\s*(?:optional\s+|required\s+|repeated\s+)?([A-Za-z_][\w.]*|map\s*<[^>]+>)\s+([A-Za-z_]\w*)\s*=\s*(\d+)",
+    );
+    // regex известной формы компилируется всегда; при сбое — пустой never-match.
+    let Ok(field_re) = field_re else {
+        return ProtoDoc::default();
+    };
+    let message_re = regex::Regex::new(r"^\s*message\s+([A-Za-z_]\w*)\s*\{?");
+    let service_re = regex::Regex::new(r"^\s*service\s+([A-Za-z_]\w*)\s*\{?");
+    let rpc_re = regex::Regex::new(r"^\s*rpc\s+([A-Za-z_]\w*)\s*\(");
+    let package_re = regex::Regex::new(r"^\s*package\s+([\w.]+)\s*;");
+    let enum_re = regex::Regex::new(r"^\s*enum\s+[A-Za-z_]\w*\s*\{?");
+    let reserved_re = regex::Regex::new(r"^\s*reserved\s+(.+?)\s*;");
+    let (Ok(message_re), Ok(service_re), Ok(rpc_re), Ok(package_re), Ok(enum_re), Ok(reserved_re)) = (
+        message_re,
+        service_re,
+        rpc_re,
+        package_re,
+        enum_re,
+        reserved_re,
+    ) else {
+        return ProtoDoc::default();
+    };
+
+    let mut doc = ProtoDoc::default();
+    // Элемент стека блоков: (вид, имя сообщения для полей/reserved).
+    // Вид: 0 — message, 1 — service, 2 — прочий (enum/oneof/…).
+    let mut stack: Vec<(u8, Option<String>)> = Vec::new();
+    let mut message_path: Vec<String> = Vec::new();
+    let mut current_service: Option<String> = None;
+    for line in text.lines().take(MAX_PROTO_LINES) {
+        // Срезаем //-комментарии (внутри строк — редкость; консервативно).
+        let line = line.split("//").next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(caps) = package_re.captures(line) {
+            doc.package = Some(caps[1].to_string());
+            continue;
+        }
+        if let Some(caps) = message_re.captures(line) {
+            message_path.push(caps[1].to_string());
+            let full = message_path.join(".");
+            doc.messages.entry(full.clone()).or_default();
+            stack.push((0, Some(full)));
+            continue;
+        }
+        if enum_re.is_match(line) {
+            stack.push((2, None));
+            continue;
+        }
+        if let Some(caps) = service_re.captures(line) {
+            let name = caps[1].to_string();
+            doc.services.entry(name.clone()).or_default();
+            current_service = Some(name);
+            stack.push((1, None));
+            continue;
+        }
+        if line.starts_with('}') {
+            if let Some((kind, _)) = stack.pop() {
+                match kind {
+                    // oneof/прочие блоки внутри message не снимают сообщение
+                    // со стека путей — их поля относятся к сообщению.
+                    0 => {
+                        message_path.pop();
+                    }
+                    1 => current_service = None,
+                    _ => {}
+                }
+            }
+            continue;
+        }
+        // Поля и reserved относятся к ближайшему охватывающему message.
+        if let Some(caps) = reserved_re.captures(line) {
+            if let Some(msg) = nearest_message(&mut doc, &stack) {
+                for part in caps[1].split(',') {
+                    let part = part.trim();
+                    if let Some(name) = part.strip_prefix('"').and_then(|p| p.strip_suffix('"')) {
+                        msg.reserved_names.insert(name.to_string());
+                    } else if let Some((from, to)) = part.split_once(" to ") {
+                        // Диапазон «N to M» (max не разворачиваем — метка).
+                        if let (Ok(a), Ok(b)) =
+                            (from.trim().parse::<u64>(), to.trim().parse::<u64>())
+                        {
+                            for tag in a..=b.min(a + 10_000) {
+                                msg.reserved_tags.insert(tag);
+                            }
+                        }
+                    } else if let Ok(tag) = part.parse::<u64>() {
+                        msg.reserved_tags.insert(tag);
+                    }
+                }
+            }
+            continue;
+        }
+        if let (Some(caps), Some(msg)) =
+            (field_re.captures(line), nearest_message(&mut doc, &stack))
+        {
+            let tag: u64 = match caps[3].parse() {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            msg.fields.insert(
+                tag,
+                ProtoField {
+                    name: caps[2].to_string(),
+                    typ: caps[1].split_whitespace().collect::<Vec<_>>().join(""),
+                },
+            );
+            continue;
+        }
+        if let Some(caps) = rpc_re.captures(line) {
+            if let Some(service) = &current_service {
+                if let Some(rpcs) = doc.services.get_mut(service) {
+                    rpcs.insert(caps[1].to_string());
+                }
+            }
+            continue;
+        }
+        // oneof/любой другой блок с `{` — на стек как «прочий».
+        if line.ends_with('{') {
+            stack.push((2, None));
+        }
+    }
+    doc
+}
+
+/// Ближайшее охватывающее сообщение на стеке (поля oneof относятся к нему).
+fn nearest_message<'d>(
+    doc: &'d mut ProtoDoc,
+    stack: &[(u8, Option<String>)],
+) -> Option<&'d mut ProtoMessage> {
+    let full = stack.iter().rev().find(|(kind, _)| *kind == 0)?.1.clone()?;
+    doc.messages.get_mut(&full)
+}
+
+/// Дифф двух `.proto`: CD-P01..CD-P05 (CD-P06 — major-правилом выше).
+fn diff_proto(old: &str, new: &str) -> Vec<Finding> {
+    let old_doc = parse_proto(old);
+    let new_doc = parse_proto(new);
+    let mut out = Vec::new();
+
+    // CD-P01 (error): удалённое сообщение; CD-P05 (warn): добавленное.
+    for name in old_doc.messages.keys() {
+        if !new_doc.messages.contains_key(name) {
+            out.push(Finding {
+                severity: "error".into(),
+                rule: "CD-P01".into(),
+                location: format!("#/proto/message/{}", escape_segment(name)),
+                message: format!("удалено сообщение «{name}»"),
+            });
+        }
+    }
+    for name in new_doc.messages.keys() {
+        if !old_doc.messages.contains_key(name) {
+            out.push(Finding {
+                severity: "warn".into(),
+                rule: "CD-P05".into(),
+                location: format!("#/proto/message/{}", escape_segment(name)),
+                message: format!("добавлено сообщение «{name}»"),
+            });
+        }
+    }
+
+    // Поля общих сообщений: идентичность — тег.
+    for (name, old_msg) in &old_doc.messages {
+        let Some(new_msg) = new_doc.messages.get(name) else {
+            continue;
+        };
+        let loc = format!("#/proto/message/{}", escape_segment(name));
+        for (tag, old_field) in &old_msg.fields {
+            match new_msg.fields.get(tag) {
+                None => {
+                    let covered = new_msg.reserved_tags.contains(tag)
+                        || new_msg.reserved_names.contains(&old_field.name);
+                    if covered {
+                        // Удаление с reserved — допустимая эволюция (как buf).
+                        out.push(Finding {
+                            severity: "warn".into(),
+                            rule: "CD-P05".into(),
+                            location: format!("{loc}/field/{tag}"),
+                            message: format!(
+                                "поле «{}» (тег {tag}) удалено и зарезервировано — допустимо",
+                                old_field.name
+                            ),
+                        });
+                    } else {
+                        out.push(Finding {
+                            severity: "error".into(),
+                            rule: "CD-P02".into(),
+                            location: format!("{loc}/field/{tag}"),
+                            message: format!(
+                                "удалено поле «{}» (тег {tag}) без reserved",
+                                old_field.name
+                            ),
+                        });
+                    }
+                }
+                Some(new_field) => {
+                    if new_field.name != old_field.name {
+                        out.push(Finding {
+                            severity: "error".into(),
+                            rule: "CD-P02".into(),
+                            location: format!("{loc}/field/{tag}"),
+                            message: format!(
+                                "тег {tag}: поле переименовано «{}» → «{}» (имя — часть JSON/текстового контракта)",
+                                old_field.name, new_field.name
+                            ),
+                        });
+                    }
+                    if new_field.typ != old_field.typ {
+                        out.push(Finding {
+                            severity: "error".into(),
+                            rule: "CD-P03".into(),
+                            location: format!("{loc}/field/{tag}"),
+                            message: format!(
+                                "тег {tag} («{}»): тип {} → {}",
+                                old_field.name, old_field.typ, new_field.typ
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+        // Перенумерация: имя осталось, тег изменился.
+        for (new_tag, new_field) in &new_msg.fields {
+            if let Some(old_tag) = old_msg
+                .fields
+                .iter()
+                .find(|(t, f)| *f.name == new_field.name && **t != *new_tag)
+                .map(|(t, _)| *t)
+            {
+                out.push(Finding {
+                    severity: "error".into(),
+                    rule: "CD-P02".into(),
+                    location: format!("{loc}/field/{new_tag}"),
+                    message: format!(
+                        "поле «{}» перенумеровано: тег {old_tag} → {new_tag}",
+                        new_field.name
+                    ),
+                });
+            }
+        }
+        for (tag, new_field) in &new_msg.fields {
+            if !old_msg.fields.contains_key(tag)
+                && !old_msg.fields.values().any(|f| f.name == new_field.name)
+            {
+                out.push(Finding {
+                    severity: "warn".into(),
+                    rule: "CD-P05".into(),
+                    location: format!("{loc}/field/{tag}"),
+                    message: format!("добавлено поле «{}» (тег {tag})", new_field.name),
+                });
+            }
+        }
+    }
+
+    // CD-P04 (error): удалённый сервис/rpc; CD-P05 (warn): добавленные.
+    for name in old_doc.services.keys() {
+        match new_doc.services.get(name) {
+            None => out.push(Finding {
+                severity: "error".into(),
+                rule: "CD-P04".into(),
+                location: format!("#/proto/service/{}", escape_segment(name)),
+                message: format!("удалён сервис «{name}»"),
+            }),
+            Some(new_rpcs) => {
+                let old_rpcs = &old_doc.services[name];
+                for rpc in old_rpcs {
+                    if !new_rpcs.contains(rpc) {
+                        out.push(Finding {
+                            severity: "error".into(),
+                            rule: "CD-P04".into(),
+                            location: format!(
+                                "#/proto/service/{}/rpc/{}",
+                                escape_segment(name),
+                                escape_segment(rpc)
+                            ),
+                            message: format!("удалён rpc «{name}.{rpc}»"),
+                        });
+                    }
+                }
+                for rpc in new_rpcs {
+                    if !old_rpcs.contains(rpc) {
+                        out.push(Finding {
+                            severity: "warn".into(),
+                            rule: "CD-P05".into(),
+                            location: format!(
+                                "#/proto/service/{}/rpc/{}",
+                                escape_segment(name),
+                                escape_segment(rpc)
+                            ),
+                            message: format!("добавлен rpc «{name}.{rpc}»"),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    for name in new_doc.services.keys() {
+        if !old_doc.services.contains_key(name) {
+            out.push(Finding {
+                severity: "warn".into(),
+                rule: "CD-P05".into(),
+                location: format!("#/proto/service/{}", escape_segment(name)),
+                message: format!("добавлен сервис «{name}»"),
+            });
+        }
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Avro (.avsc)
+// ---------------------------------------------------------------------------
+
+/// Поле Avro-записи.
+#[derive(Debug, Clone)]
+struct AvroField {
+    /// Нормализованный тип (union — отсортированный список через `|`).
+    typ: String,
+    /// Есть ли `default`.
+    has_default: bool,
+}
+
+/// Avro-запись (record) по полному имени.
+#[derive(Debug, Default)]
+struct AvroRecord {
+    /// Поля по имени.
+    fields: BTreeMap<String, AvroField>,
+}
+
+/// Нормализует тип Avro в стабильную строку: строка — как есть; union
+/// (массив) — отсортированные варианты через `|`; объект — компактный JSON.
+fn avro_type_norm(typ: &Value) -> String {
+    match typ {
+        Value::String(s) => s.clone(),
+        Value::Array(variants) => {
+            let mut v: Vec<String> = variants.iter().map(avro_type_norm).collect();
+            v.sort();
+            v.join("|")
+        }
+        other => serde_json::to_string(other).unwrap_or_else(|_| "<bad-type>".to_string()),
+    }
+}
+
+/// Собирает все record'ы документа Avro (с вложенными): полное имя
+/// (`namespace.name`, либо локальное) → поля.
+fn collect_avro_records(
+    node: &Value,
+    namespace: Option<&str>,
+    out: &mut BTreeMap<String, AvroRecord>,
+) {
+    let Some(obj) = node.as_object() else {
+        return;
+    };
+    let ns = obj
+        .get("namespace")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| namespace.map(str::to_string));
+    if obj.get("type").and_then(Value::as_str) == Some("record") {
+        if let (Some(name), Some(fields)) = (
+            obj.get("name").and_then(Value::as_str),
+            obj.get("fields").and_then(Value::as_array),
+        ) {
+            let full = match &ns {
+                Some(ns) => format!("{ns}.{name}"),
+                None => name.to_string(),
+            };
+            let mut record = AvroRecord::default();
+            for field in fields {
+                let Some(fname) = field.get("name").and_then(Value::as_str) else {
+                    continue;
+                };
+                let typ = field
+                    .get("type")
+                    .map_or_else(|| "<нет type>".to_string(), avro_type_norm);
+                record.fields.insert(
+                    fname.to_string(),
+                    AvroField {
+                        typ,
+                        has_default: field.get("default").is_some(),
+                    },
+                );
+                // Вложенные record в типе поля.
+                if let Some(ftype) = field.get("type") {
+                    collect_avro_records(ftype, ns.as_deref(), out);
+                }
+            }
+            out.insert(full, record);
+        }
+    }
+    // Рекурсия по значениям объекта (вложенные схемы/варианты).
+    for value in obj.values() {
+        match value {
+            Value::Object(_) => collect_avro_records(value, ns.as_deref(), out),
+            Value::Array(items) => {
+                for item in items {
+                    collect_avro_records(item, ns.as_deref(), out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Совместимые расширения типов Avro (промоушены спецификации):
+/// `int→long/float/double`, `long→float/double`, `float→double`.
+const AVRO_PROMOTIONS: &[(&str, &str)] = &[
+    ("int", "long"),
+    ("int", "float"),
+    ("int", "double"),
+    ("long", "float"),
+    ("long", "double"),
+    ("float", "double"),
+];
+
+fn avro_promotion(old: &str, new: &str) -> bool {
+    AVRO_PROMOTIONS.contains(&(old, new))
+}
+
+/// Дифф двух `.avsc`: CD-A01..CD-A05.
+///
+/// # Errors
+/// Текст не парсится как JSON/YAML, документ не похож на Avro record.
+fn diff_avro(old_text: &str, new_text: &str, old: &Path, new: &Path) -> Result<Vec<Finding>> {
+    let old_doc = parse_contract(old_text, old)?;
+    let new_doc = parse_contract(new_text, new)?;
+    let mut old_records = BTreeMap::new();
+    let mut new_records = BTreeMap::new();
+    collect_avro_records(&old_doc, None, &mut old_records);
+    collect_avro_records(&new_doc, None, &mut new_records);
+    if old_records.is_empty() || new_records.is_empty() {
+        return Err(HarnessError::Tool(format!(
+            "{}: не Avro record (ожидается «type\": «record» с «fields»)",
+            if old_records.is_empty() {
+                old.display()
+            } else {
+                new.display()
+            }
+        )));
+    }
+    let mut out = Vec::new();
+
+    // CD-A01 (error): удалённый record; CD-A05 (warn): добавленный.
+    for name in old_records.keys() {
+        if !new_records.contains_key(name) {
+            out.push(Finding {
+                severity: "error".into(),
+                rule: "CD-A01".into(),
+                location: format!("#/avro/record/{}", escape_segment(name)),
+                message: format!("удалена запись «{name}»"),
+            });
+        }
+    }
+    for name in new_records.keys() {
+        if !old_records.contains_key(name) {
+            out.push(Finding {
+                severity: "warn".into(),
+                rule: "CD-A05".into(),
+                location: format!("#/avro/record/{}", escape_segment(name)),
+                message: format!("добавлена запись «{name}»"),
+            });
+        }
+    }
+
+    for (name, old_rec) in &old_records {
+        let Some(new_rec) = new_records.get(name) else {
+            continue;
+        };
+        let loc = format!("#/avro/record/{}", escape_segment(name));
+        for (fname, old_field) in &old_rec.fields {
+            match new_rec.fields.get(fname) {
+                // CD-A02 (error): удалённое поле без default; с default — warn.
+                None => {
+                    if old_field.has_default {
+                        out.push(Finding {
+                            severity: "warn".into(),
+                            rule: "CD-A05".into(),
+                            location: format!("{loc}/field/{}", escape_segment(fname)),
+                            message: format!("поле «{fname}» удалено (у старой схемы был default — чтение старых данных безопасно)"),
+                        });
+                    } else {
+                        out.push(Finding {
+                            severity: "error".into(),
+                            rule: "CD-A02".into(),
+                            location: format!("{loc}/field/{}", escape_segment(fname)),
+                            message: format!("удалено поле «{fname}» (без default в старой схеме)"),
+                        });
+                    }
+                }
+                Some(new_field) => {
+                    if old_field.typ == new_field.typ {
+                        continue;
+                    }
+                    let old_set: BTreeSet<&str> = old_field.typ.split('|').collect();
+                    let new_set: BTreeSet<&str> = new_field.typ.split('|').collect();
+                    if avro_promotion(&old_field.typ, &new_field.typ)
+                        || (old_set.len() > 1 && old_set.is_subset(&new_set))
+                    {
+                        // Промоушен / расширение union — warn.
+                        out.push(Finding {
+                            severity: "warn".into(),
+                            rule: "CD-A05".into(),
+                            location: format!("{loc}/field/{}", escape_segment(fname)),
+                            message: format!(
+                                "поле «{fname}»: тип расширен {} → {}",
+                                old_field.typ, new_field.typ
+                            ),
+                        });
+                    } else {
+                        out.push(Finding {
+                            severity: "error".into(),
+                            rule: "CD-A03".into(),
+                            location: format!("{loc}/field/{}", escape_segment(fname)),
+                            message: format!(
+                                "поле «{fname}»: несовместимая смена типа {} → {}",
+                                old_field.typ, new_field.typ
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+        for (fname, new_field) in &new_rec.fields {
+            if old_rec.fields.contains_key(fname) {
+                continue;
+            }
+            // CD-A04 (error): добавленное поле без default (читатели новой
+            // схемы не прочтут старые данные); с default — warn.
+            if new_field.has_default {
+                out.push(Finding {
+                    severity: "warn".into(),
+                    rule: "CD-A05".into(),
+                    location: format!("{loc}/field/{}", escape_segment(fname)),
+                    message: format!("добавлено поле «{fname}» (с default)"),
+                });
+            } else {
+                out.push(Finding {
+                    severity: "error".into(),
+                    rule: "CD-A04".into(),
+                    location: format!("{loc}/field/{}", escape_segment(fname)),
+                    message: format!("добавлено поле «{fname}» без default"),
+                });
+            }
+        }
+    }
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// JSON Schema (топики/тела сообщений)
+// ---------------------------------------------------------------------------
+
+/// Множество типов свойства (`type` строкой или массивом).
+fn js_type_set(prop: &Value) -> Option<BTreeSet<String>> {
+    match prop.get("type") {
+        Some(Value::String(s)) => Some(BTreeSet::from([s.clone()])),
+        Some(Value::Array(items)) => {
+            let set: BTreeSet<String> = items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect();
+            (!set.is_empty()).then_some(set)
+        }
+        _ => None,
+    }
+}
+
+/// Множество имён из `required`.
+fn js_required(schema: &Value) -> BTreeSet<String> {
+    schema
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Дифф двух JSON Schema: CD-J01..CD-J05, рекурсия по вложенным
+/// `properties` с потолком [`MAX_JSONSCHEMA_DEPTH`].
+///
+/// # Errors
+/// Текст не парсится как JSON/YAML, документ не похож на JSON Schema.
+fn diff_jsonschema(old_text: &str, new_text: &str, old: &Path, new: &Path) -> Result<Vec<Finding>> {
+    let old_doc = parse_contract(old_text, old)?;
+    let new_doc = parse_contract(new_text, new)?;
+    if !is_json_schema(&old_doc) || !is_json_schema(&new_doc) {
+        return Err(HarnessError::Tool(format!(
+            "{}: не JSON Schema (нет $schema/properties/required/type)",
+            if is_json_schema(&old_doc) {
+                new.display()
+            } else {
+                old.display()
+            }
+        )));
+    }
+    let mut out = Vec::new();
+    diff_js_object(&old_doc, &new_doc, "#", 0, &mut out);
+    Ok(out)
+}
+
+/// Рекурсивный дифф объекта схемы (уровень `properties`+`required`).
+fn diff_js_object(old: &Value, new: &Value, loc: &str, depth: usize, out: &mut Vec<Finding>) {
+    if depth > MAX_JSONSCHEMA_DEPTH {
+        return;
+    }
+    let old_props = old.get("properties").and_then(Value::as_object);
+    let new_props = new.get("properties").and_then(Value::as_object);
+    let old_req = js_required(old);
+    let new_req = js_required(new);
+
+    if let Some(old_props) = old_props {
+        for (name, old_prop) in old_props {
+            let ploc = format!("{loc}/properties/{}", escape_segment(name));
+            match new_props.and_then(|np| np.get(name)) {
+                // CD-J01 (error): удалённое свойство.
+                None => out.push(Finding {
+                    severity: "error".into(),
+                    rule: "CD-J01".into(),
+                    location: ploc,
+                    message: format!("удалено свойство «{name}»"),
+                }),
+                Some(new_prop) => {
+                    // CD-J04 (warn): снята обязательность.
+                    if old_req.contains(name) && !new_req.contains(name) {
+                        out.push(Finding {
+                            severity: "warn".into(),
+                            rule: "CD-J04".into(),
+                            location: ploc.clone(),
+                            message: format!("свойство «{name}» перестало быть required"),
+                        });
+                    }
+                    // CD-J02 (error): свойство стало обязательным.
+                    if !old_req.contains(name) && new_req.contains(name) {
+                        out.push(Finding {
+                            severity: "error".into(),
+                            rule: "CD-J02".into(),
+                            location: ploc.clone(),
+                            message: format!("свойство «{name}» стало required"),
+                        });
+                    }
+                    // CD-J03/CD-J05: сужение/смена/расширение типа.
+                    if let (Some(old_t), Some(new_t)) =
+                        (js_type_set(old_prop), js_type_set(new_prop))
+                    {
+                        if old_t != new_t {
+                            if new_t.is_subset(&old_t) {
+                                out.push(Finding {
+                                    severity: "error".into(),
+                                    rule: "CD-J03".into(),
+                                    location: ploc.clone(),
+                                    message: format!(
+                                        "свойство «{name}»: сужение типа [{}] → [{}]",
+                                        old_t.into_iter().collect::<Vec<_>>().join("|"),
+                                        new_t.into_iter().collect::<Vec<_>>().join("|")
+                                    ),
+                                });
+                            } else if old_t.is_subset(&new_t) {
+                                out.push(Finding {
+                                    severity: "warn".into(),
+                                    rule: "CD-J05".into(),
+                                    location: ploc.clone(),
+                                    message: format!(
+                                        "свойство «{name}»: тип расширен [{}] → [{}]",
+                                        old_t.into_iter().collect::<Vec<_>>().join("|"),
+                                        new_t.into_iter().collect::<Vec<_>>().join("|")
+                                    ),
+                                });
+                            } else {
+                                out.push(Finding {
+                                    severity: "error".into(),
+                                    rule: "CD-J03".into(),
+                                    location: ploc.clone(),
+                                    message: format!(
+                                        "свойство «{name}»: смена типа [{}] → [{}]",
+                                        old_t.into_iter().collect::<Vec<_>>().join("|"),
+                                        new_t.into_iter().collect::<Vec<_>>().join("|")
+                                    ),
+                                });
+                            }
+                        }
+                    }
+                    // Рекурсия по вложенным объектам.
+                    if old_prop.get("properties").is_some() && new_prop.get("properties").is_some()
+                    {
+                        diff_js_object(old_prop, new_prop, &ploc, depth + 1, out);
+                    }
+                }
+            }
+        }
+    }
+    if let Some(new_props) = new_props {
+        for name in new_props.keys() {
+            if old_props.is_some_and(|op| op.contains_key(name)) {
+                continue;
+            }
+            let ploc = format!("{loc}/properties/{}", escape_segment(name));
+            // CD-J02 (error): добавлено сразу обязательное свойство;
+            // необязательное — CD-J05 (warn).
+            if new_req.contains(name) {
+                out.push(Finding {
+                    severity: "error".into(),
+                    rule: "CD-J02".into(),
+                    location: ploc,
+                    message: format!("добавлено обязательное свойство «{name}»"),
+                });
+            } else {
+                out.push(Finding {
+                    severity: "warn".into(),
+                    rule: "CD-J05".into(),
+                    location: ploc,
+                    message: format!("добавлено необязательное свойство «{name}»"),
+                });
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DDL-миграции (.sql)
+// ---------------------------------------------------------------------------
+
+/// Колонка в итоговом состоянии DDL.
+#[derive(Debug, Clone)]
+struct DdlColumn {
+    /// Тип (нижний регистр, схлопнутые пробелы).
+    typ: String,
+    /// `NOT NULL` (или `PRIMARY KEY`).
+    not_null: bool,
+    /// Есть `DEFAULT`.
+    has_default: bool,
+}
+
+/// Итоговое состояние схемы после применения всех операторов файла.
+#[derive(Debug, Default)]
+struct DdlSchema {
+    /// Таблицы → колонки по имени.
+    tables: BTreeMap<String, BTreeMap<String, DdlColumn>>,
+}
+
+/// Нормализация идентификатора SQL: срез кавычек/обратных кавычек/скобок,
+/// нижний регистр (неквотированные идентификаторы PostgreSQL складываются
+/// в нижний регистр; консервативно — для всех диалектов).
+fn sql_ident(raw: &str) -> String {
+    raw.trim()
+        .trim_matches('"')
+        .trim_matches('`')
+        .trim_matches(['[', ']'])
+        .to_ascii_lowercase()
+}
+
+/// Ключевые слова-ограничители в определении колонки (по ним обрезается тип).
+const SQL_CONSTRAINT_WORDS: [&str; 10] = [
+    "primary",
+    "not",
+    "null",
+    "default",
+    "references",
+    "unique",
+    "check",
+    "constraint",
+    "collate",
+    "generated",
+];
+
+/// Разбор определения колонки (`name type [constraints]`).
+fn parse_column_def(def: &str) -> Option<(String, DdlColumn)> {
+    let tokens: Vec<&str> = def.split_whitespace().collect();
+    let name = sql_ident(tokens.first()?);
+    if SQL_CONSTRAINT_WORDS.contains(&name.as_str()) {
+        return None; // табличный constraint, не колонка
+    }
+    let mut type_tokens: Vec<&str> = Vec::new();
+    for tok in tokens.iter().skip(1) {
+        let low = tok.to_ascii_lowercase();
+        // Тип кончается первым словом-ограничителем (NOT NULL, DEFAULT, …).
+        let stripped = low.trim_end_matches([',', ')']);
+        if !type_tokens.is_empty() && SQL_CONSTRAINT_WORDS.contains(&stripped) {
+            break;
+        }
+        type_tokens.push(tok);
+    }
+    let typ = type_tokens
+        .join(" ")
+        .to_ascii_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let rest = def.to_ascii_lowercase();
+    Some((
+        name,
+        DdlColumn {
+            typ,
+            not_null: rest.contains("not null") || rest.contains("primary key"),
+            has_default: rest.contains("default"),
+        },
+    ))
+}
+
+/// Разбивает тело `CREATE TABLE (...)` на определения по запятым верхнего
+/// уровня (запятые внутри `varchar(…)`/check-скобок не режем).
+fn split_top_level_commas(body: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut current = String::new();
+    for ch in body.chars() {
+        match ch {
+            '(' => {
+                depth += 1;
+                current.push(ch);
+            }
+            ')' => {
+                depth -= 1;
+                current.push(ch);
+            }
+            ',' if depth == 0 => {
+                if !current.trim().is_empty() {
+                    out.push(current.trim().to_string());
+                }
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+    if !current.trim().is_empty() {
+        out.push(current.trim().to_string());
+    }
+    out
+}
+
+/// Приводит DDL-файл к итоговому состоянию схемы: `CREATE TABLE` +
+/// `ALTER TABLE` (add/drop column, type, not null) + `DROP TABLE`.
+/// Незнакомые операторы пропускаются (консервативный скелет).
+fn parse_ddl(text: &str) -> DdlSchema {
+    let create_re = regex::Regex::new(
+        r"(?i)^\s*create\s+table\s+(?:if\s+not\s+exists\s+)?([^\s(]+)\s*\((.*)\)\s*$",
+    );
+    let alter_re =
+        regex::Regex::new(r"(?i)^\s*alter\s+table\s+(?:if\s+exists\s+)?([^\s]+)\s+(.*)$");
+    let drop_re = regex::Regex::new(r"(?i)^\s*drop\s+table\s+(?:if\s+exists\s+)?(.+)$");
+    let (Ok(create_re), Ok(alter_re), Ok(drop_re)) = (create_re, alter_re, drop_re) else {
+        return DdlSchema::default();
+    };
+
+    let mut schema = DdlSchema::default();
+    for stmt in text.split(';').take(MAX_DDL_STATEMENTS) {
+        // Однострочные комментарии -- срезаем построчно.
+        let cleaned: String = stmt
+            .lines()
+            .map(|l| l.split("--").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let stmt = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+        if stmt.is_empty() {
+            continue;
+        }
+        if let Some(caps) = create_re.captures(&stmt) {
+            let table = sql_ident(&caps[1]);
+            let columns = schema.tables.entry(table).or_default();
+            for def in split_top_level_commas(&caps[2]) {
+                if let Some((name, col)) = parse_column_def(&def) {
+                    columns.insert(name, col);
+                }
+            }
+            continue;
+        }
+        if let Some(caps) = drop_re.captures(&stmt) {
+            for name in caps[1].split(',') {
+                let name = name.trim();
+                if name.is_empty() {
+                    continue;
+                }
+                // Отсекаем хвосты cascade/restrict.
+                let name = name.split_whitespace().next().unwrap_or(name);
+                schema.tables.remove(&sql_ident(name));
+            }
+            continue;
+        }
+        if let Some(caps) = alter_re.captures(&stmt) {
+            let table = sql_ident(&caps[1]);
+            let actions = split_top_level_commas(&caps[2]);
+            let Some(columns) = schema.tables.get_mut(&table) else {
+                continue; // alter несуществующей таблицы — пропускаем
+            };
+            for action in actions {
+                apply_alter_action(columns, &action);
+            }
+        }
+    }
+    schema
+}
+
+/// Применяет одно действие `ALTER TABLE` к набору колонок.
+fn apply_alter_action(columns: &mut BTreeMap<String, DdlColumn>, action: &str) {
+    let low = action.to_ascii_lowercase();
+    let tokens: Vec<&str> = action.split_whitespace().collect();
+    if low.starts_with("add column ") || low.starts_with("add ") {
+        let skip = if low.starts_with("add column ") { 2 } else { 1 };
+        let Some(def) = tokens.get(skip..).map(|t| t.join(" ")) else {
+            return;
+        };
+        // «if not exists» в определении пропускаем.
+        let def = if def.to_ascii_lowercase().starts_with("if not exists ") {
+            def.split_whitespace().skip(3).collect::<Vec<_>>().join(" ")
+        } else {
+            def
+        };
+        if let Some((name, col)) = parse_column_def(&def) {
+            columns.insert(name, col);
+        }
+        return;
+    }
+    if low.starts_with("drop column ") || low.starts_with("drop ") {
+        let skip = if low.starts_with("drop column ") {
+            2
+        } else {
+            1
+        };
+        if let Some(name) = tokens.get(skip) {
+            columns.remove(&sql_ident(name));
+        }
+        return;
+    }
+    if low.starts_with("alter column ") || low.starts_with("alter ") || low.starts_with("modify ") {
+        let name_idx = 1;
+        let Some(raw_name) = tokens.get(name_idx) else {
+            return;
+        };
+        let name = sql_ident(raw_name);
+        let rest = tokens.get(2..).map(|t| t.join(" ")).unwrap_or_default();
+        let rest_low = rest.to_ascii_lowercase();
+        let Some(col) = columns.get_mut(&name) else {
+            return;
+        };
+        if let Some(pos) = rest_low.find(" type ") {
+            // «SET DATA TYPE …» / «TYPE …»: тип до « using » или конца.
+            let type_start = pos + " type ".len();
+            let tail = &rest[type_start..];
+            let tail = tail.split(" using ").next().unwrap_or(tail);
+            col.typ = tail.trim().to_ascii_lowercase();
+        } else if rest_low.starts_with("set not null") {
+            col.not_null = true;
+        } else if rest_low.starts_with("drop not null") {
+            col.not_null = false;
+        } else if low.starts_with("modify ") {
+            // MySQL: MODIFY <name> <type> [constraints].
+            let def = tokens.get(2..).map(|t| t.join(" ")).unwrap_or_default();
+            if let Some((_, new_col)) = parse_column_def(&format!("{name} {def}")) {
+                *col = new_col;
+            }
+        }
+    }
+}
+
+/// Скалярные совместимые расширения типов SQL (warn).
+const SQL_SCALAR_WIDENINGS: &[(&str, &str)] = &[
+    ("smallint", "int"),
+    ("smallint", "integer"),
+    ("smallint", "bigint"),
+    ("int", "bigint"),
+    ("integer", "bigint"),
+    ("real", "double precision"),
+    ("float", "double precision"),
+    ("varchar", "text"),
+];
+
+/// Совместимые расширения типов SQL (warn): `int→bigint`, `smallint→int/bigint`,
+/// `real→double precision`, `varchar(N→M≥N)`, `char(N→M≥N)`,
+/// `numeric(p,s)→numeric(p'≥p,s'≥s)`.
+fn sql_type_widening(old: &str, new: &str) -> bool {
+    if old == new {
+        return true;
+    }
+    if SQL_SCALAR_WIDENINGS.contains(&(old, new)) {
+        return true;
+    }
+    // Параметризованные типы: name(a[, b]).
+    if let (Some((on, op)), Some((nn, np))) = (sql_type_params(old), sql_type_params(new)) {
+        if on != nn
+            || !matches!(
+                on,
+                "varchar" | "char" | "character varying" | "numeric" | "decimal"
+            )
+        {
+            return false;
+        }
+        return op.len() == np.len() && op.iter().zip(np.iter()).all(|(o, n)| n >= o);
+    }
+    false
+}
+
+/// Разбор параметризованного типа `name(a[, b])` → (имя, параметры).
+fn sql_type_params(t: &str) -> Option<(&str, Vec<u64>)> {
+    let (name, rest) = t.split_once('(')?;
+    let rest = rest.trim_end_matches(')');
+    let nums: Option<Vec<u64>> = rest
+        .split(',')
+        .map(|p| p.trim().parse::<u64>().ok())
+        .collect();
+    Some((name.trim(), nums?))
+}
+
+/// Дифф двух DDL-файлов (итоговых состояний): CD-S01..CD-S05.
+fn diff_ddl(old: &str, new: &str) -> Vec<Finding> {
+    let old_schema = parse_ddl(old);
+    let new_schema = parse_ddl(new);
+    let mut out = Vec::new();
+
+    // CD-S01 (error): удалённая таблица; CD-S05 (warn): добавленная.
+    for table in old_schema.tables.keys() {
+        if !new_schema.tables.contains_key(table) {
+            out.push(Finding {
+                severity: "error".into(),
+                rule: "CD-S01".into(),
+                location: format!("#/ddl/table/{}", escape_segment(table)),
+                message: format!("удалена таблица «{table}»"),
+            });
+        }
+    }
+    for (table, columns) in &new_schema.tables {
+        if !old_schema.tables.contains_key(table) {
+            out.push(Finding {
+                severity: "warn".into(),
+                rule: "CD-S05".into(),
+                location: format!("#/ddl/table/{}", escape_segment(table)),
+                message: format!("добавлена таблица «{table}» ({} колонок)", columns.len()),
+            });
+        }
+    }
+
+    for (table, old_cols) in &old_schema.tables {
+        let Some(new_cols) = new_schema.tables.get(table) else {
+            continue;
+        };
+        let loc = format!("#/ddl/table/{}", escape_segment(table));
+        for (col, old_col) in old_cols {
+            let cloc = format!("{loc}/column/{}", escape_segment(col));
+            match new_cols.get(col) {
+                // CD-S02 (error): удалённая колонка.
+                None => out.push(Finding {
+                    severity: "error".into(),
+                    rule: "CD-S02".into(),
+                    location: cloc,
+                    message: format!("удалена колонка «{table}.{col}»"),
+                }),
+                Some(new_col) => {
+                    // CD-S03 (error): несовместимая смена типа; расширение — warn.
+                    if old_col.typ != new_col.typ {
+                        if sql_type_widening(&old_col.typ, &new_col.typ) {
+                            out.push(Finding {
+                                severity: "warn".into(),
+                                rule: "CD-S05".into(),
+                                location: cloc.clone(),
+                                message: format!(
+                                    "колонка «{table}.{col}»: тип расширен {} → {}",
+                                    old_col.typ, new_col.typ
+                                ),
+                            });
+                        } else {
+                            out.push(Finding {
+                                severity: "error".into(),
+                                rule: "CD-S03".into(),
+                                location: cloc.clone(),
+                                message: format!(
+                                    "колонка «{table}.{col}»: несовместимая смена типа {} → {}",
+                                    old_col.typ, new_col.typ
+                                ),
+                            });
+                        }
+                    }
+                    // CD-S04 (error): стала NOT NULL без default; с default — warn.
+                    if !old_col.not_null && new_col.not_null {
+                        if new_col.has_default {
+                            out.push(Finding {
+                                severity: "warn".into(),
+                                rule: "CD-S05".into(),
+                                location: cloc.clone(),
+                                message: format!(
+                                    "колонка «{table}.{col}» стала NOT NULL (с DEFAULT — существующие строки заполнятся)"
+                                ),
+                            });
+                        } else {
+                            out.push(Finding {
+                                severity: "error".into(),
+                                rule: "CD-S04".into(),
+                                location: cloc.clone(),
+                                message: format!(
+                                    "колонка «{table}.{col}» стала NOT NULL без DEFAULT — существующие NULL не пройдут"
+                                ),
+                            });
+                        }
+                    }
+                    if old_col.not_null && !new_col.not_null {
+                        out.push(Finding {
+                            severity: "warn".into(),
+                            rule: "CD-S05".into(),
+                            location: cloc,
+                            message: format!("колонка «{table}.{col}»: снято NOT NULL"),
+                        });
+                    }
+                }
+            }
+        }
+        for (col, new_col) in new_cols {
+            if old_cols.contains_key(col) {
+                continue;
+            }
+            let cloc = format!("{loc}/column/{}", escape_segment(col));
+            // CD-S04 (error): добавлена NOT NULL колонка без default;
+            // nullable/с default — CD-S05 (warn).
+            if new_col.not_null && !new_col.has_default {
+                out.push(Finding {
+                    severity: "error".into(),
+                    rule: "CD-S04".into(),
+                    location: cloc,
+                    message: format!(
+                        "добавлена обязательная колонка «{table}.{col}» без DEFAULT — вставка в существующие строки невозможна"
+                    ),
+                });
+            } else {
+                out.push(Finding {
+                    severity: "warn".into(),
+                    rule: "CD-S05".into(),
+                    location: cloc,
+                    message: format!("добавлена колонка «{table}.{col}»"),
+                });
+            }
+        }
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Инструмент, рендер, CLI-вердикт
+// ---------------------------------------------------------------------------
+
 /// JSON Pointer-экранирование сегмента: `~` → `~0`, `/` → `~1`.
 fn escape_segment(segment: &str) -> String {
     segment.replace('~', "~0").replace('/', "~1")
@@ -403,23 +2067,119 @@ fn location(segments: &[&str]) -> String {
     format!("#/{}", escaped.join("/"))
 }
 
+/// Собирает отчёт в стиле `spine_lint`: сводка с форматом, строки находок,
+/// итог, опциональная секция связки с моделью.
+#[must_use]
+pub fn render_report(report: &DiffReport) -> String {
+    let findings = &report.findings;
+    let breaking = findings.iter().filter(|f| f.severity == "error").count();
+    let non_breaking = findings.len() - breaking;
+    let mut out = format!(
+        "contract_diff: {} изменений (breaking: {breaking}, non-breaking: {non_breaking})\nФормат: {}",
+        findings.len(),
+        report.format.name()
+    );
+    // Запись в String не может завершиться ошибкой — игноры безопасны.
+    for f in findings {
+        let _ = writeln!(
+            out,
+            "[{}] {} {} — {}",
+            f.severity, f.location, f.rule, f.message
+        );
+    }
+    let _ = writeln!(out, "Итог: {}", if breaking == 0 { "PASS" } else { "FAIL" });
+    if let Some(impact) = &report.impact {
+        if impact.matched_int.is_empty() {
+            let _ = writeln!(
+                out,
+                "Связь с моделью: ни один INT.contract не совпал с путями old/new (gap — контракт вне модели, ADR-035)"
+            );
+        } else {
+            let _ = writeln!(
+                out,
+                "Связь с моделью: {} ({})",
+                impact.matched_int.join(", "),
+                impact.matched_paths.join(", ")
+            );
+            if !impact.consumers.is_empty() {
+                let _ = writeln!(out, "  Потребители: {}", impact.consumers.join("; "));
+            }
+            if !impact.rules.is_empty() {
+                let _ = writeln!(out, "  Правила: {}", impact.rules.join("; "));
+            }
+            if !impact.owners.is_empty() {
+                let _ = writeln!(
+                    out,
+                    "  Владельцы (согласовать): {}",
+                    impact.owners.join("; ")
+                );
+            }
+            let _ = writeln!(out, "  {}", impact.summary);
+        }
+    }
+    out
+}
+
+/// JSON-форма отчёта (`arch-be contract-diff --json`).
+#[must_use]
+pub fn report_json(report: &DiffReport) -> Value {
+    let breaking = report
+        .findings
+        .iter()
+        .filter(|f| f.severity == "error")
+        .count();
+    json!({
+        "tool": "contract_diff",
+        "passed": !report.has_breaking(),
+        "format": report.format.name(),
+        "breaking": breaking,
+        "non_breaking": report.findings.len() - breaking,
+        "findings": report.findings.iter().map(|f| json!({
+            "severity": f.severity,
+            "rule": f.rule,
+            "location": f.location,
+            "message": f.message,
+        })).collect::<Vec<_>>(),
+        "impact": report.impact.as_ref().map(|i| json!({
+            "matched_int": i.matched_int,
+            "matched_paths": i.matched_paths,
+            "consumers": i.consumers,
+            "rules": i.rules,
+            "owners": i.owners,
+            "summary": i.summary,
+        })),
+        "summary": format!(
+            "{} изменений (breaking: {breaking}), формат {}",
+            report.findings.len(),
+            report.format.name()
+        ),
+    })
+}
+
 /// Инструменты модуля: `contract_diff`.
 #[must_use]
 pub fn tools() -> Vec<Arc<dyn Tool>> {
     vec![Arc::new(ContractDiffTool)]
 }
 
-/// Инструмент `contract_diff`: сравнение двух версий контракта `OpenAPI` 3.x
-/// на breaking changes правилами CD-001..CD-006 (транш T1 контрактного контура,
-/// ADR-015).
+/// Инструмент `contract_diff`: сравнение двух версий контракта на breaking
+/// changes — `OpenAPI` 3.x (CD-001..CD-007, транш T1, ADR-015), protobuf/gRPC
+/// (CD-P01..CD-P06), Avro (CD-A01..CD-A05), JSON Schema (CD-J01..CD-J05),
+/// DDL-миграции (CD-S01..CD-S05) (бэклог волны 3, п.14).
 pub struct ContractDiffTool;
 
 #[derive(Debug, Deserialize)]
 struct ContractDiffArgs {
-    /// Путь к старой версии контракта `OpenAPI` (yaml/yml/json).
+    /// Путь к старой версии контракта.
     old: String,
-    /// Путь к новой версии контракта `OpenAPI` (yaml/yml/json).
+    /// Путь к новой версии контракта.
     new: String,
+    /// Формат: auto (детектор, дефолт) | openapi | proto | avro |
+    /// jsonschema | ddl.
+    format: Option<String>,
+    /// Корень кейса с `model/` — связка с моделью (ADR-035): по полю
+    /// `contract` INT находятся потребители и владельцы (impact-секция).
+    model: Option<String>,
 }
 
 #[async_trait]
@@ -427,20 +2187,35 @@ impl Tool for ContractDiffTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "contract_diff".into(),
-            description: "Сравнить две версии контракта OpenAPI 3.x: breaking changes (удалённые \
-                          пути/операции/параметры/ответы, смена типов) — третий инструмент T1 \
-                          (ADR-015)"
+            description: "Сравнить две версии контракта на breaking changes: OpenAPI 3.x \
+                          (CD-001..CD-006 + CD-007 — ломающий дифф без смены major \
+                          info.version), protobuf/gRPC .proto (удалённые/перенумерованные \
+                          поля, rpc, CD-P06 major пакета), Avro .avsc (поля без default, \
+                          несовместимые типы), JSON Schema топиков (required/properties/тип), \
+                          DDL-миграции .sql (DROP/ALTER/NOT NULL без DEFAULT). format=auto — \
+                          детектор по расширению/содержимому. model — корень кейса с model/: \
+                          ломающий дифф сразу возвращает потребителей и владельцев по полю \
+                          contract у INT (ADR-035)"
                 .into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "old": {
                         "type": "string",
-                        "description": "Путь к старой версии контракта OpenAPI (yaml/yml/json)"
+                        "description": "Путь к старой версии контракта (yaml/yml/json/proto/avsc/sql)"
                     },
                     "new": {
                         "type": "string",
-                        "description": "Путь к новой версии контракта OpenAPI (yaml/yml/json)"
+                        "description": "Путь к новой версии контракта (тот же формат)"
+                    },
+                    "format": {
+                        "type": "string",
+                        "description": "Формат: auto (по умолчанию — детектор) | openapi | proto | avro | jsonschema | ddl",
+                        "enum": ["auto", "openapi", "proto", "avro", "jsonschema", "ddl"]
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "Корень кейса с model/ — секция impact: потребители/владельцы ломаемого контракта (ADR-035)"
                     }
                 },
                 "required": ["old", "new"]
@@ -457,39 +2232,26 @@ impl Tool for ContractDiffTool {
                 )));
             }
         };
+        let format = match args.format.as_deref().unwrap_or("auto") {
+            "auto" => None,
+            other => match ContractFormat::from_name(other) {
+                Some(f) => Some(f),
+                None => {
+                    return Ok(ToolOutput::err(format!(
+                        "contract_diff: неизвестный формат '{other}' (допустимы: auto, openapi, proto, avro, jsonschema, ddl)"
+                    )));
+                }
+            },
+        };
         let old = ctx.resolve(&args.old);
         let new = ctx.resolve(&args.new);
-        let findings = match diff_contracts(&old, &new) {
-            Ok(f) => f,
+        let model = args.model.as_deref().map(|m| ctx.resolve(m));
+        let report = match diff_report(&old, &new, format, model.as_deref()) {
+            Ok(r) => r,
             Err(e) => return Ok(ToolOutput::err(format!("contract_diff: {e}"))),
         };
-        Ok(ToolOutput::ok(render_report(&findings)))
+        Ok(ToolOutput::ok(render_report(&report)))
     }
-}
-
-/// Собирает отчёт в стиле `spine_lint`: сводка, строки находок, итог.
-fn render_report(findings: &[Finding]) -> String {
-    let breaking = findings.iter().filter(|f| f.severity == "error").count();
-    let non_breaking = findings.len() - breaking;
-    let mut report = format!(
-        "contract_diff: {} изменений (breaking: {breaking}, non-breaking: {non_breaking})",
-        findings.len()
-    );
-    // Запись в String не может завершиться ошибкой — игнор безопасен.
-    for f in findings {
-        let _ = writeln!(
-            report,
-            "[{}] {} {} — {}",
-            f.severity, f.location, f.rule, f.message
-        );
-    }
-    // Запись в String не может завершиться ошибкой — игнор безопасен.
-    let _ = writeln!(
-        report,
-        "Итог: {}",
-        if breaking == 0 { "PASS" } else { "FAIL" }
-    );
-    report
 }
 
 #[cfg(test)]
@@ -602,6 +2364,7 @@ components:
             "{}",
             out.content
         );
+        assert!(out.content.contains("Формат: openapi"), "{}", out.content);
         assert!(out.content.contains("Итог: PASS"), "{}", out.content);
         assert!(!out.content.contains("CD-00"), "{}", out.content);
     }
@@ -757,6 +2520,25 @@ components:
         assert!(out.content.contains("Итог: FAIL"), "{}", out.content);
     }
 
+    /// CD-007 (п.14): breaking-дифф без смены major `info.version` — error;
+    /// смена major узаконивает.
+    #[tokio::test]
+    async fn cd007_breaking_without_major_bump_is_error() {
+        let new = BASE.replace(PETS_PATH, "");
+        let out = diff_text(BASE, &new, "old.yaml", "new.yaml").await;
+        assert!(
+            out.content.contains("[error] #/info/version CD-007"),
+            "{}",
+            out.content
+        );
+        // Смена major (1.0.0 → 2.0.0): CD-007 не срабатывает, CD-001 остаётся.
+        let new_v2 = new.replace("version: 1.0.0", "version: 2.0.0");
+        let out = diff_text(BASE, &new_v2, "old.yaml", "new.yaml").await;
+        assert!(!out.content.contains("CD-007"), "{}", out.content);
+        assert!(out.content.contains("CD-001"), "{}", out.content);
+        assert!(out.content.contains("Итог: FAIL"), "{}", out.content);
+    }
+
     #[tokio::test]
     async fn mixed_json_and_yaml_are_compared() {
         let old = r#"{
@@ -777,7 +2559,7 @@ components:
         let new = r"openapi: 3.0.3
 info:
   title: T
-  version: 1.0.0
+  version: 2.0.0
 paths:
   /v1/pets:
     get:
@@ -826,5 +2608,577 @@ paths:
             .expect("вызов contract_diff");
         assert!(out.is_error, "{}", out.content);
         assert!(out.content.contains("contract_diff"), "{}", out.content);
+    }
+
+    // -----------------------------------------------------------------
+    // protobuf/gRPC (.proto), CD-P01..CD-P06
+    // -----------------------------------------------------------------
+
+    /// Proto-эталон v1: package, два сообщения (одно вложенное), сервис.
+    const PROTO_V1: &str = r#"syntax = "proto3";
+
+package acme.payments.v1;
+
+// Запрос списания.
+message ChargeRequest {
+  string id = 1;
+  int64 amount_minor = 2;
+  optional string currency = 3;
+  Address billing = 4;
+
+  message Address {
+    string city = 1;
+  }
+}
+
+message ChargeResponse {
+  string status = 1;
+}
+
+service Charging {
+  rpc Charge (ChargeRequest) returns (ChargeResponse);
+  rpc Refund (ChargeRequest) returns (ChargeResponse);
+}
+"#;
+
+    /// Прогон proto-диффа через инструмент.
+    async fn diff_proto_text(old: &str, new: &str) -> ToolOutput {
+        diff_text(old, new, "old.proto", "new.proto").await
+    }
+
+    #[tokio::test]
+    async fn proto_identical_passes_clean() {
+        let out = diff_proto_text(PROTO_V1, PROTO_V1).await;
+        assert!(!out.is_error, "{}", out.content);
+        assert!(
+            out.content.contains("contract_diff: 0 изменений"),
+            "{}",
+            out.content
+        );
+        assert!(out.content.contains("Формат: proto"), "{}", out.content);
+        assert!(out.content.contains("Итог: PASS"), "{}", out.content);
+    }
+
+    #[tokio::test]
+    async fn proto_removed_field_and_rpc_are_breaking() {
+        let new = PROTO_V1
+            .replace("  optional string currency = 3;\n", "")
+            .replace(
+                "  rpc Refund (ChargeRequest) returns (ChargeResponse);\n",
+                "",
+            );
+        let out = diff_proto_text(PROTO_V1, &new).await;
+        assert!(!out.is_error, "{}", out.content);
+        assert!(
+            out.content
+                .contains("[error] #/proto/message/ChargeRequest/field/3 CD-P02"),
+            "{}",
+            out.content
+        );
+        assert!(
+            out.content
+                .contains("[error] #/proto/service/Charging/rpc/Refund CD-P04"),
+            "{}",
+            out.content
+        );
+        // Ломающий дифф, пакет остался v1 → CD-P06.
+        assert!(
+            out.content.contains("[error] #/proto/package CD-P06"),
+            "{}",
+            out.content
+        );
+        assert!(out.content.contains("Итог: FAIL"), "{}", out.content);
+    }
+
+    #[tokio::test]
+    async fn proto_reserved_removal_is_warn_not_breaking() {
+        let new = PROTO_V1.replace(
+            "  optional string currency = 3;\n",
+            "  reserved 3;\n  reserved \"currency\";\n",
+        );
+        let out = diff_proto_text(PROTO_V1, &new).await;
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.contains("CD-P05"), "{}", out.content);
+        assert!(!out.content.contains("CD-P02"), "{}", out.content);
+        assert!(!out.content.contains("CD-P06"), "{}", out.content);
+        assert!(out.content.contains("Итог: PASS"), "{}", out.content);
+    }
+
+    #[tokio::test]
+    async fn proto_type_change_and_renumbering_are_breaking_major_bump_clears_p06() {
+        // Смена типа тега 2 (int64 → string) и перенумерация currency 3 → 5.
+        let new = PROTO_V1
+            .replace("int64 amount_minor = 2;", "string amount_minor = 2;")
+            .replace(
+                "optional string currency = 3;",
+                "optional string currency = 5;",
+            )
+            .replace("package acme.payments.v1;", "package acme.payments.v2;");
+        let out = diff_proto_text(PROTO_V1, &new).await;
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.contains("CD-P03"), "{}", out.content);
+        assert!(out.content.contains("перенумеровано"), "{}", out.content);
+        // major поднят (v1 → v2) — CD-P06 молчит.
+        assert!(!out.content.contains("CD-P06"), "{}", out.content);
+        assert!(out.content.contains("Итог: FAIL"), "{}", out.content);
+    }
+
+    #[tokio::test]
+    async fn proto_added_field_and_rpc_are_warn() {
+        let new = PROTO_V1
+            .replace(
+                "service Charging {",
+                "service Charging {\n  rpc Status (ChargeRequest) returns (ChargeResponse);",
+            )
+            .replace(
+                "message ChargeResponse {",
+                "message ChargeResponse {\n  string receipt_id = 2;",
+            );
+        let out = diff_proto_text(PROTO_V1, &new).await;
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.contains("CD-P05"), "{}", out.content);
+        assert!(out.content.contains("Итог: PASS"), "{}", out.content);
+    }
+
+    #[tokio::test]
+    async fn proto_removed_message_is_breaking() {
+        let new = PROTO_V1.replace("message ChargeResponse {\n  string status = 1;\n}\n\n", "");
+        // rpc возвращают ChargeResponse — тип резолвится позже; для диффа
+        // важно только удаление сообщения.
+        let out = diff_proto_text(PROTO_V1, &new).await;
+        assert!(
+            out.content
+                .contains("[error] #/proto/message/ChargeResponse CD-P01"),
+            "{}",
+            out.content
+        );
+        assert!(out.content.contains("Итог: FAIL"), "{}", out.content);
+    }
+
+    // -----------------------------------------------------------------
+    // Avro (.avsc), CD-A01..CD-A05
+    // -----------------------------------------------------------------
+
+    const AVRO_V1: &str = r#"{
+  "type": "record",
+  "name": "ChargeEvent",
+  "namespace": "acme.payments",
+  "fields": [
+    {"name": "id", "type": "string"},
+    {"name": "amount_minor", "type": "long"},
+    {"name": "note", "type": ["null", "string"], "default": null}
+  ]
+}"#;
+
+    async fn diff_avro_text(old: &str, new: &str) -> ToolOutput {
+        diff_text(old, new, "old.avsc", "new.avsc").await
+    }
+
+    #[tokio::test]
+    async fn avro_identical_passes_clean() {
+        let out = diff_avro_text(AVRO_V1, AVRO_V1).await;
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.contains("Формат: avro"), "{}", out.content);
+        assert!(out.content.contains("Итог: PASS"), "{}", out.content);
+    }
+
+    #[tokio::test]
+    async fn avro_removed_field_without_default_is_breaking() {
+        let new = AVRO_V1.replace(
+            "    {\"name\": \"amount_minor\", \"type\": \"long\"},\n",
+            "",
+        );
+        let out = diff_avro_text(AVRO_V1, &new).await;
+        assert!(out.content.contains("CD-A02"), "{}", out.content);
+        assert!(out.content.contains("Итог: FAIL"), "{}", out.content);
+        // Удаление поля С default — warn (CD-A05).
+        let new2 = AVRO_V1.replace(
+            "    {\"name\": \"note\", \"type\": [\"null\", \"string\"], \"default\": null}\n",
+            "",
+        );
+        // Запятую после amount_minor чиним, чтобы JSON оставался валидным.
+        let new2 = new2.replace(
+            "    {\"name\": \"amount_minor\", \"type\": \"long\"},\n",
+            "    {\"name\": \"amount_minor\", \"type\": \"long\"}\n",
+        );
+        let out = diff_avro_text(AVRO_V1, &new2).await;
+        assert!(out.content.contains("CD-A05"), "{}", out.content);
+        assert!(!out.content.contains("CD-A02"), "{}", out.content);
+        assert!(out.content.contains("Итог: PASS"), "{}", out.content);
+    }
+
+    #[tokio::test]
+    async fn avro_added_field_without_default_is_breaking_with_default_warn() {
+        let new = AVRO_V1.replace(
+            "    {\"name\": \"note\", \"type\": [\"null\", \"string\"], \"default\": null}",
+            "    {\"name\": \"note\", \"type\": [\"null\", \"string\"], \"default\": null},\n    {\"name\": \"trace_id\", \"type\": \"string\"}",
+        );
+        let out = diff_avro_text(AVRO_V1, &new).await;
+        assert!(out.content.contains("CD-A04"), "{}", out.content);
+        assert!(out.content.contains("Итог: FAIL"), "{}", out.content);
+        let new = AVRO_V1.replace(
+            "    {\"name\": \"note\", \"type\": [\"null\", \"string\"], \"default\": null}",
+            "    {\"name\": \"note\", \"type\": [\"null\", \"string\"], \"default\": null},\n    {\"name\": \"trace_id\", \"type\": \"string\", \"default\": \"\"}",
+        );
+        let out = diff_avro_text(AVRO_V1, &new).await;
+        assert!(out.content.contains("CD-A05"), "{}", out.content);
+        assert!(!out.content.contains("CD-A04"), "{}", out.content);
+        assert!(out.content.contains("Итог: PASS"), "{}", out.content);
+    }
+
+    #[tokio::test]
+    async fn avro_type_change_incompatible_breaking_promotion_warn() {
+        // long → string: несовместимо.
+        let new = AVRO_V1.replace(
+            "{\"name\": \"amount_minor\", \"type\": \"long\"}",
+            "{\"name\": \"amount_minor\", \"type\": \"string\"}",
+        );
+        let out = diff_avro_text(AVRO_V1, &new).await;
+        assert!(out.content.contains("CD-A03"), "{}", out.content);
+        assert!(out.content.contains("Итог: FAIL"), "{}", out.content);
+        // Расширение union ["null","string"] → ["null","string","long"]: warn.
+        let new = AVRO_V1.replace("[\"null\", \"string\"]", "[\"null\", \"long\", \"string\"]");
+        let out = diff_avro_text(AVRO_V1, &new).await;
+        assert!(out.content.contains("CD-A05"), "{}", out.content);
+        assert!(!out.content.contains("CD-A03"), "{}", out.content);
+        assert!(out.content.contains("Итог: PASS"), "{}", out.content);
+    }
+
+    // -----------------------------------------------------------------
+    // JSON Schema, CD-J01..CD-J05
+    // -----------------------------------------------------------------
+
+    const JSCHEMA_V1: &str = r#"{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "id": {"type": "string"},
+    "amount": {"type": ["integer", "null"]},
+    "meta": {
+      "type": "object",
+      "properties": {
+        "channel": {"type": "string"}
+      },
+      "required": ["channel"]
+    }
+  },
+  "required": ["id", "amount"]
+}"#;
+
+    async fn diff_js_text(old: &str, new: &str) -> ToolOutput {
+        diff_text(old, new, "old.json", "new.json").await
+    }
+
+    #[tokio::test]
+    async fn jsonschema_identical_passes_clean() {
+        let out = diff_js_text(JSCHEMA_V1, JSCHEMA_V1).await;
+        assert!(!out.is_error, "{}", out.content);
+        assert!(
+            out.content.contains("Формат: jsonschema"),
+            "{}",
+            out.content
+        );
+        assert!(out.content.contains("Итог: PASS"), "{}", out.content);
+    }
+
+    #[tokio::test]
+    async fn jsonschema_removed_property_and_required_relaxation() {
+        // Удалено свойство amount — CD-J01 error.
+        let new = JSCHEMA_V1
+            .replace("    \"amount\": {\"type\": [\"integer\", \"null\"]},\n", "")
+            .replace(
+                "\"required\": [\"id\", \"amount\"]",
+                "\"required\": [\"id\"]",
+            );
+        let out = diff_js_text(JSCHEMA_V1, &new).await;
+        assert!(
+            out.content.contains("[error] #/properties/amount CD-J01"),
+            "{}",
+            out.content
+        );
+        assert!(out.content.contains("Итог: FAIL"), "{}", out.content);
+
+        // amount оставлен, но выведен из required — CD-J04 warn (ослабление).
+        let new = JSCHEMA_V1.replace(
+            "\"required\": [\"id\", \"amount\"]",
+            "\"required\": [\"id\"]",
+        );
+        let out = diff_js_text(JSCHEMA_V1, &new).await;
+        assert!(out.content.contains("CD-J04"), "{}", out.content);
+        assert!(out.content.contains("Итог: PASS"), "{}", out.content);
+    }
+
+    #[tokio::test]
+    async fn jsonschema_type_narrowed_breaking_widened_warn() {
+        // ["integer","null"] → ["integer"]: сужение — error.
+        let new = JSCHEMA_V1.replace("\"type\": [\"integer\", \"null\"]", "\"type\": \"integer\"");
+        let out = diff_js_text(JSCHEMA_V1, &new).await;
+        assert!(out.content.contains("CD-J03"), "{}", out.content);
+        assert!(out.content.contains("Итог: FAIL"), "{}", out.content);
+        // "string" → ["string","null"]: расширение — warn.
+        let new = JSCHEMA_V1.replace(
+            "\"id\": {\"type\": \"string\"}",
+            "\"id\": {\"type\": [\"null\", \"string\"]}",
+        );
+        let out = diff_js_text(JSCHEMA_V1, &new).await;
+        assert!(out.content.contains("CD-J05"), "{}", out.content);
+        assert!(!out.content.contains("CD-J03"), "{}", out.content);
+        assert!(out.content.contains("Итог: PASS"), "{}", out.content);
+    }
+
+    #[tokio::test]
+    async fn jsonschema_nested_and_added_required_property() {
+        // Вложенное свойство meta.channel удалено (вместе с его required) —
+        // находка по вложенному пути.
+        let new = JSCHEMA_V1.replace(
+            "      \"properties\": {\n        \"channel\": {\"type\": \"string\"}\n      },\n      \"required\": [\"channel\"]\n",
+            "      \"properties\": {}\n",
+        );
+        let out = diff_js_text(JSCHEMA_V1, &new).await;
+        assert!(
+            out.content
+                .contains("[error] #/properties/meta/properties/channel CD-J01"),
+            "{}",
+            out.content
+        );
+        // Добавлено сразу обязательное свойство — CD-J02 error.
+        let new = JSCHEMA_V1
+            .replace(
+                "    \"id\": {\"type\": \"string\"},",
+                "    \"id\": {\"type\": \"string\"},\n    \"trace_id\": {\"type\": \"string\"},",
+            )
+            .replace(
+                "\"required\": [\"id\", \"amount\"]",
+                "\"required\": [\"id\", \"amount\", \"trace_id\"]",
+            );
+        let out = diff_js_text(JSCHEMA_V1, &new).await;
+        assert!(out.content.contains("CD-J02"), "{}", out.content);
+        assert!(out.content.contains("Итог: FAIL"), "{}", out.content);
+    }
+
+    // -----------------------------------------------------------------
+    // DDL-миграции (.sql), CD-S01..CD-S05
+    // -----------------------------------------------------------------
+
+    const DDL_V1: &str = "CREATE TABLE charges (
+  id varchar(36) NOT NULL,
+  amount_minor bigint NOT NULL,
+  note text
+);
+
+ALTER TABLE charges ADD COLUMN currency varchar(3);
+";
+
+    async fn diff_ddl_text(old: &str, new: &str) -> ToolOutput {
+        diff_text(old, new, "old.sql", "new.sql").await
+    }
+
+    #[tokio::test]
+    async fn ddl_identical_passes_clean() {
+        let out = diff_ddl_text(DDL_V1, DDL_V1).await;
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.contains("Формат: ddl"), "{}", out.content);
+        assert!(out.content.contains("Итог: PASS"), "{}", out.content);
+    }
+
+    #[tokio::test]
+    async fn ddl_drop_column_and_table_are_breaking() {
+        // Колонка note удалена из CREATE TABLE.
+        let new = DDL_V1.replace(",\n  note text\n", "\n");
+        let out = diff_ddl_text(DDL_V1, &new).await;
+        assert!(out.content.contains("CD-S02"), "{}", out.content);
+        assert!(out.content.contains("Итог: FAIL"), "{}", out.content);
+
+        let new = "DROP TABLE charges;\n";
+        let out = diff_ddl_text(DDL_V1, new).await;
+        assert!(
+            out.content.contains("[error] #/ddl/table/charges CD-S01"),
+            "{}",
+            out.content
+        );
+    }
+
+    #[tokio::test]
+    async fn ddl_not_null_without_default_breaking_with_default_warn() {
+        // Существующая nullable-колонка стала NOT NULL без DEFAULT — error.
+        let new = DDL_V1.replace("  note text\n", "  note text NOT NULL\n");
+        let out = diff_ddl_text(DDL_V1, &new).await;
+        assert!(out.content.contains("CD-S04"), "{}", out.content);
+        assert!(out.content.contains("Итог: FAIL"), "{}", out.content);
+        // С DEFAULT — warn.
+        let new = DDL_V1.replace("  note text\n", "  note text NOT NULL DEFAULT ''\n");
+        let out = diff_ddl_text(DDL_V1, &new).await;
+        assert!(!out.content.contains("CD-S04"), "{}", out.content);
+        assert!(out.content.contains("Итог: PASS"), "{}", out.content);
+        // Новая обязательная колонка без DEFAULT — error.
+        let new =
+            format!("{DDL_V1}\nALTER TABLE charges ADD COLUMN trace_id varchar(36) NOT NULL;\n");
+        let out = diff_ddl_text(DDL_V1, &new).await;
+        assert!(out.content.contains("CD-S04"), "{}", out.content);
+    }
+
+    #[tokio::test]
+    async fn ddl_type_change_incompatible_breaking_widening_warn() {
+        // varchar(36) → int: несовместимо.
+        let new = DDL_V1.replace("id varchar(36) NOT NULL", "id int NOT NULL");
+        let out = diff_ddl_text(DDL_V1, &new).await;
+        assert!(out.content.contains("CD-S03"), "{}", out.content);
+        assert!(out.content.contains("Итог: FAIL"), "{}", out.content);
+        // varchar(36) → varchar(64) и ALTER TYPE bigint→bigint через alter.
+        let new = DDL_V1
+            .replace("id varchar(36) NOT NULL", "id varchar(64) NOT NULL")
+            .replace(
+                "ADD COLUMN currency varchar(3);",
+                "ADD COLUMN currency varchar(8);",
+            );
+        let out = diff_ddl_text(DDL_V1, &new).await;
+        assert!(!out.content.contains("CD-S03"), "{}", out.content);
+        assert!(out.content.contains("Итог: PASS"), "{}", out.content);
+        // ALTER COLUMN TYPE через отдельный оператор (int → bigint — warn).
+        let new = format!(
+            "{DDL_V1}\nALTER TABLE charges ALTER COLUMN amount_minor SET DATA TYPE numeric(20,0);\n"
+        );
+        let out = diff_ddl_text(DDL_V1, &new).await;
+        assert!(!out.content.contains("CD-S03"), "{}", out.content);
+    }
+
+    // -----------------------------------------------------------------
+    // Детектор формата и связка с моделью (ADR-035)
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn format_mismatch_and_bad_format_name_error() {
+        // old — proto, new — openapi: разные форматы.
+        let out = diff_text(PROTO_V1, BASE, "old.proto", "new.yaml").await;
+        assert!(out.is_error, "{}", out.content);
+        assert!(
+            out.content.contains("форматы различаются"),
+            "{}",
+            out.content
+        );
+        // Неизвестное имя формата.
+        let dir = tempfile::tempdir().expect("tmp");
+        std::fs::write(dir.path().join("a.proto"), PROTO_V1).expect("a");
+        std::fs::write(dir.path().join("b.proto"), PROTO_V1).expect("b");
+        let ctx = ToolContext::new(
+            dir.path().to_path_buf(),
+            Arc::new(crate::config::Config::default()),
+        );
+        let out = tools()[0]
+            .call(
+                json!({"old": "a.proto", "new": "b.proto", "format": "xml"}),
+                &ctx,
+            )
+            .await
+            .expect("вызов");
+        assert!(out.is_error, "{}", out.content);
+        assert!(
+            out.content.contains("неизвестный формат"),
+            "{}",
+            out.content
+        );
+        // Явный format=proto на proto-файлах работает.
+        let out = tools()[0]
+            .call(
+                json!({"old": "a.proto", "new": "b.proto", "format": "proto"}),
+                &ctx,
+            )
+            .await
+            .expect("вызов");
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.contains("Формат: proto"), "{}", out.content);
+    }
+
+    /// Связка с моделью: INT-001 несёт `contract: contracts/pay.proto`;
+    /// ломающий дифф возвращает потребителей (CMP/SYS) и владельцев.
+    #[tokio::test]
+    async fn model_linkage_returns_consumers_and_owners() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let case = dir.path().join("case");
+        let model = case.join("model");
+        std::fs::create_dir_all(&model).expect("mkdir model");
+        for (name, fm) in [
+            (
+                "AD-1.md",
+                "---\nid: AD-1\ntype: ad\ntitle: Контракты\nstatus: ADOPTED\nverified_by: [C-001]\n---\n\nПравило.\n",
+            ),
+            (
+                "CMP-001.md",
+                "---\nid: CMP-001\ntype: cmp\ntitle: Платёжный шлюз\nstatus: designed\nimplements: [AD-1]\ndepends_on: [INT-001]\n---\n\nТело.\n",
+            ),
+            (
+                "INT-001.md",
+                "---\nid: INT-001\ntype: int\ntitle: Рельс процессинга\nstatus: accepted\ncontract: contracts/pay.proto\naffects: [OWNER-1]\n---\n\nТело.\n",
+            ),
+            (
+                "OWNER-1.md",
+                "---\nid: OWNER-1\ntype: owner\ntitle: Команда процессинга\nstatus: active\n---\n\nТело.\n",
+            ),
+        ] {
+            std::fs::write(model.join(name), fm).expect("сущность");
+        }
+        std::fs::write(
+            case.join("CONSTRAINTS.yaml"),
+            "constraints:\n  - id: C-001\n    name: contract_review\n    owner: Команда платежей\n",
+        )
+        .expect("constraints");
+        let contracts = case.join("contracts");
+        std::fs::create_dir_all(&contracts).expect("mkdir contracts");
+        std::fs::write(contracts.join("old.proto"), PROTO_V1).expect("old");
+        let new_proto = PROTO_V1.replace("  optional string currency = 3;\n", "");
+        std::fs::write(contracts.join("new.proto"), new_proto).expect("new");
+
+        let ctx = ToolContext::new(
+            dir.path().to_path_buf(),
+            Arc::new(crate::config::Config::default()),
+        );
+        let out = tools()[0]
+            .call(
+                json!({
+                    "old": "case/contracts/old.proto",
+                    "new": "case/contracts/new.proto",
+                    "model": "case",
+                }),
+                &ctx,
+            )
+            .await
+            .expect("вызов");
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.contains("CD-P02"), "{}", out.content);
+        assert!(out.content.contains("Итог: FAIL"), "{}", out.content);
+        // Impact-секция: INT-001 совпал (путь old/new не равен contract
+        // строкой — сверка по имени файла? нет: contract=contracts/pay.proto,
+        // а дифф по old.proto/new.proto — совпадения НЕТ, gap).
+        assert!(out.content.contains("Связь с моделью"), "{}", out.content);
+        // Теперь настоящее совпадение: contract указывает на new.proto.
+        std::fs::write(
+            model.join("INT-001.md"),
+            "---\nid: INT-001\ntype: int\ntitle: Рельс процессинга\nstatus: accepted\ncontract: contracts/new.proto\naffects: [OWNER-1]\n---\n\nТело.\n",
+        )
+        .expect("INT с совпадающим contract");
+        let out = tools()[0]
+            .call(
+                json!({
+                    "old": "case/contracts/old.proto",
+                    "new": "case/contracts/new.proto",
+                    "model": "case",
+                }),
+                &ctx,
+            )
+            .await
+            .expect("вызов");
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.contains("INT-001"), "{}", out.content);
+        assert!(
+            out.content.contains("CMP-001 · Платёжный шлюз"),
+            "{}",
+            out.content
+        );
+        assert!(
+            out.content.contains("OWNER-1 · Команда процессинга"),
+            "{}",
+            out.content
+        );
+        assert!(out.content.contains("C-001"), "{}", out.content);
     }
 }

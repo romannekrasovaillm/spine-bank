@@ -42,10 +42,28 @@ MIT; слой `banking/` в публикацию не входит.
 
 ## Шаг 0. Бинарь (30 секунд)
 
+Linux / macOS — одна команда на платформу (имя файла — из таблицы):
+
 ```bash
 curl -L -o arch-be https://github.com/romannekrasovaillm/spine-bank/releases/latest/download/arch-be-core-linux-x86_64
 chmod +x arch-be && mv arch-be ~/.local/bin/
 ```
+
+| Платформа | Файл релиза |
+|---|---|
+| Linux x86_64 | `arch-be-core-linux-x86_64` |
+| Linux aarch64 | `arch-be-core-linux-aarch64` |
+| macOS arm64 (Apple Silicon) | `arch-be-core-macos-arm64` |
+| Windows x86_64 | `arch-be-core-windows-x86_64.exe` |
+
+Windows (PowerShell):
+
+```powershell
+curl.exe -L -o arch-be.exe https://github.com/romannekrasovaillm/spine-bank/releases/latest/download/arch-be-core-windows-x86_64.exe
+# положите arch-be.exe в каталог из PATH
+```
+
+Сверка целостности: `SHA256SUMS` из того же релиза — `sha256sum --check SHA256SUMS` (Linux) / `shasum -a 256 --check SHA256SUMS` (macOS).
 
 ## Шаг 1. Подключение
 
@@ -104,7 +122,8 @@ arch-be connect qwen        # пишет .qwen/settings.json (мердж, чуж
 ![GigaCode: split-judge](docs/screenshots/harnesses/qwen-splitjudge.png)
 
 **5. Скиллы.** 62 архитектурных скилла через `skill_search`/`skill_load` —
-агент применяет их к контексту вашего проекта:
+агент применяет их к контексту вашего проекта (обзор библиотеки —
+[docs/skills_for_architects.md](docs/skills_for_architects.md)):
 
 ![GigaCode: скиллы](docs/screenshots/harnesses/qwen-skills.png)
 
@@ -227,6 +246,57 @@ LLM у Spine нет: думает ваш агент, вердикты даёт �
 
 ![Судья через подписку](docs/screenshots/connect/06-rubric-cli-judge.png)
 
+## MCP для архитекторов
+
+Архитектор не покидает свой кодовый агент: механика Spine — маршрут
+значимости, модель системы, NFR, контракты, реестры — доступна вызовом
+MCP-инструмента, а плейбуки работы (`spine-*`) приезжают как слэш-команды
+хоста через MCP prompts.
+
+- **Ревью одним вызовом**: `architect_review` (маршрут из диффа + fitness +
+  спайн + трассировка + NFR + контракты — единый вердикт) и `change_impact`
+  (что заденет изменение и с кем согласовывать — по графу модели до
+  владельцев OWNER).
+- **Маршрут — не самооценка**: `significance_from_diff` выводит триггеры из
+  git-диффа и показывает источник каждого (заявлен / найден) с
+  файлами-причинами.
+- **Находки со смыслом**: у нарушения видны задетый инвариант `AD-*`,
+  rationale, `fix_hint` и скилл для исправления.
+- **Транши инструментов**: `nfr_check`, `model_validate`, `model_drift`,
+  `delta_guard`, `evidence_verify`, `contract_diff` (OpenAPI, proto/gRPC,
+  Avro, JSON Schema, DDL + правило major-версии), реестры `landscape_report`,
+  `adr_registry`, `rules_report`, `openspec_coverage`, `model_graph`.
+- **Плейбуки как команды**: 7 MCP-промптов (`spine-architect-review`,
+  `spine-fitness-gate`, …) — в Qwen Code 0.24 видны в меню как команды
+  `[Project]`, ревью запускается из меню.
+
+<p align="center">
+  <img src="docs/screenshots/harnesses/waves-qwen-tui-prompts.png" alt="Qwen Code 0.24: плейбуки spine-* как слэш-команды [Project] через MCP prompts" width="49%">
+  <img src="docs/screenshots/harnesses/waves-claude-tui-mcp.png" alt="Claude Code: /mcp — spine connected, 33 tools" width="49%">
+</p>
+
+![Headless-прогоны architect_review: omp · OpenClaw · Qwen](docs/screenshots/harnesses/waves-headless-reviews.png)
+
+## Хуки-гейты для архитекторов
+
+Единая команда `arch-be gate [--route auto]`: fitness + `delta guard` +
+линтер спайна + трассировка (+ `nfr` и `evidence verify` на маршрутах
+Standard/Critical). Провал — по коду возврата, не по разбору строк;
+антиигровая находка `rule_weakened` ловит ослабление реестра правил
+(удалённое правило, новый `exclude_glob`, пониженный severity — без активного
+override с ADR). Хуки всех хостов (`arch-be connect <host>`) зовут именно её:
+fail-soft на инфраструктуре (нет бинаря/правил — молча пропускает),
+fail-hard на вердикте (exit 2 → находки уходят агенту как feedback).
+
+<p align="center">
+  <img src="docs/screenshots/harnesses/waves-claude-tui-hook.png" alt="Claude Code: Stop-хук с arch-be gate блокирует завершение; модель докладывает и просит разрешение" width="49%">
+  <img src="docs/screenshots/harnesses/waves-kimi-hook.png" alt="Kimi Code: Stop-хук FAIL → модель сама создала дельту и ужала бюджет → PASS" width="49%">
+</p>
+
+По прогону волн 1–3 на пяти харнессах (Qwen Code, Claude Code, omp,
+Kimi Code, OpenClaw) — с матрицей, нюансами и всеми кадрами:
+**[docs/HARNESS-TESTS.md](docs/HARNESS-TESTS.md)**.
+
 ### Скиллы видны агенту нативно
 
 62 архитектурных скилла (ADR, fitness-функции, saga/outbox/circuit-breaker,
@@ -243,7 +313,8 @@ pptx/docx/xlsx-отчёты + плейбуки spine-*) раскладывают
 # Режим 2. Spine Harness (TUI) — самостоятельный
 
 ```bash
-# 1. Бинарь (полная сборка)
+# 1. Бинарь (полная сборка; другие платформы: arch-be-linux-aarch64,
+#    arch-be-macos-arm64, Windows — arch-be-windows-x86_64.exe через curl.exe в PowerShell)
 curl -L -o arch-be https://github.com/romannekrasovaillm/spine-bank/releases/latest/download/arch-be-linux-x86_64
 chmod +x arch-be && mv arch-be ~/.local/bin/
 
@@ -289,13 +360,19 @@ fitness-правил, **сам** чинил его и перепроверял. 
 ## Что внутри MCP-сервера
 
 ```bash
-arch-be mcp serve         # read-only: 20 инструментов (контроль + знания)
-arch-be mcp serve --rw    # + handoff_create, adr_new, agentsmd_generate, …
+arch-be mcp serve         # read-only: 33 инструмента (контроль + знания + реестры)
+                          # + 7 промптов-плейбуков spine-* (слэш-команды хоста)
+arch-be mcp serve --rw    # + handoff_create (теперь и в core), adr_new, …
 ```
 
-- **Контроль**: `fitness_check`, `spine_lint`, `significance_score`,
-  `trace_check`, `model_query`, `contract_diff`, `openapi_lint`,
-  `asyncapi_lint`, `fleet_audit`, `archify_validate`, `agentsmd_lint`.
+- **Контроль**: `fitness_check`, `spine_lint`, `significance_score` +
+  `significance_from_diff` (маршрут из диффа), `trace_check`, `model_query`,
+  `model_validate`, `model_drift`, `contract_diff` (OpenAPI/proto/Avro/
+  JSON Schema/DDL), `openapi_lint`, `asyncapi_lint`, `fleet_audit`,
+  `archify_validate`, `agentsmd_lint`, `nfr_check`, `delta_guard`,
+  `evidence_verify`; составные `architect_review` и `change_impact`.
+- **Реестры**: `landscape_report`, `adr_registry`, `rules_report`,
+  `openspec_coverage`, `model_graph`.
 - **Знания**: `kb_search`, `skill_search`, `skill_load`, `rubric_list`,
   `plugin_list`, `mermaid_render`.
 - **Судья**: `rubric_run` (через `kind="cli"`), `rubric_prompt` +
@@ -303,6 +380,9 @@ arch-be mcp serve --rw    # + handoff_create, adr_new, agentsmd_generate, …
 - **Никогда наружу** (у хоста свои): `bash`, `write_file`, `edit_file`,
   `harness_run`, `subagent_*`, `web_*` — зашитый never-список, охраняется
   тестами реестра.
+- **Журнал**: каждый вызов пишется в `.arch-handoff/mcp-calls.jsonl`
+  (инструмент, вердикт, длительность — без аргументов); недельный дайджест —
+  `arch-be digest`.
 
 ## Кейсы
 
@@ -326,7 +406,11 @@ arch-be mcp serve --rw    # + handoff_create, adr_new, agentsmd_generate, …
   сценарий «архитектор внутри харнесса»: каналы, рабочий день, безопасность.
 - **[docs/HARNESSES.md](docs/HARNESSES.md)** — матрица прогонов пяти
   харнессов + прокси-прогон GigaCode: MCP, скиллы, хуки, ограничения.
+- **[docs/HARNESS-TESTS.md](docs/HARNESS-TESTS.md)** — живое тестирование
+  волн 1–3 на пяти харнессах (архитекторские сценарии, кадры TUI и headless).
 - [docs/mcp.md](docs/mcp.md) — контракт MCP-сервера и split-judge.
+- [docs/skills_for_architects.md](docs/skills_for_architects.md) — обзор
+  библиотеки: все 62 скилла в 9 плагинах, с чего начать.
 - [docs/INVERSION.md](docs/INVERSION.md) — отчёт по плану инверсии: что сделано, отступления.
 - [README-full.md](README-full.md) — полный тур харнесса (RU/EN).
 

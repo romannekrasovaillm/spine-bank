@@ -485,6 +485,57 @@ mod tests {
             "05-handoff.svg",
             &snap(&mut app, 150, 36, "arch — handoff кодовому харнессу"),
         );
+
+        // 6. Скиллы: библиотека методик в действии — модель сама ищет скиллы
+        //    (skill_search), грузит два в контекст (skill_load) и отвечает
+        //    по методике; решение фиксируется в ADR.
+        let mut app = test_app();
+        app.screen = Screen::Chat;
+        app.model_name = "deepseek:deepseek-v4-flash".into();
+        app.tool_ctx.cwd = std::path::PathBuf::from("/home/user/integration-hub");
+        app.push_block(ChatBlock::User(
+            "подбери методики надёжной интеграции и собери контур гейтов".into(),
+        ));
+        app.push_block(ChatBlock::Tool {
+            name: "skill_search".into(),
+            action: "«надёжная интеграция: события, доставка, гейты»".into(),
+            state: ToolState::Ok,
+            summary: "4 скилла: saga-transactions · transactional-outbox · \
+                 idempotent-consumer · circuit-breaker-retry"
+                .into(),
+        });
+        app.push_block(ChatBlock::Tool {
+            name: "skill_load".into(),
+            action: "transactional-outbox".into(),
+            state: ToolState::Ok,
+            summary: "transactional-outbox [patterns-integration] — скилл в контексте".into(),
+        });
+        app.push_block(ChatBlock::Tool {
+            name: "skill_load".into(),
+            action: "fitness-functions".into(),
+            state: ToolState::Ok,
+            summary: "fitness-functions [arch-core] — скилл в контексте".into(),
+        });
+        app.push_block(ChatBlock::Assistant(
+            "## План по методикам библиотеки\n\
+             - **Outbox** (transactional-outbox): событие пишется с сущностью в одной транзакции\n\
+             - **Потребитель** идемпотентный (idempotent-consumer) — at-least-once без дублей\n\
+             - **Fitness-гейты в CI** (fitness-functions): ретраи с джиттером, запрет float в деньгах\n\
+             - Критерии приёмки зафиксированы в ADR-003"
+                .into(),
+        ));
+        app.push_block(ChatBlock::Tool {
+            name: "adr_new".into(),
+            action: String::new(),
+            state: ToolState::Ok,
+            summary: "ADR-003 создан: docs/adr/ADR-003-outbox.md".into(),
+        });
+        set_context_usage(&mut app, 74_800, 1_000_000);
+        write(
+            &out,
+            "07-skills.svg",
+            &snap(&mut app, 150, 26, "arch — библиотека скиллов"),
+        );
     }
 
     /// Кадры кейса 004 (кейсы/parallel-epics/screenshots): параллельный флот

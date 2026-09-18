@@ -1,0 +1,93 @@
+# Release: бинари arch-be под 4 платформы × 2 редакции (core / full) +
+# сводный SHA256SUMS. Триггер — тег v* (публикация GitHub Release) или
+# ручной запуск (только сборка + артефакты workflow, релиз не создаётся).
+# Имена артефактов — по README «Шаг 0»: arch-be[-core]-<os>-<arch>[.exe].
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.edition }} / ${{ matrix.platform.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        edition: [core, full]
+        platform:
+          - { runner: ubuntu-24.04, name: linux-x86_64 }
+          - { runner: ubuntu-24.04-arm, name: linux-aarch64 }
+          - { runner: macos-latest, name: macos-arm64 }
+          - { runner: windows-latest, name: windows-x86_64 }
+    runs-on: ${{ matrix.platform.runner }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Кэш не должен пересекаться между платформами и редакциями.
+          shared-key: release-${{ matrix.platform.name }}-${{ matrix.edition }}
+
+      - name: Build (core)
+        if: matrix.edition == 'core'
+        run: cargo build --release --locked --no-default-features --features core
+
+      - name: Build (full)
+        if: matrix.edition == 'full'
+        run: cargo build --release --locked
+
+      - name: Stage artifact + smoke (--version)
+        # Git Bash есть и на windows-раннерах: один шаг на все ОС.
+        shell: bash
+        run: |
+          set -euo pipefail
+          prefix="arch-be"
+          [ "${{ matrix.edition }}" = "core" ] && prefix="arch-be-core"
+          ext=""
+          [ "$RUNNER_OS" = "Windows" ] && ext=".exe"
+          mkdir -p dist
+          cp "target/release/arch-be$ext" "dist/$prefix-${{ matrix.platform.name }}$ext"
+          "dist/$prefix-${{ matrix.platform.name }}$ext" --version
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.platform.name }}-${{ matrix.edition }}
+          path: dist/
+          retention-days: 30
+
+  release:
+    # Публикация — только по тегу; при workflow_dispatch джоба пропускается,
+    # бинари остаются артефактами прогона для ручной проверки.
+    name: publish GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+
+      - name: SHA256SUMS (все платформы и редакции)
+        # Хэши считаются здесь, а не в матрице: один каноничный файл
+        # (формат sha256sum) на все 8 артефактов, без pwsh/certutil-веток.
+        run: |
+          cd dist
+          sha256sum arch-be-* > SHA256SUMS
+          cat SHA256SUMS
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/arch-be-*
+            dist/SHA256SUMS

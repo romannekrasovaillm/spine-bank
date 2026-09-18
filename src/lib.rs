@@ -42,6 +42,7 @@ pub mod control;
 pub mod cron;
 pub mod delta;
 pub mod detectors;
+pub mod digest;
 #[cfg(feature = "harness")]
 pub mod distill;
 pub mod doctor;
@@ -52,6 +53,8 @@ pub mod evidence;
 pub mod export;
 pub mod failure_memory;
 pub mod fleet;
+pub mod gate;
+pub mod handoff;
 #[cfg(feature = "harness")]
 pub mod harness;
 pub mod hooks;
@@ -61,6 +64,7 @@ pub mod landscape;
 pub mod llm;
 pub mod matchers;
 pub mod mcp;
+pub mod mcp_journal;
 pub mod mcp_server;
 pub mod memory;
 pub mod mermaid;
@@ -77,7 +81,9 @@ pub mod publish;
 #[cfg(feature = "harness")]
 pub mod ralph;
 pub mod rehearsal;
+pub mod report_fmt;
 pub mod retry;
+pub mod review;
 pub mod rubric;
 pub mod secrets;
 #[cfg(feature = "harness")]

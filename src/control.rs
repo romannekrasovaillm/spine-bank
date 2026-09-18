@@ -22,7 +22,11 @@
 //!   ADR-030), `deny_dependency` (запрещённые пакеты в манифестах
 //!   Cargo.toml/pom.xml/requirements.txt — детектор тех-радара,
 //!   `docs/corp-spine.md`); итог PASS/FAIL + находки + длительность каждого
-//!   правила (per-rule timing, [`RuleDuration`]);
+//!   правила (per-rule timing, [`RuleDuration`]); baseline-режим (ratchet) для
+//!   brownfield — исторический долг не ломает гейт, ломают только новые
+//!   нарушения и рост счётчика правила, а `--changed-since` прогоняет файловые
+//!   правила на срезе изменённых файлов (модуль [`baseline`],
+//!   [`check_with_options`]);
 //! - наследование корпоративного контекста (`docs/corp-spine.md`): поле
 //!   верхнего уровня `extends: [<ref>@<version>]` подмешивает правила
 //!   родительских constraint-файлов с меткой источника и проверкой пина
@@ -57,6 +61,10 @@ use walkdir::WalkDir;
 use crate::error::{HarnessError, Result};
 use crate::llm::ToolSpec;
 use crate::tool::{Tool, ToolContext, ToolOutput};
+
+/// Baseline-режим (ratchet) для brownfield и срез изменённых файлов
+/// (`--baseline`/`--baseline-update`/`--changed-since`) — см. модуль.
+pub mod baseline;
 
 /// Маршрут изменения по значимости.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -550,7 +558,12 @@ pub fn score_with_sources(
 }
 
 /// Находка линтера/сенсора.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Карточные поля (`ad`…`skill`) — архитектурный контекст находки: проставляются
+/// движком `control check` из карточки породившего правила (`CONSTRAINTS.yaml`),
+/// у находок линтера spine/дельты/наследования их нет. Аддитивный контракт
+/// (SDK v1): отсутствующие поля не сериализуются, старые клиенты не ломаются.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LintIssue {
     /// Файл.
     pub file: PathBuf,
@@ -563,6 +576,25 @@ pub struct LintIssue {
     pub message: String,
     /// Критичность: error|warn.
     pub severity: String,
+    /// Задетый инвариант spine (`AD-<n>`, из карточки правила).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ad: Option<String>,
+    /// Связанное архитектурное решение (`ADR-<n>`, из карточки правила).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adr: Option<String>,
+    /// Какой отказ предотвращает правило (из карточки).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rationale: Option<String>,
+    /// Владелец правила (из карточки).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    /// Подсказка исправления (из карточки правила).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fix_hint: Option<String>,
+    /// Скилл библиотеки плагинов, который загрузить для исправления
+    /// (из карточки правила).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill: Option<String>,
 }
 
 /// Номера инвариантов `AD-<n>`, определённых в файле spine.
@@ -644,6 +676,7 @@ pub fn lint_spine(path: &Path) -> Result<Vec<LintIssue>> {
             rule: rule.into(),
             message,
             severity: severity.into(),
+            ..LintIssue::default()
         });
     };
 
@@ -884,6 +917,23 @@ pub struct FitnessReport {
     /// `docs/corp-spine.md`). Аддитивное поле SDK-контракта v1.
     #[serde(default)]
     pub overrides: Vec<OverrideInfo>,
+    /// Итог ratchet-сравнения с baseline (`--baseline`; модуль [`baseline`]).
+    /// `None` — прогон без baseline. Аддитивное поле SDK-контракта v1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline: Option<baseline::BaselineReport>,
+    /// Правила, пропущенные в режиме `--changed-since` (глобальные — по
+    /// дизайну, файловые — при пустом срезе их файлов), с причинами.
+    /// Аддитивное поле SDK-контракта v1.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<baseline::SkippedRule>,
+    /// Git-реф режима `--changed-since` (`None` — полный прогон).
+    /// Аддитивное поле SDK-контракта v1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changed_since: Option<String>,
+    /// Число изменённых файлов в срезе `--changed-since`.
+    /// Аддитивное поле SDK-контракта v1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changed_files: Option<usize>,
 }
 
 /// Тип fitness-правила из `CONSTRAINTS.yaml`.
@@ -947,6 +997,17 @@ impl RuleKind {
             Self::ArchUnit => "archunit",
             Self::DenyDependency => "deny_dependency",
         }
+    }
+
+    /// Файловое ли правило (content-правило по glob-набору файлов): только
+    /// они исполняются в режиме `--changed-since` — на срезе изменённых
+    /// файлов; глобальные и структурные правила на срезе лгут или дороги и
+    /// пропускаются с пометкой в отчёте (модуль [`baseline`]).
+    fn is_file_scoped(self) -> bool {
+        matches!(
+            self,
+            Self::MustContain | Self::MustNotContain | Self::EachFileMustContain
+        )
     }
 }
 
@@ -1014,15 +1075,32 @@ pub struct FitnessRule {
     pub(crate) jar_dir: Option<String>,
     /// Карточка правила (метаданные из шаблона дистилляции источников,
     /// необязательны): признак применимости.
-    /// Поля схемы — читаются внешними потребителями YAML; движок
-    /// использует пока только owner/expiry (expiry-находка).
+    /// Поля схемы — читаются внешними потребителями YAML; движок находок
+    /// использует `ad`/`adr`/`rationale`/`owner`/`fix_hint`/`skill`
+    /// (переносит в находки) и expiry (expiry-находка).
     #[serde(default)]
     #[allow(dead_code)]
     trigger: Option<String>,
     /// Карточка правила: какой отказ предотвращается (одно предложение).
+    /// Переносится движком в находки (`LintIssue::rationale`).
     #[serde(default)]
-    #[allow(dead_code)]
     rationale: Option<String>,
+    /// Карточка правила: задетый инвариант spine (`AD-<n>`). Переносится
+    /// движком в находки (`LintIssue::ad`).
+    #[serde(default)]
+    ad: Option<String>,
+    /// Карточка правила: связанное архитектурное решение (`ADR-<n>`).
+    /// Переносится движком в находки (`LintIssue::adr`).
+    #[serde(default)]
+    adr: Option<String>,
+    /// Карточка правила: подсказка исправления (что сделать вместо
+    /// нарушения). Переносится движком в находки (`LintIssue::fix_hint`).
+    #[serde(default)]
+    fix_hint: Option<String>,
+    /// Карточка правила: скилл библиотеки плагинов для исправления
+    /// (`skill_load <имя>`). Переносится движком в находки (`LintIssue::skill`).
+    #[serde(default)]
+    skill: Option<String>,
     /// Карточка правила: артефакт, остающийся после проверки.
     #[serde(default)]
     #[allow(dead_code)]
@@ -1031,9 +1109,11 @@ pub struct FitnessRule {
     #[serde(default)]
     #[allow(dead_code)]
     reversibility: Option<String>,
-    /// Карточка правила: владелец.
+    /// Карточка правила: владелец. Переносится движком в находки
+    /// (`LintIssue::owner`) и читается обходом `change_impact`
+    /// (`src/review.rs`) — «с кем согласовывать».
     #[serde(default)]
-    owner: Option<String>,
+    pub(crate) owner: Option<String>,
     /// Карточка правила: дата пересмотра (YYYY-MM-DD). Просроченное правило —
     /// находка уровня warn (антипаттерн «правило без срока жизни» — теперь
     /// механически видно).
@@ -1081,6 +1161,21 @@ pub struct FitnessRule {
     /// `command_succeeds`, 300 для `archunit` (ADR-039).
     #[serde(default)]
     pub(crate) timeout_secs: Option<u64>,
+}
+
+impl FitnessRule {
+    /// Переносит архитектурный контекст карточки правила в находку
+    /// (`ad`/`adr`/`rationale`/`owner`/`fix_hint`/`skill`): агент видит задетый
+    /// инвариант и подсказку исправления, а не только имя правила. Поля,
+    /// пустые в карточке, остаются `None` (в JSON не сериализуются).
+    fn apply_card(&self, issue: &mut LintIssue) {
+        issue.ad.clone_from(&self.ad);
+        issue.adr.clone_from(&self.adr);
+        issue.rationale.clone_from(&self.rationale);
+        issue.owner.clone_from(&self.owner);
+        issue.fix_hint.clone_from(&self.fix_hint);
+        issue.skill.clone_from(&self.skill);
+    }
 }
 
 fn default_severity() -> String {
@@ -1465,6 +1560,7 @@ fn resolve_constraints(path: &Path, stack: &mut Vec<PathBuf>) -> Result<Resolved
                         "extends: родитель обновился: {reference}@{pinned} → {actual} — перепиновать осознанно"
                     ),
                     severity: "error".to_string(),
+                    ..LintIssue::default()
                 });
             }
             Some(_) => {}
@@ -1477,6 +1573,7 @@ fn resolve_constraints(path: &Path, stack: &mut Vec<PathBuf>) -> Result<Resolved
                         "extends: у родителя {reference} нет поля version — пин {pinned} проверить нельзя"
                     ),
                     severity: "error".to_string(),
+                    ..LintIssue::default()
                 });
             }
         }
@@ -1582,6 +1679,7 @@ fn evaluate_overrides(
         rule: "override".to_string(),
         message,
         severity: severity.to_string(),
+        ..LintIssue::default()
     };
     for entry in overrides {
         let rule = entry.rule.as_deref().unwrap_or("").trim();
@@ -1669,12 +1767,68 @@ fn evaluate_overrides(
 /// правило некорректно (нет pattern/path/command, невалидный regex/severity),
 /// родитель из `extends` не найден, цикл наследования.
 pub fn check(repo: &Path, constraints: &Path) -> Result<FitnessReport> {
+    check_with_options(repo, constraints, &baseline::CheckOptions::default())
+}
+
+/// Полный вариант [`check`] с опциями ([`baseline::CheckOptions`], модуль
+/// [`baseline`], `docs/control.md`):
+///
+/// - `baseline` (путь) — режим ratchet: находки, присутствующие в
+///   baseline-файле, — исторический долг (в отчёт `baseline.debt`, гейт не
+///   ломают); НОВАЯ error-находка (нет отпечатка в baseline) — ломает гейт;
+///   рост счётчика error-находок правила против baseline — error-находка
+///   (страховка от коллизий отпечатков). Warn-находки и находки механики
+///   (`extends`/`override`) в ratchet не участвуют: первые гейт не ломают
+///   никогда, вторые — сломанная конфигурация, а не кодовый долг;
+/// - `baseline_update` — перезаписать baseline текущим состоянием
+///   ([`baseline::ensure_shrinks`]: принимается только при неухудшении долга,
+///   иначе — ошибка, файл не трогается); после принятого обновления весь
+///   текущий долг зафиксирован и гейт зелёный (кроме находок механики);
+/// - `changed_since` (git-реф) — файловые правила исполняются на срезе
+///   изменённых файлов ([`baseline::changed_files_since`]), глобальные
+///   пропускаются (отчёт `skipped`); закрытие долга в этом режиме не
+///   отслеживается, а `baseline_update` запрещён (срез уничтожил бы записи
+///   долга в нетронутых файлах).
+///
+/// # Errors
+/// Те же, что у [`check`]; плюс: baseline-файл не читается/невалиден (в
+/// режиме ratchet без обновления — обязан существовать), обновление при
+/// выросшем долге, `--baseline-update` в сочетании с `--changed-since`,
+/// некорректный git-реф.
+pub fn check_with_options(
+    repo: &Path,
+    constraints: &Path,
+    options: &baseline::CheckOptions,
+) -> Result<FitnessReport> {
     if !repo.is_dir() {
         return Err(HarnessError::Control(format!(
             "репозиторий недоступен: {}",
             repo.display()
         )));
     }
+    // Валидация сочетаний флагов — до любой работы.
+    if options.baseline_update && options.changed_since.is_some() {
+        return Err(HarnessError::Control(
+            "--baseline-update несовместим с --changed-since: обновление baseline требует полного \
+             прогона — срез изменённых файлов уничтожил бы записи долга в нетронутых файлах"
+                .to_string(),
+        ));
+    }
+    let baseline_path = if options.baseline_update {
+        Some(
+            options
+                .baseline
+                .clone()
+                .unwrap_or_else(|| repo.join(baseline::DEFAULT_BASELINE_PATH)),
+        )
+    } else {
+        options.baseline.clone()
+    };
+    let changed: Option<BTreeSet<String>> = match &options.changed_since {
+        Some(reference) => Some(baseline::changed_files_since(repo, reference)?),
+        None => None,
+    };
+
     let resolved = load_constraints_resolved(constraints)?;
     if resolved.rules.is_empty() {
         return Err(HarnessError::Control(format!(
@@ -1693,10 +1847,21 @@ pub fn check(repo: &Path, constraints: &Path) -> Result<FitnessReport> {
 
     let mut issues = resolved.findings;
     issues.extend(override_findings);
+    // Находки механики (наследование, overrides) — не кодовый долг: в baseline
+    // не зашиваются и ratchet их не прощает.
+    let mechanics_len = issues.len();
     let mut durations = Vec::new();
+    let mut skipped: Vec<baseline::SkippedRule> = Vec::new();
     for rule in &rule_refs {
         let started = Instant::now();
-        run_rule(rule, repo, &rule_refs, &mut issues)?;
+        run_rule(
+            rule,
+            repo,
+            &rule_refs,
+            changed.as_ref(),
+            &mut skipped,
+            &mut issues,
+        )?;
         // u128 → u64 с насыщением: переполнение недостижимо практически
         // (584 млн лет), насыщение — страховка вместо паники.
         let ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -1705,6 +1870,87 @@ pub fn check(repo: &Path, constraints: &Path) -> Result<FitnessReport> {
             ms,
         });
     }
+
+    // Ratchet: находки правил сверяются с baseline; долг уходит из `issues`
+    // в отчёт `baseline`, новые находки и рост счётчиков остаются error'ами.
+    let mut baseline_report: Option<baseline::BaselineReport> = None;
+    if let Some(path) = &baseline_path {
+        let rule_issues = issues.split_off(mechanics_len);
+        let mut error_issues = Vec::new();
+        let mut warn_issues = Vec::new();
+        for issue in rule_issues {
+            if issue.severity == "error" {
+                error_issues.push(issue);
+            } else {
+                warn_issues.push(issue);
+            }
+        }
+        if options.baseline_update {
+            let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+            let old = if path.is_file() {
+                Some(baseline::load(path)?)
+            } else {
+                None
+            };
+            let new_baseline = baseline::Baseline::from_issues(&error_issues, &today);
+            baseline::ensure_shrinks(old.as_ref(), &new_baseline)?;
+            baseline::save(path, &new_baseline)?;
+            let debt: Vec<baseline::RuleDebt> = new_baseline
+                .rules
+                .iter()
+                .map(baseline::RuleDebt::from_baseline_rule)
+                .collect();
+            let closed = match &old {
+                Some(old) => new_baseline.closed_since(old),
+                None => Vec::new(),
+            };
+            baseline_report = Some(baseline::BaselineReport {
+                path: path.clone(),
+                updated: true,
+                debt_total: debt.iter().map(|d| d.count).sum(),
+                closed_total: closed.len(),
+                debt,
+                closed,
+            });
+        } else {
+            if !path.is_file() {
+                return Err(HarnessError::Control(format!(
+                    "baseline: файл не найден: {} — сначала зафиксируйте долг: \
+                     arch-be control check <repo> --baseline {} --baseline-update",
+                    path.display(),
+                    path.display()
+                )));
+            }
+            let base = baseline::load(path)?;
+            let classification =
+                baseline::classify(&error_issues, &base, options.changed_since.is_none());
+            for grown in &classification.grown {
+                issues.push(LintIssue {
+                    file: path.clone(),
+                    line: 0,
+                    rule: grown.rule.clone(),
+                    message: format!(
+                        "baseline: нарушений правила '{}' стало {}, было {} — \
+                         долг может только убывать (ratchet)",
+                        grown.rule, grown.now, grown.was
+                    ),
+                    severity: "error".to_string(),
+                    ..LintIssue::default()
+                });
+            }
+            issues.extend(classification.new_issues);
+            baseline_report = Some(baseline::BaselineReport {
+                path: path.clone(),
+                updated: false,
+                debt_total: classification.debt.iter().map(|d| d.count).sum(),
+                closed_total: classification.closed.len(),
+                debt: classification.debt,
+                closed: classification.closed,
+            });
+        }
+        issues.extend(warn_issues);
+    }
+
     issues.sort_by(|a, b| {
         a.file
             .cmp(&b.file)
@@ -1726,11 +1972,29 @@ pub fn check(repo: &Path, constraints: &Path) -> Result<FitnessReport> {
 
     let errors = issues.iter().filter(|i| i.severity == "error").count();
     let warns = issues.len() - errors;
-    let summary = format!(
+    let mut summary = format!(
         "Правил: {}, нарушений: {} (error: {errors}, warn: {warns})",
         rule_refs.len(),
         issues.len()
     );
+    if let Some(report) = &baseline_report {
+        if report.updated {
+            let _ = write!(
+                summary,
+                "; baseline обновлён: долг {} находок",
+                report.debt_total
+            );
+        } else {
+            let _ = write!(
+                summary,
+                "; долг baseline: {} находок (закрыто: {})",
+                report.debt_total, report.closed_total
+            );
+        }
+    }
+    if let (Some(reference), Some(changed_set)) = (&options.changed_since, &changed) {
+        let _ = write!(summary, "; срез {reference}: файлов {}", changed_set.len());
+    }
     Ok(FitnessReport {
         repo: repo.to_path_buf(),
         passed: errors == 0,
@@ -1739,7 +2003,179 @@ pub fn check(repo: &Path, constraints: &Path) -> Result<FitnessReport> {
         durations,
         inherited,
         overrides: override_infos,
+        baseline: baseline_report,
+        skipped,
+        changed_since: options.changed_since.clone(),
+        changed_files: changed.as_ref().map(BTreeSet::len),
     })
+}
+
+// --- Анти-ослабление гейта (находка `rule_weakened`, `arch-be gate`) -------
+
+/// Тип ослабления правила — расшифровка находки `rule_weakened`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WeakenedKind {
+    /// Правило удалено из реестра (было в базовой версии, нет в текущей).
+    Removed,
+    /// У правила появился или расширился `exclude_glob` (новые исключения
+    /// из набора проверяемых файлов).
+    ExcludeWidened,
+    /// Severity понижен (нормализованное error → warn; сами нормализованные
+    /// значения сравниваются — `critical`/`high`/`block` ≡ error).
+    SeverityLowered,
+}
+
+impl WeakenedKind {
+    /// Русская метка для текста находки.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Removed => "удалено из реестра",
+            Self::ExcludeWidened => "появился/расширился exclude_glob",
+            Self::SeverityLowered => "severity понижен",
+        }
+    }
+}
+
+/// Имена/идентификаторы правил с АКТИВНЫМИ overrides (`rule`+`adr`+`until`,
+/// дата корректна и не просрочена — та же логика, что у
+/// [`evaluate_overrides`]). Активный override узаконивает ослабление своего
+/// правила: находка `rule_weakened` по нему подавляется.
+fn active_override_keys(overrides: &[OverrideEntry]) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for entry in overrides {
+        let (Some(rule), Some(adr), Some(until)) = (&entry.rule, &entry.adr, &entry.until) else {
+            continue; // неполный override — не активен (отдельная error-находка `check`)
+        };
+        let rule = rule.trim();
+        if rule.is_empty() || adr.trim().is_empty() {
+            continue;
+        }
+        let Some((y, m, d)) = parse_until(until.trim()) else {
+            continue; // некорректная дата — override не активен
+        };
+        if until_expired(y, m, d) {
+            continue;
+        }
+        out.insert(rule.to_string());
+    }
+    out
+}
+
+/// Снимок правила для сравнения версий: `exclude_glob` и нормализованный
+/// severity (id — для матчинга overrides, которые могут ссылаться на правило
+/// по id).
+struct RuleSnapshot {
+    /// Идентификатор правила (`id: C-NNN`), если задан.
+    id: Option<String>,
+    /// Множество `exclude_glob`.
+    excludes: BTreeSet<String>,
+    /// Нормализованный severity (`error`/`warn`).
+    severity: &'static str,
+}
+
+/// Строит карту «имя правила → снимок» из разобранного constraint-файла.
+/// Невалидный severity — ошибка разбора (ту же ошибку дал бы и `check`).
+fn rules_snapshot(parsed: &ConstraintsFile) -> Result<BTreeMap<String, RuleSnapshot>> {
+    let mut out = BTreeMap::new();
+    for rule in parsed.all_rules() {
+        out.insert(
+            rule.name.clone(),
+            RuleSnapshot {
+                id: rule.id.clone(),
+                excludes: rule.exclude_glob.iter().cloned().collect(),
+                severity: normalize_severity(&rule.severity, &rule.name)?,
+            },
+        );
+    }
+    Ok(out)
+}
+
+/// Анти-ослабление fitness-гейта (находка `rule_weakened`): сравнивает
+/// текущий `CONSTRAINTS.yaml` с версией из git-базы (обе версии — текстами,
+/// git-разрешение делает вызывающий — [`crate::gate`]). Ослабления, дающие
+/// error-находку с именем правила:
+///
+/// - правило из базы исчезло из текущего файла (по именам);
+/// - у правила появился/расширился `exclude_glob` (новые glob'ы исключений);
+/// - severity понижен (error → warn, нормализация [`normalize_severity`]).
+///
+/// Ослабление УЗАКОНЕНО (находки нет), если в текущем файле есть активный
+/// override на это правило (по имени или id) с ADR — гейт «только через ADR»
+/// (`docs/corp-spine.md`).
+///
+/// Сравнение — по плоскому разбору этого файла (оба корня `rules:`/
+/// `constraints:`), наследование `extends` не разворачивается: правке через
+/// смену пина родителя соответствует отдельная error-находка резолва.
+///
+/// # Errors
+/// YAML любой из версий невалиден, severity правила вне допустимых значений.
+pub fn rule_weakened(current_src: &str, base_src: &str, file: &Path) -> Result<Vec<LintIssue>> {
+    let current: ConstraintsFile = serde_yaml_ng::from_str(current_src)?;
+    let base: ConstraintsFile = serde_yaml_ng::from_str(base_src)?;
+    let current_rules = rules_snapshot(&current)?;
+    let base_rules = rules_snapshot(&base)?;
+    let legalized = active_override_keys(&current.overrides);
+
+    let mut issues = Vec::new();
+    let push = |kind: WeakenedKind,
+                name: &str,
+                id: Option<&str>,
+                detail: String,
+                issues: &mut Vec<LintIssue>| {
+        // Активный override по имени или id правила узаконивает ослабление.
+        if legalized.contains(name) || id.is_some_and(|i| legalized.contains(i)) {
+            return;
+        }
+        issues.push(LintIssue {
+            file: file.to_path_buf(),
+            line: 0,
+            rule: "rule_weakened".to_string(),
+            message: format!(
+                "правило '{name}': {} — {detail}; ослабление гейта требует активный override \
+                 с ADR (overrides: rule+adr+until)",
+                kind.label()
+            ),
+            severity: "error".to_string(),
+            ..LintIssue::default()
+        });
+    };
+
+    for (name, base_rule) in &base_rules {
+        let Some(current_rule) = current_rules.get(name) else {
+            push(
+                WeakenedKind::Removed,
+                name,
+                base_rule.id.as_deref(),
+                "правило присутствовало в базовой версии и удалено".to_string(),
+                &mut issues,
+            );
+            continue;
+        };
+        let added: Vec<String> = current_rule
+            .excludes
+            .difference(&base_rule.excludes)
+            .cloned()
+            .collect();
+        if !added.is_empty() {
+            push(
+                WeakenedKind::ExcludeWidened,
+                name,
+                current_rule.id.as_deref(),
+                format!("новые исключения: {}", added.join(", ")),
+                &mut issues,
+            );
+        }
+        if base_rule.severity == "error" && current_rule.severity == "warn" {
+            push(
+                WeakenedKind::SeverityLowered,
+                name,
+                current_rule.id.as_deref(),
+                "error → warn".to_string(),
+                &mut issues,
+            );
+        }
+    }
+    Ok(issues)
 }
 
 /// Число коммитов за последние 90 дней, трогавших файл ограничений —
@@ -2170,10 +2606,16 @@ pub(crate) fn normalize_severity(raw: &str, rule_name: &str) -> Result<&'static 
 ///
 /// `all_rules` — все правила того же файла: нужны типу `archunit`
 /// (ADR-039), который исполняет java-правила всего `CONSTRAINTS.yaml`.
+///
+/// `changed` — срез режима `--changed-since` (модуль [`baseline`]): при
+/// `Some` глобальные правила пропускаются (запись в `skipped`), а файловые
+/// исполняются на подмножестве изменённых файлов.
 fn run_rule(
     rule: &FitnessRule,
     repo: &Path,
     all_rules: &[&FitnessRule],
+    changed: Option<&BTreeSet<String>>,
+    skipped: &mut Vec<baseline::SkippedRule>,
     issues: &mut Vec<LintIssue>,
 ) -> Result<()> {
     let severity = normalize_severity(&rule.severity, &rule.name)?;
@@ -2189,7 +2631,7 @@ fn run_rule(
                     .as_deref()
                     .map(|o| format!(" (владелец: {o})"))
                     .unwrap_or_default();
-                issues.push(LintIssue {
+                let mut finding = LintIssue {
                     file: PathBuf::from("CONSTRAINTS.yaml"),
                     line: 0,
                     rule: rule.name.clone(),
@@ -2197,22 +2639,44 @@ fn run_rule(
                         "expiry: правило просрочено {expiry}{owner} — пересмотреть, продлить с владельцем или удалить"
                     ),
                     severity: "warn".into(),
-                });
+                    ..LintIssue::default()
+                };
+                rule.apply_card(&mut finding);
+                issues.push(finding);
             }
         }
     }
+    // Режим --changed-since: глобальные и структурные правила на срезе файлов
+    // лгут или неоправданно дороги (command_succeeds, archunit) — пропускаются
+    // с пометкой в отчёте; полный прогон остаётся истиной гейта.
+    if changed.is_some() && !rule.kind.is_file_scoped() {
+        skipped.push(baseline::SkippedRule {
+            rule: rule.name.clone(),
+            reason: "глобальное правило — исполняется в полном прогоне".to_string(),
+        });
+        return Ok(());
+    }
+    // Карточный контекст правила (ad/adr/rationale/owner/fix_hint/skill)
+    // проставляется в каждую находку — агент видит задетый инвариант и
+    // подсказку исправления, а не только имя правила.
     let mut issue = |file: PathBuf, line: usize, message: String| {
-        issues.push(LintIssue {
+        let mut finding = LintIssue {
             file,
             line,
             rule: rule.name.clone(),
             message,
             severity: severity.to_string(),
-        });
+            ..LintIssue::default()
+        };
+        rule.apply_card(&mut finding);
+        issues.push(finding);
     };
     match rule.kind {
         RuleKind::MustContain => {
             let (re, glob, files) = prep_content_rule(rule, repo)?;
+            let Some(files) = scope_files(rule, changed, files, &glob, skipped) else {
+                return Ok(());
+            };
             let pattern = rule.pattern.as_deref().unwrap_or_default();
             let mut found = false;
             for (_, abs) in &files {
@@ -2233,7 +2697,10 @@ fn run_rule(
             }
         }
         RuleKind::MustNotContain => {
-            let (re, _, files) = prep_content_rule(rule, repo)?;
+            let (re, glob, files) = prep_content_rule(rule, repo)?;
+            let Some(files) = scope_files(rule, changed, files, &glob, skipped) else {
+                return Ok(());
+            };
             let pattern = rule.pattern.as_deref().unwrap_or_default();
             for (rel, abs) in &files {
                 let bytes = std::fs::read(abs).map_err(|e| HarnessError::io(abs, e))?;
@@ -2252,6 +2719,9 @@ fn run_rule(
         }
         RuleKind::EachFileMustContain => {
             let (re, glob, files) = prep_content_rule(rule, repo)?;
+            let Some(files) = scope_files(rule, changed, files, &glob, skipped) else {
+                return Ok(());
+            };
             let pattern = rule.pattern.as_deref().unwrap_or_default();
             if files.is_empty() {
                 issue(
@@ -2461,7 +2931,18 @@ fn run_rule(
             // сбой (нет java/jar'ов/классов, таймаут) — error-находка
             // (fail-closed), а не молчаливый PASS.
             match crate::archunit::run_control_rule(rule, all_rules, repo) {
-                Ok(found) => issues.extend(found),
+                Ok(found) => {
+                    // Находки JVM-гейта ссылаются на исходное java-правило по
+                    // id (либо имени) — обогащаем их карточкой того правила.
+                    for mut finding in found {
+                        if let Some(source) = all_rules.iter().find(|r| {
+                            r.id.as_deref() == Some(finding.rule.as_str()) || r.name == finding.rule
+                        }) {
+                            source.apply_card(&mut finding);
+                        }
+                        issues.push(finding);
+                    }
+                }
                 Err(e) => issue(
                     repo.to_path_buf(),
                     0,
@@ -2908,6 +3389,33 @@ fn prep_content_rule(rule: &FitnessRule, repo: &Path) -> Result<PreparedContentR
     Ok((re, globs.join(", "), files))
 }
 
+/// Срез `--changed-since` для файловых правил (модуль [`baseline`]):
+/// оставляет только изменённые файлы. Пустой срез — НЕ находка (в отличие от
+/// пустого полного набора у `each_file_must_contain`), а пропуск правила с
+/// пометкой в отчёте: нетронутые файлы проверит полный прогон.
+///
+/// `None` у `changed` — полный прогон: набор возвращается как есть.
+fn scope_files(
+    rule: &FitnessRule,
+    changed: Option<&BTreeSet<String>>,
+    mut files: Vec<(String, PathBuf)>,
+    glob: &str,
+    skipped: &mut Vec<baseline::SkippedRule>,
+) -> Option<Vec<(String, PathBuf)>> {
+    let Some(changed) = changed else {
+        return Some(files);
+    };
+    files.retain(|(rel, _)| changed.contains(rel));
+    if files.is_empty() {
+        skipped.push(baseline::SkippedRule {
+            rule: rule.name.clone(),
+            reason: format!("нет изменённых файлов по glob '{glob}'"),
+        });
+        return None;
+    }
+    Some(files)
+}
+
 /// Glob'ы правила с дефолтом `**/*`.
 fn rule_globs(rule: &FitnessRule) -> Vec<String> {
     if rule.glob.is_empty() {
@@ -3329,7 +3837,99 @@ pub fn tools() -> Vec<Arc<dyn Tool>> {
         Arc::new(SpineLintTool),
         Arc::new(FitnessCheckTool),
         Arc::new(SignificanceScoreTool),
+        Arc::new(RulesReportTool),
     ]
+}
+
+/// Инструмент `rules_report`: отчёт по реестру правил `CONSTRAINTS.yaml`
+/// (markdown + счётчики; мост в MCP, транш 2 инверсии; read-only).
+pub struct RulesReportTool;
+
+#[derive(Debug, Deserialize)]
+struct RulesReportArgs {
+    /// Корень репозитория.
+    repo: String,
+    /// Путь к `CONSTRAINTS.yaml` (дефолт `<repo>/.arch-handoff/CONSTRAINTS.yaml`).
+    constraints: Option<String>,
+}
+
+#[async_trait]
+impl Tool for RulesReportTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "rules_report".into(),
+            description: "Отчёт по реестру правил CONSTRAINTS.yaml: сводка (всего/по типам/по \
+                          severity), таблица карточек (owner, expiry, exclude_glob, \
+                          effort_hours), находки (правила без owner/expiry, просроченные, \
+                          с exclude_glob), git-прокси стоимости сопровождения. Ответ — JSON: \
+                          счётчики rules_total/by_kind/by_severity + summary + \
+                          report_markdown. Отчёт, а не гейт: passed всегда true"
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "repo": {"type": "string", "description": "Корень репозитория"},
+                    "constraints": {
+                        "type": "string",
+                        "description": "Путь к CONSTRAINTS.yaml (по умолчанию <repo>/.arch-handoff/CONSTRAINTS.yaml)"
+                    }
+                },
+                "required": ["repo"]
+            }),
+        }
+    }
+
+    async fn call(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput> {
+        let args: RulesReportArgs = match serde_json::from_value(args) {
+            Ok(a) => a,
+            Err(e) => {
+                return Ok(ToolOutput::err(format!(
+                    "rules_report: невалидные аргументы: {e}"
+                )));
+            }
+        };
+        let repo = ctx.resolve(&args.repo);
+        let constraints = args.constraints.map_or_else(
+            || repo.join(".arch-handoff/CONSTRAINTS.yaml"),
+            |c| ctx.resolve(c),
+        );
+        let report = match rules_report(&repo, &constraints) {
+            Ok(r) => r,
+            Err(e) => return Ok(ToolOutput::err(format!("rules_report: {e}"))),
+        };
+        // Счётчики — из того же файла ограничений (тот же разбор, что и в
+        // rules_report; отчёт выше уже доказал, что YAML валиден и не пуст).
+        // Недостижимый здесь None оставил бы счётчики нулевыми — отчёт
+        // markdown всё равно отдаётся.
+        let (mut rules_total, mut by_kind, mut by_severity) =
+            (0usize, BTreeMap::new(), BTreeMap::new());
+        if let Some(parsed) = std::fs::read_to_string(&constraints)
+            .ok()
+            .and_then(|y| serde_yaml_ng::from_str::<ConstraintsFile>(&y).ok())
+        {
+            for r in parsed.all_rules() {
+                rules_total += 1;
+                *by_kind.entry(r.kind.as_str().to_string()).or_insert(0usize) += 1;
+                *by_severity.entry(r.severity.clone()).or_insert(0usize) += 1;
+            }
+        }
+        let summary = format!(
+            "Реестр правил {}: {rules_total} правил; отчёт markdown в поле report_markdown",
+            constraints.display()
+        );
+        let verdict = json!({
+            "tool": "rules_report",
+            "passed": true,
+            "rules_total": rules_total,
+            "by_kind": by_kind,
+            "by_severity": by_severity,
+            "summary": summary,
+            "report_markdown": report,
+        });
+        // Сериализация собранного объекта не падает; запасной вариант — компактная форма.
+        let text = serde_json::to_string_pretty(&verdict).unwrap_or_else(|_| verdict.to_string());
+        Ok(ToolOutput::ok(text))
+    }
 }
 
 /// Инструмент `adr_new`: создать ADR по шаблону AI-DLC с очередным номером.
@@ -3622,6 +4222,163 @@ mod tests {
         p
     }
 
+    // --- Анти-ослабление гейта (rule_weakened) ------------------------------
+
+    /// Базовая версия CONSTRAINTS.yaml для тестов `rule_weakened`: два
+    /// правила уровня error, у `no-pan` есть id для матчинга overrides.
+    const WEAK_BASE: &str = "rules:\n\
+         - name: no-pan\n  \
+         id: C-01\n  \
+         type: must_not_contain\n  \
+         glob: \"src/**\"\n  \
+         pattern: 'PAN'\n  \
+         severity: error\n\
+         - name: spine-present\n  \
+         type: file_exists\n  \
+         path: \"ARCHITECTURE-SPINE.md\"\n  \
+         severity: error\n";
+
+    /// Текущая версия, идентичная базовой (без ослаблений).
+    #[test]
+    fn rule_weakened_clean_when_unchanged_or_strengthened() {
+        let file = Path::new("CONSTRAINTS.yaml");
+        let issues = rule_weakened(WEAK_BASE, WEAK_BASE, file).expect("сравнение");
+        assert!(issues.is_empty(), "{issues:?}");
+        // Усиление (новое правило, поднятие severity, добавление glob) —
+        // не ослабление: находок нет.
+        let stronger = "rules:\n\
+             - name: no-pan\n  \
+             id: C-01\n  \
+             type: must_not_contain\n  \
+             glob: \"src/**\"\n  \
+             pattern: 'PAN'\n  \
+             severity: critical\n\
+             - name: spine-present\n  \
+             type: file_exists\n  \
+             path: \"ARCHITECTURE-SPINE.md\"\n  \
+             severity: error\n\
+             - name: no-dbg\n  \
+             type: must_not_contain\n  \
+             glob: \"src/**\"\n  \
+             pattern: 'dbg!'\n  \
+             severity: warn\n";
+        let issues = rule_weakened(stronger, WEAK_BASE, file).expect("сравнение");
+        assert!(issues.is_empty(), "{issues:?}");
+    }
+
+    /// Удаление правила (агент «позеленил» гейт) — error-находка с именем.
+    #[test]
+    fn rule_weakened_flags_removed_rule() {
+        let current = "rules:\n\
+             - name: spine-present\n  \
+             type: file_exists\n  \
+             path: \"ARCHITECTURE-SPINE.md\"\n  \
+             severity: error\n";
+        let issues =
+            rule_weakened(current, WEAK_BASE, Path::new("CONSTRAINTS.yaml")).expect("сравнение");
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        let i = &issues[0];
+        assert_eq!(i.rule, "rule_weakened");
+        assert_eq!(i.severity, "error");
+        assert!(i.message.contains("no-pan"), "{}", i.message);
+        assert!(i.message.contains("удалено из реестра"), "{}", i.message);
+    }
+
+    /// Появление `exclude_glob` у правила — error-находка.
+    #[test]
+    fn rule_weakened_flags_new_exclude_glob() {
+        let current = WEAK_BASE.replace(
+            "pattern: 'PAN'\n  severity: error",
+            "pattern: 'PAN'\n  exclude_glob: [\"src/legacy/**\"]\n  severity: error",
+        );
+        assert_ne!(current, WEAK_BASE, "подстановка сработала");
+        let issues =
+            rule_weakened(&current, WEAK_BASE, Path::new("CONSTRAINTS.yaml")).expect("сравнение");
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert!(
+            issues[0].message.contains("exclude_glob"),
+            "{}",
+            issues[0].message
+        );
+        assert!(
+            issues[0].message.contains("src/legacy/**"),
+            "{}",
+            issues[0].message
+        );
+    }
+
+    /// Понижение severity error → warn без override — error-находка;
+    /// нормализованные эквиваленты (critical → error) ослаблением не считаются.
+    #[test]
+    fn rule_weakened_flags_severity_downgrade_only_when_real() {
+        let lowered = WEAK_BASE.replace(
+            "path: \"ARCHITECTURE-SPINE.md\"\n  severity: error",
+            "path: \"ARCHITECTURE-SPINE.md\"\n  severity: warn",
+        );
+        assert_ne!(lowered, WEAK_BASE, "подстановка сработала");
+        let issues =
+            rule_weakened(&lowered, WEAK_BASE, Path::new("CONSTRAINTS.yaml")).expect("сравнение");
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert!(
+            issues[0].message.contains("spine-present")
+                && issues[0].message.contains("severity понижен"),
+            "{}",
+            issues[0].message
+        );
+        // critical → error: оба нормализуются в error — не ослабление.
+        let base_critical = WEAK_BASE.replacen("severity: error", "severity: critical", 1);
+        let current_error = WEAK_BASE;
+        let issues = rule_weakened(current_error, &base_critical, Path::new("CONSTRAINTS.yaml"))
+            .expect("сравнение");
+        assert!(issues.is_empty(), "{issues:?}");
+    }
+
+    /// Ослабление с АКТИВНЫМ override (rule+adr+until в будущем) — узаконено:
+    /// находок нет; просроченный override ослабление не легализует.
+    #[test]
+    fn rule_weakened_active_override_legalizes_weakening() {
+        // Удаление no-pan + активный override по id правила (C-01).
+        let legal = "rules:\n\
+             - name: spine-present\n  \
+             type: file_exists\n  \
+             path: \"ARCHITECTURE-SPINE.md\"\n  \
+             severity: error\n\
+             overrides:\n\
+             - rule: C-01\n  \
+             adr: ADR-042\n  \
+             until: \"2999-01\"\n";
+        let issues =
+            rule_weakened(legal, WEAK_BASE, Path::new("CONSTRAINTS.yaml")).expect("сравнение");
+        assert!(
+            issues.is_empty(),
+            "активный override узаконивает: {issues:?}"
+        );
+
+        // Тот же override, но просроченный, — ослабление снова находка.
+        let expired = legal.replace("2999-01", "2001-01");
+        let issues =
+            rule_weakened(&expired, WEAK_BASE, Path::new("CONSTRAINTS.yaml")).expect("сравнение");
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert!(
+            issues[0].message.contains("no-pan"),
+            "{}",
+            issues[0].message
+        );
+
+        // Override на ДРУГОЕ правило ослабление no-pan не легализует.
+        let alien = legal.replace("rule: C-01", "rule: spine-present");
+        let issues =
+            rule_weakened(&alien, WEAK_BASE, Path::new("CONSTRAINTS.yaml")).expect("сравнение");
+        assert_eq!(issues.len(), 1, "{issues:?}");
+    }
+
+    /// Невалидный YAML любой из версий — ошибка разбора, не паника.
+    #[test]
+    fn rule_weakened_reports_broken_yaml() {
+        assert!(rule_weakened("{битый", WEAK_BASE, Path::new("C.yaml")).is_err());
+        assert!(rule_weakened(WEAK_BASE, "{битый", Path::new("C.yaml")).is_err());
+    }
+
     #[test]
     fn spine_detects_all_rule_kinds() {
         let dir = tempfile::tempdir().unwrap();
@@ -3842,6 +4599,79 @@ mod tests {
         assert_eq!(issue["rule"], "no_pan");
         assert_eq!(issue["severity"], "error");
         assert_eq!(issue["line"], 1);
+    }
+
+    #[test]
+    fn fitness_issue_carries_rule_card_context() {
+        // Находки несут архитектурный контекст карточки правила (ad/adr/
+        // rationale/owner/fix_hint/skill): видно задетый инвариант и скилл
+        // исправления, а не только имя правила. Контракт аддитивный: у
+        // правила без карточки полей в JSON нет (skip_serializing_if).
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        write_file(&repo, "src/main.rs", "fn main() {}\n");
+        let constraints = write_file(
+            dir.path(),
+            "CONSTRAINTS.yaml",
+            "rules:\n\
+             \x20 - name: no_unsafe\n\
+             \x20   type: must_not_contain\n\
+             \x20   glob: 'src/**/*.rs'\n\
+             \x20   pattern: 'unsafe'\n\
+             \x20   ad: AD-6\n\
+             \x20   adr: ADR-012\n\
+             \x20   rationale: безопасный Rust без unsafe\n\
+             \x20   owner: архитектор контура\n\
+             \x20   fix_hint: убрать unsafe-блок\n\
+             \x20   skill: fitness-functions\n\
+             \x20 - name: bare_rule\n\
+             \x20   type: must_contain\n\
+             \x20   glob: 'src/**/*.rs'\n\
+             \x20   pattern: 'never-found-marker'\n",
+        );
+        // Нарушение собирается конкатенацией строк: цельный литерал в
+        // исходнике теста сам попал бы под догфуд-правило C-01 (no_unsafe_code).
+        write_file(&repo, "src/lib.rs", concat!("un", "safe fn f() {}\n"));
+        let report = check(&repo, &constraints).unwrap();
+        assert!(!report.passed);
+        let issue = report
+            .issues
+            .iter()
+            .find(|i| i.rule == "no_unsafe")
+            .expect("находка no_unsafe");
+        assert_eq!(issue.ad.as_deref(), Some("AD-6"));
+        assert_eq!(issue.adr.as_deref(), Some("ADR-012"));
+        assert_eq!(
+            issue.rationale.as_deref(),
+            Some("безопасный Rust без unsafe")
+        );
+        assert_eq!(issue.owner.as_deref(), Some("архитектор контура"));
+        assert_eq!(issue.fix_hint.as_deref(), Some("убрать unsafe-блок"));
+        assert_eq!(issue.skill.as_deref(), Some("fitness-functions"));
+
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&report).unwrap()).unwrap();
+        let issues = v["issues"].as_array().expect("issues");
+        let with_card = issues
+            .iter()
+            .find(|i| i["rule"] == "no_unsafe")
+            .expect("no_unsafe в JSON");
+        assert_eq!(with_card["ad"], "AD-6");
+        assert_eq!(with_card["skill"], "fitness-functions");
+        assert_eq!(with_card["fix_hint"], "убрать unsafe-блок");
+        let bare = issues
+            .iter()
+            .find(|i| i["rule"] == "bare_rule")
+            .expect("bare_rule в JSON");
+        for key in ["ad", "adr", "rationale", "owner", "fix_hint", "skill"] {
+            assert!(bare.get(key).is_none(), "у находки без карточки нет {key}");
+        }
+        // Обратная совместимость: старый JSON без новых полей десериализуется.
+        let legacy: LintIssue = serde_json::from_str(
+            r#"{"file":"src/x.rs","line":1,"rule":"r","message":"m","severity":"error"}"#,
+        )
+        .expect("legacy JSON без карточных полей");
+        assert!(legacy.ad.is_none() && legacy.fix_hint.is_none() && legacy.skill.is_none());
     }
 
     #[test]
@@ -4457,7 +5287,7 @@ mod tests {
     }
 
     #[test]
-    fn tools_expose_four_domain_specs() {
+    fn tools_expose_five_domain_specs() {
         let mut names: Vec<String> = tools().iter().map(|t| t.spec().name.clone()).collect();
         names.sort();
         assert_eq!(
@@ -4465,6 +5295,7 @@ mod tests {
             [
                 "adr_new",
                 "fitness_check",
+                "rules_report",
                 "significance_score",
                 "spine_lint"
             ]
@@ -5632,5 +6463,62 @@ mod command_capture_tests {
         let big = vec![b'x'; MAX_CAPTURE_BYTES * 3];
         let tail = drain_tail(&big[..]);
         assert_eq!(tail.len(), MAX_CAPTURE_BYTES);
+    }
+
+    /// Инструмент `rules_report`: счётчики + markdown-отчёт на фикстуре
+    /// карточек правил; битый репозиторий — мягкая ошибка.
+    #[tokio::test]
+    async fn rules_report_tool_counts_and_markdown() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(
+            dir.path().join("CONSTRAINTS.yaml"),
+            "rules:\n\
+             \x20 - name: no-pan\n\
+             \x20   type: must_not_contain\n\
+             \x20   glob: 'src/**/*.py'\n\
+             \x20   pattern: '\\b\\d{16}\\b'\n\
+             \x20 - name: readme\n\
+             \x20   type: file_exists\n\
+             \x20   path: README.md\n\
+             \x20   severity: warn\n",
+        )
+        .unwrap();
+        let ctx = ToolContext::new(
+            dir.path().to_path_buf(),
+            Arc::new(crate::config::Config::default()),
+        );
+        let out = RulesReportTool
+            .call(
+                json!({"repo": "repo", "constraints": "CONSTRAINTS.yaml"}),
+                &ctx,
+            )
+            .await
+            .expect("вызов");
+        assert!(!out.is_error, "{}", out.content);
+        let v: serde_json::Value = serde_json::from_str(&out.content).expect("JSON-вердикт");
+        assert_eq!(v["tool"], "rules_report");
+        // Отчёт, а не гейт: passed всегда true.
+        assert_eq!(v["passed"], true, "{v}");
+        assert_eq!(v["rules_total"], 2, "{v}");
+        assert_eq!(v["by_kind"]["must_not_contain"], 1, "{v}");
+        assert_eq!(v["by_severity"]["warn"], 1, "{v}");
+        assert!(
+            v["report_markdown"]
+                .as_str()
+                .expect("md")
+                .contains("| no-pan | must_not_contain |"),
+            "{v}"
+        );
+        // Недоступный репозиторий — мягкая ошибка инструмента.
+        let out = RulesReportTool
+            .call(
+                json!({"repo": "missing", "constraints": "CONSTRAINTS.yaml"}),
+                &ctx,
+            )
+            .await
+            .expect("вызов");
+        assert!(out.is_error, "{}", out.content);
     }
 }

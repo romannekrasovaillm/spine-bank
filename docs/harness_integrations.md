@@ -2,9 +2,15 @@
 
 Передача архитектуры в код: arch-harness готовит **handoff-пакет** для
 кодового агента (Claude Code, Qwen Code, OpenClaw, Hermes, Theseus,
-CodeWhale), прогоняет его и контролирует результат. Реализация —
+CodeWhale), прогоняет его и контролирует результат. Реализация прогона —
 `src/harness.rs`; идеи — BMAD epic-context и headless-контракты
 (`docs/SOURCE_BRIEF.md` §A.3).
+
+> **Сборки**: генерация пакета (этот раздел) — core-модуль `src/handoff.rs`
+> (чисто файловая работа): инструмент `handoff_create` доступен и в
+> слим-сборке (`--no-default-features --features core`, отдаётся
+> `arch-be mcp serve --rw`). Прогон пакета (`harness_run`, `arch-be
+> harness-run`, адаптеры) — только полная сборка (`src/harness.rs`).
 
 ## Handoff-пакет `.arch-handoff/`
 

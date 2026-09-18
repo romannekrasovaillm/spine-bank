@@ -85,6 +85,20 @@ fn spine_fixture(home: &Path, name: &str, broken: bool) -> String {
     path.display().to_string()
 }
 
+/// Фикстура репозитория `name` с нарушением карточного правила:
+/// `file_exists` на отсутствующий файл, правило несёт `ad`/`fix_hint`/`skill`.
+fn repo_card_fixture(home: &Path, name: &str) -> String {
+    let repo = home.join(name);
+    let handoff = repo.join(".arch-handoff");
+    std::fs::create_dir_all(&handoff).expect("mkdir");
+    std::fs::write(
+        handoff.join("CONSTRAINTS.yaml"),
+        "rules:\n  - name: spine_present\n    type: file_exists\n    path: \"ARCHITECTURE-SPINE.md\"\n    severity: error\n    ad: AD-9\n    fix_hint: \"вернуть ARCHITECTURE-SPINE.md в корень\"\n    skill: spine-invariants\n",
+    )
+    .expect("constraints");
+    repo.display().to_string()
+}
+
 /// Фикстура репозитория `name` с CONSTRAINTS.yaml: правило `file_exists`
 /// уровня error на файл, который есть либо нет.
 fn repo_fixture(home: &Path, name: &str, create_required_file: bool) -> String {
@@ -173,6 +187,7 @@ fn handshake_then_tools_list_over_stdio() {
         "spine_lint",
         "fitness_check",
         "significance_score",
+        "significance_from_diff",
         "trace_check",
         "model_query",
         "rubric_run",
@@ -184,7 +199,8 @@ fn handshake_then_tools_list_over_stdio() {
         assert!(names.contains(&want), "нет инструмента {want}: {names:?}");
     }
     // Split-judge (механический судья без LLM) и read-only мост реестра
-    // (детерминированный контур) тоже в списке read-only режима.
+    // (детерминированный контур + верификаторы транша 1 инверсии) тоже
+    // в списке read-only режима.
     for want in [
         "rubric_prompt",
         "rubric_verify",
@@ -196,13 +212,25 @@ fn handshake_then_tools_list_over_stdio() {
         "archify_validate",
         "rubric_list",
         "plugin_list",
+        "nfr_check",
+        "model_validate",
+        "model_drift",
+        "delta_guard",
+        "evidence_verify",
+        "landscape_report",
+        "adr_registry",
+        "rules_report",
+        "openspec_coverage",
+        "model_graph",
+        "architect_review",
+        "change_impact",
     ] {
         assert!(names.contains(&want), "нет инструмента {want}: {names:?}");
     }
     assert_eq!(
         tools.len(),
-        20,
-        "ровно 20 инструментов в ro-режиме (12 ручных + 8 read-only моста)"
+        33,
+        "ровно 33 инструмента в ro-режиме (13 ручных + 20 read-only моста; model_drift — п.15)"
     );
     // rw-контур и write/exec-принадлежность хоста закрыты в ro-режиме.
     for banned in [
@@ -210,6 +238,8 @@ fn handshake_then_tools_list_over_stdio() {
         "adr_new",
         "agentsmd_generate",
         "skill_distill",
+        "evidence_pack",
+        "delta_propose",
         "bash",
         "write_file",
         "harness_run",
@@ -219,6 +249,66 @@ fn handshake_then_tools_list_over_stdio() {
             "инструмент {banned} не должен отдаваться в ro-режиме: {names:?}"
         );
     }
+}
+
+#[test]
+fn prompts_list_and_get_over_stdio() {
+    let home = tempfile::tempdir().expect("tmp");
+    let responses = mcp_serve(
+        home.path(),
+        &batch(&[
+            json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+                "protocolVersion":"2025-06-18","capabilities":{},
+                "clientInfo":{"name":"claude-code","version":"1.0"}}})
+            .to_string(),
+            json!({"jsonrpc":"2.0","id":2,"method":"prompts/list","params":{}}).to_string(),
+            json!({"jsonrpc":"2.0","id":3,"method":"prompts/get","params":{
+                "name":"spine-architect-review"}})
+            .to_string(),
+            json!({"jsonrpc":"2.0","id":4,"method":"prompts/get","params":{"name":"ghost"}})
+                .to_string(),
+            json!({"jsonrpc":"2.0","id":5,"method":"resources/list","params":{}}).to_string(),
+        ]),
+    );
+    // initialize рекламирует capability prompts.
+    assert!(responses[0]["result"]["capabilities"]["prompts"].is_object());
+    // prompts/list: ровно семь плейбуков spine-workflows (дом изолирован —
+    // тексты и описания из встроенных ассетов).
+    let prompts = responses[1]["result"]["prompts"]
+        .as_array()
+        .expect("prompts");
+    assert_eq!(prompts.len(), 7, "семь плейбуков: {prompts:?}");
+    let names: Vec<&str> = prompts.iter().filter_map(|p| p["name"].as_str()).collect();
+    for want in [
+        "spine-quickstart",
+        "spine-content-bootstrap",
+        "spine-architect-review",
+        "spine-adr-judge",
+        "spine-contracts-gate",
+        "spine-archify-viz",
+        "spine-fitness-gate",
+    ] {
+        assert!(names.contains(&want), "нет промпта {want}: {names:?}");
+    }
+    // prompts/get: одно user-сообщение с инструкцией и телом плейбука.
+    let got = &responses[2]["result"];
+    assert!(
+        got["description"].as_str().is_some_and(|d| !d.is_empty()),
+        "description из frontmatter: {got}"
+    );
+    let messages = got["messages"].as_array().expect("messages");
+    assert_eq!(messages.len(), 1, "одно user-сообщение: {got}");
+    assert_eq!(messages[0]["role"], "user");
+    assert_eq!(messages[0]["content"]["type"], "text");
+    let text = messages[0]["content"]["text"].as_str().expect("text");
+    assert!(
+        text.contains("spine-architect-review") && text.contains("significance_score"),
+        "тело плейбука в сообщении: {}",
+        &text[..text.len().min(200)]
+    );
+    // Неизвестный промпт → -32602; resources/* по-прежнему не поддержаны → -32601.
+    assert_eq!(responses[3]["error"]["code"], -32602, "{}", responses[3]);
+    assert_eq!(responses[4]["error"]["code"], -32601, "{}", responses[4]);
 }
 
 #[test]
@@ -313,6 +403,11 @@ fn fitness_check_verdict_blocks_and_passes() {
     let issue = &verdict["issues"][0];
     assert_eq!(issue["rule"], "spine_present");
     assert_eq!(issue["severity"], "error");
+    // Правило без карточки: аддитивные поля (ad/fix_hint/skill) отсутствуют
+    // в JSON, а не null (SDK-контракт v1 не ломается).
+    for key in ["ad", "adr", "rationale", "owner", "fix_hint", "skill"] {
+        assert!(issue.get(key).is_none(), "у находки без карточки нет {key}");
+    }
 
     let verdict = structured(&responses[1], 2);
     assert_eq!(verdict["passed"], true, "{verdict}");
@@ -322,6 +417,28 @@ fn fitness_check_verdict_blocks_and_passes() {
             .expect("summary")
             .contains("Правил: 1")
     );
+}
+
+/// Критерий приёмки бэклога: в ответе `fitness_check` по нарушению видно,
+/// какой AD-* задет и какой скилл загрузить для исправления.
+#[test]
+fn fitness_check_issue_carries_card_context() {
+    let home = tempfile::tempdir().expect("tmp");
+    let broken = repo_card_fixture(home.path(), "card-repo");
+    let responses = mcp_serve(
+        home.path(),
+        &batch(&[call(1, "fitness_check", &json!({"repo": broken}))]),
+    );
+    let verdict = structured(&responses[0], 1);
+    assert_eq!(verdict["passed"], false, "{verdict}");
+    let issue = &verdict["issues"][0];
+    assert_eq!(issue["rule"], "spine_present");
+    assert_eq!(issue["ad"], "AD-9", "{issue}");
+    assert_eq!(
+        issue["fix_hint"], "вернуть ARCHITECTURE-SPINE.md в корень",
+        "{issue}"
+    );
+    assert_eq!(issue["skill"], "spine-invariants", "{issue}");
 }
 
 #[test]
@@ -344,6 +461,151 @@ fn significance_score_routes_change() {
     let fast = structured(&responses[1], 2);
     assert_eq!(fast["route"], "Fast");
     assert_eq!(fast["score"], 0);
+}
+
+/// git в каталоге с тестовой идентичностью коммиттера
+/// (образец — `src/delta.rs::make_guard_repo`).
+fn git(dir: &Path, args: &[&str]) {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("GIT_AUTHOR_NAME", "t")
+        .env("GIT_AUTHOR_EMAIL", "t@t")
+        .env("GIT_COMMITTER_NAME", "t")
+        .env("GIT_COMMITTER_EMAIL", "t@t")
+        .output()
+        .expect("git");
+    assert!(
+        out.status.success(),
+        "git {}: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Репо-фикстура для `significance_from_diff`: один коммит с README.
+fn git_repo_fixture(home: &Path, name: &str) -> std::path::PathBuf {
+    let repo = home.join(name);
+    std::fs::create_dir_all(&repo).expect("mkdir");
+    git(&repo, &["init", "-q"]);
+    std::fs::write(repo.join("README.md"), "# t\n").expect("readme");
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "init"]);
+    repo
+}
+
+/// Критерий приёмки бэклога: агент, заявивший Fast (пустой `declared`) на
+/// диффе с новым каталогом и манифестом, получает Standard или выше с
+/// указанием файла-причины.
+#[test]
+fn significance_from_diff_overrides_fast_claim() {
+    let home = tempfile::tempdir().expect("tmp");
+    let repo = git_repo_fixture(home.path(), "diff-repo");
+    // Рабочее дерево: новый компонент untracked — каталог services/risk с
+    // манифестом (детектор new_component) и строкой зависимости (new_vendor).
+    std::fs::create_dir_all(repo.join("services/risk/src")).expect("mkdir svc");
+    std::fs::write(
+        repo.join("services/risk/Cargo.toml"),
+        "[package]\nname = \"risk\"\nversion = \"0.1.0\"\n\n[dependencies]\nserde = \"1.0\"\n",
+    )
+    .expect("manifest");
+    std::fs::write(repo.join("services/risk/src/lib.rs"), "pub fn f() {}\n").expect("src");
+    let repo_str = repo.display().to_string();
+
+    let responses = mcp_serve(
+        home.path(),
+        &batch(&[
+            // Пустой declared («заявили Fast»): дифф обязан поднять маршрут.
+            call(1, "significance_from_diff", &json!({"path": repo_str})),
+            // Частично заявлено: источник new_component — «declared+diff».
+            call(
+                2,
+                "significance_from_diff",
+                &json!({"path": repo_str, "declared": {"new_component": true}}),
+            ),
+            // Не git-репозиторий — доменный сбой (isError), не protocol error.
+            call(
+                3,
+                "significance_from_diff",
+                &json!({"path": home.path().join("ghost")}),
+            ),
+        ]),
+    );
+
+    let verdict = structured(&responses[0], 1);
+    assert_eq!(verdict["route"], "Standard", "{verdict}");
+    assert_eq!(verdict["score"], 2, "{verdict}");
+    assert_eq!(verdict["sources"]["new_component"], "diff", "{verdict}");
+    assert_eq!(verdict["sources"]["new_vendor"], "diff", "{verdict}");
+    let undeclared = verdict["undeclared"].as_array().expect("undeclared");
+    let nc = undeclared
+        .iter()
+        .find(|u| u["trigger"] == "new_component")
+        .expect("new_component в undeclared");
+    let evidence: Vec<&str> = nc["evidence"]
+        .as_array()
+        .expect("evidence")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(
+        evidence
+            .iter()
+            .any(|e| e.contains("services/risk/Cargo.toml")),
+        "файл-причина new_component: {evidence:?}"
+    );
+    assert!(
+        verdict["summary"]
+            .as_str()
+            .expect("summary")
+            .contains("не заявлены"),
+        "{verdict}"
+    );
+
+    let verdict = structured(&responses[1], 2);
+    assert_eq!(
+        verdict["sources"]["new_component"], "declared+diff",
+        "{verdict}"
+    );
+    // new_vendor остался незаявленным — anti-bypass сигнал сохраняется.
+    let undeclared = verdict["undeclared"].as_array().expect("undeclared");
+    assert!(
+        undeclared.iter().any(|u| u["trigger"] == "new_vendor"),
+        "{verdict}"
+    );
+
+    assert_eq!(responses[2]["result"]["isError"], true);
+    assert!(responses[2].get("error").is_none());
+}
+
+/// Режим `base_ref`: дифф `BASE_REF...HEAD` по закоммиченному компоненту.
+#[test]
+fn significance_from_diff_with_base_ref() {
+    let home = tempfile::tempdir().expect("tmp");
+    let repo = git_repo_fixture(home.path(), "ref-repo");
+    std::fs::create_dir_all(repo.join("services/risk")).expect("mkdir svc");
+    std::fs::write(
+        repo.join("services/risk/Cargo.toml"),
+        "[package]\nname = \"risk\"\nversion = \"0.1.0\"\n\n[dependencies]\nserde = \"1.0\"\n",
+    )
+    .expect("manifest");
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "add risk service"]);
+    let repo_str = repo.display().to_string();
+
+    let responses = mcp_serve(
+        home.path(),
+        &batch(&[call(
+            1,
+            "significance_from_diff",
+            &json!({"path": repo_str, "base_ref": "HEAD~1"}),
+        )]),
+    );
+    let verdict = structured(&responses[0], 1);
+    assert_eq!(verdict["route"], "Standard", "{verdict}");
+    assert_eq!(verdict["sources"]["new_component"], "diff", "{verdict}");
+    assert_eq!(verdict["sources"]["new_vendor"], "diff", "{verdict}");
 }
 
 #[test]
@@ -484,29 +746,23 @@ fn rw_mode_lists_bridge_write_tools_over_stdio() {
     );
     let tools = responses[0]["result"]["tools"].as_array().expect("tools");
     let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
-    // В core-сборке домены harness/distill не собираются — их rw-инструменты
-    // (handoff_create, skill_distill) мост не отдаёт (спеки строятся от реестра).
-    #[cfg(feature = "harness")]
-    let rw_want = [
+    // handoff_create — в обеих сборках (генерация пакета — core-модуль
+    // `crate::handoff`, волна 2 п.10); skill_distill — только в harness.
+    let mut rw_want = vec![
         "handoff_create",
         "adr_new",
         "agentsmd_generate",
-        "skill_distill",
         "reverse_survey",
         "archify_deliver",
+        "evidence_pack",
+        "delta_propose",
         // read-only мост остаётся доступен и под --rw:
         "openapi_lint",
+        "nfr_check",
         "rubric_prompt",
     ];
-    #[cfg(not(feature = "harness"))]
-    let rw_want = [
-        "adr_new",
-        "agentsmd_generate",
-        "reverse_survey",
-        "archify_deliver",
-        "openapi_lint",
-        "rubric_prompt",
-    ];
+    #[cfg(feature = "harness")]
+    rw_want.push("skill_distill");
     for want in rw_want {
         assert!(
             names.contains(&want),
@@ -514,7 +770,7 @@ fn rw_mode_lists_bridge_write_tools_over_stdio() {
         );
     }
     #[cfg(not(feature = "harness"))]
-    for banned in ["handoff_create", "skill_distill"] {
+    for banned in ["skill_distill"] {
         assert!(
             !names.contains(&banned),
             "harness-инструмент {banned} не должен отдаваться в core: {names:?}"
@@ -542,16 +798,13 @@ fn rw_mode_lists_bridge_write_tools_over_stdio() {
             "never-инструмент {banned} не должен отдаваться и под --rw: {names:?}"
         );
     }
-    // Аннотации mutating-инструмента (handoff_create — домен сборки `harness`).
-    #[cfg(feature = "harness")]
-    {
-        let handoff = tools
-            .iter()
-            .find(|t| t["name"] == "handoff_create")
-            .expect("handoff_create");
-        assert_eq!(handoff["annotations"]["readOnlyHint"], false);
-        assert_eq!(handoff["annotations"]["destructiveHint"], true);
-    }
+    // Аннотации mutating-инструмента (handoff_create — в обеих сборках).
+    let handoff = tools
+        .iter()
+        .find(|t| t["name"] == "handoff_create")
+        .expect("handoff_create");
+    assert_eq!(handoff["annotations"]["readOnlyHint"], false);
+    assert_eq!(handoff["annotations"]["destructiveHint"], true);
 }
 
 #[test]
@@ -581,6 +834,118 @@ fn bridge_openapi_lint_call_over_stdio() {
     );
     // text-часть моста — сырой вывод инструмента (не JSON-обёртка).
     assert_eq!(result["content"][0]["text"].as_str().expect("text"), output);
+}
+
+/// Фикстура кейса NFR: `model/` с INT-hop'ом (бюджет `hop_budget_ms`) и NFR
+/// с целью p99 `target_ms` (образец — `tests/cli.rs::nfr_budget_case`).
+fn nfr_case_fixture(home: &Path, name: &str, target_ms: u32, hop_budget_ms: Option<u32>) -> String {
+    let case = home.join(name);
+    let model = case.join("model");
+    std::fs::create_dir_all(&model).expect("mkdir model");
+    let budget = hop_budget_ms.map_or(String::new(), |b| format!("latency_budget_ms: {b}\n"));
+    std::fs::write(
+        model.join("INT-001-hop.md"),
+        format!("---\nid: INT-001\ntype: int\ntitle: Hop\nstatus: accepted\n{budget}---\n"),
+    )
+    .expect("write INT");
+    std::fs::write(
+        model.join("NFR-001-lat.md"),
+        format!(
+            "---\nid: NFR-001\ntype: nfr\ntitle: Latency\nstatus: accepted\n\
+             verification: histogram\np99_target_ms: {target_ms}\naffects: [INT-001]\n---\n"
+        ),
+    )
+    .expect("write NFR");
+    case.display().to_string()
+}
+
+/// Транш 1 инверсии: `nfr_check` по NDJSON возвращает JSON-вердикт
+/// passed/issues/summary в `structuredContent.output` (мостовой вызов,
+/// без bash у агента). Зелёный кейс — passed, превышение бюджета — FAIL
+/// с виновным hop'ом в находке.
+#[test]
+fn bridge_nfr_check_verdict_over_stdio() {
+    let home = tempfile::tempdir().expect("tmp");
+    let ok_case = nfr_case_fixture(home.path(), "nfr-ok", 2000, Some(800));
+    let bad_case = nfr_case_fixture(home.path(), "nfr-bad", 2000, Some(3000));
+    let responses = mcp_serve(
+        home.path(),
+        &batch(&[
+            call(1, "nfr_check", &json!({"path": ok_case, "kind": "all"})),
+            call(2, "nfr_check", &json!({"path": bad_case, "kind": "budget"})),
+            // Кейса без model/ — доменный сбой: isError, не protocol error.
+            call(3, "nfr_check", &json!({"path": home.path().join("ghost")})),
+        ]),
+    );
+    let verdict = structured(&responses[0], 1);
+    assert_eq!(verdict["tool"], "nfr_check");
+    let output: Value = serde_json::from_str(verdict["output"].as_str().expect("output"))
+        .expect("output — JSON-вердикт {passed, issues, summary}");
+    assert_eq!(output["passed"], true, "{output}");
+    assert_eq!(
+        output["checks"],
+        json!(["budget", "availability", "capacity", "cost"])
+    );
+
+    let verdict = structured(&responses[1], 2);
+    let output: Value =
+        serde_json::from_str(verdict["output"].as_str().expect("output")).expect("JSON-вердикт");
+    assert_eq!(output["passed"], false, "{output}");
+    let issue = &output["issues"][0];
+    assert_eq!(issue["rule"], "budget-exceeded");
+    assert!(
+        issue["message"]
+            .as_str()
+            .expect("message")
+            .contains("INT-001=3000"),
+        "виновный hop в находке: {issue}"
+    );
+
+    assert_eq!(responses[2]["result"]["isError"], true);
+    assert!(responses[2].get("error").is_none());
+}
+
+/// Транш 1 инверсии, rw-контур: `delta_propose` недоступен в ro-режиме
+/// (-32602), под `--rw` создаёт скелет дельты мостовым вызовом.
+#[test]
+fn bridge_delta_propose_rw_only_over_stdio() {
+    let home = tempfile::tempdir().expect("tmp");
+    let repo = home.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("mkdir repo");
+    let repo_str = repo.display().to_string();
+    // ro-режим: инструмент закрыт, ничего не создаётся.
+    let responses = mcp_serve(
+        home.path(),
+        &batch(&[call(
+            1,
+            "delta_propose",
+            &json!({"name": "saga-pilot", "path": repo_str}),
+        )]),
+    );
+    assert_eq!(responses[0]["error"]["code"], -32602);
+    assert!(!repo.join("changes/saga-pilot/DELTA.md").exists());
+    // rw-режим: скелет создан, вердикт — JSON в output моста.
+    let responses = mcp_serve_with_args(
+        home.path(),
+        &["--rw"],
+        &batch(&[call(
+            1,
+            "delta_propose",
+            &json!({"name": "saga-pilot", "path": repo_str}),
+        )]),
+    );
+    let verdict = structured(&responses[0], 1);
+    assert_eq!(verdict["tool"], "delta_propose");
+    let output: Value =
+        serde_json::from_str(verdict["output"].as_str().expect("output")).expect("JSON-вердикт");
+    assert!(
+        output["created"]
+            .as_str()
+            .expect("created")
+            .ends_with("changes/saga-pilot/DELTA.md"),
+        "{output}"
+    );
+    assert!(repo.join("changes/saga-pilot/DELTA.md").is_file());
 }
 
 #[test]
@@ -636,5 +1001,440 @@ fn split_judge_prompt_then_verify_over_stdio() {
     assert!(
         verdict["warning"].is_string(),
         "доля отброшенных: {verdict}"
+    );
+}
+
+/// Журнал вызовов (пункт 9): после `tools/call` проектный журнал
+/// `.arch-handoff/mcp-calls.jsonl` (cwd сервера = дом теста) существует и
+/// несёт `tool`/`verdict`/`duration_ms`/`ts`; `fail` несёт имена правил
+/// error-находок, неизвестный инструмент — `invalid`. Содержимое
+/// аргументов в журнале отсутствует.
+#[test]
+fn tool_calls_are_journaled_to_project_journal() {
+    let home = tempfile::tempdir().expect("tmp");
+    let ok_repo = repo_fixture(home.path(), "repo-ok", true);
+    let bad_repo = repo_fixture(home.path(), "repo-bad", false);
+    let responses = mcp_serve(
+        home.path(),
+        &batch(&[
+            call(1, "fitness_check", &json!({"repo": ok_repo})),
+            call(2, "fitness_check", &json!({"repo": bad_repo})),
+            call(3, "ghost", &json!({})),
+        ]),
+    );
+    assert_eq!(responses.len(), 3, "все вызовы отвечены: {responses:?}");
+
+    let journal = home.path().join(".arch-handoff/mcp-calls.jsonl");
+    let text = std::fs::read_to_string(&journal)
+        .expect("журнал создан рядом с cwd сервера (fail-soft не молчит на нормальной ФС)");
+    let entries: Vec<Value> = text
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("строка журнала — валидный JSON"))
+        .collect();
+    assert_eq!(entries.len(), 3, "три вызова — три записи: {entries:?}");
+    // pass: чистый репозиторий.
+    assert_eq!(entries[0]["tool"], "fitness_check");
+    assert_eq!(entries[0]["verdict"], "pass");
+    assert!(entries[0]["duration_ms"].is_number(), "{}", entries[0]);
+    assert!(
+        entries[0]["ts"].as_str().is_some_and(|t| t.contains('T')),
+        "RFC 3339 штамп: {}",
+        entries[0]
+    );
+    // fail: нарушение — имена правил из error-находок.
+    assert_eq!(entries[1]["verdict"], "fail");
+    assert_eq!(entries[1]["rules"], json!(["spine_present"]));
+    // Неизвестный инструмент доехал до диспетчера и отвечен -32602 → invalid.
+    assert_eq!(entries[2]["tool"], "ghost");
+    assert_eq!(entries[2]["verdict"], "invalid");
+    // Содержимого аргументов в журнале нет (контракт приватности).
+    assert!(
+        !text.contains("repo-ok"),
+        "пути-аргументы не журналируются: {text}"
+    );
+}
+
+/// Транш 2 инверсии: отчётные read-only инструменты по NDJSON.
+/// `adr_registry` — счётчики и strict-гейт по находкам; `openspec_coverage` —
+/// покрытие требований (счётчики + strict); `model_graph` — граф текстом;
+/// `landscape_report` — markdown-отчёт. Всё — мостовые вызовы с JSON в
+/// `structuredContent.output`.
+#[test]
+fn bridge_tranche2_reports_over_stdio() {
+    let home = tempfile::tempdir().expect("tmp");
+
+    // Реестр ADR: два проекта, коллизия номера ADR-001 (разные заголовки).
+    let adr_root = home.path().join("adr-root");
+    for (project, title) in [("p1", "Outbox"), ("p2", "Saga")] {
+        let dir = adr_root.join(project).join("docs/adr");
+        std::fs::create_dir_all(&dir).expect("mkdir adr");
+        std::fs::write(
+            dir.join("ADR-001-x.md"),
+            format!("# ADR-001. {title}\n\n- Date: 2026-01-01\n- Status: Accepted\n"),
+        )
+        .expect("adr");
+    }
+
+    // OpenSpec-разметка: одно требование, покрытое правилом с covers.
+    let os_root = home.path().join("os-root");
+    let spec_dir = os_root.join("openspec/specs/payments");
+    std::fs::create_dir_all(&spec_dir).expect("mkdir spec");
+    std::fs::write(
+        spec_dir.join("spec.md"),
+        "# payments Specification\n\n## Requirements\n\n\
+         ### Requirement: Точные деньги\nСистема SHALL хранить суммы в minor units.\n",
+    )
+    .expect("spec");
+    let requirement_id = arch_harness::openspec::requirement_id(
+        "payments",
+        &["Система SHALL хранить суммы в minor units.".to_string()],
+    );
+    std::fs::write(
+        os_root.join("CONSTRAINTS.yaml"),
+        format!(
+            "rules:\n  - name: money-detector\n    type: must_contain\n    glob: 'src/**'\n    pattern: 'minor_units'\n    covers: [\"{requirement_id}\"]\n"
+        ),
+    )
+    .expect("constraints");
+
+    // Модель для model_graph и ландшафта: AD-1 + ADR-001 (implements).
+    let case = home.path().join("case");
+    let model_dir = case.join("model");
+    std::fs::create_dir_all(&model_dir).expect("mkdir model");
+    std::fs::write(
+        model_dir.join("AD-1.md"),
+        "---\nid: AD-1\ntype: ad\ntitle: Инвариант\nstatus: ADOPTED\n---\n\nПравило.\n",
+    )
+    .expect("AD");
+    std::fs::write(
+        model_dir.join("ADR-001-x.md"),
+        "---\nid: ADR-001\ntype: adr\ntitle: Решение\nstatus: Accepted\nimplements: [AD-1]\n---\n\nКонтекст.\n",
+    )
+    .expect("ADR");
+
+    let responses = mcp_serve(
+        home.path(),
+        &batch(&[
+            // adr_registry: отчёт (не гейт) — passed=true при находках.
+            call(1, "adr_registry", &json!({"path": adr_root})),
+            // strict — гейт: коллизия номеров → passed=false.
+            call(
+                2,
+                "adr_registry",
+                &json!({"path": adr_root, "strict": true}),
+            ),
+            // openspec_coverage strict: требование покрыто — passed=true.
+            call(
+                3,
+                "openspec_coverage",
+                &json!({"path": os_root, "strict": true}),
+            ),
+            // model_graph: текстовый граф модели.
+            call(4, "model_graph", &json!({"dir": model_dir})),
+            // landscape_report: markdown по корню с одним проектом-моделью.
+            call(5, "landscape_report", &json!({"path": case})),
+        ]),
+    );
+    assert_eq!(responses.len(), 5, "все вызовы отвечены: {responses:?}");
+
+    let output = |idx: u64| -> Value {
+        let verdict = structured(&responses[(idx - 1) as usize], idx);
+        serde_json::from_str(verdict["output"].as_str().expect("output"))
+            .expect("output — JSON-вердикт")
+    };
+
+    let registry = output(1);
+    assert_eq!(registry["tool"], "adr_registry");
+    assert_eq!(registry["entries"], 2, "{registry}");
+    assert!(
+        registry["finding_count"].as_u64().expect("findings") >= 1,
+        "{registry}"
+    );
+    assert_eq!(registry["passed"], true, "отчёт, не гейт: {registry}");
+    assert!(
+        registry["findings"][0]["kind"].as_str().expect("kind") == "number_collision",
+        "{registry}"
+    );
+
+    let registry_strict = output(2);
+    assert_eq!(
+        registry_strict["passed"], false,
+        "strict-гейт: {registry_strict}"
+    );
+
+    let coverage = output(3);
+    assert_eq!(coverage["tool"], "openspec_coverage");
+    assert_eq!(coverage["total"], 1, "{coverage}");
+    assert_eq!(coverage["covered"], 1, "{coverage}");
+    assert_eq!(coverage["unresolved"], 0, "{coverage}");
+    assert_eq!(coverage["passed"], true, "strict, всё покрыто: {coverage}");
+
+    let graph = output(4);
+    assert_eq!(graph["tool"], "model_graph");
+    assert_eq!(graph["entities"], 2, "{graph}");
+    assert_eq!(graph["edges"], 1, "{graph}");
+    assert!(
+        graph["graph"]
+            .as_str()
+            .expect("graph")
+            .contains("implements → AD-1"),
+        "{graph}"
+    );
+
+    let landscape = output(5);
+    assert_eq!(landscape["tool"], "landscape_report");
+    assert_eq!(
+        landscape["systems"], 0,
+        "в кейсе нет SYS — только AD/ADR: {landscape}"
+    );
+    assert!(
+        landscape["report"]
+            .as_str()
+            .expect("report")
+            .contains("# Ландшафт систем"),
+        "{landscape}"
+    );
+}
+
+/// Транш 3 инверсии: составные инструменты по NDJSON. `architect_review` —
+/// единое ревью (маршрут + контур гейта + модель + контракты) с JSON-вердиктом
+/// в `structuredContent.output`; `change_impact` — радиус изменения по
+/// `id` (граф модели) и честная мягкая ошибка на неизвестном id.
+#[test]
+fn bridge_tranche3_composite_tools_over_stdio() {
+    let home = tempfile::tempdir().expect("tmp");
+
+    // Кейс-фикстура (та же цепочка, что в src/review.rs::make_case):
+    // git-репо, model/ с CMP→INT→SYS→AD→OWNER, CONSTRAINTS.yaml с C-001,
+    // spine, контракт contracts/api.yaml, .arch-handoff/CONSTRAINTS.yaml.
+    let case = home.path().join("case");
+    let model_dir = case.join("model");
+    std::fs::create_dir_all(&model_dir).expect("mkdir model");
+    for (name, fm) in [
+        (
+            "AD-1.md",
+            "---\nid: AD-1\ntype: ad\ntitle: Точные деньги\nstatus: ADOPTED\nverified_by: [C-001]\n---\n\nПравило.\n",
+        ),
+        (
+            "INT-001.md",
+            "---\nid: INT-001\ntype: int\ntitle: Рельс процессинга\nstatus: accepted\ncontract: contracts/api.yaml\n---\n\nТело.\n",
+        ),
+        (
+            "OWNER-1.md",
+            "---\nid: OWNER-1\ntype: owner\ntitle: Команда процессинга\nstatus: active\n---\n\nТело.\n",
+        ),
+    ] {
+        std::fs::write(model_dir.join(name), fm).expect("сущность");
+    }
+    // CMP-001 отдельно: несёт связь на владельца (affects OWNER-1).
+    std::fs::write(
+        model_dir.join("CMP-001.md"),
+        "---\nid: CMP-001\ntype: cmp\ntitle: Платёжный шлюз\nstatus: designed\nimplements: [AD-1]\ndepends_on: [INT-001]\naffects: [OWNER-1]\ncode_roots: [services/pay]\n---\n\nТело.\n",
+    )
+    .expect("CMP с владельцем");
+    std::fs::write(
+        case.join("CONSTRAINTS.yaml"),
+        "constraints:\n  - id: C-001\n    name: no_float_money\n    owner: Команда платежей\n",
+    )
+    .expect("constraints");
+    std::fs::write(
+        case.join("ARCHITECTURE-SPINE.md"),
+        "# Spine\n\n### AD-1. Точные деньги\n- Binds: денежные суммы\n- Prevents: потеря копеек\n- Rule: суммы в minor units\n",
+    )
+    .expect("spine");
+    let contracts = case.join("contracts");
+    std::fs::create_dir_all(&contracts).expect("mkdir contracts");
+    std::fs::write(
+        contracts.join("api.yaml"),
+        "openapi: 3.0.3\ninfo:\n  title: Processing API\n  version: 1.0.0\npaths:\n  /v1/charges:\n    get:\n      operationId: listCharges\n      responses:\n        '200':\n          description: ok\n",
+    )
+    .expect("контракт");
+    std::fs::create_dir_all(case.join(".arch-handoff")).expect("mkdir handoff");
+    std::fs::write(
+        case.join(".arch-handoff/CONSTRAINTS.yaml"),
+        "rules:\n  - name: spine_present\n    type: file_exists\n    path: \"ARCHITECTURE-SPINE.md\"\n    severity: error\n",
+    )
+    .expect("handoff constraints");
+    git(&case, &["init", "-q"]);
+    git(&case, &["add", "."]);
+    git(&case, &["commit", "-q", "-m", "init"]);
+
+    let responses = mcp_serve(
+        home.path(),
+        &batch(&[
+            call(1, "architect_review", &json!({"path": case})),
+            call(2, "change_impact", &json!({"path": case, "id": "CMP-001"})),
+            call(
+                3,
+                "change_impact",
+                &json!({"path": case, "paths": ["services/pay/src/main.rs", "docs/x.md"]}),
+            ),
+            call(4, "change_impact", &json!({"path": case, "id": "CMP-999"})),
+        ]),
+    );
+    assert_eq!(responses.len(), 4, "все вызовы отвечены: {responses:?}");
+
+    let output = |idx: u64| -> Value {
+        let verdict = structured(&responses[(idx - 1) as usize], idx);
+        serde_json::from_str(verdict["output"].as_str().expect("output"))
+            .expect("output — JSON-вердикт")
+    };
+
+    // architect_review: единый вердикт, все секции прогнались и зелёные.
+    let review = output(1);
+    assert_eq!(review["tool"], "architect_review");
+    assert_eq!(review["passed"], true, "{review}");
+    assert_eq!(review["route"], "Fast", "{review}");
+    let names: Vec<&str> = review["components"]
+        .as_array()
+        .expect("components")
+        .iter()
+        .filter_map(|c| c["name"].as_str())
+        .collect();
+    for want in [
+        "fitness",
+        "spine_lint",
+        "trace_check",
+        "model_validate",
+        "contracts",
+    ] {
+        assert!(names.contains(&want), "нет секции {want}: {names:?}");
+    }
+
+    // change_impact по id: вся цепочка + правило с владельцем + контракт.
+    let impact = output(2);
+    assert_eq!(impact["tool"], "change_impact");
+    assert_eq!(impact["seeds"], json!(["CMP-001"]), "{impact}");
+    let ids: Vec<&str> = impact["affected"]
+        .as_array()
+        .expect("affected")
+        .iter()
+        .filter_map(|a| a["id"].as_str())
+        .collect();
+    for want in ["CMP-001", "INT-001", "AD-1", "OWNER-1"] {
+        assert!(ids.contains(&want), "нет {want} в {ids:?}");
+    }
+    assert_eq!(
+        impact["contracts"],
+        json!(["contracts/api.yaml"]),
+        "{impact}"
+    );
+    assert_eq!(impact["rules"][0]["id"], "C-001", "{impact}");
+    assert_eq!(
+        impact["rules"][0]["owner"],
+        json!("Команда платежей"),
+        "{impact}"
+    );
+    assert!(
+        impact["owners"].as_array().expect("owners")[0]
+            .as_str()
+            .expect("owner")
+            .contains("Команда процессинга"),
+        "{impact}"
+    );
+
+    // change_impact по paths: code_roots → CMP-001; непокрытый путь — gap.
+    let impact = output(3);
+    assert_eq!(impact["seeds"], json!(["CMP-001"]), "{impact}");
+    assert_eq!(impact["gaps"], json!(["docs/x.md"]), "{impact}");
+
+    // Неизвестный id — доменный сбой (isError), не protocol error.
+    assert_eq!(responses[3]["result"]["isError"], true);
+    assert!(responses[3].get("error").is_none());
+    assert!(
+        responses[3]["result"]["content"][0]["text"]
+            .as_str()
+            .expect("text")
+            .contains("не найдена"),
+        "{}",
+        responses[3]
+    );
+}
+
+/// П.10 (волна 2): `handoff_create` отдаётся мостом `--rw` и в core-сборке —
+/// главный доказательный кейс drift-control воспроизводится core-бинарём в
+/// части создания пакета. Фикстура — спайн кейса 006
+/// (`кейсы/drift-control/handoff-example/`): пакет собирается с git-предгейтом
+/// (init + baseline-якорь) в tempdir-репо.
+#[test]
+fn handoff_create_over_stdio_creates_packet_on_drift_control_fixture() {
+    let home = tempfile::tempdir().expect("tmp");
+    let repo = home.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("mkdir repo");
+    let spine = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("кейсы/drift-control/handoff-example/ARCHITECTURE-SPINE.md");
+    assert!(spine.is_file(), "фикстура кейса drift-control: {spine:?}");
+
+    let list = json!({"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}).to_string();
+    let create = call(
+        2,
+        "handoff_create",
+        &json!({
+            "repo": repo,
+            "task": "Реализуй платёжное ядро: деньги целыми minor units, thiserror, идемпотентный authorize",
+            "spec": [spine],
+            "route": "fast",
+        }),
+    );
+    let responses = mcp_serve_with_args(home.path(), &["--rw"], &batch(&[list, create]));
+
+    // Инструмент в выдаче (в core-сборке тоже — это и есть пункт приёмки).
+    let tools = responses[0]["result"]["tools"].as_array().expect("tools");
+    assert!(
+        tools.iter().any(|t| t["name"] == "handoff_create"),
+        "handoff_create должен отдаваться мостом --rw (сборка: {})",
+        if cfg!(feature = "harness") {
+            "harness"
+        } else {
+            "core"
+        }
+    );
+
+    let out = structured(&responses[1], 2);
+    assert_eq!(out["tool"], "handoff_create");
+    let text = out["output"].as_str().expect("output");
+    assert!(text.contains("Handoff-пакет создан"), "{text}");
+
+    // Пакет на месте: задача со спайном кейса, манифест с baseline-якорем.
+    let dir = repo.join(".arch-handoff");
+    for file in [
+        "TASK.md",
+        "ARCHITECTURE.md",
+        "MANIFEST.json",
+        "CONSTRAINTS.yaml",
+        "SPEC.md",
+        "ROLLBACK.yaml",
+    ] {
+        assert!(dir.join(file).is_file(), "нет файла пакета {file}");
+    }
+    let task_md = std::fs::read_to_string(dir.join("TASK.md")).expect("TASK.md");
+    assert!(task_md.contains("платёжное ядро"), "{task_md}");
+    assert!(task_md.contains("## План отката"), "{task_md}");
+    let arch_md = std::fs::read_to_string(dir.join("ARCHITECTURE.md")).expect("ARCHITECTURE.md");
+    assert!(
+        arch_md.contains("AD-1"),
+        "спайн drift-control доехал в epic-context:\n{arch_md}"
+    );
+    let manifest: Value = serde_json::from_str(
+        &std::fs::read_to_string(dir.join("MANIFEST.json")).expect("MANIFEST.json"),
+    )
+    .expect("manifest json");
+    assert!(
+        manifest["baseline_commit"]
+            .as_str()
+            .is_some_and(|h| !h.is_empty()),
+        "git-предгейт: baseline_commit проставлен (git init + якорь): {manifest}"
+    );
+    // Якорь реально существует в репозитории.
+    let log = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["log", "--oneline"])
+        .output()
+        .expect("git log");
+    let log_text = String::from_utf8_lossy(&log.stdout);
+    assert!(
+        log_text.contains("baseline"),
+        "baseline-коммит в истории: {log_text}"
     );
 }

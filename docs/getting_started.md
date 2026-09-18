@@ -30,6 +30,11 @@ cargo build --release          # бинарь: target/release/arch-be
 ln -sf "$PWD/target/release/arch-be" ~/.local/bin/arch-be   # запуск одним словом
 ```
 
+Без сборки из исходников: готовые бинари обеих редакций (core и full) под
+linux-x86_64, linux-aarch64, macos-arm64, windows-x86_64 публикуются в
+GitHub Releases (теги `v*`, сводный `SHA256SUMS` на все артефакты) —
+см. «Шаг 0» в `README.md`.
+
 Дальше в тексте — `arch-be`; если симлинк не создавали, подставляйте
 `<репо>/target/release/arch-be`.
 
