@@ -216,13 +216,18 @@ fn handshake_then_tools_list_over_stdio() {
         "model_validate",
         "delta_guard",
         "evidence_verify",
+        "landscape_report",
+        "adr_registry",
+        "rules_report",
+        "openspec_coverage",
+        "model_graph",
     ] {
         assert!(names.contains(&want), "нет инструмента {want}: {names:?}");
     }
     assert_eq!(
         tools.len(),
-        25,
-        "ровно 25 инструментов в ro-режиме (13 ручных + 12 read-only моста)"
+        30,
+        "ровно 30 инструментов в ro-режиме (13 ручных + 17 read-only моста)"
     );
     // rw-контур и write/exec-принадлежность хоста закрыты в ro-режиме.
     for banned in [
@@ -1058,5 +1063,147 @@ fn tool_calls_are_journaled_to_project_journal() {
     assert!(
         !text.contains("repo-ok"),
         "пути-аргументы не журналируются: {text}"
+    );
+}
+
+/// Транш 2 инверсии: отчётные read-only инструменты по NDJSON.
+/// `adr_registry` — счётчики и strict-гейт по находкам; `openspec_coverage` —
+/// покрытие требований (счётчики + strict); `model_graph` — граф текстом;
+/// `landscape_report` — markdown-отчёт. Всё — мостовые вызовы с JSON в
+/// `structuredContent.output`.
+#[test]
+fn bridge_tranche2_reports_over_stdio() {
+    let home = tempfile::tempdir().expect("tmp");
+
+    // Реестр ADR: два проекта, коллизия номера ADR-001 (разные заголовки).
+    let adr_root = home.path().join("adr-root");
+    for (project, title) in [("p1", "Outbox"), ("p2", "Saga")] {
+        let dir = adr_root.join(project).join("docs/adr");
+        std::fs::create_dir_all(&dir).expect("mkdir adr");
+        std::fs::write(
+            dir.join("ADR-001-x.md"),
+            format!("# ADR-001. {title}\n\n- Date: 2026-01-01\n- Status: Accepted\n"),
+        )
+        .expect("adr");
+    }
+
+    // OpenSpec-разметка: одно требование, покрытое правилом с covers.
+    let os_root = home.path().join("os-root");
+    let spec_dir = os_root.join("openspec/specs/payments");
+    std::fs::create_dir_all(&spec_dir).expect("mkdir spec");
+    std::fs::write(
+        spec_dir.join("spec.md"),
+        "# payments Specification\n\n## Requirements\n\n\
+         ### Requirement: Точные деньги\nСистема SHALL хранить суммы в minor units.\n",
+    )
+    .expect("spec");
+    let requirement_id = arch_harness::openspec::requirement_id(
+        "payments",
+        &["Система SHALL хранить суммы в minor units.".to_string()],
+    );
+    std::fs::write(
+        os_root.join("CONSTRAINTS.yaml"),
+        format!(
+            "rules:\n  - name: money-detector\n    type: must_contain\n    glob: 'src/**'\n    pattern: 'minor_units'\n    covers: [\"{requirement_id}\"]\n"
+        ),
+    )
+    .expect("constraints");
+
+    // Модель для model_graph и ландшафта: AD-1 + ADR-001 (implements).
+    let case = home.path().join("case");
+    let model_dir = case.join("model");
+    std::fs::create_dir_all(&model_dir).expect("mkdir model");
+    std::fs::write(
+        model_dir.join("AD-1.md"),
+        "---\nid: AD-1\ntype: ad\ntitle: Инвариант\nstatus: ADOPTED\n---\n\nПравило.\n",
+    )
+    .expect("AD");
+    std::fs::write(
+        model_dir.join("ADR-001-x.md"),
+        "---\nid: ADR-001\ntype: adr\ntitle: Решение\nstatus: Accepted\nimplements: [AD-1]\n---\n\nКонтекст.\n",
+    )
+    .expect("ADR");
+
+    let responses = mcp_serve(
+        home.path(),
+        &batch(&[
+            // adr_registry: отчёт (не гейт) — passed=true при находках.
+            call(1, "adr_registry", &json!({"path": adr_root})),
+            // strict — гейт: коллизия номеров → passed=false.
+            call(
+                2,
+                "adr_registry",
+                &json!({"path": adr_root, "strict": true}),
+            ),
+            // openspec_coverage strict: требование покрыто — passed=true.
+            call(
+                3,
+                "openspec_coverage",
+                &json!({"path": os_root, "strict": true}),
+            ),
+            // model_graph: текстовый граф модели.
+            call(4, "model_graph", &json!({"dir": model_dir})),
+            // landscape_report: markdown по корню с одним проектом-моделью.
+            call(5, "landscape_report", &json!({"path": case})),
+        ]),
+    );
+    assert_eq!(responses.len(), 5, "все вызовы отвечены: {responses:?}");
+
+    let output = |idx: u64| -> Value {
+        let verdict = structured(&responses[(idx - 1) as usize], idx);
+        serde_json::from_str(verdict["output"].as_str().expect("output"))
+            .expect("output — JSON-вердикт")
+    };
+
+    let registry = output(1);
+    assert_eq!(registry["tool"], "adr_registry");
+    assert_eq!(registry["entries"], 2, "{registry}");
+    assert!(
+        registry["finding_count"].as_u64().expect("findings") >= 1,
+        "{registry}"
+    );
+    assert_eq!(registry["passed"], true, "отчёт, не гейт: {registry}");
+    assert!(
+        registry["findings"][0]["kind"].as_str().expect("kind") == "number_collision",
+        "{registry}"
+    );
+
+    let registry_strict = output(2);
+    assert_eq!(
+        registry_strict["passed"], false,
+        "strict-гейт: {registry_strict}"
+    );
+
+    let coverage = output(3);
+    assert_eq!(coverage["tool"], "openspec_coverage");
+    assert_eq!(coverage["total"], 1, "{coverage}");
+    assert_eq!(coverage["covered"], 1, "{coverage}");
+    assert_eq!(coverage["unresolved"], 0, "{coverage}");
+    assert_eq!(coverage["passed"], true, "strict, всё покрыто: {coverage}");
+
+    let graph = output(4);
+    assert_eq!(graph["tool"], "model_graph");
+    assert_eq!(graph["entities"], 2, "{graph}");
+    assert_eq!(graph["edges"], 1, "{graph}");
+    assert!(
+        graph["graph"]
+            .as_str()
+            .expect("graph")
+            .contains("implements → AD-1"),
+        "{graph}"
+    );
+
+    let landscape = output(5);
+    assert_eq!(landscape["tool"], "landscape_report");
+    assert_eq!(
+        landscape["systems"], 0,
+        "в кейсе нет SYS — только AD/ADR: {landscape}"
+    );
+    assert!(
+        landscape["report"]
+            .as_str()
+            .expect("report")
+            .contains("# Ландшафт систем"),
+        "{landscape}"
     );
 }

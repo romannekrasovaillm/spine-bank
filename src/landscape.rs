@@ -22,9 +22,16 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use serde::Deserialize;
+use serde_json::{Value, json};
 
 use crate::error::{HarnessError, Result};
+use crate::llm::ToolSpec;
 use crate::model::{EntityKind, LinkKind};
+use crate::tool::{Tool, ToolContext, ToolOutput};
 
 /// Каталоги, которые не считаются проектами при сканировании `ROOT`.
 const SKIP_DIRS: [&str; 3] = [".git", "target", "node_modules"];
@@ -444,6 +451,105 @@ pub fn render_mermaid(report: &LandscapeReport) -> String {
     out
 }
 
+/// Инструменты домена: `landscape_report`.
+#[must_use]
+pub fn tools() -> Vec<Arc<dyn Tool>> {
+    vec![Arc::new(LandscapeReportTool)]
+}
+
+/// Инструмент `landscape_report`: ландшафт систем набора проектов (EA-3,
+/// ADR-037) — отчёт/граф текстом + сводка (мост в MCP, транш 2 инверсии;
+/// read-only).
+pub struct LandscapeReportTool;
+
+#[derive(Debug, Deserialize)]
+struct LandscapeReportArgs {
+    /// Корневой каталог набора проектов.
+    path: String,
+    /// Формат отчёта: markdown (дефолт) | mermaid.
+    format: Option<String>,
+}
+
+#[async_trait]
+impl Tool for LandscapeReportTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "landscape_report".into(),
+            description: "Ландшафт систем набора проектов (EA-3, ADR-037): агрегация model/ \
+                          самого ROOT и непосредственных подкаталогов в реестр систем SYS/INT \
+                          с дедупликацией по нормализованному имени, находки (id-divergence, \
+                          status-conflict, dangling-ref, cross-project-link) и топ связности. \
+                          Ответ — JSON: format + счётчики systems/edges/findings + summary + \
+                          report (markdown-отчёт или mermaid graph TD). Отчёт, а не гейт: \
+                          verdict passed не применим"
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Корневой каталог набора проектов"},
+                    "format": {
+                        "type": "string",
+                        "description": "Формат отчёта: markdown (по умолчанию) | mermaid",
+                        "enum": ["markdown", "mermaid"]
+                    }
+                },
+                "required": ["path"]
+            }),
+        }
+    }
+
+    async fn call(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput> {
+        let args: LandscapeReportArgs = match serde_json::from_value(args) {
+            Ok(a) => a,
+            Err(e) => {
+                return Ok(ToolOutput::err(format!(
+                    "landscape_report: невалидные аргументы: {e}"
+                )));
+            }
+        };
+        let format = args
+            .format
+            .as_deref()
+            .unwrap_or("markdown")
+            .trim()
+            .to_ascii_lowercase();
+        if format != "markdown" && format != "mermaid" {
+            return Ok(ToolOutput::err(format!(
+                "landscape_report: неизвестный формат '{format}' (допустимы: markdown, mermaid)"
+            )));
+        }
+        let root = ctx.resolve(&args.path);
+        let report = match build_landscape(&root) {
+            Ok(r) => r,
+            Err(e) => return Ok(ToolOutput::err(format!("landscape_report: {e}"))),
+        };
+        let text = if format == "mermaid" {
+            render_mermaid(&report)
+        } else {
+            render_markdown(&report)
+        };
+        let summary = format!(
+            "Ландшафт {}: {} систем, {} связей, {} находок",
+            report.root.display(),
+            report.systems.len(),
+            report.edges.len(),
+            report.findings.len()
+        );
+        let verdict = json!({
+            "tool": "landscape_report",
+            "format": format,
+            "systems": report.systems.len(),
+            "edges": report.edges.len(),
+            "findings": report.findings.len(),
+            "summary": summary,
+            "report": text,
+        });
+        // Сериализация собранного объекта не падает; запасной вариант — компактная форма.
+        let text = serde_json::to_string_pretty(&verdict).unwrap_or_else(|_| verdict.to_string());
+        Ok(ToolOutput::ok(text))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -615,5 +721,55 @@ mod tests {
         let err = build_landscape(&root).unwrap_err();
         assert!(err.to_string().contains("model/"), "{err}");
         assert!(build_landscape(&root.join("missing")).is_err());
+    }
+
+    /// Инструмент `landscape_report`: markdown и mermaid на фикстуре, счётчики,
+    /// мягкие ошибки на битом формате и несуществующем корне.
+    #[tokio::test]
+    async fn landscape_report_tool_markdown_mermaid_and_errors() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let root = fixture(dir.path());
+        let ctx = ToolContext::new(root, Arc::new(crate::config::Config::default()));
+        let out = LandscapeReportTool
+            .call(json!({"path": "."}), &ctx)
+            .await
+            .expect("вызов");
+        assert!(!out.is_error, "{}", out.content);
+        let v: Value = serde_json::from_str(&out.content).expect("JSON-вердикт");
+        assert_eq!(v["tool"], "landscape_report");
+        assert_eq!(v["format"], "markdown");
+        assert!(v["systems"].as_u64().expect("systems") >= 1, "{v}");
+        assert!(v["findings"].as_u64().expect("findings") >= 1, "{v}");
+        let report = v["report"].as_str().expect("report");
+        assert!(report.contains("# Ландшафт систем"), "{report}");
+        assert!(
+            v["summary"].as_str().expect("summary").contains("систем"),
+            "{v}"
+        );
+        // mermaid — graph TD канонических систем.
+        let out = LandscapeReportTool
+            .call(json!({"path": ".", "format": "mermaid"}), &ctx)
+            .await
+            .expect("вызов");
+        let v: Value = serde_json::from_str(&out.content).expect("JSON");
+        assert!(
+            v["report"]
+                .as_str()
+                .expect("report")
+                .starts_with("graph TD"),
+            "{v}"
+        );
+        // Битый формат и несуществующий корень — мягкие ошибки инструмента.
+        let out = LandscapeReportTool
+            .call(json!({"path": ".", "format": "svg"}), &ctx)
+            .await
+            .expect("вызов");
+        assert!(out.is_error, "{}", out.content);
+        assert!(out.content.contains("формат"), "{}", out.content);
+        let out = LandscapeReportTool
+            .call(json!({"path": "missing"}), &ctx)
+            .await
+            .expect("вызов");
+        assert!(out.is_error, "{}", out.content);
     }
 }

@@ -3835,7 +3835,99 @@ pub fn tools() -> Vec<Arc<dyn Tool>> {
         Arc::new(SpineLintTool),
         Arc::new(FitnessCheckTool),
         Arc::new(SignificanceScoreTool),
+        Arc::new(RulesReportTool),
     ]
+}
+
+/// Инструмент `rules_report`: отчёт по реестру правил `CONSTRAINTS.yaml`
+/// (markdown + счётчики; мост в MCP, транш 2 инверсии; read-only).
+pub struct RulesReportTool;
+
+#[derive(Debug, Deserialize)]
+struct RulesReportArgs {
+    /// Корень репозитория.
+    repo: String,
+    /// Путь к `CONSTRAINTS.yaml` (дефолт `<repo>/.arch-handoff/CONSTRAINTS.yaml`).
+    constraints: Option<String>,
+}
+
+#[async_trait]
+impl Tool for RulesReportTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "rules_report".into(),
+            description: "Отчёт по реестру правил CONSTRAINTS.yaml: сводка (всего/по типам/по \
+                          severity), таблица карточек (owner, expiry, exclude_glob, \
+                          effort_hours), находки (правила без owner/expiry, просроченные, \
+                          с exclude_glob), git-прокси стоимости сопровождения. Ответ — JSON: \
+                          счётчики rules_total/by_kind/by_severity + summary + \
+                          report_markdown. Отчёт, а не гейт: passed всегда true"
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "repo": {"type": "string", "description": "Корень репозитория"},
+                    "constraints": {
+                        "type": "string",
+                        "description": "Путь к CONSTRAINTS.yaml (по умолчанию <repo>/.arch-handoff/CONSTRAINTS.yaml)"
+                    }
+                },
+                "required": ["repo"]
+            }),
+        }
+    }
+
+    async fn call(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput> {
+        let args: RulesReportArgs = match serde_json::from_value(args) {
+            Ok(a) => a,
+            Err(e) => {
+                return Ok(ToolOutput::err(format!(
+                    "rules_report: невалидные аргументы: {e}"
+                )));
+            }
+        };
+        let repo = ctx.resolve(&args.repo);
+        let constraints = args.constraints.map_or_else(
+            || repo.join(".arch-handoff/CONSTRAINTS.yaml"),
+            |c| ctx.resolve(c),
+        );
+        let report = match rules_report(&repo, &constraints) {
+            Ok(r) => r,
+            Err(e) => return Ok(ToolOutput::err(format!("rules_report: {e}"))),
+        };
+        // Счётчики — из того же файла ограничений (тот же разбор, что и в
+        // rules_report; отчёт выше уже доказал, что YAML валиден и не пуст).
+        // Недостижимый здесь None оставил бы счётчики нулевыми — отчёт
+        // markdown всё равно отдаётся.
+        let (mut rules_total, mut by_kind, mut by_severity) =
+            (0usize, BTreeMap::new(), BTreeMap::new());
+        if let Some(parsed) = std::fs::read_to_string(&constraints)
+            .ok()
+            .and_then(|y| serde_yaml_ng::from_str::<ConstraintsFile>(&y).ok())
+        {
+            for r in parsed.all_rules() {
+                rules_total += 1;
+                *by_kind.entry(r.kind.as_str().to_string()).or_insert(0usize) += 1;
+                *by_severity.entry(r.severity.clone()).or_insert(0usize) += 1;
+            }
+        }
+        let summary = format!(
+            "Реестр правил {}: {rules_total} правил; отчёт markdown в поле report_markdown",
+            constraints.display()
+        );
+        let verdict = json!({
+            "tool": "rules_report",
+            "passed": true,
+            "rules_total": rules_total,
+            "by_kind": by_kind,
+            "by_severity": by_severity,
+            "summary": summary,
+            "report_markdown": report,
+        });
+        // Сериализация собранного объекта не падает; запасной вариант — компактная форма.
+        let text = serde_json::to_string_pretty(&verdict).unwrap_or_else(|_| verdict.to_string());
+        Ok(ToolOutput::ok(text))
+    }
 }
 
 /// Инструмент `adr_new`: создать ADR по шаблону AI-DLC с очередным номером.
@@ -5193,7 +5285,7 @@ mod tests {
     }
 
     #[test]
-    fn tools_expose_four_domain_specs() {
+    fn tools_expose_five_domain_specs() {
         let mut names: Vec<String> = tools().iter().map(|t| t.spec().name.clone()).collect();
         names.sort();
         assert_eq!(
@@ -5201,6 +5293,7 @@ mod tests {
             [
                 "adr_new",
                 "fitness_check",
+                "rules_report",
                 "significance_score",
                 "spine_lint"
             ]
@@ -6368,5 +6461,62 @@ mod command_capture_tests {
         let big = vec![b'x'; MAX_CAPTURE_BYTES * 3];
         let tail = drain_tail(&big[..]);
         assert_eq!(tail.len(), MAX_CAPTURE_BYTES);
+    }
+
+    /// Инструмент `rules_report`: счётчики + markdown-отчёт на фикстуре
+    /// карточек правил; битый репозиторий — мягкая ошибка.
+    #[tokio::test]
+    async fn rules_report_tool_counts_and_markdown() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(
+            dir.path().join("CONSTRAINTS.yaml"),
+            "rules:\n\
+             \x20 - name: no-pan\n\
+             \x20   type: must_not_contain\n\
+             \x20   glob: 'src/**/*.py'\n\
+             \x20   pattern: '\\b\\d{16}\\b'\n\
+             \x20 - name: readme\n\
+             \x20   type: file_exists\n\
+             \x20   path: README.md\n\
+             \x20   severity: warn\n",
+        )
+        .unwrap();
+        let ctx = ToolContext::new(
+            dir.path().to_path_buf(),
+            Arc::new(crate::config::Config::default()),
+        );
+        let out = RulesReportTool
+            .call(
+                json!({"repo": "repo", "constraints": "CONSTRAINTS.yaml"}),
+                &ctx,
+            )
+            .await
+            .expect("вызов");
+        assert!(!out.is_error, "{}", out.content);
+        let v: serde_json::Value = serde_json::from_str(&out.content).expect("JSON-вердикт");
+        assert_eq!(v["tool"], "rules_report");
+        // Отчёт, а не гейт: passed всегда true.
+        assert_eq!(v["passed"], true, "{v}");
+        assert_eq!(v["rules_total"], 2, "{v}");
+        assert_eq!(v["by_kind"]["must_not_contain"], 1, "{v}");
+        assert_eq!(v["by_severity"]["warn"], 1, "{v}");
+        assert!(
+            v["report_markdown"]
+                .as_str()
+                .expect("md")
+                .contains("| no-pan | must_not_contain |"),
+            "{v}"
+        );
+        // Недоступный репозиторий — мягкая ошибка инструмента.
+        let out = RulesReportTool
+            .call(
+                json!({"repo": "missing", "constraints": "CONSTRAINTS.yaml"}),
+                &ctx,
+            )
+            .await
+            .expect("вызов");
+        assert!(out.is_error, "{}", out.content);
     }
 }

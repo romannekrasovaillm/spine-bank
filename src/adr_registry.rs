@@ -22,10 +22,15 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 
 use crate::error::{HarnessError, Result};
+use crate::llm::ToolSpec;
+use crate::tool::{Tool, ToolContext, ToolOutput};
 
 /// Каталоги, которые не считаются проектами при сканировании `ROOT`.
 const SKIP_DIRS: [&str; 3] = [".git", "target", "node_modules"];
@@ -428,6 +433,96 @@ pub fn render_markdown(report: &RegistryReport) -> String {
     out
 }
 
+/// Инструменты домена: `adr_registry`.
+#[must_use]
+pub fn tools() -> Vec<Arc<dyn Tool>> {
+    vec![Arc::new(AdrRegistryTool)]
+}
+
+/// Инструмент `adr_registry`: глобальный реестр ADR по набору проектов
+/// (ADR-036) — JSON-вердикт со счётчиками и находками (мост в MCP,
+/// транш 2 инверсии; read-only).
+pub struct AdrRegistryTool;
+
+#[derive(Debug, Deserialize)]
+struct AdrRegistryArgs {
+    /// Корневой каталог набора проектов.
+    path: String,
+    /// Строгий режим: находки делают `passed: false` (гейт; как `--strict`
+    /// на CLI: exit-код 1 при любой находке). По умолчанию реестр — отчёт,
+    /// `passed` всегда true.
+    strict: Option<bool>,
+}
+
+#[async_trait]
+impl Tool for AdrRegistryTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "adr_registry".into(),
+            description: "Глобальный реестр ADR по набору проектов (ADR-036): скан самого ROOT \
+                          и непосредственных подкаталогов, источники — docs/adr/*.md (проза) и \
+                          model/ADR-*.md (типизированные сущности). Ответ — JSON: passed + \
+                          счётчики entries/findings + находки (коллизия номеров, дубль \
+                          заголовка, пропуск даты/статуса) + report_markdown. Реестр — отчёт, \
+                          а не гейт: passed=false только в strict-режиме при наличии находок"
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Корневой каталог набора проектов"},
+                    "strict": {
+                        "type": "boolean",
+                        "description": "Гейт: passed=false при любой находке (по умолчанию false — отчёт)"
+                    }
+                },
+                "required": ["path"]
+            }),
+        }
+    }
+
+    async fn call(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput> {
+        let args: AdrRegistryArgs = match serde_json::from_value(args) {
+            Ok(a) => a,
+            Err(e) => {
+                return Ok(ToolOutput::err(format!(
+                    "adr_registry: невалидные аргументы: {e}"
+                )));
+            }
+        };
+        let root = ctx.resolve(&args.path);
+        let strict = args.strict.unwrap_or(false);
+        let report = match build_registry(&root) {
+            Ok(r) => r,
+            Err(e) => return Ok(ToolOutput::err(format!("adr_registry: {e}"))),
+        };
+        let findings: Vec<Value> = report
+            .findings
+            .iter()
+            .map(|f| json!({"kind": f.kind, "message": f.message}))
+            .collect();
+        let summary = format!(
+            "Реестр ADR {}: {} записей, {} находок{}",
+            report.root.display(),
+            report.entries.len(),
+            report.findings.len(),
+            if strict { " (strict)" } else { "" }
+        );
+        let verdict = json!({
+            "tool": "adr_registry",
+            "passed": exit_code(&report, strict) == 0,
+            "strict": strict,
+            "entries": report.entries.len(),
+            "findings": findings,
+            "finding_count": report.findings.len(),
+            "summary": summary,
+            "report_markdown": render_markdown(&report),
+        });
+        // Сериализация собранного объекта не падает; запасной вариант — компактная форма.
+        let text = serde_json::to_string_pretty(&verdict).unwrap_or_else(|_| verdict.to_string());
+        Ok(ToolOutput::ok(text))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -656,5 +751,49 @@ mod tests {
         assert!(md.contains("[number_collision]"), "{md}");
         assert!(md.contains("## Находки"), "{md}");
         assert!(md.contains("Итого: 5 записей"), "{md}");
+    }
+
+    /// Инструмент `adr_registry`: счётчики и markdown на фикстуре; по
+    /// умолчанию — отчёт (`passed: true` при находках), strict — гейт.
+    #[tokio::test]
+    async fn adr_registry_tool_counts_and_strict_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = fixture(dir.path());
+        let ctx = ToolContext::new(root, Arc::new(crate::config::Config::default()));
+        let out = AdrRegistryTool
+            .call(json!({"path": "."}), &ctx)
+            .await
+            .expect("вызов");
+        assert!(!out.is_error, "{}", out.content);
+        let v: Value = serde_json::from_str(&out.content).expect("JSON-вердикт");
+        assert_eq!(v["entries"], 5, "{v}");
+        assert!(v["finding_count"].as_u64().expect("findings") >= 1, "{v}");
+        assert_eq!(v["passed"], true, "отчёт, не гейт: {v}");
+        assert!(
+            v["report_markdown"]
+                .as_str()
+                .expect("md")
+                .contains("# Реестр ADR"),
+            "{v}"
+        );
+        // strict: находки → passed=false (семантика exit_code --strict).
+        let out = AdrRegistryTool
+            .call(json!({"path": ".", "strict": true}), &ctx)
+            .await
+            .expect("вызов");
+        let v: Value = serde_json::from_str(&out.content).expect("JSON");
+        assert_eq!(v["passed"], false, "{v}");
+        assert_eq!(v["strict"], true, "{v}");
+        // Пустой корень без ADR — мягкая ошибка («нечего регистрировать»).
+        let empty = tempfile::tempdir().unwrap();
+        let ctx = ToolContext::new(
+            empty.path().to_path_buf(),
+            Arc::new(crate::config::Config::default()),
+        );
+        let out = AdrRegistryTool
+            .call(json!({"path": "."}), &ctx)
+            .await
+            .expect("вызов");
+        assert!(out.is_error, "{}", out.content);
     }
 }

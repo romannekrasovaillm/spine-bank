@@ -124,6 +124,16 @@ false`; `evidence_pack`/`delta_propose` политика R-уровней кла
 тот же контракт, что у ручных контрольных инструментов: `passed: false` —
 основание отказать изменению, перечислив находки.
 
+Отчёты транша 2 (read-only; JSON со счётчиками в том же контуре моста):
+
+| Инструмент | Аргументы | Возвращает |
+|---|---|---|
+| `landscape_report` | `path`, `format?` (`markdown`\|`mermaid`) | ландшафт систем набора проектов (EA-3, ADR-037): счётчики `systems`/`edges`/`findings` + `report` (markdown-отчёт или mermaid `graph TD`). Отчёт, не гейт — `passed` не применим |
+| `adr_registry` | `path`, `strict?` | реестр ADR по набору проектов (ADR-036): `entries`, `findings` (коллизии номеров, дубли заголовков, пропуски полей), `report_markdown`; `passed=false` только при `strict: true` и наличии находок |
+| `rules_report` | `path` (репозиторий), `constraints?` | инвентарь правил CONSTRAINTS.yaml: `rules_total`, `by_kind`, `by_severity`, `report_markdown` (карточки owner/expiry/effort_hours, находки, git-прокси). Отчёт — `passed` всегда true |
+| `openspec_coverage` | `path`, `constraints?`, `strict?` | покрытие требований OpenSpec правилами (`covers:`): `total`/`covered`/`unverifiable`/`unresolved` + `unresolved_items` поимённо + `report_markdown`; `passed=false` только при `strict: true` и требованиях «без решения» |
+| `model_graph` | `dir?`, `format?` (`text`\|`mermaid`) | граф связей модели: `entities`/`edges` + `graph` (список или flowchart LR, совместим с `mermaid_render`). Отчёт, не гейт — `passed` не применим |
+
 Чтение знаний (транш T4, ADR-015; все — read-only, без verdict `passed`):
 
 | Инструмент | Аргументы | Возвращает |

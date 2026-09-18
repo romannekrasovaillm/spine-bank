@@ -20,7 +20,8 @@
 //!   [`project`] — проекция `ADR-*` в `.arch-handoff/adr/`,
 //!   [`exchange`] — обмен с отраслевыми форматами (экспорт Structurizr
 //!   DSL/PlantUML/drawio, импорт Structurizr DSL; ADR-009);
-//! - инструменты агента: `model_query`, `model_validate` ([`tools`]).
+//! - инструменты агента: `model_query`, `model_validate`, `model_graph`
+//!   ([`tools`]).
 
 pub mod exchange;
 pub mod graph;
@@ -246,10 +247,14 @@ pub fn card(model: &Model, e: &Entity) -> String {
     out
 }
 
-/// Инструменты домена: `model_query`, `model_validate`.
+/// Инструменты домена: `model_query`, `model_validate`, `model_graph`.
 #[must_use]
 pub fn tools() -> Vec<Arc<dyn Tool>> {
-    vec![Arc::new(ModelQueryTool), Arc::new(ModelValidateTool)]
+    vec![
+        Arc::new(ModelQueryTool),
+        Arc::new(ModelValidateTool),
+        Arc::new(ModelGraphTool),
+    ]
 }
 
 /// Инструмент `model_validate`: ссылочная целостность модели —
@@ -418,6 +423,104 @@ impl Tool for ModelQueryTool {
             );
         }
         Ok(ToolOutput::ok(out))
+    }
+}
+
+/// Инструмент `model_graph`: граф связей модели — граф текстом (text) или
+/// mermaid flowchart + сводка (мост в MCP, транш 2 инверсии; read-only).
+pub struct ModelGraphTool;
+
+#[derive(Debug, Deserialize)]
+struct ModelGraphArgs {
+    /// Каталог модели (дефолт `model`).
+    dir: Option<String>,
+    /// Формат графа: text (дефолт) | mermaid.
+    format: Option<String>,
+}
+
+#[async_trait]
+impl Tool for ModelGraphTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "model_graph".into(),
+            description: "Граф связей типизированной модели архитектуры (каталог model/, \
+                          ADR-003): format=text — список сущностей с исходящими связями \
+                          (depends_on/implements/affects/verified_by), format=mermaid — \
+                          flowchart LR (совместим с mermaid_render). Ответ — JSON: format + \
+                          счётчики entities/edges + summary + graph. Отчёт, а не гейт: \
+                          verdict passed не применим (целостность — model_validate)"
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "dir": {"type": "string", "description": "Каталог модели (по умолчанию model)"},
+                    "format": {
+                        "type": "string",
+                        "description": "Формат графа: text (по умолчанию) | mermaid",
+                        "enum": ["text", "mermaid"]
+                    }
+                }
+            }),
+        }
+    }
+
+    async fn call(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput> {
+        let args: ModelGraphArgs = match serde_json::from_value(args) {
+            Ok(a) => a,
+            Err(e) => {
+                return Ok(ToolOutput::err(format!(
+                    "model_graph: невалидные аргументы: {e}"
+                )));
+            }
+        };
+        let format = args
+            .format
+            .as_deref()
+            .unwrap_or("text")
+            .trim()
+            .to_ascii_lowercase();
+        if format != "text" && format != "mermaid" {
+            return Ok(ToolOutput::err(format!(
+                "model_graph: неизвестный формат '{format}' (допустимы: text, mermaid)"
+            )));
+        }
+        let dir = ctx.resolve(args.dir.as_deref().unwrap_or("model"));
+        let model = match load_model(&dir) {
+            Ok(m) => m,
+            Err(e) => return Ok(ToolOutput::err(format!("model_graph: {e}"))),
+        };
+        let edges: usize = model
+            .entities
+            .iter()
+            .map(|e| {
+                LinkKind::ALL
+                    .iter()
+                    .map(|k| e.link_targets(*k).len())
+                    .sum::<usize>()
+            })
+            .sum();
+        let graph = if format == "mermaid" {
+            graph_mermaid(&model)
+        } else {
+            graph_text(&model)
+        };
+        let summary = format!(
+            "Граф модели {}: {} сущностей, {} связей ({format})",
+            model.dir.display(),
+            model.entities.len(),
+            edges
+        );
+        let verdict = json!({
+            "tool": "model_graph",
+            "format": format,
+            "entities": model.entities.len(),
+            "edges": edges,
+            "summary": summary,
+            "graph": graph,
+        });
+        // Сериализация собранного объекта не падает; запасной вариант — компактная форма.
+        let text = serde_json::to_string_pretty(&verdict).unwrap_or_else(|_| verdict.to_string());
+        Ok(ToolOutput::ok(text))
     }
 }
 
@@ -612,5 +715,49 @@ mod tests {
             .await
             .expect("вызов");
         assert!(out.is_error, "{}", out.content);
+    }
+
+    /// Инструмент `model_graph`: text-список и mermaid flowchart на фикстуре,
+    /// счётчики сущностей/связей, мягкая ошибка на битом формате.
+    #[tokio::test]
+    async fn model_graph_tool_text_mermaid_and_bad_format() {
+        let dir = tempfile::tempdir().expect("tmp");
+        fixture_model(dir.path());
+        let ctx = ToolContext::new(
+            dir.path().to_path_buf(),
+            Arc::new(crate::config::Config::default()),
+        );
+        let out = ModelGraphTool
+            .call(json!({"dir": "."}), &ctx)
+            .await
+            .expect("вызов");
+        assert!(!out.is_error, "{}", out.content);
+        let v: Value = serde_json::from_str(&out.content).expect("JSON-вердикт");
+        assert_eq!(v["tool"], "model_graph");
+        assert_eq!(v["format"], "text");
+        assert_eq!(v["entities"], 2, "{v}");
+        assert_eq!(v["edges"], 1, "{v}");
+        let graph = v["graph"].as_str().expect("graph");
+        assert!(graph.contains("implements → AD-1"), "{graph}");
+        // mermaid — flowchart LR, совместим с mermaid_render.
+        let out = ModelGraphTool
+            .call(json!({"dir": ".", "format": "mermaid"}), &ctx)
+            .await
+            .expect("вызов");
+        let v: Value = serde_json::from_str(&out.content).expect("JSON");
+        assert!(
+            v["graph"]
+                .as_str()
+                .expect("graph")
+                .starts_with("flowchart LR"),
+            "{v}"
+        );
+        // Битый формат — мягкая ошибка.
+        let out = ModelGraphTool
+            .call(json!({"dir": ".", "format": "png"}), &ctx)
+            .await
+            .expect("вызов");
+        assert!(out.is_error, "{}", out.content);
+        assert!(out.content.contains("формат"), "{}", out.content);
     }
 }

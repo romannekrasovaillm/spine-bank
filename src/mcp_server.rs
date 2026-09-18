@@ -40,7 +40,11 @@
 //!   инверсии в мосте: `nfr_check`, `model_validate`, `delta_guard`,
 //!   `evidence_verify` (read-only верификаторы, JSON-вердикт
 //!   passed/issues/summary в тексте вывода) и под `--rw` — `evidence_pack`,
-//!   `delta_propose`. В core-сборке (без фичи `harness`) домены
+//!   `delta_propose`. Транш 2: `landscape_report`, `adr_registry`,
+//!   `rules_report`, `openspec_coverage`, `model_graph` (read-only отчёты:
+//!   счётчики + markdown/mermaid в JSON; `passed=false` только у strict-гейтов
+//!   `adr_registry`/`openspec_coverage`). В core-сборке (без фичи `harness`)
+//!   домены
 //!   `harness`/`distill`/`subagent`/`ralph`/`worktree`/`web` в реестре
 //!   отсутствуют — мост их имена из белых списков молча пропускает (спеки
 //!   строятся от реестра), `handoff_create` и `skill_distill` там
@@ -209,6 +213,7 @@ const PLAYBOOK_PROMPTS: &[PlaybookPrompt] = &[
 /// инструментами. Все перечисленные — без записи в рабочий каталог клиента
 /// и без LLM. Доступны в обоих режимах [`ServeMode`].
 const BRIDGE_READ_ONLY: &[&str] = &[
+    "adr_registry",
     "agentsmd_lint",
     "archify_validate",
     "asyncapi_lint",
@@ -216,11 +221,15 @@ const BRIDGE_READ_ONLY: &[&str] = &[
     "delta_guard",
     "evidence_verify",
     "fleet_audit",
+    "landscape_report",
+    "model_graph",
     "model_validate",
     "nfr_check",
     "openapi_lint",
+    "openspec_coverage",
     "plugin_list",
     "rubric_list",
+    "rules_report",
 ];
 
 /// Дополнительный белый список режима `--rw` ([`ServeMode::ReadWrite`]):
@@ -560,7 +569,10 @@ impl McpServe {
                                          asyncapi_lint, contract_diff, fleet_audit, \
                                          agentsmd_lint, archify_validate, rubric_list, \
                                          plugin_list, nfr_check, model_validate, delta_guard, \
-                                         evidence_verify) доступен напрямую; аргумент `cwd` — \
+                                         evidence_verify) доступен напрямую; отчёты реестров \
+                                         (landscape_report, adr_registry, rules_report, \
+                                         openspec_coverage, model_graph) — read-only JSON \
+                                         со счётчиками; аргумент `cwd` — \
                                          рабочий каталог клиента для относительных путей. \
                                          Чтение знаний (read-only): kb_search — поиск по \
                                          базе знаний архитектора; skill_search/skill_load — \

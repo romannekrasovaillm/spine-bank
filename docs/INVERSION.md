@@ -25,6 +25,11 @@
   `evidence_verify` — read-only мост; `evidence_pack`, `delta_propose` —
   под `--rw`) с JSON-вердиктом `passed`/`issues`/`summary` и политикой
   R-уровней.
+- **Отчётный контур** (транш 2, 2026-09-18): `landscape_report`,
+  `adr_registry`, `rules_report`, `openspec_coverage`, `model_graph` —
+  read-only мост, JSON со счётчиками + markdown/mermaid отчёт; `passed=false`
+  только у strict-режимов `adr_registry`/`openspec_coverage` (семантика
+  `--strict` CLI), у отчётов ландшафта/правил/графа `passed` не применим.
 - **never-список** шире планового: кроме `bash`/`write_file`/`harness_run`
   наружу не отдаются также `read_file`/`glob`/`grep`/скриншоты/`subagent_*`/
   `ralph_*`/`worktree_new`/`web_*` — это всё принадлежит хосту.

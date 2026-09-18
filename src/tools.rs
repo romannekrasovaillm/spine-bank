@@ -81,6 +81,11 @@ fn domain_tools(cfg: &Config) -> Vec<Arc<dyn Tool>> {
     out.extend(crate::nfr::tools());
     out.extend(crate::delta::tools());
     out.extend(crate::evidence::tools());
+    // Отчётный контур (транш 2 инверсии — read-only реестры и отчёты;
+    // мост MCP отдаёт их по белому списку `mcp_server.rs`).
+    out.extend(crate::landscape::tools());
+    out.extend(crate::adr_registry::tools());
+    out.extend(crate::openspec::tools());
     // Домены агентного цикла — только в сборке `harness` (инверсия, шаг 4):
     // кодовые харнессы, субагенты, ralph, worktree, дистилляция скиллов.
     #[cfg(feature = "harness")]
@@ -123,6 +128,7 @@ mod tests {
             "archify_compare",
             "model_query",
             "model_validate",
+            "model_graph",
             "trace_check",
             "openapi_lint",
             "asyncapi_lint",
@@ -132,6 +138,10 @@ mod tests {
             "delta_propose",
             "evidence_verify",
             "evidence_pack",
+            "landscape_report",
+            "adr_registry",
+            "rules_report",
+            "openspec_coverage",
         ] {
             assert!(
                 names.iter().any(|n| n == expected),
