@@ -1010,3 +1010,53 @@ fn split_judge_prompt_then_verify_over_stdio() {
         "доля отброшенных: {verdict}"
     );
 }
+
+/// Журнал вызовов (пункт 9): после `tools/call` проектный журнал
+/// `.arch-handoff/mcp-calls.jsonl` (cwd сервера = дом теста) существует и
+/// несёт `tool`/`verdict`/`duration_ms`/`ts`; `fail` несёт имена правил
+/// error-находок, неизвестный инструмент — `invalid`. Содержимое
+/// аргументов в журнале отсутствует.
+#[test]
+fn tool_calls_are_journaled_to_project_journal() {
+    let home = tempfile::tempdir().expect("tmp");
+    let ok_repo = repo_fixture(home.path(), "repo-ok", true);
+    let bad_repo = repo_fixture(home.path(), "repo-bad", false);
+    let responses = mcp_serve(
+        home.path(),
+        &batch(&[
+            call(1, "fitness_check", &json!({"repo": ok_repo})),
+            call(2, "fitness_check", &json!({"repo": bad_repo})),
+            call(3, "ghost", &json!({})),
+        ]),
+    );
+    assert_eq!(responses.len(), 3, "все вызовы отвечены: {responses:?}");
+
+    let journal = home.path().join(".arch-handoff/mcp-calls.jsonl");
+    let text = std::fs::read_to_string(&journal)
+        .expect("журнал создан рядом с cwd сервера (fail-soft не молчит на нормальной ФС)");
+    let entries: Vec<Value> = text
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("строка журнала — валидный JSON"))
+        .collect();
+    assert_eq!(entries.len(), 3, "три вызова — три записи: {entries:?}");
+    // pass: чистый репозиторий.
+    assert_eq!(entries[0]["tool"], "fitness_check");
+    assert_eq!(entries[0]["verdict"], "pass");
+    assert!(entries[0]["duration_ms"].is_number(), "{}", entries[0]);
+    assert!(
+        entries[0]["ts"].as_str().is_some_and(|t| t.contains('T')),
+        "RFC 3339 штамп: {}",
+        entries[0]
+    );
+    // fail: нарушение — имена правил из error-находок.
+    assert_eq!(entries[1]["verdict"], "fail");
+    assert_eq!(entries[1]["rules"], json!(["spine_present"]));
+    // Неизвестный инструмент доехал до диспетчера и отвечен -32602 → invalid.
+    assert_eq!(entries[2]["tool"], "ghost");
+    assert_eq!(entries[2]["verdict"], "invalid");
+    // Содержимого аргументов в журнале нет (контракт приватности).
+    assert!(
+        !text.contains("repo-ok"),
+        "пути-аргументы не журналируются: {text}"
+    );
+}

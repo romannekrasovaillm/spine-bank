@@ -42,6 +42,7 @@ pub mod control;
 pub mod cron;
 pub mod delta;
 pub mod detectors;
+pub mod digest;
 #[cfg(feature = "harness")]
 pub mod distill;
 pub mod doctor;
@@ -62,6 +63,7 @@ pub mod landscape;
 pub mod llm;
 pub mod matchers;
 pub mod mcp;
+pub mod mcp_journal;
 pub mod mcp_server;
 pub mod memory;
 pub mod mermaid;

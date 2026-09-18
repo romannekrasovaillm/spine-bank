@@ -62,6 +62,11 @@
 //! - доменный сбой выполнения (файл не читается, сущность не найдена) —
 //!   `result` с `isError: true`, не protocol error; сервер не падает ни на
 //!   каком вводе, цикл живёт до EOF stdin;
+//! - каждый вызов `tools/call` журналируется в проектный append-only журнал
+//!   `<cwd сервера>/.arch-handoff/mcp-calls.jsonl` (модуль
+//!   [`crate::mcp_journal`]: инструмент, вердикт, длительность, имена правил
+//!   error-находок — БЕЗ содержимого аргументов; fail-soft, ротация по
+//!   размеру) — источник outcome-данных для `arch-be digest`;
 //! - `rubric_run` требует LLM-ключ из конфига: предпроверка доступности
 //!   ключа (env задана / файл ключа существует; содержимое не печатается)
 //!   → без ключа понятная JSON-RPC ошибка `-32603`; для моделей с
@@ -419,6 +424,27 @@ where
     }
 }
 
+/// Вердикт журнала по структурированному ответу ручного инструмента:
+/// `pass`/`fail` — по `passed`, `ok` — успех без `passed`. У `fail`
+/// извлекаются имена правил error-находок (источник — verdict, не аргументы).
+fn verdict_from_structured(v: &Value) -> (&'static str, Vec<String>) {
+    match v.get("passed").and_then(Value::as_bool) {
+        Some(true) => ("pass", Vec::new()),
+        Some(false) => ("fail", crate::mcp_journal::failed_rule_names(v)),
+        None => ("ok", Vec::new()),
+    }
+}
+
+/// Вердикт журнала по текстовому выводу мостового инструмента: верификаторы
+/// реестра несут в text JSON `{passed, issues, summary}` — разбираем его;
+/// не-JSON вывод (markdown-отчёты) журналируется как `ok` без разбора.
+fn verdict_from_bridge_text(text: &str) -> (&'static str, Vec<String>) {
+    match serde_json::from_str::<Value>(text) {
+        Ok(v) => verdict_from_structured(&v),
+        Err(_) => ("ok", Vec::new()),
+    }
+}
+
 impl McpServe {
     /// Сервер поверх конфигурации харнесса в режиме read-only (дефолт).
     #[must_use]
@@ -572,7 +598,10 @@ impl McpServe {
                 format!("tools/call: 'arguments' должен быть объектом, получено: {args}"),
             );
         }
-        match self.dispatch_tool(name, args).await {
+        let started = std::time::Instant::now();
+        let outcome = self.dispatch_tool(name, args).await;
+        self.journal_call(name, started.elapsed(), &outcome);
+        match outcome {
             Ok(DispatchOutcome::Structured(structured)) => {
                 // Клиент нашего же mcp.rs читает только text-части — дублируем
                 // verdict pretty-JSON; structuredContent — для MCP-клиентов.
@@ -604,6 +633,33 @@ impl McpServe {
             ),
             Err(CallError::Protocol { code, message }) => error_response(id, code, message),
         }
+    }
+
+    /// Журналирует вызов в проектный журнал `.arch-handoff/mcp-calls.jsonl`
+    /// (модуль [`crate::mcp_journal`]): инструмент, вердикт, длительность,
+    /// имена правил из error-находок — БЕЗ содержимого аргументов. Здесь
+    /// проходят и ручные, и мостовые вызовы (единая точка `tools/call`).
+    /// Fail-soft: журнал — аудит, а не часть вызова; его сбой (каталог не
+    /// создать, ФС только на чтение) не должен ломать инструмент.
+    fn journal_call(
+        &self,
+        name: &str,
+        duration: std::time::Duration,
+        outcome: &std::result::Result<DispatchOutcome, CallError>,
+    ) {
+        let (verdict, rules) = match outcome {
+            Ok(DispatchOutcome::Structured(v)) => verdict_from_structured(v),
+            Ok(DispatchOutcome::Text { text, .. }) => verdict_from_bridge_text(text),
+            Err(CallError::Execution(_)) => ("error", Vec::new()),
+            Err(CallError::Protocol { .. }) => ("invalid", Vec::new()),
+        };
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        // Ошибка записи журнала осознанно глушится (fail-soft по контракту
+        // mcp_journal): аудит не должен ломать вызовы инструментов.
+        let _ = crate::mcp_journal::append(
+            &cwd,
+            &crate::mcp_journal::JournalEntry::new(name, verdict, duration, rules),
+        );
     }
 
     /// `prompts/list`: семь плейбуков [`PLAYBOOK_PROMPTS`] с описаниями из

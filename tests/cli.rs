@@ -1238,3 +1238,98 @@ fn control_check_baseline_missing_file_errors_with_hint() {
         .stderr(contains("baseline: файл не найден"))
         .stderr(contains("--baseline-update"));
 }
+
+/// `control fp mark` пишет регистр ложных срабатываний: файл
+/// `evidence/fp-register.md` создаётся с шапкой таблицы, пометка — строкой
+/// с датой/правилом/файлом/примечанием (пункт 9, docs/outcome-metrics.md §2).
+#[test]
+fn control_fp_mark_appends_to_register() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("control")
+        .arg("fp")
+        .arg("mark")
+        .arg("no-pan")
+        .arg("src/a.rs:10")
+        .arg("--note")
+        .arg("crate::… в строковом литерале");
+    cmd.assert()
+        .success()
+        .stdout(contains("Пометка FP записана"));
+
+    let register = tmp.path().join("evidence/fp-register.md");
+    let text = std::fs::read_to_string(&register).expect("регистр создан");
+    assert!(
+        text.contains("| Дата | Правило | Файл | Примечание |"),
+        "шапка таблицы: {text}"
+    );
+    assert!(
+        text.contains("| no-pan | src/a.rs:10 | crate::… в строковом литерале |"),
+        "строка пометки: {text}"
+    );
+    // Вторая пометка — append, шапка не дублируется.
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("control")
+        .arg("fp")
+        .arg("mark")
+        .arg("msrv")
+        .arg("Cargo.toml");
+    cmd.assert().success();
+    let text = std::fs::read_to_string(&register).expect("регистр на месте");
+    assert_eq!(text.matches("| Дата |").count(), 1, "шапка одна: {text}");
+    assert!(text.contains("| msrv | Cargo.toml | — |"), "{text}");
+}
+
+/// `arch-be digest` на фикстуре журнала: итерации FAIL→PASS, топ правил,
+/// истекающие overrides; `--json` — машиночитаемый контракт (пункт 9).
+#[test]
+fn digest_reads_journal_and_register() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let handoff = tmp.path().join(".arch-handoff");
+    std::fs::create_dir_all(&handoff).expect("mkdir .arch-handoff");
+    // Штампы «сейчас» (дайджест в бинаре берёт Local::now): fail → pass.
+    let ts = chrono::Local::now().to_rfc3339();
+    std::fs::write(
+        handoff.join("mcp-calls.jsonl"),
+        format!(
+            "{{\"ts\":\"{ts}\",\"tool\":\"fitness_check\",\"verdict\":\"fail\",\"duration_ms\":7,\"rules\":[\"no-pan\"]}}\n\
+             {{\"ts\":\"{ts}\",\"tool\":\"fitness_check\",\"verdict\":\"pass\",\"duration_ms\":5}}\n"
+        ),
+    )
+    .expect("журнал-фикстура");
+    // Override истекает завтра — должен попасть в дайджест.
+    let tomorrow = (chrono::Local::now() + chrono::Duration::days(1))
+        .format("%Y-%m-%d")
+        .to_string();
+    std::fs::write(
+        handoff.join("CONSTRAINTS.yaml"),
+        format!(
+            "rules:\n  - name: no-pan\n    type: must_not_contain\n    glob: \"src/**\"\n    pattern: 'PAN'\n    severity: error\n\
+             overrides:\n  - rule: no-pan\n    adr: ADR-001\n    until: {tomorrow}\n"
+        ),
+    )
+    .expect("constraints");
+
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("digest");
+    cmd.assert()
+        .success()
+        .stdout(contains("## Итерации FAIL→PASS"))
+        .stdout(contains("fitness_check: 1"))
+        .stdout(contains("no-pan: 1"))
+        .stdout(contains("истекает через 1 дн."));
+
+    // Машиночитаемый контракт.
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("digest").arg("--json");
+    let out = cmd.assert().success();
+    let json: serde_json::Value =
+        serde_json::from_slice(&out.get_output().stdout).expect("stdout — валидный JSON");
+    assert_eq!(json["calls_total"], 2);
+    assert_eq!(json["fail_pass_iterations"]["fitness_check"], 1);
+    assert_eq!(
+        json["top_failed_rules"][0],
+        serde_json::json!(["no-pan", 1])
+    );
+    assert_eq!(json["expiring"][0]["rule"], "no-pan");
+}

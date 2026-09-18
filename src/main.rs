@@ -240,6 +240,24 @@ enum Cmd {
         #[arg(long)]
         cost_report: bool,
     },
+    /// Недельный дайджест outcome-данных MCP-контроля (`docs/outcome-metrics.md`):
+    /// итерации FAIL→PASS по инструментам, топ нарушаемых правил, доля ложных
+    /// срабатываний (регистр `evidence/fp-register.md`), истекающие overrides
+    /// и expiry правил. Источник — журнал `.arch-handoff/mcp-calls.jsonl`.
+    Digest {
+        /// Репозиторий проекта (по умолчанию — текущий каталог).
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        /// Недельное окно (дефолт; синоним `--days 7`).
+        #[arg(long)]
+        week: bool,
+        /// Окно в днях (перекрывает дефолтную неделю).
+        #[arg(long, value_name = "N")]
+        days: Option<u32>,
+        /// Машиночитаемый вывод: JSON-отчёт `DigestReport`.
+        #[arg(long)]
+        json: bool,
+    },
     /// Диагностика окружения: ключи, каталоги, плагины, харнессы, MCP.
     Doctor,
     /// Экспорт журнала сессии в Word/Excel.
@@ -793,6 +811,32 @@ enum ControlCmd {
         /// fast|standard|critical|never (дефолт critical).
         #[arg(long, default_value = "critical")]
         require_rehearsal: String,
+    },
+    /// Регистр ложных срабатываний правил (FP, `docs/outcome-metrics.md` §2).
+    Fp {
+        #[command(subcommand)]
+        cmd: FpCmd,
+    },
+}
+
+/// Подкоманды `arch-be control fp` (регистр ложных срабатываний).
+#[derive(Subcommand)]
+enum FpCmd {
+    /// Пометить срабатывание правила как ложное: append строки
+    /// `| дата | правило | файл | примечание |` в `evidence/fp-register.md`
+    /// проекта (файл создаётся с шапкой при отсутствии).
+    Mark {
+        /// Имя правила из CONSTRAINTS.yaml.
+        rule: String,
+        /// Файл срабатывания (обычно `путь:строка`).
+        file: String,
+        /// Примечание (причина/решение: поправить правило / записать
+        /// отступление / принять).
+        #[arg(long)]
+        note: Option<String>,
+        /// Репозиторий проекта (по умолчанию — текущий каталог).
+        #[arg(long)]
+        repo: Option<PathBuf>,
     },
 }
 
@@ -1468,6 +1512,25 @@ async fn main() -> Result<()> {
                 }
             }
             println!("{}", m.to_markdown());
+        }
+        Some(Cmd::Digest {
+            repo,
+            week,
+            days,
+            json,
+        }) => {
+            let _ = week; // неделя — дефолтное окно; флаг принят для читаемости вызова
+            let repo = repo.unwrap_or_else(|| PathBuf::from("."));
+            let days = days.unwrap_or(arch_harness::digest::DEFAULT_WINDOW_DAYS);
+            let report = arch_harness::digest::build(&repo, days)?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&report).expect("DigestReport сериализуется")
+                );
+            } else {
+                print!("{}", arch_harness::digest::render_markdown(&report));
+            }
         }
         Some(Cmd::Doctor) => {
             let checks = arch_harness::doctor::run_checks(&cfg);
@@ -2700,6 +2763,19 @@ fn cmd_control(cfg: &arch_harness::config::Config, cmd: ControlCmd) -> Result<()
                 std::process::exit(1);
             }
         }
+        ControlCmd::Fp { cmd } => match cmd {
+            FpCmd::Mark {
+                rule,
+                file,
+                note,
+                repo,
+            } => {
+                let repo = repo.unwrap_or_else(|| PathBuf::from("."));
+                let path =
+                    arch_harness::digest::fp_register_mark(&repo, &rule, &file, note.as_deref())?;
+                println!("Пометка FP записана: {}", path.display());
+            }
+        },
     }
     Ok(())
 }
