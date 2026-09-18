@@ -10,7 +10,7 @@
 | Артефакт | Чем проверяется |
 |---|---|
 | Исходники (репозиторий) | git-история, подписи коммитов (если включены), ADR-дисциплина |
-| Бинарь `arch-be` | `SHA256SUMS.release` из CI-джобы supply-chain + сборка из исходников (ниже) |
+| Бинарь `arch-be` | `SHA256SUMS.release` из CI-джобы supply-chain + сборка из исходников (ниже); для релизов по тегам `v*` — сводный `SHA256SUMS` на 8 бинарей (linux-x86_64/aarch64, macos-arm64, windows-x86_64 × core/full, workflow release.yml) |
 | Зависимости Rust | `Cargo.lock` + `cargo audit` (CI-джоба audit, ежедневная база RUSTSEC) |
 | Состав поставки (SBOM) | `sbom.cyclonedx.json` (CycloneDX 1.6) из CI-джобы supply-chain |
 | Вендоренный JS (`vendor/archify/`) | `SHA256SUMS` в каталоге вендора; целостность гейтится правилом BE-22 (`control check`) |

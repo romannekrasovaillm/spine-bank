@@ -42,10 +42,28 @@ MIT; слой `banking/` в публикацию не входит.
 
 ## Шаг 0. Бинарь (30 секунд)
 
+Linux / macOS — одна команда на платформу (имя файла — из таблицы):
+
 ```bash
 curl -L -o arch-be https://github.com/romannekrasovaillm/spine-bank/releases/latest/download/arch-be-core-linux-x86_64
 chmod +x arch-be && mv arch-be ~/.local/bin/
 ```
+
+| Платформа | Файл релиза |
+|---|---|
+| Linux x86_64 | `arch-be-core-linux-x86_64` |
+| Linux aarch64 | `arch-be-core-linux-aarch64` |
+| macOS arm64 (Apple Silicon) | `arch-be-core-macos-arm64` |
+| Windows x86_64 | `arch-be-core-windows-x86_64.exe` |
+
+Windows (PowerShell):
+
+```powershell
+curl.exe -L -o arch-be.exe https://github.com/romannekrasovaillm/spine-bank/releases/latest/download/arch-be-core-windows-x86_64.exe
+# положите arch-be.exe в каталог из PATH
+```
+
+Сверка целостности: `SHA256SUMS` из того же релиза — `sha256sum --check SHA256SUMS` (Linux) / `shasum -a 256 --check SHA256SUMS` (macOS).
 
 ## Шаг 1. Подключение
 
@@ -243,7 +261,8 @@ pptx/docx/xlsx-отчёты + плейбуки spine-*) раскладывают
 # Режим 2. Spine Harness (TUI) — самостоятельный
 
 ```bash
-# 1. Бинарь (полная сборка)
+# 1. Бинарь (полная сборка; другие платформы: arch-be-linux-aarch64,
+#    arch-be-macos-arm64, Windows — arch-be-windows-x86_64.exe через curl.exe в PowerShell)
 curl -L -o arch-be https://github.com/romannekrasovaillm/spine-bank/releases/latest/download/arch-be-linux-x86_64
 chmod +x arch-be && mv arch-be ~/.local/bin/
 
