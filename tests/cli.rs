@@ -154,6 +154,40 @@ fn control_check_passing_constraints_exits_0() {
     cmd.assert().success().stdout(contains("Итог: PASS"));
 }
 
+/// Карточный контекст правила (`ad`/`fix_hint`/`skill` из CONSTRAINTS.yaml) виден
+/// в текстовом выводе (строкой-отступом) и в `--json` (аддитивные поля).
+#[test]
+fn control_check_shows_card_context_in_text_and_json() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = repo_with_constraints(
+        tmp.path(),
+        "rules:\n  - name: spine_present\n    type: file_exists\n    path: \"docs/ARCHITECTURE-SPINE.md\"\n    severity: error\n    ad: AD-9\n    rationale: \"гейт, а не документация задним числом\"\n    fix_hint: \"вернуть spine на место\"\n    skill: spine-invariants\n",
+    );
+
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("control").arg("check").arg(repo.as_os_str());
+    cmd.assert()
+        .code(1)
+        .stdout(contains("spine_present"))
+        .stdout(contains("↳ AD-9"))
+        .stdout(contains("как чинить: вернуть spine на место"))
+        .stdout(contains("скилл: spine-invariants"));
+
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("control")
+        .arg("check")
+        .arg(repo.as_os_str())
+        .arg("--json");
+    let output = cmd.assert().code(1).get_output().clone();
+    let v: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("--json печатает JSON даже при exit 1");
+    let issue = &v["issues"][0];
+    assert_eq!(issue["ad"], "AD-9");
+    assert_eq!(issue["fix_hint"], "вернуть spine на место");
+    assert_eq!(issue["skill"], "spine-invariants");
+    assert_eq!(issue["rationale"], "гейт, а не документация задним числом");
+}
+
 /// `arch-be control spine` на чистом spine-файле → exit 0.
 #[test]
 fn control_spine_clean_exits_0() {

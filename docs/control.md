@@ -166,10 +166,14 @@ rules:
     severity: error             # error | block (синонимы) | warn (дефолт error)
     # Карточка правила (опциональные метаданные, движок не enforce'ит):
     trigger: "признак применимости"
-    rationale: "какой отказ предотвращается"
+    rationale: "какой отказ предотвращается"      # → в находки (issues[].rationale)
     evidence: "артефакт после проверки"
     reversibility: "обратимо | дорого | необратимо"
-    owner: "владелец правила"
+    owner: "владелец правила"                     # → в находки (issues[].owner)
+    ad: "AD-6"                     # задетый инвариант spine → в находки (issues[].ad)
+    adr: "ADR-012"                 # связанное решение → в находки (issues[].adr)
+    fix_hint: "что сделать вместо нарушения"      # → в находки (issues[].fix_hint)
+    skill: "fitness-functions"     # скилл исправления (skill_load) → в находки (issues[].skill)
     expiry: "2027-01-01"         # дата пересмотра; просроченное правило — warn-находка
     effort_hours: 4.5            # оценка стоимости сопровождения (чел.-часы);
                                  # метаданные — суммируется в rules-report
@@ -303,6 +307,17 @@ Per-rule timing (M-1a): длительность каждого правила �
   2.1s cargo-clippy-deny-warnings
 ```
 
+**Находки с архитектурным смыслом.** Если у сработавшего правила в карточке
+заполнены `ad`/`adr`/`rationale`/`owner`/`fix_hint`/`skill`, движок переносит
+их в находку: видно задетый инвариант и путь исправления, а не только имя
+правила. В текстовом выводе контекст печатается одной строкой-отступом под
+находкой (только при наличии `rationale`/`fix_hint`):
+
+```
+  [error] src/main.rs:12 no_unsafe — must_not_contain: запрещённый паттерн 'unsafe\s*(\{|fn|impl)': …
+      ↳ AD-6 · зачем: unsafe снимает гарантии памяти · как чинить: убрать unsafe-блок · скилл: fitness-functions
+```
+
 ### Машинный вывод `--json` (SDK-контракт v1)
 
 Флаг `--json` печатает в stdout одну строку JSON — сериализацию
@@ -330,7 +345,11 @@ arch-be control check banking/demos/cli-from-claude-code/scenario3-gate/fixtures
 `rule` (имя правила), `message` (тип проверки + сниппет), `severity`
 (`"error"` | `"warn"`). Аддитивное поле `durations[]` — `{rule, ms}` на каждое
 правило (per-rule timing; добавление полей контракт v1 не ломает, клиенты без
-него работают как раньше).
+него работают как раньше). Аддитивные карточные поля `issues[]` — `ad`,
+`adr`, `rationale`, `owner`, `fix_hint`, `skill` — присутствуют, только если
+заполнены в карточке правила (`skip_serializing_if`; у находок линтера
+spine/наследования/overrides их нет). Те же поля несёт и MCP-инструмент
+`fitness_check` (`structuredContent.issues[]`).
 
 **Семантика exit-кодов**: 0 — `passed=true`; 1 — `passed=false`, при этом
 **JSON всё равно напечатан** (красный гейт — это данные отчёта, а не сбой

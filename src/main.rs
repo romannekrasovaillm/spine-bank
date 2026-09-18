@@ -2388,6 +2388,30 @@ fn cmd_control(cfg: &arch_harness::config::Config, cmd: ControlCmd) -> Result<()
                         i.rule,
                         i.message
                     );
+                    // Карточный контекст правила — одной строкой-отступом и
+                    // только при наличии rationale/fix_hint (не раздуваем).
+                    if i.rationale.is_some() || i.fix_hint.is_some() {
+                        let mut parts: Vec<String> = Vec::new();
+                        if let Some(ad) = &i.ad {
+                            parts.push(ad.clone());
+                        }
+                        if let Some(adr) = &i.adr {
+                            parts.push(adr.clone());
+                        }
+                        if let Some(rationale) = &i.rationale {
+                            parts.push(format!("зачем: {rationale}"));
+                        }
+                        if let Some(fix_hint) = &i.fix_hint {
+                            parts.push(format!("как чинить: {fix_hint}"));
+                        }
+                        if let Some(skill) = &i.skill {
+                            parts.push(format!("скилл: {skill}"));
+                        }
+                        if let Some(owner) = &i.owner {
+                            parts.push(format!("владелец: {owner}"));
+                        }
+                        println!("      ↳ {}", parts.join(" · "));
+                    }
                 }
                 // Топ-5 самых медленных правил — только если есть правила > 1s.
                 let mut slow: Vec<&arch_harness::control::RuleDuration> =

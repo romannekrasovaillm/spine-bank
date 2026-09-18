@@ -550,7 +550,12 @@ pub fn score_with_sources(
 }
 
 /// Находка линтера/сенсора.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Карточные поля (`ad`…`skill`) — архитектурный контекст находки: проставляются
+/// движком `control check` из карточки породившего правила (`CONSTRAINTS.yaml`),
+/// у находок линтера spine/дельты/наследования их нет. Аддитивный контракт
+/// (SDK v1): отсутствующие поля не сериализуются, старые клиенты не ломаются.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LintIssue {
     /// Файл.
     pub file: PathBuf,
@@ -563,6 +568,25 @@ pub struct LintIssue {
     pub message: String,
     /// Критичность: error|warn.
     pub severity: String,
+    /// Задетый инвариант spine (`AD-<n>`, из карточки правила).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ad: Option<String>,
+    /// Связанное архитектурное решение (`ADR-<n>`, из карточки правила).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adr: Option<String>,
+    /// Какой отказ предотвращает правило (из карточки).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rationale: Option<String>,
+    /// Владелец правила (из карточки).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    /// Подсказка исправления (из карточки правила).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fix_hint: Option<String>,
+    /// Скилл библиотеки плагинов, который загрузить для исправления
+    /// (из карточки правила).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill: Option<String>,
 }
 
 /// Номера инвариантов `AD-<n>`, определённых в файле spine.
@@ -644,6 +668,7 @@ pub fn lint_spine(path: &Path) -> Result<Vec<LintIssue>> {
             rule: rule.into(),
             message,
             severity: severity.into(),
+            ..LintIssue::default()
         });
     };
 
@@ -1014,15 +1039,32 @@ pub struct FitnessRule {
     pub(crate) jar_dir: Option<String>,
     /// Карточка правила (метаданные из шаблона дистилляции источников,
     /// необязательны): признак применимости.
-    /// Поля схемы — читаются внешними потребителями YAML; движок
-    /// использует пока только owner/expiry (expiry-находка).
+    /// Поля схемы — читаются внешними потребителями YAML; движок находок
+    /// использует `ad`/`adr`/`rationale`/`owner`/`fix_hint`/`skill`
+    /// (переносит в находки) и expiry (expiry-находка).
     #[serde(default)]
     #[allow(dead_code)]
     trigger: Option<String>,
     /// Карточка правила: какой отказ предотвращается (одно предложение).
+    /// Переносится движком в находки (`LintIssue::rationale`).
     #[serde(default)]
-    #[allow(dead_code)]
     rationale: Option<String>,
+    /// Карточка правила: задетый инвариант spine (`AD-<n>`). Переносится
+    /// движком в находки (`LintIssue::ad`).
+    #[serde(default)]
+    ad: Option<String>,
+    /// Карточка правила: связанное архитектурное решение (`ADR-<n>`).
+    /// Переносится движком в находки (`LintIssue::adr`).
+    #[serde(default)]
+    adr: Option<String>,
+    /// Карточка правила: подсказка исправления (что сделать вместо
+    /// нарушения). Переносится движком в находки (`LintIssue::fix_hint`).
+    #[serde(default)]
+    fix_hint: Option<String>,
+    /// Карточка правила: скилл библиотеки плагинов для исправления
+    /// (`skill_load <имя>`). Переносится движком в находки (`LintIssue::skill`).
+    #[serde(default)]
+    skill: Option<String>,
     /// Карточка правила: артефакт, остающийся после проверки.
     #[serde(default)]
     #[allow(dead_code)]
@@ -1081,6 +1123,21 @@ pub struct FitnessRule {
     /// `command_succeeds`, 300 для `archunit` (ADR-039).
     #[serde(default)]
     pub(crate) timeout_secs: Option<u64>,
+}
+
+impl FitnessRule {
+    /// Переносит архитектурный контекст карточки правила в находку
+    /// (`ad`/`adr`/`rationale`/`owner`/`fix_hint`/`skill`): агент видит задетый
+    /// инвариант и подсказку исправления, а не только имя правила. Поля,
+    /// пустые в карточке, остаются `None` (в JSON не сериализуются).
+    fn apply_card(&self, issue: &mut LintIssue) {
+        issue.ad.clone_from(&self.ad);
+        issue.adr.clone_from(&self.adr);
+        issue.rationale.clone_from(&self.rationale);
+        issue.owner.clone_from(&self.owner);
+        issue.fix_hint.clone_from(&self.fix_hint);
+        issue.skill.clone_from(&self.skill);
+    }
 }
 
 fn default_severity() -> String {
@@ -1465,6 +1522,7 @@ fn resolve_constraints(path: &Path, stack: &mut Vec<PathBuf>) -> Result<Resolved
                         "extends: родитель обновился: {reference}@{pinned} → {actual} — перепиновать осознанно"
                     ),
                     severity: "error".to_string(),
+                    ..LintIssue::default()
                 });
             }
             Some(_) => {}
@@ -1477,6 +1535,7 @@ fn resolve_constraints(path: &Path, stack: &mut Vec<PathBuf>) -> Result<Resolved
                         "extends: у родителя {reference} нет поля version — пин {pinned} проверить нельзя"
                     ),
                     severity: "error".to_string(),
+                    ..LintIssue::default()
                 });
             }
         }
@@ -1582,6 +1641,7 @@ fn evaluate_overrides(
         rule: "override".to_string(),
         message,
         severity: severity.to_string(),
+        ..LintIssue::default()
     };
     for entry in overrides {
         let rule = entry.rule.as_deref().unwrap_or("").trim();
@@ -2189,7 +2249,7 @@ fn run_rule(
                     .as_deref()
                     .map(|o| format!(" (владелец: {o})"))
                     .unwrap_or_default();
-                issues.push(LintIssue {
+                let mut finding = LintIssue {
                     file: PathBuf::from("CONSTRAINTS.yaml"),
                     line: 0,
                     rule: rule.name.clone(),
@@ -2197,18 +2257,27 @@ fn run_rule(
                         "expiry: правило просрочено {expiry}{owner} — пересмотреть, продлить с владельцем или удалить"
                     ),
                     severity: "warn".into(),
-                });
+                    ..LintIssue::default()
+                };
+                rule.apply_card(&mut finding);
+                issues.push(finding);
             }
         }
     }
+    // Карточный контекст правила (ad/adr/rationale/owner/fix_hint/skill)
+    // проставляется в каждую находку — агент видит задетый инвариант и
+    // подсказку исправления, а не только имя правила.
     let mut issue = |file: PathBuf, line: usize, message: String| {
-        issues.push(LintIssue {
+        let mut finding = LintIssue {
             file,
             line,
             rule: rule.name.clone(),
             message,
             severity: severity.to_string(),
-        });
+            ..LintIssue::default()
+        };
+        rule.apply_card(&mut finding);
+        issues.push(finding);
     };
     match rule.kind {
         RuleKind::MustContain => {
@@ -2461,7 +2530,18 @@ fn run_rule(
             // сбой (нет java/jar'ов/классов, таймаут) — error-находка
             // (fail-closed), а не молчаливый PASS.
             match crate::archunit::run_control_rule(rule, all_rules, repo) {
-                Ok(found) => issues.extend(found),
+                Ok(found) => {
+                    // Находки JVM-гейта ссылаются на исходное java-правило по
+                    // id (либо имени) — обогащаем их карточкой того правила.
+                    for mut finding in found {
+                        if let Some(source) = all_rules.iter().find(|r| {
+                            r.id.as_deref() == Some(finding.rule.as_str()) || r.name == finding.rule
+                        }) {
+                            source.apply_card(&mut finding);
+                        }
+                        issues.push(finding);
+                    }
+                }
                 Err(e) => issue(
                     repo.to_path_buf(),
                     0,
@@ -3842,6 +3922,79 @@ mod tests {
         assert_eq!(issue["rule"], "no_pan");
         assert_eq!(issue["severity"], "error");
         assert_eq!(issue["line"], 1);
+    }
+
+    #[test]
+    fn fitness_issue_carries_rule_card_context() {
+        // Находки несут архитектурный контекст карточки правила (ad/adr/
+        // rationale/owner/fix_hint/skill): видно задетый инвариант и скилл
+        // исправления, а не только имя правила. Контракт аддитивный: у
+        // правила без карточки полей в JSON нет (skip_serializing_if).
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        write_file(&repo, "src/main.rs", "fn main() {}\n");
+        let constraints = write_file(
+            dir.path(),
+            "CONSTRAINTS.yaml",
+            "rules:\n\
+             \x20 - name: no_unsafe\n\
+             \x20   type: must_not_contain\n\
+             \x20   glob: 'src/**/*.rs'\n\
+             \x20   pattern: 'unsafe'\n\
+             \x20   ad: AD-6\n\
+             \x20   adr: ADR-012\n\
+             \x20   rationale: безопасный Rust без unsafe\n\
+             \x20   owner: архитектор контура\n\
+             \x20   fix_hint: убрать unsafe-блок\n\
+             \x20   skill: fitness-functions\n\
+             \x20 - name: bare_rule\n\
+             \x20   type: must_contain\n\
+             \x20   glob: 'src/**/*.rs'\n\
+             \x20   pattern: 'never-found-marker'\n",
+        );
+        // Нарушение собирается конкатенацией строк: цельный литерал в
+        // исходнике теста сам попал бы под догфуд-правило C-01 (no_unsafe_code).
+        write_file(&repo, "src/lib.rs", concat!("un", "safe fn f() {}\n"));
+        let report = check(&repo, &constraints).unwrap();
+        assert!(!report.passed);
+        let issue = report
+            .issues
+            .iter()
+            .find(|i| i.rule == "no_unsafe")
+            .expect("находка no_unsafe");
+        assert_eq!(issue.ad.as_deref(), Some("AD-6"));
+        assert_eq!(issue.adr.as_deref(), Some("ADR-012"));
+        assert_eq!(
+            issue.rationale.as_deref(),
+            Some("безопасный Rust без unsafe")
+        );
+        assert_eq!(issue.owner.as_deref(), Some("архитектор контура"));
+        assert_eq!(issue.fix_hint.as_deref(), Some("убрать unsafe-блок"));
+        assert_eq!(issue.skill.as_deref(), Some("fitness-functions"));
+
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&report).unwrap()).unwrap();
+        let issues = v["issues"].as_array().expect("issues");
+        let with_card = issues
+            .iter()
+            .find(|i| i["rule"] == "no_unsafe")
+            .expect("no_unsafe в JSON");
+        assert_eq!(with_card["ad"], "AD-6");
+        assert_eq!(with_card["skill"], "fitness-functions");
+        assert_eq!(with_card["fix_hint"], "убрать unsafe-блок");
+        let bare = issues
+            .iter()
+            .find(|i| i["rule"] == "bare_rule")
+            .expect("bare_rule в JSON");
+        for key in ["ad", "adr", "rationale", "owner", "fix_hint", "skill"] {
+            assert!(bare.get(key).is_none(), "у находки без карточки нет {key}");
+        }
+        // Обратная совместимость: старый JSON без новых полей десериализуется.
+        let legacy: LintIssue = serde_json::from_str(
+            r#"{"file":"src/x.rs","line":1,"rule":"r","message":"m","severity":"error"}"#,
+        )
+        .expect("legacy JSON без карточных полей");
+        assert!(legacy.ad.is_none() && legacy.fix_hint.is_none() && legacy.skill.is_none());
     }
 
     #[test]

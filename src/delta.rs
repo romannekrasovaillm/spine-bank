@@ -139,6 +139,7 @@ pub fn validate(repo: &Path, name: &str) -> Result<Vec<LintIssue>> {
                 rule: "missing_section".into(),
                 message: format!("нет секции «{section}»"),
                 severity: "error".into(),
+                ..LintIssue::default()
             });
         }
     }
@@ -155,6 +156,7 @@ pub fn validate(repo: &Path, name: &str) -> Result<Vec<LintIssue>> {
                     t.chars().take(60).collect::<String>()
                 ),
                 severity: "warn".into(),
+                ..LintIssue::default()
             });
         }
     }
@@ -171,6 +173,7 @@ pub fn validate(repo: &Path, name: &str) -> Result<Vec<LintIssue>> {
             rule: "empty_delta".into(),
             message: "ADDED/MODIFIED/REMOVED пусты — дельта без содержания".into(),
             severity: "error".into(),
+            ..LintIssue::default()
         });
     }
     Ok(issues)

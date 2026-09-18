@@ -497,6 +497,7 @@ pub fn lint(repo: &Path) -> Result<Vec<LintIssue>> {
                 rule: rule.into(),
                 message,
                 severity: severity.into(),
+                ..LintIssue::default()
             });
         };
 
@@ -589,6 +590,7 @@ pub fn lint_registry(registry_file: &Path) -> Result<Vec<(PathBuf, Vec<LintIssue
                     rule: "lint_error".into(),
                     message: e.to_string(),
                     severity: "error".into(),
+                    ..LintIssue::default()
                 }],
             )),
         }

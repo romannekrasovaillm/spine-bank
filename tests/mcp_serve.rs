@@ -85,6 +85,20 @@ fn spine_fixture(home: &Path, name: &str, broken: bool) -> String {
     path.display().to_string()
 }
 
+/// Фикстура репозитория `name` с нарушением карточного правила:
+/// `file_exists` на отсутствующий файл, правило несёт `ad`/`fix_hint`/`skill`.
+fn repo_card_fixture(home: &Path, name: &str) -> String {
+    let repo = home.join(name);
+    let handoff = repo.join(".arch-handoff");
+    std::fs::create_dir_all(&handoff).expect("mkdir");
+    std::fs::write(
+        handoff.join("CONSTRAINTS.yaml"),
+        "rules:\n  - name: spine_present\n    type: file_exists\n    path: \"ARCHITECTURE-SPINE.md\"\n    severity: error\n    ad: AD-9\n    fix_hint: \"вернуть ARCHITECTURE-SPINE.md в корень\"\n    skill: spine-invariants\n",
+    )
+    .expect("constraints");
+    repo.display().to_string()
+}
+
 /// Фикстура репозитория `name` с CONSTRAINTS.yaml: правило `file_exists`
 /// уровня error на файл, который есть либо нет.
 fn repo_fixture(home: &Path, name: &str, create_required_file: bool) -> String {
@@ -314,6 +328,11 @@ fn fitness_check_verdict_blocks_and_passes() {
     let issue = &verdict["issues"][0];
     assert_eq!(issue["rule"], "spine_present");
     assert_eq!(issue["severity"], "error");
+    // Правило без карточки: аддитивные поля (ad/fix_hint/skill) отсутствуют
+    // в JSON, а не null (SDK-контракт v1 не ломается).
+    for key in ["ad", "adr", "rationale", "owner", "fix_hint", "skill"] {
+        assert!(issue.get(key).is_none(), "у находки без карточки нет {key}");
+    }
 
     let verdict = structured(&responses[1], 2);
     assert_eq!(verdict["passed"], true, "{verdict}");
@@ -323,6 +342,28 @@ fn fitness_check_verdict_blocks_and_passes() {
             .expect("summary")
             .contains("Правил: 1")
     );
+}
+
+/// Критерий приёмки бэклога: в ответе `fitness_check` по нарушению видно,
+/// какой AD-* задет и какой скилл загрузить для исправления.
+#[test]
+fn fitness_check_issue_carries_card_context() {
+    let home = tempfile::tempdir().expect("tmp");
+    let broken = repo_card_fixture(home.path(), "card-repo");
+    let responses = mcp_serve(
+        home.path(),
+        &batch(&[call(1, "fitness_check", &json!({"repo": broken}))]),
+    );
+    let verdict = structured(&responses[0], 1);
+    assert_eq!(verdict["passed"], false, "{verdict}");
+    let issue = &verdict["issues"][0];
+    assert_eq!(issue["rule"], "spine_present");
+    assert_eq!(issue["ad"], "AD-9", "{issue}");
+    assert_eq!(
+        issue["fix_hint"], "вернуть ARCHITECTURE-SPINE.md в корень",
+        "{issue}"
+    );
+    assert_eq!(issue["skill"], "spine-invariants", "{issue}");
 }
 
 #[test]

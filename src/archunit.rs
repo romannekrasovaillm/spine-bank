@@ -1105,6 +1105,7 @@ pub(crate) fn run_control_rule(
             rule: u.rule.clone(),
             message: format!("archunit: правило не исполняется JVM-гейтом: {}", u.reason),
             severity: "warn".into(),
+            ..LintIssue::default()
         })
         .collect();
     issues.extend(outcome.violations.iter().map(|v| LintIssue {
@@ -1113,6 +1114,7 @@ pub(crate) fn run_control_rule(
         rule: v.rule_id.clone(),
         message: format!("archunit: {}", v.detail),
         severity: severity_of(&v.rule_id).into(),
+        ..LintIssue::default()
     }));
     Ok(issues)
 }
