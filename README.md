@@ -122,7 +122,8 @@ arch-be connect qwen        # пишет .qwen/settings.json (мердж, чуж
 ![GigaCode: split-judge](docs/screenshots/harnesses/qwen-splitjudge.png)
 
 **5. Скиллы.** 62 архитектурных скилла через `skill_search`/`skill_load` —
-агент применяет их к контексту вашего проекта:
+агент применяет их к контексту вашего проекта (обзор библиотеки —
+[docs/skills_for_architects.md](docs/skills_for_architects.md)):
 
 ![GigaCode: скиллы](docs/screenshots/harnesses/qwen-skills.png)
 
@@ -346,6 +347,8 @@ arch-be mcp serve --rw    # + handoff_create, adr_new, agentsmd_generate, …
 - **[docs/HARNESSES.md](docs/HARNESSES.md)** — матрица прогонов пяти
   харнессов + прокси-прогон GigaCode: MCP, скиллы, хуки, ограничения.
 - [docs/mcp.md](docs/mcp.md) — контракт MCP-сервера и split-judge.
+- [docs/skills_for_architects.md](docs/skills_for_architects.md) — обзор
+  библиотеки: все 62 скилла в 9 плагинах, с чего начать.
 - [docs/INVERSION.md](docs/INVERSION.md) — отчёт по плану инверсии: что сделано, отступления.
 - [README-full.md](README-full.md) — полный тур харнесса (RU/EN).
 
