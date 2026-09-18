@@ -468,7 +468,10 @@ impl Tool for ContractDiffTool {
 }
 
 /// Собирает отчёт в стиле `spine_lint`: сводка, строки находок, итог.
-fn render_report(findings: &[Finding]) -> String {
+/// Публичен: это текстовый (`--format text`) вывод CLI `arch-be contract-diff`;
+/// машинные форматы — `src/report_fmt.rs`.
+#[must_use]
+pub fn render_report(findings: &[Finding]) -> String {
     let breaking = findings.iter().filter(|f| f.severity == "error").count();
     let non_breaking = findings.len() - breaking;
     let mut report = format!(

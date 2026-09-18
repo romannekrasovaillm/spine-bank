@@ -24,9 +24,14 @@
 //! `significance_from_diff`); дифф недоступен (не git, нет HEAD) — fail-safe
 //! маршрут Critical. Явный `--route fast|standard|critical` переопределяет
 //! авто-режим.
+//!
+//! Вывод: текстовый рендер — [`render`]; машинные форматы для CI
+//! (`--format sarif|junit|gitlab-codequality|markdown`, вывод в stdout для
+//! редиректа в файл-артефакт) — модуль [`crate::report_fmt`] поверх
+//! структурированных находок [`GateFinding`].
 
 use std::collections::BTreeMap;
-use std::fmt::Write as _;
+use std::fmt::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -62,6 +67,95 @@ impl GateStatus {
     }
 }
 
+/// Структурированная находка составляющей гейта: [`fmt::Display`] воспроизводит
+/// каноничную строку текстового вывода (форматы составляющих различаются —
+/// см. конструкторы), а поля отдают адрес и правило машинным форматам
+/// (`src/report_fmt.rs`: SARIF/JUnit/GitLab Code Quality) без разбора строк.
+#[derive(Debug, Clone)]
+pub struct GateFinding {
+    /// Критичность (`error` | `warn`).
+    pub severity: String,
+    /// Код правила/проверки (`None` — чисто текстовая находка).
+    pub rule: Option<String>,
+    /// Файл (`None` — находка без адреса).
+    pub file: Option<String>,
+    /// Строка (`None` — без адреса; у `LintIssue` «файл целиком» — это 0).
+    pub line: Option<usize>,
+    /// Сообщение.
+    pub message: String,
+}
+
+impl GateFinding {
+    /// Находка из `LintIssue` (fitness, `rule_weakened`, `spine_lint`):
+    /// `[severity] file:line rule — message`.
+    fn lint(i: &control::LintIssue) -> Self {
+        Self {
+            severity: i.severity.clone(),
+            rule: Some(i.rule.clone()),
+            file: Some(i.file.display().to_string()),
+            line: Some(i.line),
+            message: i.message.clone(),
+        }
+    }
+
+    /// Адресная находка без строки (`delta_guard`): `file — message`.
+    fn file_only(severity: &str, file: String, message: String) -> Self {
+        Self {
+            severity: severity.to_string(),
+            rule: None,
+            file: Some(file),
+            line: None,
+            message,
+        }
+    }
+
+    /// Находка с правилом без адреса (`trace_check`, nfr): `[severity] rule — message`.
+    fn ruled(severity: String, rule: String, message: String) -> Self {
+        Self {
+            severity,
+            rule: Some(rule),
+            file: None,
+            line: None,
+            message,
+        }
+    }
+
+    /// Свободный текст (`evidence_verify`): печатается как есть.
+    fn text(severity: &str, message: String) -> Self {
+        Self {
+            severity: severity.to_string(),
+            rule: None,
+            file: None,
+            line: None,
+            message,
+        }
+    }
+}
+
+impl fmt::Display for GateFinding {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match (&self.file, self.line, &self.rule) {
+            (Some(file), Some(line), Some(rule)) => {
+                write!(
+                    f,
+                    "[{}] {}:{} {} — {}",
+                    self.severity, file, line, rule, self.message
+                )
+            }
+            (Some(file), _, None) => write!(f, "{} — {}", file, self.message),
+            (Some(file), _, Some(rule)) => {
+                write!(
+                    f,
+                    "[{}] {} {} — {}",
+                    self.severity, file, rule, self.message
+                )
+            }
+            (None, _, Some(rule)) => write!(f, "[{}] {} — {}", self.severity, rule, self.message),
+            (None, _, None) => write!(f, "{}", self.message),
+        }
+    }
+}
+
 /// Итог одной составляющей гейта.
 #[derive(Debug)]
 pub struct GateComponent {
@@ -72,7 +166,7 @@ pub struct GateComponent {
     /// Краткая причина/сводка одной строкой.
     pub detail: String,
     /// Находки (печатаются отступом под строкой FAIL-составляющей).
-    pub findings: Vec<String>,
+    pub findings: Vec<GateFinding>,
 }
 
 impl GateComponent {
@@ -87,7 +181,7 @@ impl GateComponent {
     }
 
     /// Составляющая провалена (находки/сбой) — гейт падает.
-    fn fail(name: &'static str, detail: String, findings: Vec<String>) -> Self {
+    fn fail(name: &'static str, detail: String, findings: Vec<GateFinding>) -> Self {
         Self {
             name,
             status: GateStatus::Fail,
@@ -227,18 +321,6 @@ fn git_show_file(repo: &Path, rev: &str, rel: &str) -> Result<String> {
         .map_err(|_| HarnessError::Control(format!("{rev}:{rel}: содержимое не UTF-8")))
 }
 
-/// Формат находки `LintIssue` одной строкой (как в выводе `control check`).
-fn fmt_issue(i: &control::LintIssue) -> String {
-    format!(
-        "[{}] {}:{} {} — {}",
-        i.severity,
-        i.file.display(),
-        i.line,
-        i.rule,
-        i.message
-    )
-}
-
 /// Составляющая `fitness`: прогон `CONSTRAINTS.yaml` ([`control::check`]).
 fn component_fitness(repo: &Path, constraints: &Path) -> GateComponent {
     if !constraints.is_file() {
@@ -255,7 +337,7 @@ fn component_fitness(repo: &Path, constraints: &Path) -> GateComponent {
         Ok(report) => GateComponent::fail(
             "fitness",
             report.summary,
-            report.issues.iter().map(fmt_issue).collect(),
+            report.issues.iter().map(GateFinding::lint).collect(),
         ),
         Err(e) => GateComponent::fail("fitness", format!("сбой выполнения: {e}"), Vec::new()),
     }
@@ -293,7 +375,13 @@ fn component_delta_guard(repo: &Path, base: Option<&str>, git: &GitProbe) -> Gat
             report
                 .violations
                 .iter()
-                .map(|v| format!("{v} — не упоминается ни в одной активной дельте"))
+                .map(|v| {
+                    GateFinding::file_only(
+                        "error",
+                        v.clone(),
+                        "не упоминается ни в одной активной дельте".to_string(),
+                    )
+                })
                 .collect(),
         ),
         Err(e) => GateComponent::fail("delta_guard", format!("сбой выполнения: {e}"), Vec::new()),
@@ -372,7 +460,7 @@ fn component_rule_weakened(
         Ok(issues) => GateComponent::fail(
             "rule_weakened",
             format!("ослаблений правил относительно {rev}: {}", issues.len()),
-            issues.iter().map(fmt_issue).collect(),
+            issues.iter().map(GateFinding::lint).collect(),
         ),
         Err(e) => GateComponent::fail("rule_weakened", format!("сбой сравнения: {e}"), Vec::new()),
     }
@@ -397,7 +485,7 @@ fn component_spine_lint(repo: &Path) -> GateComponent {
                 GateComponent::fail(
                     "spine_lint",
                     format!("находок: {} (error: {errors})", issues.len()),
-                    issues.iter().map(fmt_issue).collect(),
+                    issues.iter().map(GateFinding::lint).collect(),
                 )
             }
         }
@@ -444,7 +532,13 @@ fn component_trace(repo: &Path) -> GateComponent {
                 report
                     .issues
                     .iter()
-                    .map(|i| format!("[{}] {} — {}", i.severity, i.rule, i.message))
+                    .map(|i| {
+                        GateFinding::ruled(
+                            i.severity.to_string(),
+                            i.rule.to_string(),
+                            i.message.clone(),
+                        )
+                    })
                     .collect(),
             )
         }
@@ -457,16 +551,17 @@ fn component_trace(repo: &Path) -> GateComponent {
 fn collect_nfr(
     check: &'static str,
     issues: &[nfr::NfrIssue],
-    findings: &mut Vec<String>,
+    findings: &mut Vec<GateFinding>,
 ) -> (usize, usize) {
     let mut errors = 0;
     for i in issues {
         if i.severity == crate::model::Severity::Error {
             errors += 1;
         }
-        findings.push(format!(
-            "[{}] {}/{} — {}",
-            i.severity, check, i.rule, i.message
+        findings.push(GateFinding::ruled(
+            i.severity.to_string(),
+            format!("{check}/{}", i.rule),
+            i.message.clone(),
         ));
     }
     (errors, issues.len() - errors)
@@ -557,14 +652,22 @@ fn component_evidence(repo: &Path) -> GateComponent {
         match evidence::verify(dir) {
             Ok(verdict) if verdict.passed => {}
             Ok(verdict) => {
-                failed.push(format!("{}: {}", dir.display(), verdict.summary));
+                failed.push(GateFinding::text(
+                    "error",
+                    format!("{}: {}", dir.display(), verdict.summary),
+                ));
                 failed.extend(
                     verdict
                         .missing
                         .iter()
-                        .map(|m| format!("  отсутствует: {m}")),
+                        .map(|m| GateFinding::text("error", format!("  отсутствует: {m}"))),
                 );
-                failed.extend(verdict.tampered.iter().map(|t| format!("  изменён: {t}")));
+                failed.extend(
+                    verdict
+                        .tampered
+                        .iter()
+                        .map(|t| GateFinding::text("error", format!("  изменён: {t}"))),
+                );
             }
             Err(e) => {
                 return GateComponent::fail(

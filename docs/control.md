@@ -357,6 +357,38 @@ spine/наследования/overrides их нет). Те же поля нес
 exit **без** JSON, причина в stderr. Потребитель (SDK, CI-скрипт) обязан
 различать второй и третий случаи: парсить JSON даже при exit 1.
 
+### Форматы CI (`--format`): SARIF / JUnit / GitLab Code Quality / markdown
+
+Флаг `--format sarif|junit|gitlab-codequality|markdown` (дефолт `text`;
+несовместим с `--json`) печатает отчёт в нативном формате площадок CI —
+тем же контрактом каналов, что `--json`: машинный отчёт строго в stdout
+(годен для редиректа в файл-артефакт), exit-коды не меняются (FAIL — отчёт
+напечатан полностью, exit 1). Рендеры — чистые функции над отчётами,
+`src/report_fmt.rs`; тот же флаг есть у `arch-be gate`, `arch-be trace check`
+и `arch-be contract-diff`:
+
+| Формат | Стандарт | Назначение |
+|---|---|---|
+| `sarif` | SARIF 2.1.0 (`rules` + `results` с `level` error/warning, `locations`, стабильные `partialFingerprints`) | code scanning GitHub, импорт сторонних сканеров в GitLab |
+| `junit` | JUnit XML (`testsuite` на составляющую/правило, `testcase` на находку, `failure` только у error; SKIP — `<skipped/>`) | Jenkins `junit(...)`, виджеты тестов площадок |
+| `gitlab-codequality` | GitLab Code Quality JSON (`description`, `check_name`, `fingerprint` по правилу+файлу+строке, `severity` error→major/warn→minor, `location`) | артефакт `reports.codequality` — нарушения в интерфейсе merge request без ручной настройки |
+| `markdown` | таблица находок + сводка + статусы групп | job summary, комментарий к MR |
+
+Ограничения: у GitLab Code Quality `location.path`/`lines.begin` обязательны —
+находки без адреса (трассировка, составляющие гейта) получают путь-заглушку
+`(repository)` и строку 1; потолок находок в машинном отчёте — 1000 (полный
+список — текстовым выводом). Fingerprint стабилен между прогонами (FNV-1a по
+правилу+пути+строке, без текста сообщения — правка формулировки не плодит
+«новые» находки в MR). Готовые джобы под площадки раскладывает
+`arch-be connect ci --provider gitlab|github|jenkins` (`docs/CONNECT.md`).
+
+```bash
+arch-be gate --format gitlab-codequality > codequality-spine.json   # артефакт MR
+arch-be control check . --format junit > fitness.xml                # junit(...) в Jenkins
+arch-be trace check кейсы/legacy-survey --format markdown           # сводка в job summary
+```
+
+
 ## Реестр правил (`control rules-report`)
 
 Отчёт по карточкам CONSTRAINTS.yaml (markdown в stdout; M-1b/C-3) — реестр
@@ -523,8 +555,14 @@ arch-be fleet audit --repo . --fail-on-dupes 50        # флот worktree бе�
 `arch-be gate`).
 
 ```bash
-arch-be gate [--repo <path>] [--route auto|fast|standard|critical] [--base <git-ref>] [--constraints <file>]
+arch-be gate [--repo <path>] [--route auto|fast|standard|critical] [--base <git-ref>] [--constraints <file>] [--format text|sarif|junit|gitlab-codequality|markdown]
 ```
+
+`--format` (волна 2, п.8) — машинные форматы для CI в stdout (см. «Форматы CI»
+выше): для GitLab merge request — `gitlab-codequality` (артефакт
+`reports.codequality`), для Jenkins — `junit`, для GitHub — `sarif`, сводка в
+job summary — `markdown`. Текстовый вывод не меняется; exit-код общий: провал
+любой составляющей → exit 1. Готовые джобы — `arch-be connect ci --provider …`.
 
 Составляющие (на любом маршруте):
 

@@ -185,6 +185,11 @@ enum Cmd {
         /// Файл ограничений (по умолчанию <repo>/.arch-handoff/`CONSTRAINTS.yaml`).
         #[arg(long)]
         constraints: Option<PathBuf>,
+        /// Формат вывода: text (дефолт) | sarif | junit | gitlab-codequality |
+        /// markdown. Машинные форматы — строго в stdout (артефакт CI),
+        /// exit-код не меняется (красный гейт — данные отчёта: exit 1).
+        #[arg(long, default_value = "text", value_name = "FORMAT")]
+        format: String,
     },
     /// Реестр ADR: глобальная агрегация решений по набору проектов (ADR-036).
     Adr {
@@ -206,6 +211,21 @@ enum Cmd {
     Trace {
         #[command(subcommand)]
         cmd: TraceCmd,
+    },
+    /// Сравнение двух версий контракта `OpenAPI` 3.x на breaking changes
+    /// (правила CD-001..CD-006, ADR-015): удалённые пути/операции/обязательные
+    /// параметры/ответы, смена типов — error (exit 1); добавленные — warn.
+    /// CLI-обёртка инструмента `contract_diff` для CI (гейт контрактов).
+    #[command(name = "contract-diff", visible_alias = "contract_diff")]
+    ContractDiff {
+        /// Старая версия контракта (JSON/YAML).
+        old: PathBuf,
+        /// Новая версия контракта (JSON/YAML).
+        new: PathBuf,
+        /// Формат вывода: text (дефолт) | sarif | junit | gitlab-codequality |
+        /// markdown (машинные — в stdout; breaking-находки — exit 1).
+        #[arg(long, default_value = "text", value_name = "FORMAT")]
+        format: String,
     },
     /// Количественные NFR поверх модели: latency-бюджет, доступность,
     /// ёмкость, стоимость (ADR-007).
@@ -715,6 +735,16 @@ enum ControlCmd {
         /// Машиночитаемый вывод: JSON-отчёт `FitnessReport` (SDK-контракт v1).
         #[arg(long)]
         json: bool,
+        /// Формат вывода для CI: text (дефолт) | sarif | junit |
+        /// gitlab-codequality | markdown (машинные — в stdout, как --json;
+        /// несовместим с --json).
+        #[arg(
+            long,
+            default_value = "text",
+            value_name = "FORMAT",
+            conflicts_with = "json"
+        )]
+        format: String,
     },
     /// Линтер ARCHITECTURE-SPINE.md.
     Spine {
@@ -906,6 +936,11 @@ enum TraceCmd {
     Check {
         /// Корень кейса (каталог с model/).
         dir: PathBuf,
+        /// Формат вывода: text (дефолт — markdown-отчёт звеньев) | sarif |
+        /// junit | gitlab-codequality | markdown (нормализованная таблица
+        /// находок, `src/report_fmt.rs`; машинные — в stdout).
+        #[arg(long, default_value = "text", value_name = "FORMAT")]
+        format: String,
     },
 }
 
@@ -1396,6 +1431,7 @@ async fn main() -> Result<()> {
             route,
             base,
             constraints,
+            format,
         }) => {
             let repo = repo.unwrap_or_else(|| PathBuf::from("."));
             let route = match route.trim().to_ascii_lowercase().as_str() {
@@ -1406,6 +1442,8 @@ async fn main() -> Result<()> {
                         .map_err(|e: String| anyhow::anyhow!(e))?,
                 ),
             };
+            let format = arch_harness::report_fmt::ReportFormat::parse(&format)
+                .map_err(anyhow::Error::msg)?;
             // Пороги маршрутов — из конфига ([significance], ADR-034).
             let limits = cfg
                 .significance
@@ -1418,7 +1456,22 @@ async fn main() -> Result<()> {
                 constraints.as_deref(),
                 limits,
             )?;
-            print!("{}", arch_harness::gate::render(&report));
+            match format {
+                arch_harness::report_fmt::ReportFormat::Text => {
+                    print!("{}", arch_harness::gate::render(&report));
+                }
+                machine => {
+                    // Машинные форматы — строго в stdout (артефакт CI);
+                    // exit-код тот же, что у текста.
+                    print!(
+                        "{}",
+                        arch_harness::report_fmt::render(
+                            machine,
+                            &arch_harness::report_fmt::FmtReport::from_gate(&report),
+                        )
+                    );
+                }
+            }
             if !report.passed {
                 std::process::exit(1);
             }
@@ -1427,6 +1480,32 @@ async fn main() -> Result<()> {
         Some(Cmd::Publish { cmd }) => cmd_publish(cmd)?,
         Some(Cmd::Model { cmd }) => cmd_model(cmd)?,
         Some(Cmd::Trace { cmd }) => cmd_trace(cmd)?,
+        Some(Cmd::ContractDiff { old, new, format }) => {
+            let format = arch_harness::report_fmt::ReportFormat::parse(&format)
+                .map_err(anyhow::Error::msg)?;
+            let findings =
+                arch_harness::contract_diff::diff_contracts(&old, &new).with_context(|| {
+                    format!("сравнение контрактов {} ↔ {}", old.display(), new.display())
+                })?;
+            match format {
+                arch_harness::report_fmt::ReportFormat::Text => {
+                    print!("{}", arch_harness::contract_diff::render_report(&findings));
+                }
+                machine => {
+                    print!(
+                        "{}",
+                        arch_harness::report_fmt::render(
+                            machine,
+                            &arch_harness::report_fmt::FmtReport::from_contract_diff(&findings),
+                        )
+                    );
+                }
+            }
+            // Breaking-находки (severity error) — exit 1, как у прочих гейтов.
+            if findings.iter().any(|f| f.severity == "error") {
+                std::process::exit(1);
+            }
+        }
         Some(Cmd::Nfr { cmd }) => cmd_nfr(cmd)?,
         Some(Cmd::Skills { cmd }) => cmd_skills(&cfg, cmd)?,
         Some(Cmd::Plugins { cmd }) => cmd_plugins(&cfg, cmd)?,
@@ -2427,14 +2506,27 @@ fn cmd_control(cfg: &arch_harness::config::Config, cmd: ControlCmd) -> Result<()
             repo,
             constraints,
             json,
+            format,
         } => {
             let c = constraints.unwrap_or_else(|| repo.join(".arch-handoff/CONSTRAINTS.yaml"));
             let report = arch_harness::control::check(&repo, &c)?;
+            let format = arch_harness::report_fmt::ReportFormat::parse(&format)
+                .map_err(anyhow::Error::msg)?;
             if json {
                 // SDK-контракт v1: машиночитаемый отчёт, exit code как в текстовом режиме.
                 println!(
                     "{}",
                     serde_json::to_string(&report).expect("FitnessReport сериализуется")
+                );
+            } else if format != arch_harness::report_fmt::ReportFormat::Text {
+                // Машинные форматы CI (SARIF/JUnit/GitLab Code Quality/markdown):
+                // строго в stdout, exit-код как у текста.
+                print!(
+                    "{}",
+                    arch_harness::report_fmt::render(
+                        format,
+                        &arch_harness::report_fmt::FmtReport::from_fitness(&report),
+                    )
                 );
             } else {
                 println!("{}", report.summary);
@@ -2792,10 +2884,25 @@ fn cmd_model(cmd: ModelCmd) -> Result<()> {
 /// `arch-be trace`: трассируемость модели как fitness-функция (ADR-006).
 fn cmd_trace(cmd: TraceCmd) -> Result<()> {
     match cmd {
-        TraceCmd::Check { dir } => {
+        TraceCmd::Check { dir, format } => {
+            let format = arch_harness::report_fmt::ReportFormat::parse(&format)
+                .map_err(anyhow::Error::msg)?;
             let report = arch_harness::trace::trace_check(&dir)
                 .with_context(|| format!("трассировка кейса {}", dir.display()))?;
-            print!("{}", arch_harness::trace::render_markdown(&report));
+            match format {
+                arch_harness::report_fmt::ReportFormat::Text => {
+                    print!("{}", arch_harness::trace::render_markdown(&report));
+                }
+                machine => {
+                    print!(
+                        "{}",
+                        arch_harness::report_fmt::render(
+                            machine,
+                            &arch_harness::report_fmt::FmtReport::from_trace(&report),
+                        )
+                    );
+                }
+            }
             if report.has_errors() {
                 std::process::exit(1);
             }

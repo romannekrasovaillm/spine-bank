@@ -1064,3 +1064,218 @@ fn connect_gigacode_scaffolds_and_doctor_host_verifies() {
         .code(1)
         .stdout(contains("не найден или не JSON"));
 }
+
+// ---------------------------------------------------------------------------
+// Машинные форматы отчётов (--format) и connect ci/git-hooks (волна 2, п.8)
+// ---------------------------------------------------------------------------
+
+/// `arch-be gate --format sarif` на репозитории с находкой: exit 1, в stdout —
+/// валидный SARIF 2.1.0 с result'ом (ruleId, level, location, fingerprint).
+#[test]
+fn gate_format_sarif_emits_valid_sarif_with_result() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = gate_repo(tmp.path());
+    // Находка fitness: файл с запрещённым паттерном PAN.
+    std::fs::create_dir_all(repo.join("src")).expect("mkdir src");
+    std::fs::write(repo.join("src/hotfix.py"), "pan = 'PAN'\n").expect("write hotfix");
+
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("gate")
+        .arg("--repo")
+        .arg(repo.as_os_str())
+        .arg("--format")
+        .arg("sarif");
+    let assert = cmd.assert().code(1);
+    let out = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8");
+    let doc: serde_json::Value = serde_json::from_str(&out).expect("валидный SARIF JSON");
+    assert_eq!(doc["version"], "2.1.0");
+    let run = &doc["runs"][0];
+    assert_eq!(run["tool"]["driver"]["name"], "arch-be gate");
+    let results = run["results"].as_array().expect("results");
+    assert!(
+        !results.is_empty(),
+        "находка fitness обязана попасть в results"
+    );
+    let hit = results
+        .iter()
+        .find(|r| r["ruleId"] == "no_pan")
+        .expect("result по правилу no_pan");
+    assert_eq!(hit["level"], "error");
+    assert!(
+        hit["locations"][0]["physicalLocation"]["artifactLocation"]["uri"]
+            .as_str()
+            .expect("uri")
+            .ends_with("src/hotfix.py"),
+        "{hit}"
+    );
+    assert!(
+        hit["partialFingerprints"]["spine/v1"].as_str().is_some(),
+        "partialFingerprints: {hit}"
+    );
+}
+
+/// `arch-be gate --format gitlab-codequality`: массив Code Quality с
+/// обязательными полями (`description`/`check_name`/`fingerprint`/`severity`/`location`).
+#[test]
+fn gate_format_gitlab_codequality_emits_cq_entries() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = gate_repo(tmp.path());
+    std::fs::create_dir_all(repo.join("src")).expect("mkdir src");
+    std::fs::write(repo.join("src/hotfix.py"), "pan = 'PAN'\n").expect("write hotfix");
+
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("gate")
+        .arg("--repo")
+        .arg(repo.as_os_str())
+        .arg("--format")
+        .arg("gitlab-codequality");
+    let assert = cmd.assert().code(1);
+    let out = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8");
+    let doc: serde_json::Value = serde_json::from_str(&out).expect("валидный JSON");
+    let arr = doc.as_array().expect("массив Code Quality");
+    let hit = arr
+        .iter()
+        .find(|e| {
+            e["check_name"]
+                .as_str()
+                .is_some_and(|n| n.contains("no_pan"))
+        })
+        .expect("запись по no_pan");
+    assert_eq!(hit["severity"], "major");
+    assert!(
+        hit["location"]["path"]
+            .as_str()
+            .expect("path")
+            .ends_with("src/hotfix.py"),
+        "{hit}"
+    );
+    assert!(hit["fingerprint"].as_str().is_some(), "{hit}");
+}
+
+/// `arch-be control check --format junit` на репо с находкой: exit 1, в
+/// stdout — `JUnit` XML с `<failure>`; `--json` и `--format` несовместимы.
+#[test]
+fn control_check_format_junit_emits_failure_xml() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = gate_repo(tmp.path());
+    std::fs::create_dir_all(repo.join("src")).expect("mkdir src");
+    std::fs::write(repo.join("src/hotfix.py"), "pan = 'PAN'\n").expect("write hotfix");
+
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("control")
+        .arg("check")
+        .arg(repo.as_os_str())
+        .arg("--format")
+        .arg("junit");
+    cmd.assert()
+        .code(1)
+        .stdout(contains("<?xml version=\"1.0\" encoding=\"UTF-8\"?>"))
+        .stdout(contains("<testsuite name=\"no_pan\""))
+        .stdout(contains("<failure message="));
+
+    // Зелёный прогон: pass-группы без failure, exit 0.
+    let clean = gate_repo(&tmp.path().join("clean-home"));
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("control")
+        .arg("check")
+        .arg(clean.as_os_str())
+        .arg("--format")
+        .arg("junit");
+    cmd.assert()
+        .success()
+        .stdout(contains("<testsuite name=\"spine_present\""))
+        .stdout(predicate::str::contains("<failure").not());
+
+    // --json конфликтует с --format (ошибка clap, exit 2).
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("control")
+        .arg("check")
+        .arg(repo.as_os_str())
+        .arg("--json")
+        .arg("--format")
+        .arg("sarif");
+    cmd.assert().code(2);
+}
+
+/// `arch-be trace check --format gitlab-codequality`: error-находка (AD без
+/// правила) — exit 1 и запись с путём-заглушкой (у трассировки нет адреса).
+#[test]
+fn trace_check_format_gitlab_codequality_on_error() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let case = tmp.path().join("case");
+    std::fs::create_dir_all(case.join("model")).expect("mkdir model");
+    std::fs::write(
+        case.join("model/AD-1.md"),
+        "---\nid: AD-1\ntype: ad\ntitle: Инвариант\nstatus: ADOPTED\n---\n\nТело.\n",
+    )
+    .expect("write AD");
+    std::fs::write(case.join("CONSTRAINTS.yaml"), "rules: []\n").expect("write constraints");
+
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("trace")
+        .arg("check")
+        .arg(case.as_os_str())
+        .arg("--format")
+        .arg("gitlab-codequality");
+    let assert = cmd.assert().code(1);
+    let out = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8");
+    let doc: serde_json::Value = serde_json::from_str(&out).expect("валидный JSON");
+    let arr = doc.as_array().expect("массив Code Quality");
+    let hit = arr
+        .iter()
+        .find(|e| {
+            e["check_name"]
+                .as_str()
+                .is_some_and(|n| n.contains("ad-not-verified"))
+        })
+        .expect("запись ad-not-verified");
+    assert_eq!(hit["severity"], "major");
+    assert_eq!(hit["location"]["path"], "(repository)");
+}
+
+/// `arch-be contract-diff <old> <new>`: breaking-изменение — exit 1 (текст
+/// «Итог: FAIL»); `--format sarif` — валидный SARIF с ruleId CD-001;
+/// одинаковые контракты — exit 0.
+#[test]
+fn contract_diff_cli_text_and_sarif() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let old = tmp.path().join("old.yaml");
+    let new = tmp.path().join("new.yaml");
+    std::fs::write(
+        &old,
+        "openapi: 3.0.3\ninfo: {title: T, version: '1'}\npaths:\n  /v1/pets:\n    get:\n      responses:\n        '200': {description: ok}\n",
+    )
+    .expect("write old");
+    std::fs::write(
+        &new,
+        "openapi: 3.0.3\ninfo: {title: T, version: '1'}\npaths: {}\n",
+    )
+    .expect("write new");
+
+    // Текст по умолчанию: как у инструмента contract_diff.
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("contract-diff").arg(&old).arg(&new);
+    cmd.assert()
+        .code(1)
+        .stdout(contains("[error]"))
+        .stdout(contains("CD-001"))
+        .stdout(contains("Итог: FAIL"));
+
+    // Алиас с подчёркиванием (имя MCP-инструмента) тоже работает.
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("contract_diff")
+        .arg(&old)
+        .arg(&new)
+        .arg("--format")
+        .arg("sarif");
+    let assert = cmd.assert().code(1);
+    let out = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8");
+    let doc: serde_json::Value = serde_json::from_str(&out).expect("валидный SARIF JSON");
+    assert_eq!(doc["runs"][0]["results"][0]["ruleId"], "CD-001");
+
+    // Без изменений — PASS, exit 0.
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("contract-diff").arg(&old).arg(&old);
+    cmd.assert().success().stdout(contains("Итог: PASS"));
+}
+
