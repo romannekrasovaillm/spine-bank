@@ -136,6 +136,7 @@ mod tests {
             "model_query",
             "model_validate",
             "model_graph",
+            "model_drift",
             "trace_check",
             "openapi_lint",
             "asyncapi_lint",

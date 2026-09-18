@@ -112,9 +112,10 @@ exit 2, stderr уходит агенту; строки вывода хук не 
 OpenAPI/proto/Avro/JSON Schema/DDL и связка с моделью по `INT.contract`,
 ADR-035), `fleet_audit`, `agentsmd_lint` (`repo`),
 `archify_validate` (`type`, `path`), `rubric_list`, `plugin_list`,
-`nfr_check` (`path`, `kind`), `model_validate` (`dir`),
+`nfr_check` (`path`, `kind`), `model_validate` (`dir`), `model_drift` (`dir`),
 `delta_guard` (`path`, `base`, `protect`), `evidence_verify` (`change_dir`),
 `architect_review` (`path`, `base`), `change_impact` (`path`, `id` | `paths`).
+
 Под `--rw` добавляются: `handoff_create`, `adr_new`, `agentsmd_generate`,
 `skill_distill`, `archify_deliver`, `archify_show`, `archify_compare`,
 `reverse_survey`, `evidence_pack` (`change_dir`, `route`),
@@ -123,7 +124,7 @@ false`; `evidence_pack`/`delta_propose` политика R-уровней кла
 как `Mutating` — авто с R2, на R0/R1 вызов отклоняется с пояснением).
 
 Верификаторы транша 1 (`nfr_check`, `model_validate`, `delta_guard`,
-`evidence_verify`) возвращают в `content[0].text` (и в
+`evidence_verify`) и `model_drift` возвращают в `content[0].text` (и в
 `structuredContent.output` моста) JSON-вердикт `{passed, issues, summary}` —
 тот же контракт, что у ручных контрольных инструментов: `passed: false` —
 основание отказать изменению, перечислив находки.

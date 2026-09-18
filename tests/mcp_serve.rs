@@ -214,6 +214,7 @@ fn handshake_then_tools_list_over_stdio() {
         "plugin_list",
         "nfr_check",
         "model_validate",
+        "model_drift",
         "delta_guard",
         "evidence_verify",
         "landscape_report",
@@ -228,8 +229,8 @@ fn handshake_then_tools_list_over_stdio() {
     }
     assert_eq!(
         tools.len(),
-        32,
-        "ровно 32 инструмента в ro-режиме (13 ручных + 19 read-only моста)"
+        33,
+        "ровно 33 инструмента в ro-режиме (13 ручных + 20 read-only моста; model_drift — п.15)"
     );
     // rw-контур и write/exec-принадлежность хоста закрыты в ro-режиме.
     for banned in [

@@ -1008,17 +1008,37 @@ enum ModelCmd {
         #[arg(long)]
         format: String,
     },
-    /// Импорт Structurizr DSL в модель: сущности SYS/CMP/INT + связи
-    /// (по одному .md на элемент; существующие файлы не затираются).
+    /// Импорт внешнего реестра/описания в модель: Structurizr DSL
+    /// (SYS/CMP/INT + связи) либо реестр систем (csv/xlsx/backstage →
+    /// `SYS-*` + `OWNER-*`; по одному .md на сущность; существующие —
+    /// skip, перезапись — только `--force`, и на месте их файлов).
     Import {
-        /// Файл Structurizr DSL.
+        /// Файл-источник (Structurizr DSL, CSV, xlsx, catalog-info.yaml).
         file: PathBuf,
-        /// Формат (пока только structurizr).
+        /// Формат: structurizr, csv, xlsx, backstage.
         #[arg(long)]
         format: String,
         /// Каталог модели-получателя (создаётся при отсутствии).
-        #[arg(long, default_value = "model")]
+        #[arg(long = "out", visible_alias = "dir", default_value = "model")]
         dir: PathBuf,
+        /// Перезаписывать существующие сущности (только csv/xlsx/backstage).
+        #[arg(long)]
+        force: bool,
+        /// Только план: разбор и отчёт без записи файлов
+        /// (только csv/xlsx/backstage).
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Дрейф «модель ↔ код» (read-only): CMP с несуществующими `code_roots`
+    /// — error (exit code 1); каталог с манифестом сборки без покрывающего
+    /// CMP — warn; звено `INT → контракт` в семантике `trace check`
+    /// (ADR-035: битый путь `contract` — error, поле не задано — warn).
+    Drift {
+        /// Корень кейса (каталог с model/ внутри).
+        dir: PathBuf,
+        /// JSON-вердикт `{passed, issues, summary}` вместо текста.
+        #[arg(long)]
+        json: bool,
     },
     /// Радиус взрыва изменения (бэклог волны 3, п.13): от сущности (`--id`)
     /// или файлов (`--paths` → CMP по `code_roots`, ADR-030) транзитивный
@@ -1050,6 +1070,14 @@ enum ModelCmd {
         /// Дополнительно вывести mermaid `graph TD` ландшафта.
         #[arg(long)]
         mermaid: bool,
+        /// Карта алиасов (yaml/json «вариант имени → каноничное имя»):
+        /// дедупликация учитывает алиасы.
+        #[arg(long)]
+        aliases: Option<PathBuf>,
+        /// Дифф ландшафта против версии в git: ссылка (ветка/тег/sha) или
+        /// дата YYYY-MM-DD (последний коммит не позже конца дня).
+        #[arg(long)]
+        diff_since: Option<String>,
     },
 }
 
@@ -3130,25 +3158,71 @@ fn cmd_model(cmd: ModelCmd) -> Result<()> {
                 .with_context(|| format!("экспорт модели {}", dir.display()))?;
             print!("{text}");
         }
-        ModelCmd::Import { file, format, dir } => {
-            if !format.trim().eq_ignore_ascii_case("structurizr") {
-                anyhow::bail!(
-                    "импорт поддерживает только --format structurizr (получено: '{format}')"
+        ModelCmd::Import {
+            file,
+            format,
+            dir,
+            force,
+            dry_run,
+        } => {
+            if format.trim().eq_ignore_ascii_case("structurizr") {
+                if force || dry_run {
+                    anyhow::bail!(
+                        "флаги --force/--dry-run поддерживаются для форматов csv/xlsx/backstage; \
+                         импорт structurizr и так не затирает файлы (коллизия — ошибка)"
+                    );
+                }
+                let report = arch_harness::model::import_structurizr(&file, &dir)
+                    .with_context(|| format!("импорт {} в {}", file.display(), dir.display()))?;
+                for f in &report.written {
+                    println!("записан: {}", f.display());
+                }
+                for w in &report.warnings {
+                    println!("предупреждение: {w}");
+                }
+                println!(
+                    "Импорт {}: {} сущностей, предупреждений: {}",
+                    report.dir.display(),
+                    report.written.len(),
+                    report.warnings.len()
                 );
+                return Ok(());
             }
-            let report = arch_harness::model::import_structurizr(&file, &dir)
-                .with_context(|| format!("импорт {} в {}", file.display(), dir.display()))?;
+            let fmt =
+                arch_harness::model::RegistryFormat::from_name(&format).with_context(|| {
+                    format!(
+                        "неизвестный формат '{format}' (допустимы: structurizr, {})",
+                        arch_harness::model::RegistryFormat::names()
+                    )
+                })?;
+            let report = arch_harness::model::import_registry(
+                &file,
+                &dir,
+                fmt,
+                &arch_harness::model::RegistryImportOptions { force, dry_run },
+            )
+            .with_context(|| format!("импорт {} в {}", file.display(), dir.display()))?;
+            let verb = if report.dry_run {
+                "записал бы"
+            } else {
+                "записан"
+            };
             for f in &report.written {
-                println!("записан: {}", f.display());
+                println!("{verb}: {}", f.display());
+            }
+            for s in &report.skipped {
+                println!("пропущен (уже в модели): {s}");
             }
             for w in &report.warnings {
                 println!("предупреждение: {w}");
             }
             println!(
-                "Импорт {}: {} сущностей, предупреждений: {}",
+                "Импорт {}: записано: {}, пропущено: {}, предупреждений: {}{}",
                 report.dir.display(),
                 report.written.len(),
-                report.warnings.len()
+                report.skipped.len(),
+                report.warnings.len(),
+                if report.dry_run { " (dry-run)" } else { "" }
             );
         }
         ModelCmd::Impact {
@@ -3169,13 +3243,45 @@ fn cmd_model(cmd: ModelCmd) -> Result<()> {
                 print!("{}", arch_harness::review::render_impact(&report));
             }
         }
-        ModelCmd::Landscape { root, mermaid } => {
-            let report = arch_harness::landscape::build_landscape(&root)?;
+        ModelCmd::Drift { dir, json } => {
+            let report = arch_harness::model::drift_check(&dir)
+                .with_context(|| format!("дрейф «модель ↔ код» кейса {}", dir.display()))?;
+            if json {
+                let verdict = arch_harness::model::drift::verdict_json(&report);
+                println!("{verdict:#}");
+            } else {
+                print!("{}", arch_harness::model::drift::render_text(&report));
+            }
+            if report.has_errors() {
+                std::process::exit(1);
+            }
+        }
+        ModelCmd::Landscape {
+            root,
+            mermaid,
+            aliases,
+            diff_since,
+        } => {
+            let aliases = match aliases {
+                Some(path) => arch_harness::landscape::load_aliases(&path)
+                    .with_context(|| format!("карта алиасов {}", path.display()))?,
+                None => std::collections::BTreeMap::new(),
+            };
+            let report = arch_harness::landscape::build_landscape_with_aliases(&root, &aliases)?;
             println!("{}", arch_harness::landscape::render_markdown(&report));
             if mermaid {
                 println!("\n```mermaid");
                 println!("{}", arch_harness::landscape::render_mermaid(&report));
                 println!("```");
+            }
+            if let Some(since) = diff_since {
+                let diff = arch_harness::landscape::diff_landscape(&root, &since, &aliases)
+                    .with_context(|| format!("дифф ландшафта против {since}"))?;
+                println!();
+                println!(
+                    "{}",
+                    arch_harness::landscape::render_diff_markdown(&diff, &since)
+                );
             }
         }
     }

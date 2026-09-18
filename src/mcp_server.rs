@@ -227,6 +227,7 @@ const BRIDGE_READ_ONLY: &[&str] = &[
     "evidence_verify",
     "fleet_audit",
     "landscape_report",
+    "model_drift",
     "model_graph",
     "model_validate",
     "nfr_check",
@@ -574,14 +575,15 @@ impl McpServe {
                                          Детерминированный контур реестра (openapi_lint, \
                                          asyncapi_lint, contract_diff, fleet_audit, \
                                          agentsmd_lint, archify_validate, rubric_list, \
-                                         plugin_list, nfr_check, model_validate, delta_guard, \
-                                         evidence_verify) доступен напрямую; отчёты реестров \
-                                         (landscape_report, adr_registry, rules_report, \
-                                         openspec_coverage, model_graph) — read-only JSON \
-                                         со счётчиками; составные инструменты: architect_review \
-                                         (всё ревью одним вызовом — маршрут, контур контроля, \
-                                         модель, контракты) и change_impact (что заденет \
-                                         изменение и с кем согласовывать); аргумент `cwd` — \
+                                         plugin_list, nfr_check, model_validate, model_drift, \
+                                         delta_guard, evidence_verify) доступен напрямую; \
+                                         отчёты реестров (landscape_report, adr_registry, \
+                                         rules_report, openspec_coverage, model_graph) — \
+                                         read-only JSON со счётчиками; составные инструменты: \
+                                         architect_review (всё ревью одним вызовом — маршрут, \
+                                         контур контроля, модель, контракты) и change_impact \
+                                         (что заденет изменение и с кем согласовывать); \
+                                         аргумент `cwd` — \
                                          рабочий каталог клиента для относительных путей. \
                                          Чтение знаний (read-only): kb_search — поиск по \
                                          базе знаний архитектора; skill_search/skill_load — \

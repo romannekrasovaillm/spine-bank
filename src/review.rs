@@ -1214,7 +1214,10 @@ mod tests {
             .expect("секция");
         assert_eq!(model.status, GateStatus::Fail);
         assert!(
-            model.findings.iter().any(|f| f.rule.as_deref() == Some("broken-link")),
+            model
+                .findings
+                .iter()
+                .any(|f| f.rule.as_deref() == Some("broken-link")),
             "{:?}",
             model.findings
         );
@@ -1244,7 +1247,10 @@ mod tests {
             .expect("секция");
         assert_eq!(contracts.status, GateStatus::Fail);
         assert!(
-            contracts.findings.iter().any(|f| f.rule.as_deref() == Some("OA-001")),
+            contracts
+                .findings
+                .iter()
+                .any(|f| f.rule.as_deref() == Some("OA-001")),
             "{:?}",
             contracts.findings
         );
