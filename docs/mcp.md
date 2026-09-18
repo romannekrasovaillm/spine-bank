@@ -107,7 +107,9 @@ exit 2, stderr уходит агенту; строки вывода хук не 
 
 Мостовые read-only инструменты реестра (спеки — из `Tool::spec()`, плюс
 опциональный `cwd`): `openapi_lint` (`path`), `asyncapi_lint` (`path`),
-`contract_diff`, `fleet_audit`, `agentsmd_lint` (`repo`),
+`contract_diff` (`old`, `new`, опц. `format`, `model` — форматы
+OpenAPI/proto/Avro/JSON Schema/DDL и связка с моделью по `INT.contract`,
+ADR-035), `fleet_audit`, `agentsmd_lint` (`repo`),
 `archify_validate` (`type`, `path`), `rubric_list`, `plugin_list`,
 `nfr_check` (`path`, `kind`), `model_validate` (`dir`),
 `delta_guard` (`path`, `base`, `protect`), `evidence_verify` (`change_dir`),

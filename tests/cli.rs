@@ -1512,3 +1512,88 @@ fn model_impact_unknown_id_and_no_source_fail() {
         .failure()
         .stderr(contains("id сущности или paths"));
 }
+
+/// `arch-be contract-diff` (бэклог волны 3, п.14): .proto с ломающим диффом
+/// (удалено поле без reserved) → exit 1; с `--model` в выводе — потребители
+/// и владельцы из радиуса изменения (`INT.contract` → `change_impact`, ADR-035).
+#[test]
+fn contract_diff_proto_breaking_exits_1_with_consumers() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let case = tmp.path().join("contract-case");
+    let model = case.join("model");
+    std::fs::create_dir_all(&model).expect("mkdir model");
+    for (name, fm) in [
+        (
+            "CMP-001.md",
+            "---\nid: CMP-001\ntype: cmp\ntitle: Платёжный шлюз\nstatus: designed\ndepends_on: [INT-001]\n---\n\nТело.\n",
+        ),
+        (
+            "INT-001.md",
+            "---\nid: INT-001\ntype: int\ntitle: Рельс процессинга\nstatus: accepted\ncontract: contracts/pay-new.proto\naffects: [OWNER-1]\n---\n\nТело.\n",
+        ),
+        (
+            "OWNER-1.md",
+            "---\nid: OWNER-1\ntype: owner\ntitle: Команда процессинга\nstatus: active\n---\n\nТело.\n",
+        ),
+    ] {
+        std::fs::write(model.join(name), fm).expect("сущность");
+    }
+    let contracts = case.join("contracts");
+    std::fs::create_dir_all(&contracts).expect("mkdir contracts");
+    let proto_v1 = "syntax = \"proto3\";\n\npackage acme.payments.v1;\n\nmessage ChargeRequest {\n  string id = 1;\n  int64 amount_minor = 2;\n  optional string currency = 3;\n}\n";
+    let proto_v2 = proto_v1.replace("  optional string currency = 3;\n", "");
+    std::fs::write(contracts.join("pay-old.proto"), proto_v1).expect("old");
+    std::fs::write(contracts.join("pay-new.proto"), proto_v2).expect("new");
+
+    // Без --model: breaking → exit 1, находки CD-P02/CD-P06.
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("contract-diff")
+        .arg(contracts.join("pay-old.proto").as_os_str())
+        .arg(contracts.join("pay-new.proto").as_os_str());
+    cmd.assert()
+        .code(1)
+        .stdout(contains("Формат: proto"))
+        .stdout(contains("CD-P02"))
+        .stdout(contains("CD-P06"))
+        .stdout(contains("Итог: FAIL"));
+
+    // С --model: та же ломающая пара отдаёт потребителя и владельца.
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("contract-diff")
+        .arg(contracts.join("pay-old.proto").as_os_str())
+        .arg(contracts.join("pay-new.proto").as_os_str())
+        .arg("--model")
+        .arg(case.as_os_str());
+    cmd.assert()
+        .code(1)
+        .stdout(contains("Связь с моделью: INT-001"))
+        .stdout(contains("CMP-001 · Платёжный шлюз"))
+        .stdout(contains("OWNER-1 · Команда процессинга"));
+
+    // Не-breaking пара (добавлено поле) — exit 0.
+    let proto_v3 = proto_v1.replace(
+        "  optional string currency = 3;\n",
+        "  optional string currency = 3;\n  string trace_id = 4;\n",
+    );
+    std::fs::write(contracts.join("pay-v3.proto"), proto_v3).expect("v3");
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("contract-diff")
+        .arg(contracts.join("pay-old.proto").as_os_str())
+        .arg(contracts.join("pay-v3.proto").as_os_str())
+        .arg("--json");
+    let out = cmd.assert().success();
+    let json: serde_json::Value =
+        serde_json::from_slice(&out.get_output().stdout).expect("stdout — валидный JSON");
+    assert_eq!(json["passed"], true);
+    assert_eq!(json["format"], "proto");
+    assert_eq!(json["breaking"], 0);
+
+    // Неизвестный формат — ошибка clap-края (exit 2) или anyhow (exit 1).
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("contract-diff")
+        .arg(contracts.join("pay-old.proto").as_os_str())
+        .arg(contracts.join("pay-new.proto").as_os_str())
+        .arg("--format")
+        .arg("xml");
+    cmd.assert().failure();
+}

@@ -206,6 +206,29 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Дифф двух версий контракта на ломающие изменения (бэклог волны 3,
+    /// п.14): `OpenAPI` 3.x (CD-001..CD-007), protobuf/gRPC (.proto),
+    /// Avro (.avsc), JSON Schema топиков, DDL-миграции (.sql). Ломающее
+    /// изменение — exit 1 (гейт для CI). С `--model` (корень кейса с
+    /// model/) ломающий дифф сразу возвращает потребителей и владельцев
+    /// по полю `contract` у INT (ADR-035).
+    ContractDiff {
+        /// Старая версия контракта (yaml/yml/json/proto/avsc/sql).
+        old: PathBuf,
+        /// Новая версия контракта (тот же формат).
+        new: PathBuf,
+        /// Формат: auto (детектор, дефолт) | openapi | proto | avro |
+        /// jsonschema | ddl.
+        #[arg(long, default_value = "auto")]
+        format: String,
+        /// Корень кейса с model/ — секция impact (потребители/владельцы
+        /// ломаемого контракта, ADR-035).
+        #[arg(long)]
+        model: Option<PathBuf>,
+        /// Машиночитаемый вывод: JSON-отчёт (passed + findings + impact).
+        #[arg(long)]
+        json: bool,
+    },
     /// Реестр ADR: глобальная агрегация решений по набору проектов (ADR-036).
     Adr {
         #[command(subcommand)]
@@ -1544,6 +1567,39 @@ async fn main() -> Result<()> {
             }
         }
         Some(Cmd::Publish { cmd }) => cmd_publish(cmd)?,
+        Some(Cmd::ContractDiff {
+            old,
+            new,
+            format,
+            model,
+            json,
+        }) => {
+            let format = match format.trim() {
+                "auto" => None,
+                other => Some(
+                    arch_harness::contract_diff::ContractFormat::from_name(other)
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "неизвестный формат '{other}' (допустимы: auto, openapi, proto, avro, jsonschema, ddl)"
+                            )
+                        })?,
+                ),
+            };
+            let report =
+                arch_harness::contract_diff::diff_report(&old, &new, format, model.as_deref())?;
+            if json {
+                let verdict = arch_harness::contract_diff::report_json(&report);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&verdict).unwrap_or_else(|_| verdict.to_string())
+                );
+            } else {
+                print!("{}", arch_harness::contract_diff::render_report(&report));
+            }
+            if report.has_breaking() {
+                std::process::exit(1);
+            }
+        }
         Some(Cmd::Model { cmd }) => cmd_model(cmd)?,
         Some(Cmd::Trace { cmd }) => cmd_trace(cmd)?,
         Some(Cmd::Nfr { cmd }) => cmd_nfr(cmd)?,

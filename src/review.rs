@@ -574,6 +574,19 @@ fn rule_cards(case: &Path) -> Option<BTreeMap<String, (String, Option<String>)>>
     Some(cards)
 }
 
+/// Загружает модель кейса (`<case>/model/`) с честной ошибкой при
+/// отсутствии каталога.
+fn load_case_model(case: &Path) -> Result<Model> {
+    let model_dir = case.join("model");
+    if !model_dir.is_dir() {
+        return Err(HarnessError::Model(format!(
+            "нет каталога модели {} — обходу нечего читать",
+            model_dir.display()
+        )));
+    }
+    load_model(&model_dir)
+}
+
 /// Обход «что я задену»: от `id` (сущность модели) или `paths` (файлы →
 /// CMP по `code_roots`) транзитивно по всем видам связей в обе стороны.
 ///
@@ -586,14 +599,8 @@ fn rule_cards(case: &Path) -> Option<BTreeMap<String, (String, Option<String>)>>
 /// Нет каталога `model/`; модель не разбирается; не заданы ни `id`, ни
 /// `paths`; `id` неизвестен модели.
 pub fn change_impact(case: &Path, id: Option<&str>, paths: &[String]) -> Result<ImpactReport> {
-    let model_dir = case.join("model");
-    if !model_dir.is_dir() {
-        return Err(HarnessError::Model(format!(
-            "change_impact: нет каталога модели {} — обходу нечего читать",
-            model_dir.display()
-        )));
-    }
-    let model = load_model(&model_dir)?;
+    let model =
+        load_case_model(case).map_err(|e| HarnessError::Model(format!("change_impact: {e}")))?;
     if id.is_none() && paths.is_empty() {
         return Err(HarnessError::Model(
             "change_impact: задайте источник — id сущности или paths файлов".to_string(),
@@ -628,7 +635,46 @@ pub fn change_impact(case: &Path, id: Option<&str>, paths: &[String]) -> Result<
             gaps.join(", ")
         )));
     }
+    Ok(impact_core(case, &model, seeds, gaps))
+}
 
+/// Обход от нескольких сущностей-источников сразу (используется связкой
+/// `contract_diff --model`: все INT, чьё поле `contract` совпало с путём
+/// диффа — ломающее изменение сразу возвращает потребителей и владельцев).
+///
+/// # Errors
+/// Нет каталога `model/`; модель не разбирается; список пуст; какой-то из
+/// ID неизвестен модели.
+pub fn impact_from_ids(case: &Path, ids: &[String]) -> Result<ImpactReport> {
+    let model =
+        load_case_model(case).map_err(|e| HarnessError::Model(format!("impact_from_ids: {e}")))?;
+    if ids.is_empty() {
+        return Err(HarnessError::Model(
+            "impact_from_ids: пустой список источников".to_string(),
+        ));
+    }
+    let mut seeds: BTreeSet<String> = BTreeSet::new();
+    for raw in ids {
+        let clean = raw.trim();
+        if model.get(clean).is_none() {
+            return Err(HarnessError::Model(format!(
+                "impact_from_ids: сущность '{clean}' не найдена (всего сущностей: {})",
+                model.entities.len()
+            )));
+        }
+        seeds.insert(clean.to_string());
+    }
+    Ok(impact_core(case, &model, seeds, Vec::new()))
+}
+
+/// Ядро обхода: BFS от `seeds` по ненаправленной смежности модели + сборка
+/// отчёта (сущности по типам, правила C-NNN, контракты INT, владельцы).
+fn impact_core(
+    case: &Path,
+    model: &Model,
+    seeds: BTreeSet<String>,
+    gaps: Vec<String>,
+) -> ImpactReport {
     // Ненаправленная смежность: исходящие связи + обратные ссылки, только
     // между существующими сущностями (битые ссылки — забота validate).
     let mut adjacency: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
@@ -740,7 +786,7 @@ pub fn change_impact(case: &Path, id: Option<&str>, paths: &[String]) -> Result<
     if !gaps.is_empty() {
         let _ = write!(summary, "; путей без CMP-покрытия (gap): {}", gaps.len());
     }
-    Ok(ImpactReport {
+    ImpactReport {
         case: case.to_path_buf(),
         seeds: seeds.into_iter().collect(),
         gaps,
@@ -749,7 +795,7 @@ pub fn change_impact(case: &Path, id: Option<&str>, paths: &[String]) -> Result<
         contracts,
         owners,
         summary,
-    })
+    }
 }
 
 /// Текстовый рендер отчёта обхода: источники, gaps, сущности по типам,
