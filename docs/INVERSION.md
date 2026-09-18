@@ -19,8 +19,11 @@
 - **`archify_show`/`archify_compare`/`reverse_survey`** — в `--rw`, а не в
   read-only: они атомарно пишут файлы, называть их read-only было бы ложью
   клиенту.
-- **`nfr`/`delta`/`evidence`** — CLI-only (нет Tool-реализаций): доступны
-  хукам и командной строкой, в MCP не мостятся.
+- **`nfr`/`delta`/`evidence`** больше не CLI-only (транш 1, 2026-09-18):
+  появились Tool-реализации (`nfr_check`, `model_validate`, `delta_guard`,
+  `evidence_verify` — read-only мост; `evidence_pack`, `delta_propose` —
+  под `--rw`) с JSON-вердиктом `passed`/`issues`/`summary` и политикой
+  R-уровней.
 - **never-список** шире планового: кроме `bash`/`write_file`/`harness_run`
   наружу не отдаются также `read_file`/`glob`/`grep`/скриншоты/`subagent_*`/
   `ralph_*`/`worktree_new`/`web_*` — это всё принадлежит хосту.

@@ -199,7 +199,8 @@ fn handshake_then_tools_list_over_stdio() {
         assert!(names.contains(&want), "нет инструмента {want}: {names:?}");
     }
     // Split-judge (механический судья без LLM) и read-only мост реестра
-    // (детерминированный контур) тоже в списке read-only режима.
+    // (детерминированный контур + верификаторы транша 1 инверсии) тоже
+    // в списке read-only режима.
     for want in [
         "rubric_prompt",
         "rubric_verify",
@@ -211,13 +212,17 @@ fn handshake_then_tools_list_over_stdio() {
         "archify_validate",
         "rubric_list",
         "plugin_list",
+        "nfr_check",
+        "model_validate",
+        "delta_guard",
+        "evidence_verify",
     ] {
         assert!(names.contains(&want), "нет инструмента {want}: {names:?}");
     }
     assert_eq!(
         tools.len(),
-        21,
-        "ровно 21 инструмент в ro-режиме (13 ручных + 8 read-only моста)"
+        25,
+        "ровно 25 инструментов в ro-режиме (13 ручных + 12 read-only моста)"
     );
     // rw-контур и write/exec-принадлежность хоста закрыты в ro-режиме.
     for banned in [
@@ -225,6 +230,8 @@ fn handshake_then_tools_list_over_stdio() {
         "adr_new",
         "agentsmd_generate",
         "skill_distill",
+        "evidence_pack",
+        "delta_propose",
         "bash",
         "write_file",
         "harness_run",
@@ -681,8 +688,11 @@ fn rw_mode_lists_bridge_write_tools_over_stdio() {
         "skill_distill",
         "reverse_survey",
         "archify_deliver",
+        "evidence_pack",
+        "delta_propose",
         // read-only мост остаётся доступен и под --rw:
         "openapi_lint",
+        "nfr_check",
         "rubric_prompt",
     ];
     #[cfg(not(feature = "harness"))]
@@ -691,7 +701,10 @@ fn rw_mode_lists_bridge_write_tools_over_stdio() {
         "agentsmd_generate",
         "reverse_survey",
         "archify_deliver",
+        "evidence_pack",
+        "delta_propose",
         "openapi_lint",
+        "nfr_check",
         "rubric_prompt",
     ];
     for want in rw_want {
@@ -768,6 +781,118 @@ fn bridge_openapi_lint_call_over_stdio() {
     );
     // text-часть моста — сырой вывод инструмента (не JSON-обёртка).
     assert_eq!(result["content"][0]["text"].as_str().expect("text"), output);
+}
+
+/// Фикстура кейса NFR: `model/` с INT-hop'ом (бюджет `hop_budget_ms`) и NFR
+/// с целью p99 `target_ms` (образец — `tests/cli.rs::nfr_budget_case`).
+fn nfr_case_fixture(home: &Path, name: &str, target_ms: u32, hop_budget_ms: Option<u32>) -> String {
+    let case = home.join(name);
+    let model = case.join("model");
+    std::fs::create_dir_all(&model).expect("mkdir model");
+    let budget = hop_budget_ms.map_or(String::new(), |b| format!("latency_budget_ms: {b}\n"));
+    std::fs::write(
+        model.join("INT-001-hop.md"),
+        format!("---\nid: INT-001\ntype: int\ntitle: Hop\nstatus: accepted\n{budget}---\n"),
+    )
+    .expect("write INT");
+    std::fs::write(
+        model.join("NFR-001-lat.md"),
+        format!(
+            "---\nid: NFR-001\ntype: nfr\ntitle: Latency\nstatus: accepted\n\
+             verification: histogram\np99_target_ms: {target_ms}\naffects: [INT-001]\n---\n"
+        ),
+    )
+    .expect("write NFR");
+    case.display().to_string()
+}
+
+/// Транш 1 инверсии: `nfr_check` по NDJSON возвращает JSON-вердикт
+/// passed/issues/summary в `structuredContent.output` (мостовой вызов,
+/// без bash у агента). Зелёный кейс — passed, превышение бюджета — FAIL
+/// с виновным hop'ом в находке.
+#[test]
+fn bridge_nfr_check_verdict_over_stdio() {
+    let home = tempfile::tempdir().expect("tmp");
+    let ok_case = nfr_case_fixture(home.path(), "nfr-ok", 2000, Some(800));
+    let bad_case = nfr_case_fixture(home.path(), "nfr-bad", 2000, Some(3000));
+    let responses = mcp_serve(
+        home.path(),
+        &batch(&[
+            call(1, "nfr_check", &json!({"path": ok_case, "kind": "all"})),
+            call(2, "nfr_check", &json!({"path": bad_case, "kind": "budget"})),
+            // Кейса без model/ — доменный сбой: isError, не protocol error.
+            call(3, "nfr_check", &json!({"path": home.path().join("ghost")})),
+        ]),
+    );
+    let verdict = structured(&responses[0], 1);
+    assert_eq!(verdict["tool"], "nfr_check");
+    let output: Value = serde_json::from_str(verdict["output"].as_str().expect("output"))
+        .expect("output — JSON-вердикт {passed, issues, summary}");
+    assert_eq!(output["passed"], true, "{output}");
+    assert_eq!(
+        output["checks"],
+        json!(["budget", "availability", "capacity", "cost"])
+    );
+
+    let verdict = structured(&responses[1], 2);
+    let output: Value =
+        serde_json::from_str(verdict["output"].as_str().expect("output")).expect("JSON-вердикт");
+    assert_eq!(output["passed"], false, "{output}");
+    let issue = &output["issues"][0];
+    assert_eq!(issue["rule"], "budget-exceeded");
+    assert!(
+        issue["message"]
+            .as_str()
+            .expect("message")
+            .contains("INT-001=3000"),
+        "виновный hop в находке: {issue}"
+    );
+
+    assert_eq!(responses[2]["result"]["isError"], true);
+    assert!(responses[2].get("error").is_none());
+}
+
+/// Транш 1 инверсии, rw-контур: `delta_propose` недоступен в ro-режиме
+/// (-32602), под `--rw` создаёт скелет дельты мостовым вызовом.
+#[test]
+fn bridge_delta_propose_rw_only_over_stdio() {
+    let home = tempfile::tempdir().expect("tmp");
+    let repo = home.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("mkdir repo");
+    let repo_str = repo.display().to_string();
+    // ro-режим: инструмент закрыт, ничего не создаётся.
+    let responses = mcp_serve(
+        home.path(),
+        &batch(&[call(
+            1,
+            "delta_propose",
+            &json!({"name": "saga-pilot", "path": repo_str}),
+        )]),
+    );
+    assert_eq!(responses[0]["error"]["code"], -32602);
+    assert!(!repo.join("changes/saga-pilot/DELTA.md").exists());
+    // rw-режим: скелет создан, вердикт — JSON в output моста.
+    let responses = mcp_serve_with_args(
+        home.path(),
+        &["--rw"],
+        &batch(&[call(
+            1,
+            "delta_propose",
+            &json!({"name": "saga-pilot", "path": repo_str}),
+        )]),
+    );
+    let verdict = structured(&responses[0], 1);
+    assert_eq!(verdict["tool"], "delta_propose");
+    let output: Value =
+        serde_json::from_str(verdict["output"].as_str().expect("output")).expect("JSON-вердикт");
+    assert!(
+        output["created"]
+            .as_str()
+            .expect("created")
+            .ends_with("changes/saga-pilot/DELTA.md"),
+        "{output}"
+    );
+    assert!(repo.join("changes/saga-pilot/DELTA.md").is_file());
 }
 
 #[test]

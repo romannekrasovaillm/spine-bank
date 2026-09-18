@@ -54,6 +54,10 @@
 | `spine_lint` | Линтер инвариантов спайна (Binds/Prevents/Rule) |
 | `fitness_check` | Машинно-проверяемые утверждения о репозитории (CONSTRAINTS.yaml) |
 | `model_query` | Запрос к типизированной модели архитектуры (`model/`) |
+| `model_validate` | Ссылочная целостность модели (битая ссылка/дубль/цикл — error) — JSON-вердикт |
+| `nfr_check` | Количественные NFR: бюджет latency, доступность, ёмкость, стоимость — JSON-вердикт |
+| `delta_guard` / `delta_propose` | Гейт прямых правок спайна мимо дельты / скелет новой дельты |
+| `evidence_verify` / `evidence_pack` | Проверка / сборка Evidence Bundle (полнота + хэши) |
 | `trace_check` | Покрытие трассируемости REQ → NFR → AD/ADR → CMP → правило |
 | `rubric_list` / `rubric_evaluate` / `rubric_generate` | Якорные/динамические рубрики с evidence-судьёй |
 | `mermaid_render` | Проверка диаграммы (flowchart, sequence, erDiagram, C4) до включения в документ |
@@ -200,6 +204,12 @@ Archify CLI (`schemaVersion: 1`) — точка машинного потреб�
 | `adr_new` | ADR по шаблону AI-DLC в `docs/adr/` (очередной номер, kebab-title) | `title`* |
 | `spine_lint` | Линтер ARCHITECTURE-SPINE.md: дубли AD-id, пустые Binds/Prevents/Rule, заглушки, непиннутые версии | `path`* |
 | `fitness_check` | Fitness functions из CONSTRAINTS.yaml по репозиторию → PASS/FAIL с находками `file:line` | `repo`*; `constraints` (путь к YAML, иначе `<repo>/.arch-handoff/CONSTRAINTS.yaml`) |
+| `model_validate` | Ссылочная целостность модели (`model/`, ADR-003): битая ссылка / дубль ID / цикл `depends_on` — error; ADR без CMP, NFR без проверки, QAS без сценария — warn. Ответ — JSON `{passed, issues, summary}` (мост в MCP, read-only) | `dir` (каталог модели, по умолчанию `model`) |
+| `nfr_check` | Количественные NFR поверх модели (ADR-007): `budget` (сумма бюджетов hop'ов INT против p99), `availability` (композиция против SLA + RTO/RPO), `capacity` (RPS против ёмкости), `cost` (TCO + цена выхода); `all` — все четыре. Ответ — JSON `{passed, issues (с виновными hop'ами/звеньями), summary}` (мост в MCP, read-only) | `path`* (корень кейса — каталог с `model/`); `kind` (вид проверки, по умолчанию `all`) |
+| `delta_guard` | Гейт прямых правок спайна мимо дельты (модель 5.2): изменённые защищённые файлы (дефолт `model/`, `ARCHITECTURE-SPINE.md`, `CONSTRAINTS.yaml`) обязаны упоминаться в активной дельте. Ответ — JSON `{passed, violations, covered, summary}` (мост в MCP, read-only) | `path` (репозиторий, по умолчанию `.`); `base` (база diff, по умолчанию HEAD); `protect` (список, заменяет дефолт) |
+| `delta_propose` | Скелет дельты `changes/<name>/DELTA.md` (Проблема / ADDED / MODIFIED / REMOVED / План отката / Критерии приёмки). **Пишущий** (политика — Mutating; в MCP — только под `--rw`) | `name`* (kebab-case); `path` (репозиторий, по умолчанию `.`) |
+| `evidence_verify` | Проверка Evidence Bundle (`EVIDENCE.yaml`): полнота по профилю маршрута + целостность хэшей. Ответ — JSON `{passed, issues (missing/tampered), summary}` (мост в MCP, read-only) | `change_dir`* |
+| `evidence_pack` | Сборка Evidence Bundle: манифест `EVIDENCE.yaml` с хэшами артефактов по профилю маршрута. **Пишущий** (политика — Mutating; в MCP — только под `--rw`) | `change_dir`*; `route` (`fast`/`standard`/`critical`, по умолчанию `standard`) |
 | `openapi_lint` | Линтер контрактов OpenAPI 3.x (walking skeleton, ADR-015): semver `info.version` (OA-001), версионный префикс путей `/v<число>/` (OA-002), `Idempotency-Key` на mutating-операциях (OA-003), ошибки 4xx/5xx/default с `application/problem+json` по RFC 7807 (OA-004), `operationId` (OA-005). YAML и JSON, без `$ref`-резолюции (Deferred) | `path`* — файл контракта (yaml/yml/json) |
 | `asyncapi_lint` | Линтер контрактов AsyncAPI 2.x/3.x (walking skeleton, ADR-015): semver `info.version` (AA-001), message/messages у операций (AA-002), payload-схема сообщений (AA-003), стабильный id события (`messageId`/`x-message-id`/`key`) на publish/send для идемпотентности потребителя (AA-004), наличие `servers` и каналов/операций (AA-005). YAML и JSON, без `$ref`-резолюции и trait-полей (Deferred) | `path`* — файл контракта (yaml/yml/json) |
 | `contract_diff` | Сравнение двух версий контракта OpenAPI 3.x на breaking changes (walking skeleton, ADR-015): удалённые пути (CD-001), операции (CD-002), обязательные параметры / ставшие required (CD-003), коды ответов (CD-004), смена типов полей схем (CD-006); добавленные пути/операции/необязательные параметры/коды ответов (CD-005, non-breaking). YAML и JSON, без `$ref`-резолюции и глубокой рекурсии (Deferred) | `old`*, `new`* — пути к старой и новой версиям контракта (yaml/yml/json) |

@@ -75,6 +75,12 @@ fn domain_tools(cfg: &Config) -> Vec<Arc<dyn Tool>> {
     out.extend(crate::contract_diff::tools());
     out.extend(crate::model::tools());
     out.extend(crate::trace::tools());
+    // Количественные NFR, дельта-протокол и evidence-бандлы (транш 1
+    // инверсии — read-only верификаторы + пишущие pack/propose; мост MCP
+    // отдаёт их по белым спискам `mcp_server.rs`).
+    out.extend(crate::nfr::tools());
+    out.extend(crate::delta::tools());
+    out.extend(crate::evidence::tools());
     // Домены агентного цикла — только в сборке `harness` (инверсия, шаг 4):
     // кодовые харнессы, субагенты, ralph, worktree, дистилляция скиллов.
     #[cfg(feature = "harness")]
@@ -116,10 +122,16 @@ mod tests {
             "archify_show",
             "archify_compare",
             "model_query",
+            "model_validate",
             "trace_check",
             "openapi_lint",
             "asyncapi_lint",
             "contract_diff",
+            "nfr_check",
+            "delta_guard",
+            "delta_propose",
+            "evidence_verify",
+            "evidence_pack",
         ] {
             assert!(
                 names.iter().any(|n| n == expected),

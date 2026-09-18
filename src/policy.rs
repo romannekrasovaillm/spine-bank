@@ -110,7 +110,7 @@ pub fn classify_tool(tool: &str, args: &serde_json::Value) -> RiskClass {
             classify_bash(cmd)
         }
         "write_file" | "edit_file" | "adr_new" | "handoff_create" | "harness_run"
-        | "agentsmd_generate" => RiskClass::Mutating,
+        | "agentsmd_generate" | "evidence_pack" | "delta_propose" => RiskClass::Mutating,
         _ => RiskClass::ReadOnly,
     }
 }
@@ -238,6 +238,40 @@ mod tests {
                 .check("write_file", &serde_json::json!({})),
             PolicyDecision::RequireConfirm(_)
         ));
+    }
+
+    #[test]
+    fn bridge_write_tools_of_tranche1_are_mutating() {
+        // Пишущие доменные инструменты (evidence pack, создание дельты) —
+        // Mutating, как adr_new: авто с R2, подтверждение человека на R0/R1.
+        let p = Policy::default();
+        for tool in ["evidence_pack", "delta_propose"] {
+            assert_eq!(
+                classify_tool(tool, &serde_json::json!({})),
+                RiskClass::Mutating,
+                "{tool}"
+            );
+            assert_eq!(p.check(tool, &serde_json::json!({})), PolicyDecision::Allow);
+            assert!(matches!(
+                Policy::parse("R1")
+                    .expect("R1")
+                    .check(tool, &serde_json::json!({})),
+                PolicyDecision::RequireConfirm(_)
+            ));
+        }
+        // Read-only верификаторы транша — ReadOnly.
+        for tool in [
+            "nfr_check",
+            "model_validate",
+            "delta_guard",
+            "evidence_verify",
+        ] {
+            assert_eq!(
+                classify_tool(tool, &serde_json::json!({})),
+                RiskClass::ReadOnly,
+                "{tool}"
+            );
+        }
     }
 
     #[test]

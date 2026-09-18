@@ -135,10 +135,10 @@ evidence — см. `docs/control.md`), и при ненулевом коде в�
 ## 4. Режимы MCP-сервера
 
 ```bash
-arch-be mcp serve          # дефолт: строго read-only (20 инструментов)
+arch-be mcp serve          # дефолт: строго read-only (25 инструментов)
 arch-be mcp serve --rw     # + записывающие: handoff_create, adr_new,
                            #   agentsmd_generate, skill_distill, archify_*,
-                           #   reverse_survey
+                           #   reverse_survey, evidence_pack, delta_propose
 ```
 
 Инструменты хоста за файлы и shell отвечают сами — `bash`, `write_file`,

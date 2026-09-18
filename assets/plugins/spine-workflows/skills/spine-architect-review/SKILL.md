@@ -15,12 +15,21 @@ description: Архитектурный разбор проекта через S
 2. **Модель**: `model_query {"dir": "model"}` (список) и
    `model_query {"dir": "model", "id": "CMP-001"}` (карточка). Следи за
    сиротами (сущности без связей) — это находки.
-3. **Трассировка**: `trace_check {"case": "."}` → цепочка
+3. **Целостность модели**: `model_validate {"dir": "model"}` → JSON-вердикт
+   (битая ссылка/дубль ID/цикл depends_on — error).
+4. **Трассировка**: `trace_check {"case": "."}` → цепочка
    REQ → NFR → AD/ADR → CMP → правило CONSTRAINTS. AD без правила и без
    `unverifiable` — error: предложи правило или явное обоснование.
-4. **Спайн**: `spine_lint {"path": "ARCHITECTURE-SPINE.md"}` — формат
+5. **Спайн**: `spine_lint {"path": "ARCHITECTURE-SPINE.md"}` — формат
    инвариантов.
-5. **AGENTS.md**: `agentsmd_lint {"repo": "."}` — свежесть канала инструкций.
+6. **AGENTS.md**: `agentsmd_lint {"repo": "."}` — свежесть канала инструкций.
+7. **Количественные NFR** (если у NFR-сущностей заполнены поля ADR-007):
+   `nfr_check {"path": ".", "kind": "all"}` → агрегат budget/availability/
+   capacity/cost с виновными hop'ами/звеньями в `issues`.
+8. **Дисциплина изменений** (если репозиторий git и ведутся дельты):
+   `delta_guard {"path": "."}` → правки спайна мимо `changes/*/DELTA.md`;
+   для активного change с бандлом — `evidence_verify {"change_dir":
+   "changes/<name>"}` (полнота по маршруту + целостность хэшей).
 
 ## Выдача архитектору
 

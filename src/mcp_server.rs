@@ -14,7 +14,7 @@
 //!   `--rw` (`arch-be mcp serve --rw`) дополнительно открывает белый список
 //!   аддитивных записей ([`BRIDGE_READ_WRITE`]: `handoff_create`, `adr_new`,
 //!   `agentsmd_generate`, `archify_deliver/show/compare`, `reverse_survey`,
-//!   `skill_distill`);
+//!   `skill_distill`, `evidence_pack`, `delta_propose`);
 //! - инструменты — два слоя. РУЧНЫЕ (оттестированная поверхность ADR-008):
 //!   контрольные `spine_lint`, `fitness_check`, `significance_score`,
 //!   `significance_from_diff` (маршрут из git-диффа, S-1 anti-bypass),
@@ -27,11 +27,15 @@
 //!   под `--rw`), не пересекающиеся с ручными, маршрутизируются в
 //!   [`crate::tools::full_registry`] (`dispatch` — с политикой R-уровней;
 //!   контекст БЕЗ LLM); спеки генерируются из `Tool::spec()`, annotations —
-//!   из членства в списке + [`crate::policy::classify_tool`]. В core-сборке
-//!   (без фичи `harness`) домены `harness`/`distill`/`subagent`/`ralph`/
-//!   `worktree`/`web` в реестре отсутствуют — мост их имена из белых списков
-//!   молча пропускает (спеки строятся от реестра), `handoff_create` и
-//!   `skill_distill` там недоступны;
+//!   из членства в списке + [`crate::policy::classify_tool`]. Транш 1
+//!   инверсии в мосте: `nfr_check`, `model_validate`, `delta_guard`,
+//!   `evidence_verify` (read-only верификаторы, JSON-вердикт
+//!   passed/issues/summary в тексте вывода) и под `--rw` — `evidence_pack`,
+//!   `delta_propose`. В core-сборке (без фичи `harness`) домены
+//!   `harness`/`distill`/`subagent`/`ralph`/`worktree`/`web` в реестре
+//!   отсутствуют — мост их имена из белых списков молча пропускает (спеки
+//!   строятся от реестра), `handoff_create` и `skill_distill` там
+//!   недоступны;
 //! - НИКОГДА не отдаются (даже под `--rw`) — [`BRIDGE_NEVER`]: write/exec/
 //!   веб/субагенты (`bash`, `read_file`/`write_file`/`edit_file`, `glob`,
 //!   `grep`, `propose_options`, `screenshot*`, `harness_run`, `subagent_*`,
@@ -112,7 +116,11 @@ const BRIDGE_READ_ONLY: &[&str] = &[
     "archify_validate",
     "asyncapi_lint",
     "contract_diff",
+    "delta_guard",
+    "evidence_verify",
     "fleet_audit",
+    "model_validate",
+    "nfr_check",
     "openapi_lint",
     "plugin_list",
     "rubric_list",
@@ -121,14 +129,18 @@ const BRIDGE_READ_ONLY: &[&str] = &[
 /// Дополнительный белый список режима `--rw` ([`ServeMode::ReadWrite`]):
 /// аддитивные записи в рабочий каталог клиента (handoff-пакет, новый ADR,
 /// AGENTS.md, HTML-артефакты Archify, карта обследования, дистиллированный
-/// скилл). `archify_*`/`skill_distill`/`reverse_survey` классифицируются
-/// политикой как `ReadOnly`, но пишут файлы — поэтому только под `--rw`.
+/// скилл, evidence-манифест, скелет дельты). `archify_*`/`skill_distill`/
+/// `reverse_survey` классифицируются политикой как `ReadOnly`, но пишут
+/// файлы — поэтому только под `--rw` (как и `evidence_pack`/`delta_propose`,
+/// для которых политика честно даёт `Mutating`).
 const BRIDGE_READ_WRITE: &[&str] = &[
     "adr_new",
     "agentsmd_generate",
     "archify_compare",
     "archify_deliver",
     "archify_show",
+    "delta_propose",
+    "evidence_pack",
     "handoff_create",
     "reverse_survey",
     "skill_distill",
@@ -426,7 +438,8 @@ impl McpServe {
                                          Детерминированный контур реестра (openapi_lint, \
                                          asyncapi_lint, contract_diff, fleet_audit, \
                                          agentsmd_lint, archify_validate, rubric_list, \
-                                         plugin_list) доступен напрямую; аргумент `cwd` — \
+                                         plugin_list, nfr_check, model_validate, delta_guard, \
+                                         evidence_verify) доступен напрямую; аргумент `cwd` — \
                                          рабочий каталог клиента для относительных путей. \
                                          Чтение знаний (read-only): kb_search — поиск по \
                                          базе знаний архитектора; skill_search/skill_load — \

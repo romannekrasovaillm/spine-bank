@@ -20,7 +20,7 @@
 //!   [`project`] — проекция `ADR-*` в `.arch-handoff/adr/`,
 //!   [`exchange`] — обмен с отраслевыми форматами (экспорт Structurizr
 //!   DSL/PlantUML/drawio, импорт Structurizr DSL; ADR-009);
-//! - инструмент агента: `model_query` ([`tools`]).
+//! - инструменты агента: `model_query`, `model_validate` ([`tools`]).
 
 pub mod exchange;
 pub mod graph;
@@ -246,10 +246,79 @@ pub fn card(model: &Model, e: &Entity) -> String {
     out
 }
 
-/// Инструменты домена: `model_query`.
+/// Инструменты домена: `model_query`, `model_validate`.
 #[must_use]
 pub fn tools() -> Vec<Arc<dyn Tool>> {
-    vec![Arc::new(ModelQueryTool)]
+    vec![Arc::new(ModelQueryTool), Arc::new(ModelValidateTool)]
+}
+
+/// Инструмент `model_validate`: ссылочная целостность модели —
+/// JSON-вердикт `{passed, issues, summary}` (мост в MCP, транш 1 инверсии).
+pub struct ModelValidateTool;
+
+#[derive(Debug, Deserialize)]
+struct ModelValidateArgs {
+    /// Каталог модели (дефолт `model`).
+    dir: Option<String>,
+}
+
+#[async_trait]
+impl Tool for ModelValidateTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "model_validate".into(),
+            description: "Ссылочная целостность типизированной модели архитектуры (каталог \
+                          model/, ADR-003): битая ссылка/дубль ID/цикл depends_on — error; \
+                          ADR без CMP, NFR без способа проверки, QAS с незаполненным сценарием \
+                          — warn. Ответ — JSON: passed + issues (severity/rule/file/message) + \
+                          summary; passed=false — основание отказать изменению"
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "dir": {"type": "string", "description": "Каталог модели (по умолчанию model)"}
+                }
+            }),
+        }
+    }
+
+    async fn call(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput> {
+        let args: ModelValidateArgs = match serde_json::from_value(args) {
+            Ok(a) => a,
+            Err(e) => {
+                return Ok(ToolOutput::err(format!(
+                    "model_validate: невалидные аргументы: {e}"
+                )));
+            }
+        };
+        let dir = ctx.resolve(args.dir.as_deref().unwrap_or("model"));
+        let model = match load_model(&dir) {
+            Ok(m) => m,
+            Err(e) => return Ok(ToolOutput::err(format!("model_validate: {e}"))),
+        };
+        let report = validate(&model);
+        let issues: Vec<Value> = report
+            .issues
+            .iter()
+            .map(|i| {
+                json!({
+                    "severity": i.severity.to_string(),
+                    "rule": i.rule,
+                    "file": i.file.display().to_string(),
+                    "message": i.message,
+                })
+            })
+            .collect();
+        let verdict = json!({
+            "tool": "model_validate",
+            "passed": !report.has_errors(),
+            "issues": issues,
+            "summary": report.summary(),
+        });
+        // Сериализация собранного объекта не падает; запасной вариант — компактная форма.
+        let text = serde_json::to_string_pretty(&verdict).unwrap_or_else(|_| verdict.to_string());
+        Ok(ToolOutput::ok(text))
+    }
 }
 
 /// Инструмент `model_query`: запрос сущностей и связей типизированной модели.
@@ -495,6 +564,51 @@ mod tests {
         // Несуществующий каталог — мягкая ошибка, не паника.
         let out = tool
             .call(json!({"dir": "ghost-model"}), &ctx)
+            .await
+            .expect("вызов");
+        assert!(out.is_error, "{}", out.content);
+    }
+
+    #[tokio::test]
+    async fn model_validate_clean_model_passes_broken_link_fails() {
+        let dir = tempfile::tempdir().expect("tmp");
+        fixture_model(dir.path());
+        let ctx = ToolContext::new(
+            dir.path().to_path_buf(),
+            Arc::new(crate::config::Config::default()),
+        );
+        let tool = ModelValidateTool;
+        let out = tool.call(json!({"dir": "."}), &ctx).await.expect("вызов");
+        assert!(!out.is_error, "{}", out.content);
+        let v: Value = serde_json::from_str(&out.content).expect("JSON-вердикт");
+        assert_eq!(v["passed"], true, "{v}");
+        assert!(
+            v["summary"]
+                .as_str()
+                .expect("summary")
+                .contains("Сущностей: 2")
+        );
+
+        // Битая ссылка: ADR внедряет несуществующий CMP → error, passed=false.
+        std::fs::write(
+            dir.path().join("ADR-002-bad.md"),
+            "---\nid: ADR-002\ntype: adr\ntitle: Битое\nstatus: Accepted\nimplements: [AD-1]\naffects: [CMP-999]\n---\n\nТело.\n",
+        )
+        .expect("фикстура битой ссылки");
+        let out = tool.call(json!({"dir": "."}), &ctx).await.expect("вызов");
+        let v: Value = serde_json::from_str(&out.content).expect("JSON-вердикт");
+        assert_eq!(v["passed"], false, "{v}");
+        let rules: Vec<&str> = v["issues"]
+            .as_array()
+            .expect("issues")
+            .iter()
+            .filter_map(|i| i["rule"].as_str())
+            .collect();
+        assert!(rules.contains(&"broken-link"), "{rules:?}");
+
+        // Несуществующий каталог — мягкая ошибка инструмента.
+        let out = tool
+            .call(json!({"dir": "ghost"}), &ctx)
             .await
             .expect("вызов");
         assert!(out.is_error, "{}", out.content);

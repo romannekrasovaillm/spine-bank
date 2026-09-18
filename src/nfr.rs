@@ -17,9 +17,16 @@
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use serde::Deserialize;
+use serde_json::{Value, json};
 
 use crate::error::{HarnessError, Result};
+use crate::llm::ToolSpec;
 use crate::model::{Entity, EntityKind, Model, Severity, load_model};
+use crate::tool::{Tool, ToolContext, ToolOutput};
 
 /// Максимум реплик параллельного участка: бóльшие значения не меняют
 /// доступность в f64 ((1−A)ⁿ сливается в 0), но защищают расчёт от
@@ -1000,6 +1007,137 @@ pub fn cost_check(case: &Path) -> Result<CostReport> {
     })
 }
 
+// ---------------------------------------------------------------------------
+// Агентный инструмент `nfr_check` (мост в MCP, транш 1 инверсии)
+// ---------------------------------------------------------------------------
+
+/// Инструменты домена: `nfr_check`.
+#[must_use]
+pub fn tools() -> Vec<Arc<dyn Tool>> {
+    vec![Arc::new(NfrCheckTool)]
+}
+
+/// Инструмент `nfr_check`: количественные NFR поверх модели кейса —
+/// JSON-вердикт `{passed, issues, summary}` (машиночитаемый контракт для
+/// MCP-моста: агент хоста получает verdict без вызова bash).
+pub struct NfrCheckTool;
+
+#[derive(Debug, Deserialize)]
+struct NfrCheckArgs {
+    /// Корень кейса (каталог с `model/`).
+    path: String,
+    /// Проверка: budget | availability | capacity | cost | all (дефолт all).
+    kind: Option<String>,
+}
+
+/// Находка NFR-проверки в JSON (с меткой проверки-источника).
+fn issue_json(check: &str, i: &NfrIssue) -> Value {
+    json!({
+        "check": check,
+        "severity": i.severity.to_string(),
+        "rule": i.rule,
+        "message": i.message,
+    })
+}
+
+#[async_trait]
+impl Tool for NfrCheckTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "nfr_check".into(),
+            description: "Количественные NFR поверх типизированной модели кейса (ADR-007): \
+                          budget (сумма latency-бюджетов hop'ов INT против цели p99), \
+                          availability (композиция доступности против SLA + RTO/RPO), \
+                          capacity (RPS-цель против ёмкости компонентов), cost (TCO и цена \
+                          выхода). kind=all — все четыре, агрегат. Ответ — JSON: passed + \
+                          issues (расхождения с виновными hop'ами/звеньями, поля check/\
+                          severity/rule/message) + summary; passed=false — основание отказать \
+                          изменению"
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Корень кейса (каталог с model/)"},
+                    "kind": {
+                        "type": "string",
+                        "description": "Проверка: budget | availability | capacity | cost | all (по умолчанию all — все четыре)",
+                        "enum": ["budget", "availability", "capacity", "cost", "all"]
+                    }
+                },
+                "required": ["path"]
+            }),
+        }
+    }
+
+    async fn call(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput> {
+        let args: NfrCheckArgs = match serde_json::from_value(args) {
+            Ok(a) => a,
+            Err(e) => {
+                return Ok(ToolOutput::err(format!(
+                    "nfr_check: невалидные аргументы: {e}"
+                )));
+            }
+        };
+        let case = ctx.resolve(&args.path);
+        let kind = args
+            .kind
+            .as_deref()
+            .unwrap_or("all")
+            .trim()
+            .to_ascii_lowercase();
+        let kinds: Vec<&str> = match kind.as_str() {
+            "all" => vec!["budget", "availability", "capacity", "cost"],
+            single @ ("budget" | "availability" | "capacity" | "cost") => vec![single],
+            other => {
+                return Ok(ToolOutput::err(format!(
+                    "nfr_check: неизвестный вид проверки '{other}' (допустимы: budget, \
+                     availability, capacity, cost, all)"
+                )));
+            }
+        };
+        let mut issues: Vec<Value> = Vec::new();
+        let mut errors = 0usize;
+        let mut warns = 0usize;
+        for name in &kinds {
+            // Отчёты проверок — разных типов; объединяет их только `issues`.
+            let found = match *name {
+                "budget" => budget_check(&case).map(|r| r.issues),
+                "availability" => availability_check(&case).map(|r| r.issues),
+                "capacity" => capacity_check(&case).map(|r| r.issues),
+                _ => cost_check(&case).map(|r| r.issues),
+            };
+            match found {
+                Ok(found) => {
+                    for i in &found {
+                        match i.severity {
+                            Severity::Error => errors += 1,
+                            Severity::Warn => warns += 1,
+                        }
+                    }
+                    issues.extend(found.iter().map(|i| issue_json(name, i)));
+                }
+                Err(e) => return Ok(ToolOutput::err(format!("nfr_check/{name}: {e}"))),
+            }
+        }
+        let passed = errors == 0;
+        let summary = format!(
+            "NFR ({kind}): проверок {}, находок {} (error: {errors}, warn: {warns})",
+            kinds.len(),
+            issues.len()
+        );
+        let verdict = json!({
+            "tool": "nfr_check",
+            "passed": passed,
+            "checks": kinds,
+            "issues": issues,
+            "summary": summary,
+        });
+        // Сериализация собранного объекта не падает; запасной вариант — компактная форма.
+        let text = serde_json::to_string_pretty(&verdict).unwrap_or_else(|_| verdict.to_string());
+        Ok(ToolOutput::ok(text))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1409,5 +1547,90 @@ mod tests {
         let a = budget_check(case).expect("отчёт").render();
         let b = budget_check(case).expect("отчёт").render();
         assert_eq!(a, b);
+    }
+
+    // --- инструмент nfr_check ----------------------------------------------
+
+    /// Тестовый контекст без LLM.
+    fn tool_ctx(case: &Path) -> ToolContext {
+        ToolContext::new(
+            case.to_path_buf(),
+            Arc::new(crate::config::Config::default()),
+        )
+    }
+
+    /// Разбирает JSON-вердикт из текстового вывода инструмента.
+    fn verdict_json(out: &ToolOutput) -> Value {
+        assert!(!out.is_error, "{}", out.content);
+        serde_json::from_str(&out.content).expect("вывод nfr_check — JSON-вердикт")
+    }
+
+    #[tokio::test]
+    async fn nfr_check_all_passes_converging_case() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let case = tmp.path();
+        int(case, 1, Some(800.0));
+        nfr(case, 1, "p99_target_ms: 2000\n", "INT-001");
+        let out = NfrCheckTool
+            .call(json!({"path": "."}), &tool_ctx(case))
+            .await
+            .expect("вызов");
+        let v = verdict_json(&out);
+        assert_eq!(v["passed"], true, "{v}");
+        assert_eq!(
+            v["checks"],
+            json!(["budget", "availability", "capacity", "cost"])
+        );
+        assert!(
+            v["summary"]
+                .as_str()
+                .expect("summary")
+                .contains("NFR (all)")
+        );
+    }
+
+    #[tokio::test]
+    async fn nfr_check_budget_fails_with_guilty_hops_in_issues() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let case = tmp.path();
+        int(case, 1, Some(3000.0));
+        nfr(case, 1, "p99_target_ms: 2000\n", "INT-001");
+        let out = NfrCheckTool
+            .call(json!({"path": ".", "kind": "budget"}), &tool_ctx(case))
+            .await
+            .expect("вызов");
+        let v = verdict_json(&out);
+        assert_eq!(v["passed"], false, "{v}");
+        let issue = &v["issues"][0];
+        assert_eq!(issue["rule"], "budget-exceeded");
+        assert_eq!(issue["check"], "budget");
+        // Виновный hop — в машиночитаемой находке (DoD P1-1 сохранён в MCP).
+        assert!(
+            issue["message"]
+                .as_str()
+                .expect("msg")
+                .contains("INT-001=3000")
+        );
+    }
+
+    #[tokio::test]
+    async fn nfr_check_bad_kind_and_missing_model_are_soft_errors() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let out = NfrCheckTool
+            .call(
+                json!({"path": ".", "kind": "latency"}),
+                &tool_ctx(tmp.path()),
+            )
+            .await
+            .expect("вызов");
+        assert!(out.is_error, "{}", out.content);
+        assert!(out.content.contains("неизвестный вид"), "{}", out.content);
+        // Кейса без model/ — мягкая ошибка, не паника.
+        let out = NfrCheckTool
+            .call(json!({"path": "."}), &tool_ctx(tmp.path()))
+            .await
+            .expect("вызов");
+        assert!(out.is_error, "{}", out.content);
+        assert!(out.content.contains("model"), "{}", out.content);
     }
 }

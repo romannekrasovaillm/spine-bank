@@ -107,10 +107,21 @@ exit 2, stderr уходит агенту; строки вывода хук не 
 Мостовые read-only инструменты реестра (спеки — из `Tool::spec()`, плюс
 опциональный `cwd`): `openapi_lint` (`path`), `asyncapi_lint` (`path`),
 `contract_diff`, `fleet_audit`, `agentsmd_lint` (`repo`),
-`archify_validate` (`type`, `path`), `rubric_list`, `plugin_list`.
+`archify_validate` (`type`, `path`), `rubric_list`, `plugin_list`,
+`nfr_check` (`path`, `kind`), `model_validate` (`dir`),
+`delta_guard` (`path`, `base`, `protect`), `evidence_verify` (`change_dir`).
 Под `--rw` добавляются: `handoff_create`, `adr_new`, `agentsmd_generate`,
 `skill_distill`, `archify_deliver`, `archify_show`, `archify_compare`,
-`reverse_survey` (у mutating-инструментов `readOnlyHint: false`).
+`reverse_survey`, `evidence_pack` (`change_dir`, `route`),
+`delta_propose` (`name`, `path`) (у mutating-инструментов `readOnlyHint:
+false`; `evidence_pack`/`delta_propose` политика R-уровней классифицирует
+как `Mutating` — авто с R2, на R0/R1 вызов отклоняется с пояснением).
+
+Верификаторы транша 1 (`nfr_check`, `model_validate`, `delta_guard`,
+`evidence_verify`) возвращают в `content[0].text` (и в
+`structuredContent.output` моста) JSON-вердикт `{passed, issues, summary}` —
+тот же контракт, что у ручных контрольных инструментов: `passed: false` —
+основание отказать изменению, перечислив находки.
 
 Чтение знаний (транш T4, ADR-015; все — read-only, без verdict `passed`):
 
