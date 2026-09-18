@@ -218,10 +218,12 @@ pub async fn run_harness(
             }
         }
     }
-    cmd.envs(&cfg.env)
-        // Своя процессная группа: убивать будем группу целиком.
-        .process_group(0)
-        .kill_on_drop(true)
+    cmd.envs(&cfg.env);
+    // Своя процессная группа: убивать будем группу целиком (unix; на
+    // остальных ОС дерева нет — kill_on_drop добирает только сам процесс).
+    #[cfg(unix)]
+    cmd.process_group(0);
+    cmd.kill_on_drop(true)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     if stdin_data.is_some() {
@@ -414,8 +416,10 @@ fn auto_commit_leftovers(repo: &Path, harness: &str, task: &str) -> Option<AutoC
 
 /// Мягко, затем жёстко завершает процессную группу `pid` (TERM → 3 с → KILL).
 /// Убивает и дочерние процессы харнесса — сирот после таймаута не остаётся.
+/// Вне unix (где `process_group` не ставился) завершает только сам процесс —
+/// дерево процессов там не создавалось.
 async fn kill_process_group(pid: u32, child: &mut tokio::process::Child) {
-    if pid > 0 {
+    if pid > 0 && cfg!(unix) {
         // kill из coreutils есть всегда; unsafe/libc запрещены линтом проекта.
         // ВАЖНО: разделитель `--` обязателен — procps `/bin/kill -TERM -PGID`
         // без него молча (rc=0!) трактует отрицательное число как опцию и
@@ -433,7 +437,8 @@ async fn kill_process_group(pid: u32, child: &mut tokio::process::Child) {
             .args(["-KILL", "--", &format!("-{pid}")])
             .status();
     } else {
-        // pgid неизвестен (теоретический случай) — хотя бы самого ребёнка.
+        // pgid неизвестен (теоретический случай) или ОС без процессных групп —
+        // хотя бы самого ребёнка.
         let _ = child.kill().await;
         return;
     }
