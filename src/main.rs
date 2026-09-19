@@ -1910,6 +1910,7 @@ async fn main() -> Result<()> {
                 apply_global,
                 dry_run,
                 home: dirs::home_dir(),
+                plugins_dirs: cfg.plugins.dirs.clone(),
             };
             let report = arch_harness::connect::connect(&opts)?;
             print!("{}", arch_harness::connect::render_report(&opts, &report));
