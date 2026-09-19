@@ -724,55 +724,204 @@ pub fn recommended_timeout_secs(repo: &Path) -> Option<u64> {
 }
 
 /// Компилирует epic-context из спецификаций: заголовок с датой и источниками,
-/// далее — сжатые рендеры спек; итог усечён до [`EPIC_CONTEXT_MAX_CHARS`].
+/// далее — сжатые рендеры спек; итог удерживается в [`EPIC_CONTEXT_MAX_CHARS`].
 ///
 /// Глубина адаптивная: прочие секции рендерятся по [`DEPTH_SHALLOW`] абзацев,
 /// но если контекст недобирает до [`EPIC_CONTEXT_MIN_CHARS`] (низ окна рубрики
 /// `handoff_quality`, ~800 токенов), спеки перерендериваются глубже
 /// ([`DEPTH_DEEP`]) — «реализация без доступа к источникам» требует массы.
 ///
+/// При переполнении работает лесенка деградации (дефект A2 живого эксперимента:
+/// тупое усечение по символам обрезало инвариант AD-010 на полуслове):
+/// DEEP → SHALLOW (если мелкий рендер в окне рубрики) → прозаические секции
+/// с хвоста сокращаются до заголовков → прозаические секции с хвоста
+/// выкидываются целиком. **ADR-блоки spine (секции с полями Binds/Prevents/
+/// Rule) не режутся никогда** — ценой превышения лимита, если документ
+/// состоит из одних инвариантов. Сноска об усечении перечисляет сокращённые
+/// и выкинутые секции поимённо.
+///
 /// # Errors
 /// Спека не читается.
 fn compile_epic_context(spec_files: &[PathBuf]) -> Result<String> {
-    let mut out = render_epic(spec_files, DEPTH_SHALLOW)?;
-    if out.chars().count() < EPIC_CONTEXT_MIN_CHARS {
-        out = render_epic(spec_files, DEPTH_DEEP)?;
+    let mut depth = ProseDepth::Paragraphs(DEPTH_SHALLOW);
+    let mut render = render_epic_structured(spec_files, depth)?;
+    if render.chars_len() < EPIC_CONTEXT_MIN_CHARS {
+        depth = ProseDepth::Paragraphs(DEPTH_DEEP);
+        render = render_epic_structured(spec_files, depth)?;
     }
-    if out.chars().count() > EPIC_CONTEXT_MAX_CHARS {
-        let notice = "\n\n> **Контекст усечён** до 6000 символов; полные тексты — в файлах-источниках (см. MANIFEST.json).\n";
-        let keep = EPIC_CONTEXT_MAX_CHARS.saturating_sub(notice.chars().count());
-        let truncated: String = out.chars().take(keep).collect();
-        out = truncated;
-        out.push_str(notice);
+    if render.chars_len() <= EPIC_CONTEXT_MAX_CHARS {
+        return Ok(render.assemble(None));
     }
-    Ok(out)
+    // Шаг 1 лесенки: глубокий рендер (недобор до окна рубрики) переполнен —
+    // пробуем умолчательный мелкий. Если он в окне [MIN, MAX], это дефолтная
+    // глубина без всякого усечения — сноски не нужно. Если мелкий тоже
+    // переполнен, деградируем его (он компактнее); если недобирает до окна,
+    // остаёмся на глубоком и деградируем его (иначе контекст провалится под
+    // окно рубрики и убьёт маршрут Critical).
+    if depth == ProseDepth::Paragraphs(DEPTH_DEEP) {
+        let shallow = render_epic_structured(spec_files, ProseDepth::Paragraphs(DEPTH_SHALLOW))?;
+        if shallow.chars_len() >= EPIC_CONTEXT_MIN_CHARS
+            && shallow.chars_len() <= EPIC_CONTEXT_MAX_CHARS
+        {
+            return Ok(shallow.assemble(None));
+        }
+        if shallow.chars_len() > EPIC_CONTEXT_MAX_CHARS {
+            render = shallow;
+        }
+    }
+    // Шаг 2: прозаические секции с хвоста сокращаются до заголовков
+    // (ADR-блоки пропускаются и остаются дословными).
+    let mut dropped: Vec<String> = Vec::new();
+    for pos in (0..render.sections.len()).rev() {
+        let notice = truncation_notice(&render, &dropped);
+        if render.chars_len() + notice.chars().count() <= EPIC_CONTEXT_MAX_CHARS {
+            break;
+        }
+        let section = &mut render.sections[pos];
+        if !section.is_adr && !section.body.is_empty() {
+            section.body.clear();
+            section.shortened_to_heading = true;
+        }
+    }
+    // Шаг 3: всё ещё переполнение — выкидываем прозаические секции с хвоста
+    // целиком. ADR-блоки не выкидываются никогда: если остались только они,
+    // документ уходит за лимит дословным (честнее, чем инвариант на полуслове).
+    loop {
+        let notice = truncation_notice(&render, &dropped);
+        if render.chars_len() + notice.chars().count() <= EPIC_CONTEXT_MAX_CHARS {
+            break;
+        }
+        let Some(pos) = render.sections.iter().rposition(|s| !s.is_adr) else {
+            break;
+        };
+        dropped.push(render.sections.remove(pos).title);
+    }
+    let notice = truncation_notice(&render, &dropped);
+    Ok(render.assemble(Some(&notice)))
 }
 
-/// Рендер epic-context на заданной глубине секций (абзацев на прочую секцию;
-/// ADR-блоки spine всегда целиком).
-fn render_epic(spec_files: &[PathBuf], depth: usize) -> Result<String> {
-    let mut out = String::with_capacity(EPIC_CONTEXT_MAX_CHARS);
-    out.push_str("# Архитектурный контекст (epic-context)\n\n");
-    let _ = write!(out, "Собран: {}\n\n", Utc::now().to_rfc3339());
-    out.push_str("Источники:\n");
-    for f in spec_files {
-        let _ = writeln!(out, "- {}", f.display());
+/// Режим рендера прозаических (не-ADR) секций epic-context: заголовок +
+/// первые N абзацев тела секции. ADR-блоки spine рендерятся целиком в любом
+/// режиме — они не сокращаются никогда (сокращение прозы до заголовков делает
+/// шаг 2 лесенки в [`compile_epic_context`], очищая тела секций, а не
+/// перерендером).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ProseDepth {
+    /// Заголовок + первые N абзацев тела секции.
+    Paragraphs(usize),
+}
+
+/// Секция epic-context в структурном рендере (для лесенки деградации).
+struct EpicSection {
+    /// Название секции для сноски об усечении (заголовок без маркеров `#`;
+    /// у преамбулы — «вводная часть»).
+    title: String,
+    /// Заголовок секции (у преамбулы — пусто); сюда же вклеивается маркер
+    /// `<!-- источник: ... -->` первой секции спеки.
+    heading: String,
+    /// Тело секции на текущей глубине (у ADR-блоков — всегда дословное;
+    /// обрезается шагом 2 лесенки).
+    body: String,
+    /// ADR-блок spine: не сокращается и не выкидывается никогда.
+    is_adr: bool,
+    /// Тело сокращено до заголовка шагом 2 лесенки — секция попадает в
+    /// сноску об усечении (пока не выкинута шагом 3).
+    shortened_to_heading: bool,
+}
+
+impl EpicSection {
+    /// Длина секции в собранном документе (символов, без разделителя).
+    fn chars_len(&self) -> usize {
+        let mut n = self.heading.chars().count();
+        if !self.body.is_empty() {
+            n += 2 + self.body.chars().count();
+        }
+        n
     }
-    out.push('\n');
+
+    /// Дописывает секцию в документ.
+    fn render_into(&self, out: &mut String) {
+        out.push_str(&self.heading);
+        if !self.body.is_empty() {
+            out.push_str("\n\n");
+            out.push_str(&self.body);
+        }
+    }
+}
+
+/// Структурный рендер epic-context: неизменная шапка + секции по порядку.
+struct EpicRender {
+    /// Шапка: заголовок, дата сборки, список источников (не усечается).
+    header: String,
+    /// Секции всех спек в порядке обхода файлов.
+    sections: Vec<EpicSection>,
+}
+
+impl EpicRender {
+    /// Длина собранного документа без сноски об усечении (символов).
+    fn chars_len(&self) -> usize {
+        self.header.chars().count()
+            + self
+                .sections
+                .iter()
+                .map(|s| s.chars_len() + 2)
+                .sum::<usize>()
+    }
+
+    /// Собирает документ: шапка + секции через пустую строку + сноска (если есть).
+    fn assemble(&self, notice: Option<&str>) -> String {
+        let mut out = self.header.clone();
+        for s in &self.sections {
+            s.render_into(&mut out);
+            out.push_str("\n\n");
+        }
+        if let Some(notice) = notice {
+            out.push_str(notice);
+        }
+        out
+    }
+}
+
+/// Структурный рендер epic-context на заданной глубине прозаических секций
+/// (ADR-блоки spine всегда целиком).
+fn render_epic_structured(spec_files: &[PathBuf], depth: ProseDepth) -> Result<EpicRender> {
+    let mut header = String::with_capacity(512);
+    header.push_str("# Архитектурный контекст (epic-context)\n\n");
+    let _ = write!(header, "Собран: {}\n\n", Utc::now().to_rfc3339());
+    header.push_str("Источники:\n");
+    for f in spec_files {
+        let _ = writeln!(header, "- {}", f.display());
+    }
+    header.push('\n');
+    let mut sections = Vec::new();
     for f in spec_files {
         let text = std::fs::read_to_string(f).map_err(|e| HarnessError::io(f, e))?;
-        let _ = write!(out, "<!-- источник: {} -->\n\n", f.display());
-        out.push_str(render_spec(&text, depth).trim_end());
-        out.push_str("\n\n");
+        let marker = format!("<!-- источник: {} -->", f.display());
+        let mut spec_sections = render_spec_structured(&text, depth);
+        if let Some(first) = spec_sections.first_mut() {
+            // Маркер источника привязывается к первой секции спеки.
+            first.heading = format!("{marker}\n\n{}", first.heading);
+        } else {
+            sections.push(EpicSection {
+                title: format!("источник {}", f.display()),
+                heading: marker,
+                body: String::new(),
+                is_adr: false,
+                shortened_to_heading: false,
+            });
+        }
+        sections.extend(spec_sections);
     }
-    Ok(out)
+    Ok(EpicRender { header, sections })
 }
 
-/// Рендерит одну спецификацию: секции с полями Binds/Prevents/Rule (ADR-блоки
-/// spine) — целиком, прочие секции — заголовок + первые `depth` абзацев.
-fn render_spec(text: &str, depth: usize) -> String {
+/// Разбирает одну спецификацию в секции epic-context: преамбула (если есть) +
+/// секции по markdown-заголовкам. Секции с полями Binds/Prevents/Rule
+/// (ADR-блоки spine) помечаются `is_adr` и рендерятся дословно; проза —
+/// по глубине `depth`.
+fn render_spec_structured(text: &str, depth: ProseDepth) -> Vec<EpicSection> {
     let mut preamble = String::new();
-    let mut sections: Vec<(String, String)> = Vec::new();
+    let mut raw_sections: Vec<(String, String)> = Vec::new();
     let mut cur: Option<(String, String)> = None;
     let mut in_fence = false;
     for line in text.lines() {
@@ -782,7 +931,7 @@ fn render_spec(text: &str, depth: usize) -> String {
         }
         if !in_fence && line.starts_with('#') {
             if let Some(s) = cur.take() {
-                sections.push(s);
+                raw_sections.push(s);
             }
             cur = Some((line.trim_end().to_string(), String::new()));
         } else if let Some((_, body)) = cur.as_mut() {
@@ -794,25 +943,104 @@ fn render_spec(text: &str, depth: usize) -> String {
         }
     }
     if let Some(s) = cur.take() {
-        sections.push(s);
+        raw_sections.push(s);
     }
 
-    let mut out = String::new();
+    let mut sections = Vec::new();
     if !preamble.trim().is_empty() {
-        out.push_str(&first_paragraphs(&preamble, depth));
-        out.push_str("\n\n");
+        let is_adr = is_adr_block(&preamble);
+        sections.push(EpicSection {
+            title: "вводная часть".to_string(),
+            heading: String::new(),
+            body: render_section_body(&preamble, depth, is_adr),
+            is_adr,
+            shortened_to_heading: false,
+        });
     }
-    for (heading, body) in &sections {
-        out.push_str(heading);
-        out.push_str("\n\n");
-        if is_adr_block(body) {
-            out.push_str(body.trim());
-        } else {
-            out.push_str(&first_paragraphs(body, depth));
-        }
-        out.push_str("\n\n");
+    for (heading, body) in &raw_sections {
+        let is_adr = is_adr_block(body);
+        sections.push(EpicSection {
+            title: heading.trim_start_matches('#').trim().to_string(),
+            heading: heading.clone(),
+            body: render_section_body(body, depth, is_adr),
+            is_adr,
+            shortened_to_heading: false,
+        });
     }
-    out
+    sections
+}
+
+/// Тело секции на заданной глубине: ADR-блок — дословно, проза — первые N
+/// абзацев.
+fn render_section_body(body: &str, depth: ProseDepth, is_adr: bool) -> String {
+    if is_adr {
+        return body.trim().to_string();
+    }
+    match depth {
+        ProseDepth::Paragraphs(n) => first_paragraphs(body, n),
+    }
+}
+
+/// Бюджет перечня секций в сноске об усечении (символов): длинный список
+/// заменяется компактной формой «первые, …, последняя (всего N)» — сноска
+/// не должна сама съедать лимит epic-context.
+const NOTICE_LIST_MAX_CHARS: usize = 240;
+
+/// Сколько первых имён секций показывается в компактной форме перечня сноски.
+const NOTICE_LIST_HEAD: usize = 3;
+
+/// Компактное перечисление секций в сноске об усечении: полный список, а при
+/// превышении [`NOTICE_LIST_MAX_CHARS`] — первые [`NOTICE_LIST_HEAD`] и
+/// последняя секция + счётчик.
+fn compact_section_list(names: &[String]) -> String {
+    let joined = names.join(", ");
+    if joined.chars().count() <= NOTICE_LIST_MAX_CHARS || names.len() <= NOTICE_LIST_HEAD + 1 {
+        return joined;
+    }
+    format!(
+        "{}, …, {} (всего {})",
+        names[..NOTICE_LIST_HEAD].join(", "),
+        names[names.len() - 1],
+        names.len()
+    )
+}
+
+/// Сноска об усечении epic-context: честно перечисляет, какие секции
+/// сокращены до заголовков и какие выкинуты с хвоста; инварианты spine
+/// подчёркнуто дословны. Маркер «Контекст усечён» сохраняется для
+/// потребителей (рубрики, регрессионные проверки).
+fn truncation_notice(render: &EpicRender, dropped: &[String]) -> String {
+    let shortened: Vec<String> = render
+        .sections
+        .iter()
+        .filter(|s| s.shortened_to_heading)
+        .map(|s| s.title.clone())
+        .collect();
+    let mut notice = String::from("\n\n> **Контекст усечён**");
+    let mut parts: Vec<String> = Vec::new();
+    if !shortened.is_empty() {
+        parts.push(format!(
+            "прозаические секции сокращены до заголовков: {}",
+            compact_section_list(&shortened)
+        ));
+    }
+    if !dropped.is_empty() {
+        parts.push(format!(
+            "выкинуты прозаические секции с хвоста: {}",
+            compact_section_list(dropped)
+        ));
+    }
+    if parts.is_empty() {
+        notice
+            .push_str(" — лимит превышен документом из инвариантов spine, которые не сокращаются");
+    } else {
+        let _ = write!(notice, ": {}", parts.join("; "));
+    }
+    notice.push_str(
+        ". Инварианты spine (AD-блоки) приведены дословно и не сокращались; полные тексты — \
+         в файлах-источниках (см. MANIFEST.json).\n",
+    );
+    notice
 }
 
 /// Признак ADR-блока spine: секция содержит поля Binds/Prevents/Rule.
@@ -1782,5 +2010,94 @@ mod tests {
         let parsed: serde_yaml_ng::Value =
             serde_yaml_ng::from_str(&text).expect("CONSTRAINTS.yaml пакета парсится");
         assert!(parsed["rules"].as_sequence().is_some_and(|r| !r.is_empty()));
+    }
+
+    #[test]
+    fn epic_context_ladder_preserves_adr_blocks_verbatim() {
+        // Дефект A2: тупое усечение по символам обрезало инвариант AD-010 на
+        // полуслове. Фикстура: сумма > EPIC_CONTEXT_MAX_CHARS, несколько
+        // AD-блоков в хвосте — все они обязаны остаться дословно и целиком,
+        // сноска перечисляет сокращённые и выкинутые секции.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("mkdir repo");
+        let cfg = cfg_in(tmp.path());
+        let mut text = String::from("# Спека эпика\n\n");
+        for i in 0..120 {
+            let _ = write!(
+                text,
+                "## Прозаическая секция номер {i} с длинным хвостом имени\n\n\
+                 Наполнитель PROSE-{i}: длинный абзац прозы про контракты, стыки, \
+                 ограничения и детали реализации для объёма контекста.\n\n"
+            );
+        }
+        for i in 10..13 {
+            let _ = write!(
+                text,
+                "## AD-{i}: Инвариант интеграции\n\n\
+                 **Binds:** MARKER-BINDS-{i} — дословное правило стыковки компонентов.\n\n\
+                 **Prevents:** MARKER-PREVENTS-{i} — запрещённый класс отказов.\n\n\
+                 **Rule:** MARKER-RULE-{i} — финальная строка правила, обязана доехать целиком.\n\n"
+            );
+        }
+        let spec = tmp.path().join("spec-ladder.md");
+        write_file(&spec, &text);
+
+        let packet = generate_handoff(&repo, "задача", &[spec], &cfg, None, Route::Standard)
+            .expect("handoff");
+        let arch = std::fs::read_to_string(packet.dir.join("ARCHITECTURE.md")).expect("arch");
+        // Все AD-блоки присутствуют дословно, целиком — до последней строки.
+        for i in 10..13 {
+            for marker in [
+                format!("**Binds:** MARKER-BINDS-{i}"),
+                format!("**Prevents:** MARKER-PREVENTS-{i}"),
+                format!(
+                    "**Rule:** MARKER-RULE-{i} — финальная строка правила, обязана доехать целиком."
+                ),
+            ] {
+                assert!(arch.contains(&marker), "AD-{i} обрезан ({marker}):\n{arch}");
+            }
+        }
+        // Честная сноска: маркер усечения + перечень сокращённого и выкинутого.
+        assert!(arch.contains("Контекст усечён"), "{arch}");
+        assert!(arch.contains("сокращены до заголовков"), "{arch}");
+        assert!(
+            arch.contains("выкинуты прозаические секции с хвоста"),
+            "{arch}"
+        );
+        assert!(arch.contains("дословно"), "{arch}");
+        // Секция 119 выкинута с хвоста (есть в сноске, но нет как заголовка).
+        assert!(arch.contains("Прозаическая секция номер 119"), "{arch}");
+        assert!(
+            !arch.contains("## Прозаическая секция номер 119 с длинным хвостом имени"),
+            "{arch}"
+        );
+        // Ранняя секция осталась (хотя бы заголовком), AD не пострадали.
+        assert!(arch.contains("## Прозаическая секция номер 0"), "{arch}");
+        assert!(
+            arch.chars().count() <= EPIC_CONTEXT_MAX_CHARS,
+            "len = {}",
+            arch.chars().count()
+        );
+    }
+
+    #[test]
+    fn epic_context_fits_keeps_everything_without_notice() {
+        // Случай «влезает без усечения» не меняется: ни сноски, ни потерь.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("mkdir repo");
+        let cfg = cfg_in(tmp.path());
+        let spec = tmp.path().join("spec.md");
+        write_file(
+            &spec,
+            "# Спека\n\n## AD-1: Стек\n\n**Binds:** точный текст инварианта.\n\n## Детали\n\nабзац\n",
+        );
+        let packet = generate_handoff(&repo, "задача", &[spec], &cfg, None, Route::Standard)
+            .expect("handoff");
+        let arch = std::fs::read_to_string(packet.dir.join("ARCHITECTURE.md")).expect("arch");
+        assert!(!arch.contains("Контекст усечён"), "{arch}");
+        assert!(arch.contains("точный текст инварианта"), "{arch}");
+        assert!(arch.contains("абзац"), "{arch}");
     }
 }
