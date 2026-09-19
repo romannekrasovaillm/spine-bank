@@ -911,7 +911,7 @@ impl Default for RequiredRules {
         let base = vec!["fitness".to_string(), "spine_lint".to_string()];
         let mut standard = base.clone();
         standard.extend(
-            ["trace_check", "rule_weakened", "nfr"]
+            ["trace_check", "rule_weakened", "nfr", "model_validate"]
                 .iter()
                 .map(|s| (*s).to_string()),
         );

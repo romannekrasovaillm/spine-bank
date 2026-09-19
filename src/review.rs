@@ -41,7 +41,7 @@ use serde_json::{Value, json};
 use crate::error::{HarnessError, Result};
 use crate::gate::{self, GateComponent, GateFinding, GateReport, GateStatus};
 use crate::llm::ToolSpec;
-use crate::model::{EntityKind, LinkKind, Model, load_model_tolerant, validate};
+use crate::model::{EntityKind, LinkKind, Model, load_model_tolerant};
 use crate::tool::{Tool, ToolContext, ToolOutput};
 use crate::{asyncapi, control, openapi};
 
@@ -104,65 +104,6 @@ fn status_label(status: GateStatus) -> &'static str {
         GateStatus::Pass => "PASS",
         GateStatus::Fail => "FAIL",
         GateStatus::Skip => "SKIP",
-    }
-}
-
-/// Секция `model_validate`: ссылочная целостность `model/`
-/// ([`crate::model::validate`]). Входа нет — SKIP; модель не разбирается
-/// ВООБЩЕ или есть error-находки — FAIL. Толерантная загрузка (E3): битые
-/// сущности — error-находки `load-error` отчёта `validate`, валидное
-/// подмножество проверяется.
-fn component_model_validate(repo: &Path) -> GateComponent {
-    let model_dir = repo.join("model");
-    if !model_dir.is_dir() {
-        return GateComponent {
-            name: "model_validate",
-            status: GateStatus::Skip,
-            detail: "нет каталога model/".to_string(),
-            findings: Vec::new(),
-        };
-    }
-    let model = match load_model_tolerant(&model_dir) {
-        Ok(m) => m,
-        Err(e) => {
-            return GateComponent {
-                name: "model_validate",
-                status: GateStatus::Fail,
-                detail: format!("сбой загрузки модели: {e}"),
-                findings: Vec::new(),
-            };
-        }
-    };
-    let report = validate(&model);
-    let errors = report
-        .issues
-        .iter()
-        .filter(|i| i.severity == crate::model::Severity::Error)
-        .count();
-    let findings: Vec<GateFinding> = report
-        .issues
-        .iter()
-        .map(|i| GateFinding {
-            severity: i.severity.to_string(),
-            rule: Some(i.rule.to_string()),
-            file: Some(i.file.display().to_string()),
-            line: None,
-            message: i.message.clone(),
-        })
-        .collect();
-    GateComponent {
-        name: "model_validate",
-        status: if errors == 0 {
-            GateStatus::Pass
-        } else {
-            GateStatus::Fail
-        },
-        detail: format!(
-            "сущностей: {}, находок: {} (error: {errors})",
-            report.entities,
-            report.issues.len()
-        ),
-        findings,
     }
 }
 
@@ -396,7 +337,8 @@ pub fn architect_review(
     limits: (usize, usize),
 ) -> Result<ReviewReport> {
     let mut gate_report = gate::run(repo, None, base, constraints, limits)?;
-    gate_report.components.push(component_model_validate(repo));
+    // `model_validate` уже пришла из гейта (Н2): вторая секция означала бы
+    // двойной счёт одной проверки. Ревью = gate + контракты.
     gate_report.components.push(component_contracts(repo));
     gate_report.recompute();
     Ok(ReviewReport { gate: gate_report })

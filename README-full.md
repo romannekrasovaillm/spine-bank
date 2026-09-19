@@ -678,7 +678,7 @@ arch-be [--config <path>] <command>   # без команды — TUI
 | `harnesses` | Известные кодовые харнессы и их доступность |
 | `control check/spine/sensors/score/adr` | Архитектурный контроль (fitness, линтеры, значимость); у `check` — `--baseline`/`--baseline-update` (ratchet для brownfield), `--changed-since`, `--format sarif\|junit\|gitlab-codequality\|markdown` |
 | `control rules-report` / `control fp mark <правило> <файл>` | Реестр правил CONSTRAINTS.yaml (карточки, находки, git-прокси стоимости) / регистр ложных срабатываний (`docs/outcome-metrics.md`) |
-| `gate [--route auto\|fast\|standard\|critical] [--repo] [--base] [--constraints] [--format]` | Единый архитектурный гейт: fitness + delta guard + rule_weakened (анти-ослабление) + spine-линт + трассировка (+ nfr и evidence на Standard/Critical); провал любой составляющей — exit 1 |
+| `gate [--route auto\|fast\|standard\|critical] [--repo] [--base] [--constraints] [--format]` | Единый архитектурный гейт: fitness + delta guard + rule_weakened (анти-ослабление) + spine-линт + трассировка + целостность модели `model_validate` (+ nfr и evidence на Standard/Critical); провал любой составляющей — exit 1 |
 | `review <dir> [--base] [--json]` | Составное архитектурное ревью одним ответом: гейт + целостность модели + линт контрактов OpenAPI/AsyncAPI |
 | `digest [--week\|--days N] [--json]` | Недельный дайджест outcome-данных MCP-контроля из журнала `.arch-handoff/mcp-calls.jsonl` (итерации FAIL→PASS, топ правил, доля FP, истекающие overrides) |
 | `contract-diff <old> <new> [--contract-format] [--format] [--model] [--json]` | Дифф контрактов на ломающие изменения: OpenAPI (CD-001..CD-007), proto/gRPC, Avro, JSON Schema, DDL; `--model` — потребители/владельцы по модели (ADR-035); breaking → exit 1 |

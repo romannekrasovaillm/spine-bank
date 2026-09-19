@@ -1150,6 +1150,79 @@ fn component_evidence(repo: &Path, cfg: &crate::config::EvidenceConfig) -> GateC
     }
 }
 
+/// Составляющая `model_validate` (Н2 волны A 0.3.4): ссылочная целостность
+/// типизированной модели `model/`.
+///
+/// Живёт в гейте, а не только в составном ревью: без неё битая ссылка модели
+/// проходила `gate`, pre-push и Stop-хук, тогда как `model validate` и
+/// `review` её видели — вердикт зависел от способа вызова, а не от состояния
+/// репозитория (`review` = gate + контракты, секция не считается дважды).
+///
+/// Нет каталога `model/` — SKIP (fail-soft: нет входа).
+///
+/// На маршруте Critical находка `nfr-without-verification` повышается с `warn`
+/// до `error`: NFR без способа проверки на критическом маршруте не цель, а
+/// пожелание.
+fn component_model_validate(repo: &Path, route: Route) -> GateComponent {
+    let model_dir = repo.join("model");
+    if !model_dir.is_dir() {
+        return GateComponent::skip("model_validate", "нет каталога model/".to_string());
+    }
+    let model = match crate::model::load_model_tolerant(&model_dir) {
+        Ok(m) => m,
+        Err(e) => {
+            return GateComponent::fail(
+                "model_validate",
+                format!("сбой загрузки модели: {e}"),
+                Vec::new(),
+            );
+        }
+    };
+    let report = crate::model::validate(&model);
+    let promoted = route == Route::Critical;
+    let errors = report
+        .issues
+        .iter()
+        .filter(|i| {
+            i.severity == crate::model::Severity::Error
+                || (promoted && i.rule == "nfr-without-verification")
+        })
+        .count();
+    let findings: Vec<GateFinding> = report
+        .issues
+        .iter()
+        .map(|i| {
+            let severity = if promoted && i.rule == "nfr-without-verification" {
+                "error".to_string()
+            } else {
+                i.severity.to_string()
+            };
+            GateFinding {
+                severity,
+                rule: Some(i.rule.to_string()),
+                file: Some(i.file.display().to_string()),
+                line: None,
+                message: i.message.clone(),
+            }
+        })
+        .collect();
+    let detail = format!(
+        "сущностей: {}, находок: {} (error: {errors}){}",
+        report.entities,
+        report.issues.len(),
+        if promoted {
+            "; Critical: nfr-without-verification → error"
+        } else {
+            ""
+        }
+    );
+    if errors == 0 {
+        GateComponent::pass("model_validate", detail)
+    } else {
+        GateComponent::fail("model_validate", detail, findings)
+    }
+}
+
 /// Вычисляет маршрут из git-диффа (`--route auto`): [`control::detect_diff_triggers`]
 /// и [`control::score_with_sources`] с пустым declared (механический минимум
 /// S-1, ADR-034). Дифф недоступен (не git-репозиторий, нет HEAD) — fail-safe
@@ -1450,6 +1523,9 @@ fn run_inner(
         component_rule_weakened(repo, &constraints, base.unwrap_or("HEAD"), &git),
         component_spine_lint(repo),
         component_trace(repo),
+        // Н2: целостность модели — часть гейта на ЛЮБОМ маршруте (SKIP без
+        // каталога model/); обязательность по маршрутам — в `[gate.required]`.
+        component_model_validate(repo, route),
     ];
     if matches!(route, Route::Standard | Route::Critical) {
         components.push(component_sensors(repo));
@@ -1607,6 +1683,169 @@ mod tests {
             .find(|c| c.name == name)
             .unwrap_or_else(|| panic!("нет составляющей {name}"))
             .status
+    }
+
+    /// Н2: битая ссылка модели краснит гейт — без каталога `model/` секция
+    /// честно SKIP, вердикт тот же, что у `model validate`.
+    #[test]
+    fn gate_fails_on_broken_model_link() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        make_gate_repo(dir);
+        write_model(
+            dir,
+            &[
+                ("CMP-001", "depends_on: [CMP-002]"),
+                ("CMP-002", "depends_on: []"),
+            ],
+        );
+        let limits = (1, 4);
+        let clean = run_with(
+            dir,
+            Some(Route::Standard),
+            None,
+            None,
+            limits,
+            &GateRequirements::default(),
+        )
+        .expect("gate");
+        assert_eq!(status_of(&clean, "model_validate"), GateStatus::Pass);
+        assert_ne!(clean.outcome, GateOutcome::Fail);
+        // Конверт вердикта содержит составляющую (П7).
+        let envelope = clean.envelope_json();
+        assert!(
+            envelope["components"]
+                .as_array()
+                .expect("components")
+                .iter()
+                .any(|c| c["name"] == "model_validate"),
+            "{envelope}"
+        );
+        // Ссылка на несуществующую сущность — гейт краснеет.
+        write_model(
+            dir,
+            &[
+                ("CMP-001", "depends_on: [CMP-099]"),
+                ("CMP-002", "depends_on: []"),
+            ],
+        );
+        git(dir, &["add", "."]);
+        git(dir, &["commit", "-q", "-m", "broken link"]);
+        let broken = run_with(
+            dir,
+            Some(Route::Standard),
+            None,
+            None,
+            limits,
+            &GateRequirements::default(),
+        )
+        .expect("gate");
+        assert_eq!(status_of(&broken, "model_validate"), GateStatus::Fail);
+        assert!(!broken.passed);
+        assert_eq!(broken.outcome, GateOutcome::Fail);
+    }
+
+    /// Без каталога `model/` составляющая пропускается fail-soft, и на
+    /// маршруте, где она НЕ обязательна, это не даёт INCOMPLETE.
+    #[test]
+    fn gate_skips_model_validate_without_model_dir() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        make_gate_repo(dir);
+        let report = run_with(
+            dir,
+            Some(Route::Fast),
+            None,
+            None,
+            (1, 4),
+            &GateRequirements::default(),
+        )
+        .expect("gate");
+        assert_eq!(status_of(&report, "model_validate"), GateStatus::Skip);
+        assert_eq!(
+            report.outcome,
+            GateOutcome::Pass,
+            "{:?}",
+            report.not_checked
+        );
+        // А на Standard она обязательна: SKIP даёт INCOMPLETE (exit 3).
+        let standard = run_with(
+            dir,
+            Some(Route::Standard),
+            None,
+            None,
+            (1, 4),
+            &GateRequirements::default(),
+        )
+        .expect("gate");
+        assert_eq!(standard.outcome, GateOutcome::Incomplete);
+        assert!(
+            standard.not_checked.contains(&"model_validate".to_string()),
+            "{:?}",
+            standard.not_checked
+        );
+    }
+
+    /// На маршруте Critical NFR без способа проверки — error, а не warn.
+    #[test]
+    fn critical_route_promotes_nfr_without_verification() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        make_gate_repo(dir);
+        write_model(
+            dir,
+            &[
+                ("CMP-001", "depends_on: []"),
+                ("NFR-001", "verification: \"\"\naffects: [CMP-001]"),
+            ],
+        );
+        let standard = run_with(
+            dir,
+            Some(Route::Standard),
+            None,
+            None,
+            (1, 4),
+            &GateRequirements::default(),
+        )
+        .expect("gate");
+        let comp = standard
+            .components
+            .iter()
+            .find(|c| c.name == "model_validate")
+            .expect("comp");
+        assert_eq!(
+            status_of(&standard, "model_validate"),
+            GateStatus::Pass,
+            "{:?}",
+            comp.findings
+        );
+        let critical = run_with(
+            dir,
+            Some(Route::Critical),
+            None,
+            None,
+            (1, 4),
+            &GateRequirements::default(),
+        )
+        .expect("gate");
+        assert_eq!(status_of(&critical, "model_validate"), GateStatus::Fail);
+    }
+
+    /// Пишет минимальную модель: `(id, хвост frontmatter)`.
+    fn write_model(dir: &Path, entities: &[(&str, &str)]) {
+        let model = dir.join("model");
+        std::fs::create_dir_all(&model).expect("mkdir model");
+        for (id, body) in entities {
+            // Тип выводится из префикса ID — иначе `id-type-mismatch`.
+            let kind = id.split('-').next().unwrap_or("cmp").to_ascii_lowercase();
+            std::fs::write(
+                model.join(format!("{id}.md")),
+                format!(
+                    "---\nid: {id}\ntype: {kind}\ntitle: \"{id}\"\nstatus: \"designed\"\n{body}\n---\n\n# {id}\n"
+                ),
+            )
+            .expect("write entity");
+        }
     }
 
     #[test]

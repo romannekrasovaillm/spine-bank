@@ -37,9 +37,11 @@ arch-be gate --repo . --format json             # конверт вердикт�
 ```toml
 [gate.required]
 fast     = ["fitness", "spine_lint"]
-standard = ["fitness", "spine_lint", "trace_check", "rule_weakened", "nfr"]
+standard = ["fitness", "spine_lint", "trace_check", "rule_weakened", "nfr",
+            "model_validate"]
 critical = ["fitness", "spine_lint", "trace_check", "rule_weakened",
-            "delta_guard", "sensors", "nfr", "evidence_verify"]
+            "delta_guard", "sensors", "nfr", "evidence_verify",
+            "model_validate"]
 ```
 
 `SKIP` необязательной составляющей остаётся допустимым (fail-soft на
