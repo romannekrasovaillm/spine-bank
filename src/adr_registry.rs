@@ -14,10 +14,11 @@
 //!   файлы сущностей других типов игнорируются — фильтр по префиксу `ADR-`).
 //!
 //! Находки: коллизия номеров (один `ADR-NNN` в разных проектах с разными
-//! заголовками — глобального пространства номеров нет), дубль заголовка
-//! (одинаковый заголовок у разных номеров — возможный дубль решения), запись
-//! без даты/статуса. Проект без ADR — не находка: просто не попадает в
-//! индекс.
+//! заголовками — глобального пространства номеров нет; либо два файла с
+//! одним `ADR-NNN` ВНУТРИ одного проекта — локальное пространство номеров
+//! неоднозначно независимо от заголовков), дубль заголовка (одинаковый
+//! заголовок у разных номеров — возможный дубль решения), запись без
+//! даты/статуса. Проект без ADR — не находка: просто не попадает в индекс.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -237,6 +238,43 @@ fn collect_project(project: &str, dir: &Path, entries: &mut Vec<RegistryEntry>) 
 /// Находки по собранному индексу.
 fn find_issues(entries: &[RegistryEntry]) -> Vec<RegistryFinding> {
     let mut findings = Vec::new();
+
+    // Коллизия номеров ВНУТРИ одного проекта: два файла с одним ADR-NNN.
+    // В отличие от межпроектной коллизии заголовки роли не играют: дубль
+    // номера в локальном пространстве делает ссылку на него неоднозначной
+    // и при совпадающем заголовке (копия файла под другим именем).
+    let mut by_project_number: BTreeMap<(&str, u64), Vec<&RegistryEntry>> = BTreeMap::new();
+    for e in entries {
+        by_project_number
+            .entry((e.project.as_str(), e.number))
+            .or_default()
+            .push(e);
+    }
+    for ((project, number), group) in &by_project_number {
+        if group.len() < 2 {
+            continue;
+        }
+        let detail = group
+            .iter()
+            .map(|e| format!("{} «{}»", e.file, e.title))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let distinct_titles: std::collections::BTreeSet<&str> =
+            group.iter().map(|e| e.title.as_str()).collect();
+        let nuance = if distinct_titles.len() > 1 {
+            "разные заголовки — конфликт решений под одним номером"
+        } else {
+            "тот же заголовок — вероятная копия файла"
+        };
+        findings.push(RegistryFinding {
+            kind: "number_collision".to_string(),
+            message: format!(
+                "ADR-{number:03} дублируется в проекте {project}: {detail} \
+                 ({nuance}; в одном проекте номер обязан быть уникальным — \
+                 ссылки на номер неоднозначны)"
+            ),
+        });
+    }
 
     // Коллизия номеров: один ADR-NNN в РАЗНЫХ проектах с РАЗНЫМИ заголовками.
     let mut by_number: BTreeMap<u64, Vec<&RegistryEntry>> = BTreeMap::new();
@@ -657,6 +695,89 @@ mod tests {
             missing.iter().any(|f| f.message.contains("p2 ADR-005")),
             "{missing:?}"
         );
+    }
+
+    #[test]
+    fn registry_detects_within_project_duplicate_numbers() {
+        // Фикстура из отчёта полигона (E1): в одном docs/adr два дубля —
+        // ADR-001 с другим заголовком и ADR-002 с идентичным (копия файла).
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        let hdr = |n: u64, title: &str| {
+            format!("# ADR-{n:03}. {title}\n\n- Date: 2026-09-19\n- Status: Accepted\n")
+        };
+        write_file(
+            &root,
+            "docs/adr/ADR-001-payment-state-machine.md",
+            &hdr(1, "Платёж как конечный автомат"),
+        );
+        write_file(
+            &root,
+            "docs/adr/ADR-001-duplicate-number.md",
+            &hdr(1, "Дубликат номера для проверки реестра"),
+        );
+        write_file(
+            &root,
+            "docs/adr/ADR-002-inbox.md",
+            &hdr(2, "In-memory inbox"),
+        );
+        write_file(
+            &root,
+            "docs/adr/ADR-002-same-title-copy.md",
+            &hdr(2, "In-memory inbox"),
+        );
+        let report = build_registry(&root).unwrap();
+        assert_eq!(report.entries.len(), 4, "{:?}", report.entries);
+        let collisions: Vec<_> = report
+            .findings
+            .iter()
+            .filter(|f| f.kind == "number_collision")
+            .collect();
+        // Ровно две находки — по одной на дублированный номер, с именами файлов.
+        assert_eq!(collisions.len(), 2, "{:?}", report.findings);
+        assert!(
+            collisions
+                .iter()
+                .any(|f| f.message.contains("ADR-001-duplicate-number.md")
+                    && f.message.contains("ADR-001-payment-state-machine.md")),
+            "{collisions:?}"
+        );
+        assert!(
+            collisions
+                .iter()
+                .any(|f| f.message.contains("ADR-002-same-title-copy.md")
+                    && f.message.contains("ADR-002-inbox.md")),
+            "{collisions:?}"
+        );
+        // Копия с тем же заголовком — тоже коллизия номера, а не тишина;
+        // дубль-заголовок при этом не дублирует находку (номер тот же).
+        assert!(
+            report.findings.iter().all(|f| f.kind != "title_duplicate"),
+            "{:?}",
+            report.findings
+        );
+        // strict: любая находка → гейт падает.
+        assert_eq!(exit_code(&report, true), 1);
+    }
+
+    #[test]
+    fn registry_clean_docs_adr_has_no_findings() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        write_file(
+            &root,
+            "docs/adr/ADR-001-one.md",
+            "# ADR-001. Первое\n\n- Date: 2026-09-19\n- Status: Accepted\n",
+        );
+        write_file(
+            &root,
+            "docs/adr/ADR-002-two.md",
+            "# ADR-002. Второе\n\n- Date: 2026-09-19\n- Status: Proposed\n",
+        );
+        let report = build_registry(&root).unwrap();
+        assert_eq!(report.entries.len(), 2, "{:?}", report.entries);
+        assert!(report.findings.is_empty(), "{:?}", report.findings);
+        assert_eq!(exit_code(&report, true), 0);
     }
 
     #[test]
