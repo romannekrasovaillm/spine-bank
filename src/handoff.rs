@@ -29,6 +29,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -832,10 +833,15 @@ pub fn recommended_timeout_secs(repo: &Path) -> Option<u64> {
 /// тупое усечение по символам обрезало инвариант AD-010 на полуслове):
 /// DEEP → SHALLOW (если мелкий рендер в окне рубрики) → прозаические секции
 /// с хвоста сокращаются до заголовков → прозаические секции с хвоста
-/// выкидываются целиком. **ADR-блоки spine (секции с полями Binds/Prevents/
-/// Rule) не режутся никогда** — ценой превышения лимита, если документ
-/// состоит из одних инвариантов. Сноска об усечении перечисляет сокращённые
-/// и выкинутые секции поимённо.
+/// выкидываются целиком. **ADR-блоки spine не режутся никогда** — ценой
+/// превышения лимита, если документ состоит из одних инвариантов. ADR-блоком
+/// считается секция с полями Binds/Prevents/Rule в любой markdown-форме
+/// (`Binds:`, `- Binds:`, `**Binds**:`, `- **Binds**:` — см.
+/// [`ADR_FIELD_PATTERN`]) или с заголовком `AD-<n>`/`ADR-<n>` (подстраховка
+/// полевого детектора, дефект D1 живого отчёта: спайн кейса digital-ruble
+/// пишет поля как `- **Binds**:`, и инварианты резались как проза). Сноска об
+/// усечении перечисляет сокращённые и выкинутые секции поимённо и проверяет
+/// факт перед утверждением о дословности инвариантов (см. [`cut_ad_sections`]).
 ///
 /// # Errors
 /// Спека не читается.
@@ -982,6 +988,9 @@ impl EpicRender {
 /// Структурный рендер epic-context на заданной глубине прозаических секций
 /// (ADR-блоки spine всегда целиком).
 fn render_epic_structured(spec_files: &[PathBuf], depth: ProseDepth) -> Result<EpicRender> {
+    // Полевой regex ADR-блоков компилируется один раз на рендер и раздаётся
+    // разбору каждой спеки.
+    let adr_re = epic_re(ADR_FIELD_PATTERN)?;
     let mut header = String::with_capacity(512);
     header.push_str("# Архитектурный контекст (epic-context)\n\n");
     let _ = write!(header, "Собран: {}\n\n", Utc::now().to_rfc3339());
@@ -994,7 +1003,7 @@ fn render_epic_structured(spec_files: &[PathBuf], depth: ProseDepth) -> Result<E
     for f in spec_files {
         let text = std::fs::read_to_string(f).map_err(|e| HarnessError::io(f, e))?;
         let marker = format!("<!-- источник: {} -->", f.display());
-        let mut spec_sections = render_spec_structured(&text, depth);
+        let mut spec_sections = render_spec_structured(&text, depth, &adr_re);
         if let Some(first) = spec_sections.first_mut() {
             // Маркер источника привязывается к первой секции спеки.
             first.heading = format!("{marker}\n\n{}", first.heading);
@@ -1013,10 +1022,11 @@ fn render_epic_structured(spec_files: &[PathBuf], depth: ProseDepth) -> Result<E
 }
 
 /// Разбирает одну спецификацию в секции epic-context: преамбула (если есть) +
-/// секции по markdown-заголовкам. Секции с полями Binds/Prevents/Rule
-/// (ADR-блоки spine) помечаются `is_adr` и рендерятся дословно; проза —
-/// по глубине `depth`.
-fn render_spec_structured(text: &str, depth: ProseDepth) -> Vec<EpicSection> {
+/// секции по markdown-заголовкам. Секции с полями Binds/Prevents/Rule (в любой
+/// markdown-форме, см. [`ADR_FIELD_PATTERN`]) или с заголовком `AD-<n>`/
+/// `ADR-<n>` помечаются `is_adr` и рендерятся дословно; проза — по глубине
+/// `depth`.
+fn render_spec_structured(text: &str, depth: ProseDepth, adr_re: &Regex) -> Vec<EpicSection> {
     let mut preamble = String::new();
     let mut raw_sections: Vec<(String, String)> = Vec::new();
     let mut cur: Option<(String, String)> = None;
@@ -1045,7 +1055,7 @@ fn render_spec_structured(text: &str, depth: ProseDepth) -> Vec<EpicSection> {
 
     let mut sections = Vec::new();
     if !preamble.trim().is_empty() {
-        let is_adr = is_adr_block(&preamble);
+        let is_adr = is_adr_block(adr_re, &preamble);
         sections.push(EpicSection {
             title: "вводная часть".to_string(),
             heading: String::new(),
@@ -1055,9 +1065,14 @@ fn render_spec_structured(text: &str, depth: ProseDepth) -> Vec<EpicSection> {
         });
     }
     for (heading, body) in &raw_sections {
-        let is_adr = is_adr_block(body);
+        let title = heading.trim_start_matches('#').trim().to_string();
+        // Классификация ADR-блока: поля Binds/Prevents/Rule в теле ИЛИ
+        // заголовок AD/ADR-<n> — подстраховка на случай формы полей, которую
+        // полевой regex не узнал: тело инварианта не должно резаться из-за
+        // орфографии полей (дефект D1 — потерянные AD-008…AD-010 кейса).
+        let is_adr = is_adr_block(adr_re, body) || is_ad_title(&title);
         sections.push(EpicSection {
-            title: heading.trim_start_matches('#').trim().to_string(),
+            title,
             heading: heading.clone(),
             body: render_section_body(body, depth, is_adr),
             is_adr,
@@ -1104,8 +1119,12 @@ fn compact_section_list(names: &[String]) -> String {
 
 /// Сноска об усечении epic-context: честно перечисляет, какие секции
 /// сокращены до заголовков и какие выкинуты с хвоста; инварианты spine
-/// подчёркнуто дословны. Маркер «Контекст усечён» сохраняется для
-/// потребителей (рубрики, регрессионные проверки).
+/// подчёркнуто дословны — но только после проверки факта: если AD/ADR-секция
+/// (по заголовку) осталась без тела или выкинута, сноска называет её, а не
+/// декларирует дословность (дефект D1 живого отчёта: сноска писала «приведены
+/// дословно и не сокращались» про AD-008…AD-010, вырезанные до заголовков).
+/// Маркер «Контекст усечён» сохраняется для потребителей (рубрики,
+/// регрессионные проверки).
 fn truncation_notice(render: &EpicRender, dropped: &[String]) -> String {
     let shortened: Vec<String> = render
         .sections
@@ -1133,18 +1152,77 @@ fn truncation_notice(render: &EpicRender, dropped: &[String]) -> String {
     } else {
         let _ = write!(notice, ": {}", parts.join("; "));
     }
-    notice.push_str(
-        ". Инварианты spine (AD-блоки) приведены дословно и не сокращались; полные тексты — \
-         в файлах-источниках (см. MANIFEST.json).\n",
-    );
+    let ad_cut = cut_ad_sections(render, dropped);
+    if ad_cut.is_empty() {
+        notice.push_str(
+            ". Инварианты spine (AD-блоки) приведены дословно и не сокращались; полные тексты — \
+             в файлах-источниках (см. MANIFEST.json).\n",
+        );
+    } else {
+        let _ = writeln!(
+            notice,
+            ". ВНИМАНИЕ: секции инвариантов без текста (урезаны лесенкой или пусты в источнике): \
+             {} — дословность AD-блоков НЕ гарантируется; полные тексты — в файлах-источниках \
+             (см. MANIFEST.json).",
+            compact_section_list(&ad_cut)
+        );
+    }
     notice
 }
 
-/// Признак ADR-блока spine: секция содержит поля Binds/Prevents/Rule.
-fn is_adr_block(body: &str) -> bool {
-    ["Binds:", "Prevents:", "Rule:"]
+/// AD/ADR-секции (по заголовку, см. [`is_ad_title`]), оставшиеся в выходе без
+/// тела (урезаны лесенкой или пусты в источнике), плюс выкинутые AD-секции.
+/// Проверка факта для сноски об усечении: непустой список запрещает сноске
+/// утверждать дословность инвариантов (дефект D1).
+fn cut_ad_sections(render: &EpicRender, dropped: &[String]) -> Vec<String> {
+    let mut cut: Vec<String> = render
+        .sections
         .iter()
-        .any(|m| body.contains(m))
+        .filter(|s| is_ad_title(&s.title) && s.body.trim().is_empty())
+        .map(|s| s.title.clone())
+        .collect();
+    cut.extend(dropped.iter().filter(|t| is_ad_title(t)).cloned());
+    cut
+}
+
+/// Regex полей ADR-блока spine (Binds/Prevents/Rule), толерантный к
+/// markdown-формам: `Binds:`, `- Binds:`, `**Binds**:`, `- **Binds**:`,
+/// `**Binds:**`. Семантика повторяет полевой regex штатного линтера spine
+/// (`control.rs::lint_spine` — `re_field` = `\b(Binds|Prevents|Rule)\*{0,2}\s*:`,
+/// там же извлекается значение поля; здесь нужен только факт наличия).
+/// Держать синхронно с линтером, чтобы форматы не расходились в третий раз:
+/// дефект D1 живого отчёта — спайн кейса digital-ruble пишет поля как
+/// `- **Binds**:`, подстроки `Binds:` там нет, и AD-блоки классифицировались
+/// прозой и резались лесенкой до заголовков.
+const ADR_FIELD_PATTERN: &str = r"\b(?:Binds|Prevents|Rule)\*{0,2}\s*:";
+
+/// Компилирует статический regex epic-context; сбой компиляции — доменная
+/// ошибка, не паника (конвенция `control.rs::spine_regex`).
+fn epic_re(pattern: &str) -> Result<Regex> {
+    Regex::new(pattern).map_err(|e| HarnessError::Harness(format!("внутренний regex handoff: {e}")))
+}
+
+/// Признак ADR-блока spine: секция содержит поля Binds/Prevents/Rule в любой
+/// markdown-форме (см. [`ADR_FIELD_PATTERN`]).
+fn is_adr_block(adr_re: &Regex, body: &str) -> bool {
+    adr_re.is_match(body)
+}
+
+/// Признак заголовка AD/ADR-секции (`AD-8 …`, `ADR-012 …` — сразу после
+/// префикса идёт номер). Подстраховка полевого детектора [`is_adr_block`]:
+/// секция с таким заголовком считается инвариантом, даже если её тело
+/// записано в форме, которую полевой regex не узнал, — тело AD-блока не
+/// должно резаться из-за орфографии полей (так спайн кейса digital-ruble
+/// потерял AD-008…AD-010, дефект D1). Проверка строковая (без regex), чтобы
+/// вызываться и из сноски об усечении без обработки ошибок компиляции.
+fn is_ad_title(title: &str) -> bool {
+    let t = title.trim_start();
+    for prefix in ["AD-", "ADR-"] {
+        if let Some(rest) = t.strip_prefix(prefix) {
+            return rest.chars().next().is_some_and(|c| c.is_ascii_digit());
+        }
+    }
+    false
 }
 
 /// Первые `n` абзацев текста (абзацы разделены пустыми строками).
@@ -2180,6 +2258,275 @@ mod tests {
             "len = {}",
             arch.chars().count()
         );
+    }
+
+    /// Секции сгенерированного ARCHITECTURE.md по заголовкам `## ` (без
+    /// сноски об усечении): (текст заголовка без `#`, тело до следующего
+    /// заголовка). Хелпер охранных проверок «сноска не врёт» (D1).
+    fn arch_ad_sections(arch: &str) -> Vec<(String, String)> {
+        // Сноска примыкает к последней секции — отрезаем её, иначе текст
+        // сноски попадёт в «тело» последней секции и замаскирует пустоту.
+        let region = arch
+            .split_once("\n\n> **Контекст усечён**")
+            .map_or(arch, |(before, _)| before);
+        let mut sections: Vec<(String, String)> = Vec::new();
+        let mut cur: Option<(String, String)> = None;
+        for line in region.lines() {
+            if line.starts_with("## ") {
+                if let Some(s) = cur.take() {
+                    sections.push(s);
+                }
+                cur = Some((
+                    line.trim_start_matches('#').trim().to_string(),
+                    String::new(),
+                ));
+            } else if let Some((_, body)) = cur.as_mut() {
+                body.push_str(line);
+                body.push('\n');
+            }
+        }
+        if let Some(s) = cur.take() {
+            sections.push(s);
+        }
+        sections
+    }
+
+    /// Охранная сверка сноски с фактом (D1): каждая AD/ADR-секция выхода
+    /// имеет непустое тело; если сноска декларирует дословность, ни одна
+    /// AD/ADR-секция не урезана. Возвращает число AD/ADR-заголовков.
+    fn assert_notice_matches_fact(arch: &str) -> usize {
+        let sections = arch_ad_sections(arch);
+        let ad_sections: Vec<&(String, String)> = sections
+            .iter()
+            .filter(|(title, _)| is_ad_title(title))
+            .collect();
+        for (title, body) in &ad_sections {
+            assert!(
+                !body.trim().is_empty(),
+                "секция «{title}» без тела:\n{arch}"
+            );
+        }
+        if arch.contains("приведены дословно и не сокращались") {
+            assert!(
+                !arch.contains("дословность AD-блоков НЕ гарантируется"),
+                "сноска противоречит сама себе:\n{arch}"
+            );
+        }
+        ad_sections.len()
+    }
+
+    #[test]
+    fn adr_field_detector_accepts_markdown_forms() {
+        // D1: детектор ADR-блока толерантен к формам полей из реальных
+        // спайнов (линтер `control spine` их принимает — epic-context обязан
+        // узнавать те же формы, иначе инварианты режутся как проза).
+        let re = epic_re(ADR_FIELD_PATTERN).expect("regex");
+        for form in [
+            "Binds: все сервисы — Rust.",
+            "- Binds: Оркестратор ↔ Платформа",
+            "**Binds**: контур интеграции",
+            "- **Binds**: Оркестратор операций ЦР, Реестр кошельков",
+            "* **Rule**: остаток живёт на платформе",
+            "  - **Prevents**: теневой баланс",
+            "**Binds:** все сервисы — Rust 1.85.",
+        ] {
+            assert!(is_adr_block(&re, form), "форма не узнана: {form}");
+        }
+        for prose in [
+            "Связывает компоненты контура.",
+            "Rule-based подход без двоеточия",
+            "поля инварианта перечислены ниже",
+            "",
+        ] {
+            assert!(!is_adr_block(&re, prose), "ложное срабатывание: {prose:?}");
+        }
+        // Заголовки AD/ADR — подстраховка классификации.
+        for title in [
+            "AD-008. Криптографическая граница",
+            "ADR-012 Восстановление",
+            "AD-1: Стек",
+        ] {
+            assert!(is_ad_title(title), "заголовок не узнан: {title}");
+        }
+        for title in [
+            "Проза про AD-008 и его следствия",
+            "Изменения по ADR-1",
+            "Deferred — отложенные решения",
+            "",
+        ] {
+            assert!(!is_ad_title(title), "ложный заголовок: {title:?}");
+        }
+    }
+
+    #[test]
+    fn epic_context_ladder_preserves_bold_adr_blocks_verbatim() {
+        // Дефект D1 живого отчёта: спайн кейса digital-ruble пишет поля
+        // инвариантов в жирной markdown-форме `- **Binds**:` — до фикса
+        // AD-блоки резались лесенкой как проза, а сноска утверждала
+        // дословность. Фикстура: сумма > EPIC_CONTEXT_MAX_CHARS, AD-блоки в
+        // хвосте в жирной форме — все обязаны доехать дословно и целиком.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("mkdir repo");
+        let cfg = cfg_in(tmp.path());
+        let mut text = String::from("# Спека эпика\n\n");
+        for i in 0..120 {
+            let _ = write!(
+                text,
+                "## Прозаическая секция номер {i} с длинным хвостом имени\n\n\
+                 Наполнитель PROSE-{i}: длинный абзац прозы про контракты, стыки, \
+                 ограничения и детали реализации для объёма контекста.\n\n"
+            );
+        }
+        for i in 8..11 {
+            let _ = write!(
+                text,
+                "## AD-{i:03}. Инвариант контура\n\n\
+                 - **Binds**: MARKER-BINDS-{i} — дословное правило стыковки компонентов\n\
+                 - **Prevents**: MARKER-PREVENTS-{i} — запрещённый класс отказов\n\
+                 - **Rule**: MARKER-RULE-{i} — финальная строка правила, обязана доехать целиком\n\
+                 - **Status**: [ADOPTED]\n\n"
+            );
+        }
+        let spec = tmp.path().join("spec-bold-ladder.md");
+        write_file(&spec, &text);
+
+        let packet = generate_handoff(&repo, "задача", &[spec], &cfg, None, Route::Standard)
+            .expect("handoff");
+        let arch = std::fs::read_to_string(packet.dir.join("ARCHITECTURE.md")).expect("arch");
+        // Все AD-блоки присутствуют дословно, целиком — до последней строки.
+        for i in 8..11 {
+            for marker in [
+                format!("- **Binds**: MARKER-BINDS-{i}"),
+                format!("- **Prevents**: MARKER-PREVENTS-{i}"),
+                format!(
+                    "- **Rule**: MARKER-RULE-{i} — финальная строка правила, обязана доехать целиком"
+                ),
+                "- **Status**: [ADOPTED]".to_string(),
+            ] {
+                assert!(
+                    arch.contains(&marker),
+                    "AD-{i:03} обрезан ({marker}):\n{arch}"
+                );
+            }
+        }
+        // Сноска честная: маркер усечения есть, утверждение дословности
+        // совпадает с фактом (все AD-секции с телами).
+        assert!(arch.contains("Контекст усечён"), "{arch}");
+        assert!(arch.contains("дословно"), "{arch}");
+        let ad_count = assert_notice_matches_fact(&arch);
+        assert_eq!(ad_count, 3, "все три AD-заголовка в выходе:\n{arch}");
+        // AD-секции не названы «прозаическими» в перечне сокращённых.
+        assert!(
+            !arch.contains("сокращены до заголовков: AD-"),
+            "AD попали в перечень сокращённой прозы:\n{arch}"
+        );
+    }
+
+    #[test]
+    fn epic_context_keeps_all_ten_ad_bodies_from_report_case() {
+        // Регрессия по форме кейса digital-ruble из отчёта: спайн — преамбула
+        // и 10 инвариантов `## AD-0XX` в форме `- **Binds**:`; в пакете
+        // обязано быть 10 заголовков AD — и у всех 10 непустые тела (в отчёте
+        // у AD-008/009/010 тела были вырезаны до заголовков). Лимит символов
+        // здесь осознанно не проверяется: документ из одних инвариантов
+        // уходит за лимит дословным (зафиксированный компромисс лесенки).
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("mkdir repo");
+        let cfg = cfg_in(tmp.path());
+        let mut text = String::from(
+            "# ARCHITECTURE-SPINE. Сервис примера\n\n\
+             Преамбула спайна: регуляторный контур, статусы решений, граница честности. \
+             Вторая строка преамбулы для объёма и проверки лесенки на прозе.\n\n",
+        );
+        for i in 1..=10 {
+            let _ = write!(
+                text,
+                "## AD-{i:03}. Инвариант контура номер {i}\n\n\
+                 - **Binds**: Компонент-A-{i}, Компонент-B-{i} ↔ Внешняя платформа\n\
+                 - **Prevents**: класс отказов {i}: теневой баланс, двойное списание, потерю следа\n\
+                 - **Rule**: правило инварианта {i} исполняется дословно: записи append-only, \
+                 корректировка — компенсирующей записью со ссылкой на исходную; журнал — \
+                 единственный источник аудита и аргументов в спорах. Любое решение об исходе \
+                 операции принимается по ответу или выписке платформы, но не по локальной \
+                 записи; проекция, устаревшая сверх лага сверки, помечается несвежей, \
+                 а операции по ней не исполняются. MARKER-RULE-TAIL-{i}\n\
+                 - **Status**: [ADOPTED] 2026-09-19\n\n"
+            );
+        }
+        assert!(
+            text.chars().count() > EPIC_CONTEXT_MAX_CHARS,
+            "фикстура обязана превышать лимит: {}",
+            text.chars().count()
+        );
+        let spec = tmp.path().join("spine.md");
+        write_file(&spec, &text);
+
+        let packet = generate_handoff(&repo, "задача", &[spec], &cfg, None, Route::Standard)
+            .expect("handoff");
+        let arch = std::fs::read_to_string(packet.dir.join("ARCHITECTURE.md")).expect("arch");
+        // 10 заголовков → 10 непустых тел, каждый — с финальным маркером.
+        for i in 1..=10 {
+            assert!(
+                arch.contains(&format!("## AD-{i:03}. Инвариант контура номер {i}")),
+                "заголовок AD-{i:03} потерян:\n{arch}"
+            );
+            assert!(
+                arch.contains(&format!("MARKER-RULE-TAIL-{i}")),
+                "тело AD-{i:03} урезано:\n{arch}"
+            );
+        }
+        let ad_count = assert_notice_matches_fact(&arch);
+        assert_eq!(ad_count, 10, "10 заголовков → 10 тел:\n{arch}");
+        // Сноска (усечение преамбулы) не врёт про инварианты.
+        assert!(arch.contains("Контекст усечён"), "{arch}");
+        assert!(arch.contains("дословно"), "{arch}");
+        assert!(
+            !arch.contains("НЕ гарантируется"),
+            "все AD с телами — дословность подтверждена:\n{arch}"
+        );
+    }
+
+    #[test]
+    fn truncation_notice_never_claims_verbatim_for_cut_ad_sections() {
+        // Охранный тест честности сноски (D1): если AD/ADR-секция по факту
+        // без тела (урезана лесенкой или выкинута), сноска НЕ пишет «дословно
+        // и не сокращались» — утверждение не расходится с фактом.
+        let section = |title: &str, body: &str, shortened: bool| EpicSection {
+            title: title.to_string(),
+            heading: format!("## {title}"),
+            body: body.to_string(),
+            is_adr: !body.is_empty(),
+            shortened_to_heading: shortened,
+        };
+        let render = EpicRender {
+            header: String::new(),
+            sections: vec![
+                section("AD-008. Криптографическая граница", "", true),
+                section("AD-009. Антифрод", "- **Binds**: x", false),
+            ],
+        };
+        let notice = truncation_notice(&render, &["ADR-012. Выкинутый инвариант".to_string()]);
+        assert!(
+            !notice.contains("дословно и не сокращались"),
+            "сноска врёт про дословность:\n{notice}"
+        );
+        assert!(notice.contains("НЕ гарантируется"), "{notice}");
+        assert!(notice.contains("AD-008"), "{notice}");
+        assert!(notice.contains("ADR-012"), "{notice}");
+
+        // Все AD-секции с телами — дословность декларируется законно.
+        let render_ok = EpicRender {
+            header: String::new(),
+            sections: vec![section("AD-009. Антифрод", "- **Binds**: x", false)],
+        };
+        let notice_ok = truncation_notice(&render_ok, &[]);
+        assert!(
+            notice_ok.contains("дословно и не сокращались"),
+            "{notice_ok}"
+        );
+        assert!(!notice_ok.contains("НЕ гарантируется"), "{notice_ok}");
     }
 
     #[test]

@@ -32,6 +32,33 @@ const MAX_SCAN_FILES: usize = 200;
 /// префиксу (маркеры детекторов живут в тексте, не в бинарных хвостах).
 const MAX_FILE_BYTES: u64 = 512 * 1024;
 
+/// Единый EARS-паттерн детектора 1 и эмитимого правила (дефект D3 живого
+/// отчёта — «два диалекта EARS»: детектор искал голое `When` в начале строки,
+/// а собственное предложенное правило и спеки кейсов принимали жирную форму
+/// `- **When** …`, и кейс 011 с жирным EARS считался «без EARS»). Формы:
+/// `When x`, `- When x`, `**While** y`, `- **When** x` (с отступами).
+/// Детектор и правило обязаны говорить на одном паттерне: иначе правило
+/// `must_contain` «пропускает» кейс, который детектор считает пробелом (или
+/// наоборот — ложный кандидат на кейсе с EARS).
+const EARS_PATTERN: &str = r"(?m)^\s*[-*]?\s*\**\s*(When|While|If|Where)\b";
+
+/// Триггеры ручных действий детектора 5 — префиксы словоформ, case-insensitive
+/// (дефект D4 живого отчёта: «разблокировка антифрода человеком» кейса
+/// digital-ruble не совпала с формулировками словаря — детектор молчал):
+/// «разблокировк», «вручную», «ручн(ая|ой|…)», «оператор», «сотрудник»,
+/// «дежурн», «человек».
+const MANUAL_ACTION_PATTERN: &str =
+    r"(?i)(разблокировк|вручную|ручн(ая|ой|ое|ые|ого|ому|ым|ых)|оператор|сотрудник|дежурн|человек)";
+
+/// Маркеры аудит-контура детектора 5 — общие для детектора и эмитимого
+/// правила: «аудит» (покрывает и «аудиторский след»), «audit», «журнал»
+/// (журнал действий/операций, журналируется). Голое «след» не берём —
+/// «следует» давало бы шум. Баланс детектора (read-only эвристика уровня
+/// warn-кандидата): пропуск хуже ложного срабатывания, но и фонтан
+/// недопустим — словарь шире прежнего (`журнал (действий|операций)`), но
+/// ограничен аудит-лексикой.
+const AUDIT_TRAIL_PATTERN: &str = r"(?i)(аудит|audit|журнал)";
+
 /// Кандидатное правило: что предложить, почему и откуда методика.
 #[derive(Debug, Clone, Serialize)]
 pub struct Candidate {
@@ -104,7 +131,20 @@ fn internal_re(pattern: &str) -> Result<Regex> {
         .map_err(|e| HarnessError::Control(format!("внутренний regex rules-suggest: {e}")))
 }
 
+/// Скаляр YAML в одинарных кавычках: внутри них нет escape-последовательностей,
+/// поэтому regex с `\s`/`\d`/`[^\n]` доезжает до парсера литерально — в
+/// ДВОЙНЫХ кавычках `\s` недопустимая escape-последовательность, и 2 из 3
+/// «готовых фрагментов» отклонялись YAML-парсером (дефект D2 живого отчёта).
+/// Единственное экранирование в одинарных кавычках — удвоение самой кавычки.
+fn yaml_sq(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
 /// YAML-фрагмент кандидатного правила `must_contain` для `rules:`.
+/// Скаляры `glob`/`pattern`/`rationale`/`fix_hint` — в одинарных кавычках
+/// ([`yaml_sq`]): фрагмент обязан парситься как YAML и загружаться боевой
+/// схемой `control::load_fitness_rules` (охранный тест ниже). `name`/`skill`
+/// — внутренние kebab-case константы, безопасны в plain-стиле.
 fn yaml_must_contain(
     name: &str,
     glob: &str,
@@ -116,18 +156,23 @@ fn yaml_must_contain(
     format!(
         "  - name: {name}\n    \
          type: must_contain\n    \
-         glob: \"{glob}\"\n    \
-         pattern: \"{pattern}\"\n    \
+         glob: {glob}\n    \
+         pattern: {pattern}\n    \
          severity: warn\n    \
-         rationale: \"{rationale}\"\n    \
-         fix_hint: \"{fix_hint}\"\n    \
-         skill: {skill}"
+         rationale: {rationale}\n    \
+         fix_hint: {fix_hint}\n    \
+         skill: {skill}",
+        glob = yaml_sq(glob),
+        pattern = yaml_sq(pattern),
+        rationale = yaml_sq(rationale),
+        fix_hint = yaml_sq(fix_hint),
     )
 }
 
 /// Детектор 1 (EARS): спецификации (`docs/spec/**/*.md`) и документы с
 /// секцией «Критерии приёмки» есть, а EARS-формулировок (When/While/If/Where
-/// в начале строки — нотация скилла readiness-gate) нет ни в одном.
+/// в начале строки — голой или жирной markdown-форме, [`EARS_PATTERN`]) нет
+/// ни в одном.
 fn detect_ears(case: &Path) -> Result<Option<Candidate>> {
     let mut files = read_texts(&case.join("docs/spec"), &["md"]);
     let acceptance = |t: &str| {
@@ -142,8 +187,9 @@ fn detect_ears(case: &Path) -> Result<Option<Candidate>> {
         return Ok(None);
     }
     // EARS-паттерн: ключевое слово в начале строки (форма требования), а не
-    // слово в середине прозы — ложных срабатываний детектора меньше.
-    let ears = internal_re(r"(?m)^\s*(When|While|If|Where)\s")?;
+    // слово в середине прозы — ложных срабатываний детектора меньше. Тот же
+    // паттерн уезжает в предложенное правило — единый диалект (дефект D3).
+    let ears = internal_re(EARS_PATTERN)?;
     if files.iter().any(|(_, t)| ears.is_match(t)) {
         return Ok(None);
     }
@@ -159,7 +205,7 @@ fn detect_ears(case: &Path) -> Result<Option<Candidate>> {
         yaml: Some(yaml_must_contain(
             "ears_acceptance_criteria",
             "docs/**/*.md",
-            r"(?m)^\s*(When|While|If|Where)\s",
+            EARS_PATTERN,
             "критерии приёмки без EARS-формы непроверяемы формально",
             "переписать критерии приёмки в EARS-нотации (When/While/If/Where)",
             "readiness-gate",
@@ -176,7 +222,10 @@ fn detect_contract_timeouts(case: &Path) -> Result<Option<Candidate>> {
     if files.is_empty() {
         return Ok(None);
     }
-    // Численный бюджет: слово-маркер и число в одной строке (в любую сторону).
+    // Численный бюджет: слово-маркер и число в одной строке (в любую сторону)
+    // либо число с единицей времени. Детектор осознанно ШИРЕ эмитимого ниже
+    // правила (там только «маркер и число»): подавлять кандидата может и
+    // голая цифра с единицей, а правило-напоминание требует явного маркера.
     let numeric = internal_re(
         r"(?i)(timeout|retry|retries|deadline|таймаут|дедлайн|повтор)[^\n]{0,48}\d|\d+\s*(ms|s|sec|seconds|мс|сек)\b",
     )?;
@@ -279,32 +328,34 @@ fn detect_rto_rpo_adr(case: &Path) -> Result<Option<Candidate>> {
 }
 
 /// Детектор 5 (аудит операторских действий): тексты упоминают ручные
-/// действия (разблокировка/оператор/вручную), но нет аудит-формулировок:
-/// ручные вмешательства в эксплуатацию без требования журналирования.
+/// действия (разблокировка/вручную/ручная/оператор/сотрудник/дежурный/
+/// человек — [`MANUAL_ACTION_PATTERN`]), но нет аудит-формулировок
+/// ([`AUDIT_TRAIL_PATTERN`]): ручные вмешательства в эксплуатацию без
+/// требования журналирования.
 fn detect_operator_audit(case: &Path) -> Result<Option<Candidate>> {
     let docs = read_texts(&case.join("docs"), &["md"]);
     if docs.is_empty() {
         return Ok(None);
     }
-    let manual = internal_re(r"(?i)(разблокиров|оператор|вручную)")?;
+    let manual = internal_re(MANUAL_ACTION_PATTERN)?;
     if !docs.iter().any(|(_, t)| manual.is_match(t)) {
         return Ok(None);
     }
-    let audit = internal_re(r"(?i)(аудит|audit|журнал (действий|операций))")?;
+    let audit = internal_re(AUDIT_TRAIL_PATTERN)?;
     if docs.iter().any(|(_, t)| audit.is_match(t)) {
         return Ok(None);
     }
     Ok(Some(Candidate {
         id: "operator-actions-audit".into(),
-        rationale: "документы упоминают ручные действия (разблокировка/оператор/вручную), \
-             но аудит-формулировок (аудит/журнал действий) нет — операторские \
-             вмешательства не журналируются, расследовать инциденты будет не по чему"
+        rationale: "документы упоминают ручные действия (разблокировка/вручную/оператор/\
+             сотрудник/дежурный), но аудит-формулировок (аудит/журнал действий) нет — \
+             операторские вмешательства не журналируются, расследовать инциденты будет не по чему"
             .into(),
         source_skill: "fitness-functions".into(),
         yaml: Some(yaml_must_contain(
             "operator_actions_audited",
             "docs/**/*.md",
-            r"(?i)(аудит|audit|журнал (действий|операций))",
+            AUDIT_TRAIL_PATTERN,
             "ручные действия оператора без требования аудита — вмешательства нерасследуемы",
             "добавить требование журналирования операторских действий в эксплуатационные документы",
             "fitness-functions",
@@ -558,5 +609,207 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tmp");
         let report = suggest(tmp.path()).expect("suggest");
         assert!(report.candidates.is_empty());
+    }
+
+    #[test]
+    fn generated_yaml_fragments_parse_and_load_into_control_schema() {
+        // Дефект D2: «готовые фрагменты» с pattern в двойных кавычках YAML не
+        // парсились (`\s` — недопустимая escape-последовательность): 2 из 3
+        // кандидатов отклонялись парсером. Каждый сгенерированный фрагмент
+        // всех детекторов обязан парситься serde_yaml_ng И приниматься боевой
+        // схемой `control::load_fitness_rules` (прецедент — тест
+        // `default_constraints_yaml_is_valid_for_every_stack` в handoff.rs).
+        let tmp = tempfile::tempdir().expect("tmp");
+        let case = gap_case(tmp.path());
+        let report = suggest(&case).expect("suggest");
+        let mut checked = 0_usize;
+        for c in &report.candidates {
+            let Some(yaml) = &c.yaml else {
+                continue;
+            };
+            checked += 1;
+            let doc = format!("rules:\n{yaml}\n");
+            let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&doc)
+                .unwrap_or_else(|e| panic!("{}: фрагмент не парсится: {e}\n{doc}", c.id));
+            let rules = parsed["rules"]
+                .as_sequence()
+                .unwrap_or_else(|| panic!("{}: нет списка rules:\n{doc}", c.id));
+            assert_eq!(rules.len(), 1, "{}:\n{doc}", c.id);
+            let rule = &rules[0];
+            for key in ["name", "type", "severity"] {
+                assert!(rule[key].is_string(), "{}: нет '{key}':\n{doc}", c.id);
+            }
+            // Скаляр pattern доезжает до regex-движка без потерь: обратная
+            // косая в одинарных кавычках YAML — литерал.
+            let pattern = rule["pattern"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{}: pattern не строка:\n{doc}", c.id));
+            Regex::new(pattern)
+                .unwrap_or_else(|e| panic!("{}: pattern не компилируется: {e}\n{pattern}", c.id));
+            // Боевая схема (control::check): файл читается загрузчиком правил.
+            let path = tmp.path().join(format!("CONSTRAINTS-{}.yaml", c.id));
+            std::fs::write(&path, &doc).expect("write");
+            let loaded = crate::control::load_fitness_rules(&path)
+                .unwrap_or_else(|e| panic!("{}: схема не принимает: {e}\n{doc}", c.id));
+            assert_eq!(loaded.len(), 1, "{}", c.id);
+        }
+        assert!(
+            checked >= 4,
+            "механизируемых кандидатов минимум 4 (EARS, таймауты, RTO/RPO, аудит): {checked}"
+        );
+        // Паттерн EARS-правила после парсинга — в точности детекторный (D3).
+        let ears = report
+            .candidates
+            .iter()
+            .find(|c| c.id == "ears-acceptance-criteria")
+            .expect("ears-кандидат");
+        let doc = format!("rules:\n{}\n", ears.yaml.as_deref().expect("yaml"));
+        let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&doc).expect("parse");
+        assert_eq!(
+            parsed["rules"][0]["pattern"].as_str(),
+            Some(EARS_PATTERN),
+            "pattern искажён кавычками:\n{doc}"
+        );
+    }
+
+    #[test]
+    fn yaml_sq_escapes_single_quotes() {
+        // Одинарная кавычка внутри значения удваивается — фрагмент остаётся
+        // валидным YAML со скаляром без искажений.
+        let doc = format!(
+            "rules:\n{}\n",
+            yaml_must_contain(
+                "quoted",
+                "docs/**/*.md",
+                "don't panic",
+                "rationale с 'кавычкой'",
+                "fix",
+                "skill-x",
+            )
+        );
+        let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&doc).expect("parse");
+        assert_eq!(
+            parsed["rules"][0]["pattern"].as_str(),
+            Some("don't panic"),
+            "{doc}"
+        );
+        assert_eq!(
+            parsed["rules"][0]["rationale"].as_str(),
+            Some("rationale с 'кавычкой'"),
+            "{doc}"
+        );
+    }
+
+    #[test]
+    fn ears_detector_recognizes_all_markdown_dialects() {
+        // D3: единый диалект — детектор и эмитимое правило говорят на одном
+        // паттерне; формы из реальных спек (кейс 011) узнаются.
+        let re = internal_re(EARS_PATTERN).expect("regex");
+        for form in [
+            "When платёж принят, the шлюз shall подтвердить за 200 мс.",
+            "- When платёж принят, the шлюз shall подтвердить.",
+            "- **When** сторона публикует версию условия, **the** сервис **shall** …",
+            "**While** платёж находится в состоянии `DISPUTED`, **the** движок **shall** …",
+            "   - **Where** применяется растепливание, **the** система **shall** …",
+            "  * If платформа не подтвердила исполнение, **then** …",
+        ] {
+            assert!(re.is_match(form), "форма не узнана: {form}");
+        }
+        for non in [
+            "Система корректно обрабатывает платежи.",
+            "Когда платёж принят, шлюз подтверждает.",
+            "the шлюз shall подтвердить за 200 мс.",
+            "Заметка о When в середине строки не считается.",
+        ] {
+            assert!(!re.is_match(non), "ложное срабатывание: {non}");
+        }
+    }
+
+    #[test]
+    fn bold_ears_case_yields_no_ears_candidate() {
+        // Регрессия D3 по кейсу 011: EARS только в жирной форме — детектор
+        // молчит (раньше считал такой кейс «без EARS» и давал ложного
+        // кандидата, а собственное правило кейс проходил бы).
+        let tmp = tempfile::tempdir().expect("tmp");
+        let case = tmp.path().join("bold-ears");
+        std::fs::create_dir_all(case.join("docs/spec")).expect("spec");
+        std::fs::write(
+            case.join("docs/spec/payments.md"),
+            "# Спека\n\n## Критерии приёмки\n\n- **When** платёж принят, **the** шлюз **shall** \
+             подтвердить за 200 мс.\n- **While** платёж в `DISPUTED`, **the** движок **shall** \
+             приостановить исполнение.\n",
+        )
+        .expect("spec");
+        let report = suggest(&case).expect("suggest");
+        assert!(
+            !ids(&report).contains(&"ears-acceptance-criteria"),
+            "{:?}",
+            ids(&report)
+        );
+    }
+
+    #[test]
+    fn operator_audit_gap_yields_candidate_and_audited_case_does_not() {
+        // D4: «разблокировка человеком» без аудит-формулировок → кандидат;
+        // те же ручные действия с контуром аудита → кандидата нет.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let case = tmp.path().join("manual-no-audit");
+        std::fs::create_dir_all(case.join("docs")).expect("docs");
+        std::fs::write(
+            case.join("docs/antifraud.md"),
+            "# Антифрод\n\nРешение «стоп» блокирующее: разблокировка возможна только человеком.\n",
+        )
+        .expect("doc");
+        let report = suggest(&case).expect("suggest");
+        assert!(
+            ids(&report).contains(&"operator-actions-audit"),
+            "{:?}",
+            ids(&report)
+        );
+
+        std::fs::write(
+            case.join("docs/audit.md"),
+            "# Аудит\n\nДействия оператора журналируются: кто, когда и что разблокировал — \
+             аудиторский след вмешательств.\n",
+        )
+        .expect("doc");
+        let report = suggest(&case).expect("suggest");
+        assert!(
+            !ids(&report).contains(&"operator-actions-audit"),
+            "{:?}",
+            ids(&report)
+        );
+    }
+
+    #[test]
+    fn operator_audit_dictionary_covers_word_forms() {
+        // Словари D4: префиксы словоформ триггеров ручных действий и
+        // маркеров аудита; «следует» и «выследить» шумом не становятся.
+        let manual = internal_re(MANUAL_ACTION_PATTERN).expect("manual");
+        for form in [
+            "разблокировка антифрода человеком",
+            "перезапуск выполняет дежурный администратор",
+            "Сотрудник back-office подтверждает операцию",
+            "ручная сверка выписок",
+            "Ручного разбора не предусмотрено",
+            "операция проводится вручную",
+            "Решение принимает оператор",
+        ] {
+            assert!(manual.is_match(form), "триггер не узнан: {form}");
+        }
+        assert!(!manual.is_match("автоматическая сверка по расписанию"));
+        let audit = internal_re(AUDIT_TRAIL_PATTERN).expect("audit");
+        for form in [
+            "журнал действий оператора",
+            "аудиторский след вмешательств",
+            "immutable audit trail",
+            "каждое действие журналируется",
+        ] {
+            assert!(audit.is_match(form), "маркер не узнан: {form}");
+        }
+        assert!(
+            !audit.is_match("следует выполнять сверку"),
+            "«следует» — шум"
+        );
     }
 }
