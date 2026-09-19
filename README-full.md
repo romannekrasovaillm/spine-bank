@@ -114,6 +114,13 @@ TUI, CLI, библиотека.
 дисциплина артефактов: спецификации, architecture-spine, ADR, рубрики,
 fitness functions, handoff-пакеты кодовым агентам.
 
+**Что нового в 0.3.4**: паспорт вердикта (`arch-be gate --explain` — страница
+«чего зелёный НЕ означает»), проводник нового кейса (`arch-be bootstrap`),
+метрика доверия к контуру (`arch-be trust`), мутационное измерение пакета
+(`arch-be redteam`), семантика артефактов Evidence Bundle (заглушка — находка,
+а не «файл на месте»). Полный список и раздел «Что может покраснеть после
+обновления» — [CHANGELOG.md](CHANGELOG.md).
+
 Идеи — разбор SDD-харнессов и корпоративных агентных фреймворков
 (`docs/SOURCE_BRIEF.md`, август 2026: AI-Disrupt PDLC, AWS AI-DLC/Kiro,
 BMAD, Spec Kit, OpenSpec и др.):
@@ -739,6 +746,14 @@ CI: fmt / clippy / test / MSRV 1.85 / cargo audit — `.github/workflows/ci.yml`
 corporate environments): a thin, Rust-built agent that lives in your terminal
 and speaks the language of architecture work — ADRs, architecture-spine
 invariants, rubrics, fitness functions, handoff packages for coding agents.
+
+**New in 0.3.4**: the verdict passport (`arch-be gate --explain` — a page
+stating what a green does NOT mean), a case conductor (`arch-be bootstrap`), a
+trust metric with anchors and evidence (`arch-be trust`), mutation testing of
+the package itself (`arch-be redteam`), and artifact semantics for the evidence
+bundle (a stub is a finding, not "the file is there"). See
+[CHANGELOG.md](CHANGELOG.md) for the full list and the "what may turn red"
+section.
 One binary, `arch-be`: TUI, CLI, and library.
 
 The harness is deliberately **thin**: core tools (bash, files) plus a small

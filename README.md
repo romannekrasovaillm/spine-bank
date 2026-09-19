@@ -40,6 +40,35 @@ MIT; слой `banking/` в публикацию не входит.
 
 # Режим 1. Spine Core внутри вашего харнесса
 
+## Что нового в 0.3.4
+
+Релиз про **честную границу зелёного** — три вещи, которые раньше приходилось
+объяснять словами, теперь печатает сам контур:
+
+- **Паспорт вердикта** — `arch-be gate --explain` (и MCP `verdict_explain`):
+  рядом с любым вердиктом страница из трёх блоков — что проверено (с числами),
+  что заявлено и механикой **не** проверяется (подпись A3, семантика ссылок,
+  независимость судьи и ревьюера), что не проверено вовсе (`SKIP` с причиной).
+- **Проводник** — `arch-be bootstrap "Имя кейса"`: каркас кейса и следующая
+  красная находка с подсказкой. Прогресс — `arch-be bootstrap --status`
+  (`спайн ✓ · правила ✓ · модель ✗ (2 находки) · бандл 7/13`). Каркас намеренно
+  красный: его заглушки ловит семантика бандла.
+- **Метрика доверия** — `arch-be trust`: положение на шкале 1–5 **с якорями и
+  доказательствами**, а не число. Ступень 5 недостижима, пока есть
+  неподписанное A3, судья-автор или доля обнаружения ниже порога.
+
+Плюс ужесточения, которые меняют вердикты (полный список — в
+[CHANGELOG.md](CHANGELOG.md), раздел «Что может покраснеть после обновления»):
+
+- **Заглушка в артефакте бандла — находка.** `DECISION.md` со словом `TODO` или
+  ревью с `VERDICT: NOT-READY` больше не дают «выпуск разрешён» на Critical.
+- **Битая ссылка модели краснит `gate`**, а не только `model validate`.
+- **Аттестация вердикта** привязана к состоянию репозитория: правка спайна,
+  модели или бандла меняет её, безвредная правка текста — тоже. Сравнивать
+  аттестации корректно только внутри одной версии.
+- **Мутационное измерение пакета** — `arch-be redteam <кейс>`: доля
+  обнаружения по 16 мутаторам. На эталонном кейсе ТСП — **11 из 14 = 79 %**.
+
 ## Шаг 0. Бинарь (30 секунд)
 
 Linux / macOS — одна команда на платформу (имя файла — из таблицы):
@@ -215,7 +244,7 @@ arch-be connect codex     # TOML для ~/.codex/config.toml (+ --apply-global)
 arch-be connect generic   # сниппеты для любого MCP-совместимого хоста
 ```
 
-## Шаг 2. Три способа работы
+## Шаг 2. Пять способов работы
 
 ### А. Кодер под гейтом
 
@@ -309,13 +338,13 @@ MCP-инструмента, а плейбуки работы (`spine-*`) при�
   `delta_guard`, `evidence_verify`, `contract_diff` (OpenAPI, proto/gRPC,
   Avro, JSON Schema, DDL + правило major-версии), реестры `landscape_report`,
   `adr_registry`, `rules_report`, `openspec_coverage`, `model_graph`.
-- **Плейбуки как команды**: 7 MCP-промптов (`spine-architect-review`,
+- **Плейбуки как команды**: 8 MCP-промптов (`spine-architect-review`,
   `spine-fitness-gate`, …) — в Qwen Code 0.24 видны в меню как команды
   `[Project]`, ревью запускается из меню.
 
 <p align="center">
   <img src="docs/screenshots/harnesses/waves-qwen-tui-prompts.png" alt="Qwen Code 0.24: плейбуки spine-* как слэш-команды [Project] через MCP prompts" width="49%">
-  <img src="docs/screenshots/harnesses/waves-claude-tui-mcp.png" alt="Claude Code: /mcp — spine connected, 33 tools (захват; актуально — 34)" width="49%">
+  <img src="docs/screenshots/harnesses/waves-claude-tui-mcp.png" alt="Claude Code: /mcp — spine connected, 33 tools (захват; актуально — 36)" width="49%">
 </p>
 
 ![Headless-прогоны architect_review: omp · OpenClaw · Qwen](docs/screenshots/harnesses/waves-headless-reviews.png)
@@ -359,6 +388,18 @@ Code) спроектировал сервис цифрового рубля ма
 поймана, взвешенный итог отреагировал); **Stop-хук с exit 2** останавливает
 агента на красном гейте. Формула из отчёта: «не текст, а измерение текста…
 не могу получить „нет" на свою работу — здесь могу».
+
+В 0.3.4 к этому добавилось **измерение защищённости самого пакета**:
+`arch-be redteam кейсы/digital-ruble-merchant` засеивает 16 дефектов по
+одному и печатает карту обнаружения — кто поймал и кто нет. Эталонный кейс
+ТСП: **11 из 14 = 79 %** (порог 78 %), контроль аттестации пройден. Три
+непойманных дефекта названы честно: два (`D6` ссылка «не на ту» сущность,
+`D10` решение противоречит инварианту при формально верном тексте) механике
+недоступны по построению и живут в блоке 2 паспорта вердикта, третий
+(`D11` код нарушает инвариант без правила на код) — работа ревьюера.
+Тот же прогон на втором кейсе, [salary-payments](кейсы/salary-payments/),
+даёт 10 из 14 — и это не регрессия, а измерение: у кейса нет правил,
+проверяющих поведение, и его `README` называет причину каждого пропуска.
 
 > **🇬🇧 English:** Measured on a live Critical-route case
 > ([digital-ruble](кейсы/digital-ruble/), external Claude Code agent, zero
@@ -494,6 +535,8 @@ arch-be mcp serve --rw    # + handoff_create (теперь и в core), adr_new,
 | [fleet-spine-drift](кейсы/fleet-spine-drift/) | Аудит флота: дрейф `CONSTRAINTS.yaml` как exit-код — без LLM |
 | [parallel-epics](кейсы/parallel-epics/) · [fleet-of-ten](кейсы/fleet-of-ten/) | Спайн как клей флота Claude Code |
 | [legacy-survey](кейсы/legacy-survey/) · [jvm-archunit-gate](кейсы/jvm-archunit-gate/) | Reverse discovery, гейт по байткоду |
+| [digital-ruble-merchant](кейсы/digital-ruble-merchant/) | Эталон мутационного измерения: 9 инвариантов, 13 правил, бандл Critical — `redteam` даёт 11 из 14 |
+| [salary-payments](кейсы/salary-payments/) | Кейс, собранный проводником `bootstrap` с нуля: 43 сущности, 5 ADR, walking skeleton, бандл из 13 артефактов |
 
 Реестр — [`кейсы/AGENTS.md`](кейсы/AGENTS.md); ещё три кейса —
 в [README-full.md](README-full.md).
