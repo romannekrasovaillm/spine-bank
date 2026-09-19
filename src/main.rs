@@ -2949,7 +2949,14 @@ fn cmd_control(cfg: &arch_harness::config::Config, cmd: ControlCmd) -> Result<()
             }
         }
         ControlCmd::Sensors { dir } => {
-            for r in arch_harness::control::sensors_check(&dir)? {
+            let results = arch_harness::control::sensors_check(&dir)?;
+            // Провал сенсора — ненулевой exit (годится для CI): до волны
+            // DB-гейта команда печатала [FAIL], но завершалась с кодом 0,
+            // и дефект формы спецификации проходил контур незамеченным
+            // (red-team кейса 011, вариант 06). PASS всех сенсоров — exit 0,
+            // поведение зелёных кейсов не меняется.
+            let failed = results.iter().filter(|r| !r.passed).count();
+            for r in &results {
                 println!(
                     "  [{}] {} {} — {}",
                     if r.passed { "PASS" } else { "FAIL" },
@@ -2957,6 +2964,14 @@ fn cmd_control(cfg: &arch_harness::config::Config, cmd: ControlCmd) -> Result<()
                     r.file.display(),
                     r.details
                 );
+            }
+            println!(
+                "Итог: {} — сенсоров: {}, провалено: {failed}",
+                if failed == 0 { "PASS" } else { "FAIL" },
+                results.len()
+            );
+            if failed > 0 {
+                std::process::exit(1);
             }
         }
         ControlCmd::Score { trigger, from_diff } => {

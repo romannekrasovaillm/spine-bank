@@ -7,9 +7,10 @@
 //! Составляющие (на любом маршруте): fitness (`control check`), гейт прямых
 //! правок спайна (`delta guard`), анти-ослабление реестра правил
 //! ([`control::rule_weakened`]), линтер спайна (`control spine`), трассировка
-//! (`trace check`). На маршрутах Standard/Critical добавляются количественные
-//! NFR (все четыре проверки `nfr`) и проверка evidence-бандлов активных дельт
-//! (`changes/<name>/EVIDENCE.yaml`).
+//! (`trace check`). На маршрутах Standard/Critical добавляются сенсоры
+//! спецификаций ([`control::sensors_check`] по `<repo>/docs/spec`),
+//! количественные NFR (все четыре проверки `nfr`) и проверка evidence-бандлов
+//! активных дельт (`changes/<name>/EVIDENCE.yaml`).
 //!
 //! Fail-soft (статус SKIP, не падение): у составляющей нет входа — нет
 //! `CONSTRAINTS.yaml`, не git-репозиторий, нет `model/`, нет активных
@@ -297,6 +298,18 @@ fn git_rev_has_path(repo: &Path, rev: &str, rel: &str) -> bool {
         .is_ok_and(|s| s.success())
 }
 
+/// Первая непустая строка stderr git без префикса «fatal:» — краткая причина
+/// для отчёта. Сырой stderr целиком в отчёт не проксируем (D9): там
+/// многострочная справка использования, засорявшая вывод гейта.
+fn git_stderr_reason(stderr: &[u8]) -> String {
+    let text = String::from_utf8_lossy(stderr);
+    let reason = text.lines().map(str::trim).find(|l| !l.is_empty()).map_or(
+        "git завершился с ошибкой без сообщения",
+        |l| l.strip_prefix("fatal:").map_or(l, str::trim),
+    );
+    reason.chars().take(160).collect()
+}
+
 /// Содержимое файла в ревизии (`git show <rev>:<rel>`).
 ///
 /// # Errors
@@ -311,36 +324,96 @@ fn git_show_file(repo: &Path, rev: &str, rel: &str) -> Result<String> {
         .output()
         .map_err(|e| HarnessError::Control(format!("git show не запустился: {e}")))?;
     if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
         return Err(HarnessError::Control(format!(
             "git show {rev}:{rel}: {}",
-            stderr.trim().chars().take(300).collect::<String>()
+            git_stderr_reason(&out.stderr)
         )));
     }
     String::from_utf8(out.stdout)
         .map_err(|_| HarnessError::Control(format!("{rev}:{rel}: содержимое не UTF-8")))
 }
 
+/// Разрешённый путь к файлу ограничений гейта: явный `--constraints` либо
+/// дефолт с fallback'ом на корневой `CONSTRAINTS.yaml` (D6).
+struct ConstraintsPath {
+    /// Файл ограничений (может не существовать — составляющие дадут SKIP).
+    path: PathBuf,
+    /// Путь задан явно флагом `--constraints`: тогда путь вне репозитория
+    /// валит `rule_weakened` (fail-closed), а не молча отключает
+    /// анти-ослабление (раньше — SKIP «git-сравнение невозможно»).
+    explicit: bool,
+}
+
+/// Путь к файлу ограничений для отчёта: относительный к репозиторию, когда
+/// файл внутри него (иначе — как передан).
+fn constraints_label(repo: &Path, constraints: &Path) -> String {
+    constraints
+        .strip_prefix(repo)
+        .unwrap_or(constraints)
+        .display()
+        .to_string()
+}
+
+/// Относительный путь `file` внутри `repo` по канонизированным путям
+/// (`None` — файл вне репозитория или канонизация не удалась). Сравнение
+/// канонизированно: явный `--constraints` бывает абсолютным или с `./`,
+/// тогда как `repo` — `.` (раньше такой путь улетал в SKIP).
+fn canonical_rel(repo: &Path, file: &Path) -> Option<PathBuf> {
+    let abs_file = file.canonicalize().ok()?;
+    let abs_repo = repo.canonicalize().ok()?;
+    abs_file.strip_prefix(&abs_repo).ok().map(Path::to_path_buf)
+}
+
 /// Составляющая `fitness`: прогон `CONSTRAINTS.yaml` ([`control::check`]).
-fn component_fitness(repo: &Path, constraints: &Path) -> GateComponent {
-    if !constraints.is_file() {
+fn component_fitness(repo: &Path, constraints: &ConstraintsPath) -> GateComponent {
+    if !constraints.path.is_file() {
         return GateComponent::skip(
             "fitness",
             format!(
                 "нет файла ограничений {} — нечего прогонять",
-                constraints.display()
+                constraints.path.display()
             ),
         );
     }
-    match control::check(repo, constraints) {
-        Ok(report) if report.passed => GateComponent::pass("fitness", report.summary),
+    let label = constraints_label(repo, &constraints.path);
+    match control::check(repo, &constraints.path) {
+        Ok(report) if report.passed => {
+            GateComponent::pass("fitness", format!("{} — файл: {label}", report.summary))
+        }
         Ok(report) => GateComponent::fail(
             "fitness",
-            report.summary,
+            format!("{} — файл: {label}", report.summary),
             report.issues.iter().map(GateFinding::lint).collect(),
         ),
         Err(e) => GateComponent::fail("fitness", format!("сбой выполнения: {e}"), Vec::new()),
     }
+}
+
+/// Потолок записей покрытия «файл ← дельты» в детали составляющей
+/// `delta_guard`: строка детали одна, полный список всегда доступен
+/// `arch-be delta guard`.
+const MAX_COVERAGE_NOTE: usize = 3;
+
+/// Однострочная сводка покрытия защищённых файлов дельтами:
+/// `file ← 'delta1', 'delta2'` через запятую (с потолком [`MAX_COVERAGE_NOTE`]).
+fn coverage_note(report: &delta::GuardReport) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for (file, deltas) in report.mentions.iter().take(MAX_COVERAGE_NOTE) {
+        if deltas.is_empty() {
+            continue;
+        }
+        let quoted: Vec<String> = deltas.iter().map(|d| format!("'{d}'")).collect();
+        parts.push(format!("{file} ← {}", quoted.join(", ")));
+    }
+    let covered = report
+        .mentions
+        .iter()
+        .filter(|(_, d)| !d.is_empty())
+        .count();
+    if covered > MAX_COVERAGE_NOTE {
+        parts.push(format!("… и ещё {}", covered - MAX_COVERAGE_NOTE));
+    }
+    parts.join("; ")
 }
 
 /// Составляющая `delta_guard`: гейт прямых правок спайна ([`delta::guard`]).
@@ -358,19 +431,26 @@ fn component_delta_guard(repo: &Path, base: Option<&str>, git: &GitProbe) -> Gat
         );
     }
     match delta::guard(repo, base, &[]) {
-        Ok(report) if report.passed => GateComponent::pass(
-            "delta_guard",
-            format!(
+        Ok(report) if report.passed => {
+            let mut detail = format!(
                 "изменённых файлов: {}, защищённых среди них: {}",
                 report.changed,
                 report.protected_changed.len()
-            ),
-        ),
+            );
+            // Отчёт, а не галочка (D8): какие защищённые пути изменены и
+            // какой дельтой каждый покрыт.
+            if !report.protected_changed.is_empty() {
+                // Запись в String не может завершиться ошибкой — игнор безопасен.
+                let _ = write!(detail, " — покрытие: {}", coverage_note(&report));
+            }
+            GateComponent::pass("delta_guard", detail)
+        }
         Ok(report) => GateComponent::fail(
             "delta_guard",
             format!(
-                "правки спайна мимо дельты: {} файлов",
-                report.violations.len()
+                "правки спайна мимо дельты: {} файлов (активных дельт: {})",
+                report.violations.len(),
+                report.active_deltas
             ),
             report
                 .violations
@@ -379,7 +459,15 @@ fn component_delta_guard(repo: &Path, base: Option<&str>, git: &GitProbe) -> Gat
                     GateFinding::file_only(
                         "error",
                         v.clone(),
-                        "не упоминается ни в одной активной дельте".to_string(),
+                        if report.active_deltas == 0 {
+                            "не упоминается ни в одной активной дельте — активных дельт нет"
+                                .to_string()
+                        } else {
+                            format!(
+                                "не упоминается ни в одной из {} активных дельт",
+                                report.active_deltas
+                            )
+                        },
                     )
                 })
                 .collect(),
@@ -391,9 +479,16 @@ fn component_delta_guard(repo: &Path, base: Option<&str>, git: &GitProbe) -> Gat
 /// Составляющая `rule_weakened`: анти-ослабление реестра правил относительно
 /// git-базы ([`control::rule_weakened`]). Активные overrides с ADR
 /// узаконивают ослабление.
+///
+/// Fail-closed (D6): явный `--constraints` ВНУТРИ репозитория сравнивается
+/// по относительному пути (раньше абсолютный путь улетал в SKIP «вне
+/// репозитория» — защита молча отключалась); путь ВНЕ репозитория — FAIL
+/// с причиной, а не SKIP: анти-ослабление невозможно честно, и гейт обязан
+/// это сказать. Репозиторий без базовой ревизии (нет коммитов) — честный
+/// SKIP: сравнивать не с чем, это не поломка и не ослабление.
 fn component_rule_weakened(
     repo: &Path,
-    constraints: &Path,
+    constraints: &ConstraintsPath,
     base: &str,
     git: &GitProbe,
 ) -> GateComponent {
@@ -403,7 +498,7 @@ fn component_rule_weakened(
             "не git-репозиторий — сравнение с базой недоступно".to_string(),
         );
     }
-    if !constraints.is_file() {
+    if !constraints.path.is_file() {
         return GateComponent::skip(
             "rule_weakened",
             "нет файла ограничений — нечего сравнивать".to_string(),
@@ -413,15 +508,30 @@ fn component_rule_weakened(
     if !git_rev_exists(repo, rev) {
         return GateComponent::skip(
             "rule_weakened",
-            format!("базовая ревизия '{rev}' не существует — сравнивать не с чем"),
+            format!("базовая ревизия '{rev}' не существует (нет коммитов?) — сравнивать не с чем"),
         );
     }
-    let Ok(rel) = constraints.strip_prefix(repo) else {
+    let Some(rel) = canonical_rel(repo, &constraints.path) else {
+        if constraints.explicit {
+            return GateComponent::fail(
+                "rule_weakened",
+                format!(
+                    "анти-ослабление невозможно: файл ограничений {} вне репозитория {} — \
+                     git-сравнение недоступно; держите реестр правил внутри репозитория \
+                     (или снимите явный --constraints)",
+                    constraints.path.display(),
+                    repo.display()
+                ),
+                Vec::new(),
+            );
+        }
+        // Дефолтный путь строится из repo.join(...) и вне репозитория
+        // оказаться не может; ветка — страховка от рассинхрона резолва.
         return GateComponent::skip(
             "rule_weakened",
             format!(
                 "файл ограничений {} вне репозитория — git-сравнение невозможно",
-                constraints.display()
+                constraints.path.display()
             ),
         );
     };
@@ -442,24 +552,27 @@ fn component_rule_weakened(
             );
         }
     };
-    let current_src = match std::fs::read_to_string(constraints) {
+    let current_src = match std::fs::read_to_string(&constraints.path) {
         Ok(text) => text,
         Err(e) => {
             return GateComponent::fail(
                 "rule_weakened",
-                format!("сбой чтения {}: {e}", constraints.display()),
+                format!("сбой чтения {}: {e}", constraints.path.display()),
                 Vec::new(),
             );
         }
     };
-    match control::rule_weakened(&current_src, &base_src, constraints) {
+    match control::rule_weakened(&current_src, &base_src, &constraints.path) {
         Ok(issues) if issues.is_empty() => GateComponent::pass(
             "rule_weakened",
-            format!("реестр правил не ослаблен относительно {rev}"),
+            format!("реестр правил не ослаблен относительно {rev} — файл: {rel}"),
         ),
         Ok(issues) => GateComponent::fail(
             "rule_weakened",
-            format!("ослаблений правил относительно {rev}: {}", issues.len()),
+            format!(
+                "ослаблений правил относительно {rev}: {} — файл: {rel}",
+                issues.len()
+            ),
             issues.iter().map(GateFinding::lint).collect(),
         ),
         Err(e) => GateComponent::fail("rule_weakened", format!("сбой сравнения: {e}"), Vec::new()),
@@ -543,6 +656,64 @@ fn component_trace(repo: &Path) -> GateComponent {
             )
         }
         Err(e) => GateComponent::fail("trace_check", format!("сбой выполнения: {e}"), Vec::new()),
+    }
+}
+
+/// Составляющая `sensors` (маршруты Standard/Critical): сенсоры спецификаций
+/// [`control::sensors_check`] по `<repo>/docs/spec` — обязательные секции
+/// (`required_sections`) и живость относительных ссылок (`upstream_coverage`).
+///
+/// Маршрутность — как у соседних nfr/evidence (Standard/Critical): сенсоры
+/// проверяют СОДЕРЖАНИЕ решения (форму спецификаций), а не механику
+/// протокола гейта; на маршруте Fast контур намеренно лёгкий (ADR-034) —
+/// мелкая правка не должна блокироваться неполной спекой, полнота
+/// обязательна со Standard. Каталога нет или он пуст — SKIP (fail-soft на
+/// инфраструктуру, как у соседних составляющих); провал любого сенсора —
+/// FAIL, и с ним весь гейт (класс red-team 06: удалённая секция спеки
+/// раньше проходила весь контур незамеченной).
+fn component_sensors(repo: &Path) -> GateComponent {
+    let spec_dir = repo.join("docs/spec");
+    if !spec_dir.is_dir() {
+        return GateComponent::skip(
+            "sensors",
+            "нет каталога docs/spec — спецификаций для сенсоров нет".to_string(),
+        );
+    }
+    match control::sensors_check(&spec_dir) {
+        Ok(results) if results.is_empty() => GateComponent::skip(
+            "sensors",
+            "в docs/spec нет *.md — спецификаций для сенсоров нет".to_string(),
+        ),
+        Ok(results) => {
+            let failed: Vec<&control::SensorResult> =
+                results.iter().filter(|r| !r.passed).collect();
+            if failed.is_empty() {
+                GateComponent::pass(
+                    "sensors",
+                    format!("сенсоров прогнано: {}, провалов нет", results.len()),
+                )
+            } else {
+                GateComponent::fail(
+                    "sensors",
+                    format!(
+                        "сенсоров прогнано: {}, провалено: {}",
+                        results.len(),
+                        failed.len()
+                    ),
+                    failed
+                        .iter()
+                        .map(|r| GateFinding {
+                            severity: "error".to_string(),
+                            rule: Some(r.sensor.clone()),
+                            file: Some(r.file.display().to_string()),
+                            line: None,
+                            message: r.details.clone(),
+                        })
+                        .collect(),
+                )
+            }
+        }
+        Err(e) => GateComponent::fail("sensors", format!("сбой выполнения: {e}"), Vec::new()),
     }
 }
 
@@ -722,7 +893,9 @@ fn auto_route(repo: &Path, base: Option<&str>, limits: (usize, usize)) -> (Route
 /// `route_override`: `None` — маршрут вычисляется из диффа (`--route auto`).
 /// `base`: git-ref базы для диффа, delta guard и сравнения правил (`None` —
 /// рабочее дерево против HEAD). `constraints`: файл ограничений (дефолт
-/// `<repo>/.arch-handoff/CONSTRAINTS.yaml`, как у `control check`).
+/// `<repo>/.arch-handoff/CONSTRAINTS.yaml`, как у `control check`; D6 —
+/// fallback: если его нет, но есть `<repo>/CONSTRAINTS.yaml`, берётся он —
+/// и для fitness, и для анти-ослабления).
 /// `limits` — пороги маршрутов `(fast_max, standard_max)` из конфига
 /// (`[significance]`, ADR-034).
 ///
@@ -748,10 +921,29 @@ pub fn run(
         let (r, note) = auto_route(repo, base, limits);
         (r, true, note)
     };
-    let constraints = constraints.map_or_else(
-        || repo.join(".arch-handoff/CONSTRAINTS.yaml"),
-        Path::to_path_buf,
-    );
+    let constraints = if let Some(path) = constraints {
+        ConstraintsPath {
+            path: path.to_path_buf(),
+            explicit: true,
+        }
+    } else {
+        let handoff = repo.join(".arch-handoff/CONSTRAINTS.yaml");
+        // Fallback (D6): на кейсе без handoff-пакета fitness и
+        // rule_weakened по дефолту уходили в SKIP — гейт зеленел
+        // «из-за пропусков», хотя в корне лежал настоящий реестр правил.
+        let root = repo.join("CONSTRAINTS.yaml");
+        if handoff.is_file() || !root.is_file() {
+            ConstraintsPath {
+                path: handoff,
+                explicit: false,
+            }
+        } else {
+            ConstraintsPath {
+                path: root,
+                explicit: false,
+            }
+        }
+    };
     let git = GitProbe::probe(repo);
 
     let mut components = vec![
@@ -762,6 +954,7 @@ pub fn run(
         component_trace(repo),
     ];
     if matches!(route, Route::Standard | Route::Critical) {
+        components.push(component_sensors(repo));
         components.push(component_nfr(repo));
         components.push(component_evidence(repo));
     }
@@ -1059,5 +1252,270 @@ mod tests {
         let err = run(&tmp.path().join("ghost"), None, None, None, (1, 4))
             .expect_err("несуществующий репозиторий");
         assert!(err.to_string().contains("недоступен"), "{err}");
+    }
+
+    // --- составляющая `sensors` (D5) ----------------------------------------
+    /// Пишет спецификацию в `<repo>/docs/spec/<name>`.
+    fn write_spec(repo: &Path, name: &str, text: &str) {
+        let dir = repo.join("docs/spec");
+        std::fs::create_dir_all(&dir).expect("mkdir spec");
+        std::fs::write(dir.join(name), text).expect("spec");
+    }
+
+    #[test]
+    fn gate_sensors_fail_when_spec_lost_required_section() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("mkdir");
+        make_gate_repo(&repo);
+        // Red-team 06: из спеки удалена секция «## Критерии приёмки».
+        write_spec(
+            &repo,
+            "payments.md",
+            "# Спека\n\n## Проблема\nТекст.\n\n## Риски\nТекст.\n",
+        );
+        // Маршрут Standard: sensors в контуре (на Fast её нет — см. ниже).
+        let report = run(&repo, Some(Route::Standard), None, None, (1, 4)).expect("гейт");
+        assert!(!report.passed, "{}", render(&report));
+        assert_eq!(status_of(&report, "sensors"), GateStatus::Fail);
+        let text = render(&report);
+        assert!(text.contains("required_sections"), "{text}");
+        assert!(text.contains("## Критерии приёмки"), "{text}");
+        // На маршруте Fast составляющей sensors нет вовсе (лёгкий контур).
+        let fast = run(&repo, Some(Route::Fast), None, None, (1, 4)).expect("гейт fast");
+        assert!(
+            !fast.components.iter().any(|c| c.name == "sensors"),
+            "маршрут Fast — sensors вне гейта"
+        );
+    }
+
+    #[test]
+    fn gate_sensors_skip_without_docs_spec_and_pass_on_full_spec() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("mkdir");
+        make_gate_repo(&repo);
+        // Без docs/spec — честный SKIP (fail-soft на инфраструктуру).
+        let report = run(&repo, Some(Route::Standard), None, None, (1, 4)).expect("гейт");
+        assert_eq!(status_of(&report, "sensors"), GateStatus::Skip);
+        // Полная спека (все секции REQUIRED_SECTIONS, ссылок нет) — PASS.
+        write_spec(
+            &repo,
+            "payments.md",
+            "# Спека\n\n## Проблема\nТекст.\n\n## Критерии приёмки\n- [ ] тест.\n\n## Риски\nТекст.\n",
+        );
+        let report = run(&repo, Some(Route::Standard), None, None, (1, 4)).expect("гейт");
+        assert_eq!(
+            status_of(&report, "sensors"),
+            GateStatus::Pass,
+            "{}",
+            render(&report)
+        );
+        assert!(report.passed, "{}", render(&report));
+    }
+
+    // --- пути ограничений и fail-closed `rule_weakened` (D6) -----------------
+
+    /// Ослабленный реестр: правило `no_pan` удалено (антикейс «зеленения» гейта).
+    const WEAKENED_CONSTRAINTS: &str = "rules:\n  - name: spine_present\n    type: file_exists\n    path: \"ARCHITECTURE-SPINE.md\"\n    severity: error\n";
+
+    #[test]
+    fn gate_explicit_constraints_inside_repo_keeps_weakened_protection() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("mkdir");
+        make_gate_repo(&repo);
+        // Явный --constraints АБСОЛЮТНЫМ путём внутри репозитория (red-team,
+        // наблюдение 1): раньше секция уходила в SKIP «вне репозитория».
+        let explicit = repo.join(".arch-handoff/CONSTRAINTS.yaml");
+        std::fs::write(&explicit, WEAKENED_CONSTRAINTS).expect("ослабленный constraints");
+        let report = run(&repo, None, None, Some(&explicit), (1, 4)).expect("гейт");
+        assert!(!report.passed, "{}", render(&report));
+        assert_eq!(status_of(&report, "rule_weakened"), GateStatus::Fail);
+        let text = render(&report);
+        assert!(text.contains("no_pan"), "{text}");
+    }
+
+    #[test]
+    fn gate_explicit_constraints_outside_repo_fails_closed() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("mkdir");
+        make_gate_repo(&repo);
+        // Файл ограничений ВНЕ репозитория: анти-ослабление невозможно —
+        // FAIL с причиной, а не молчаливый SKIP.
+        let outside_dir = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside_dir).expect("mkdir outside");
+        let outside = outside_dir.join("CONSTRAINTS.yaml");
+        std::fs::write(&outside, WEAKENED_CONSTRAINTS).expect("внешний constraints");
+        let report = run(&repo, None, None, Some(&outside), (1, 4)).expect("гейт");
+        assert!(!report.passed, "{}", render(&report));
+        assert_eq!(status_of(&report, "rule_weakened"), GateStatus::Fail);
+        let component = report
+            .components
+            .iter()
+            .find(|c| c.name == "rule_weakened")
+            .expect("составляющая");
+        assert!(
+            component.detail.contains("анти-ослабление невозможно")
+                && component.detail.contains("вне репозитория"),
+            "{}",
+            component.detail
+        );
+        // Fitness при этом честно прогоняет внешний файл (вход есть).
+        assert_eq!(status_of(&report, "fitness"), GateStatus::Pass);
+    }
+
+    #[test]
+    fn gate_falls_back_to_root_constraints_yaml() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("mkdir");
+        // Кейс без handoff-пакета: реестр правил — КОРНЕВОЙ CONSTRAINTS.yaml
+        // (как кейс 011 и сам этот репозиторий).
+        std::fs::write(
+            repo.join("CONSTRAINTS.yaml"),
+            "rules:\n  - name: spine_present\n    type: file_exists\n    path: \"ARCHITECTURE-SPINE.md\"\n    severity: error\n  - name: no_pan\n    type: must_not_contain\n    glob: \"**/*.py\"\n    pattern: 'PAN'\n    severity: error\n",
+        )
+        .expect("constraints");
+        std::fs::write(repo.join("ARCHITECTURE-SPINE.md"), "# Spine\n").expect("spine");
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-q", "-m", "init"]);
+        // До ослабления: fitness прогоняется по корневому файлу (не SKIP),
+        // rule_weakened сравнивает по корневому пути.
+        let report = run(&repo, None, None, None, (1, 4)).expect("гейт");
+        assert!(report.passed, "{}", render(&report));
+        assert_eq!(status_of(&report, "fitness"), GateStatus::Pass);
+        let fitness = report
+            .components
+            .iter()
+            .find(|c| c.name == "fitness")
+            .expect("составляющая");
+        assert!(
+            fitness.detail.contains("файл: CONSTRAINTS.yaml"),
+            "секция печатает использованный путь: {}",
+            fitness.detail
+        );
+        let weakened = report
+            .components
+            .iter()
+            .find(|c| c.name == "rule_weakened")
+            .expect("составляющая");
+        assert_eq!(weakened.status, GateStatus::Pass);
+        assert!(
+            weakened.detail.contains("CONSTRAINTS.yaml"),
+            "{}",
+            weakened.detail
+        );
+        // Ослабление корневого реестра ловится тем же анти-ослаблением.
+        std::fs::write(repo.join("CONSTRAINTS.yaml"), WEAKENED_CONSTRAINTS)
+            .expect("ослабленный constraints");
+        let report = run(&repo, None, None, None, (1, 4)).expect("гейт");
+        assert!(!report.passed, "{}", render(&report));
+        assert_eq!(status_of(&report, "rule_weakened"), GateStatus::Fail);
+    }
+
+    #[test]
+    fn gate_repo_without_commits_skips_weakened_honestly() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("repo");
+        make_uncommitted_repo(&repo);
+        let report = run(&repo, None, None, None, (1, 4)).expect("гейт");
+        assert!(report.passed, "{}", render(&report));
+        assert_eq!(status_of(&report, "rule_weakened"), GateStatus::Skip);
+        let component = report
+            .components
+            .iter()
+            .find(|c| c.name == "rule_weakened")
+            .expect("составляющая");
+        assert!(
+            component.detail.contains("не существует"),
+            "{}",
+            component.detail
+        );
+    }
+
+    /// git-репозиторий без единого коммита: `.arch-handoff/CONSTRAINTS.yaml`
+    /// и spine на месте, базы для диффа/сравнения нет.
+    fn make_uncommitted_repo(repo: &Path) {
+        std::fs::create_dir_all(repo.join(".arch-handoff")).expect("mkdir");
+        std::fs::write(
+            repo.join(".arch-handoff/CONSTRAINTS.yaml"),
+            "rules:\n  - name: spine_present\n    type: file_exists\n    path: \"ARCHITECTURE-SPINE.md\"\n    severity: error\n",
+        )
+        .expect("constraints");
+        std::fs::write(repo.join("ARCHITECTURE-SPINE.md"), "# Spine\n").expect("spine");
+        git(repo, &["init", "-q"]);
+    }
+
+    #[test]
+    fn gate_route_note_is_clean_when_diff_base_unavailable() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("repo");
+        make_uncommitted_repo(&repo);
+        let report = run(&repo, None, None, None, (1, 4)).expect("гейт");
+        assert_eq!(report.route, Route::Critical, "fail-safe без диффа");
+        // D9: сырой stderr git (многострочная справка «Используйте «--»…»)
+        // в отчёт не протекает — только чистое однострочное сообщение.
+        assert!(
+            report.route_note.contains("база диффа недоступна"),
+            "{}",
+            report.route_note
+        );
+        assert!(
+            !report.route_note.contains('\n'),
+            "однострочная заметка: {}",
+            report.route_note
+        );
+        for junk in ["Используйте", "Use '--'", "separate paths", "fatal:"] {
+            assert!(
+                !report.route_note.contains(junk),
+                "в заметке маршрута сырой stderr git ({junk}): {}",
+                report.route_note
+            );
+        }
+        assert!(
+            report.route_note.contains("fail-safe маршрут Critical"),
+            "{}",
+            report.route_note
+        );
+    }
+
+    #[test]
+    fn gate_delta_guard_detail_shows_coverage() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("mkdir");
+        make_gate_repo(&repo);
+        // Защищённая правка, покрытая активной дельтой: деталь секции —
+        // отчёт «что изменено и чем покрыто», а не голая галочка (D8).
+        std::fs::write(repo.join("ARCHITECTURE-SPINE.md"), "# Spine v2\n").expect("edit");
+        let delta_dir = repo.join("changes/spine-update");
+        std::fs::create_dir_all(&delta_dir).expect("mkdir delta");
+        std::fs::write(
+            delta_dir.join("DELTA.md"),
+            "# Дельта\n\nПравим ARCHITECTURE-SPINE.md (v2).\n",
+        )
+        .expect("delta");
+        let report = run(&repo, None, None, None, (1, 4)).expect("гейт");
+        assert_eq!(
+            status_of(&report, "delta_guard"),
+            GateStatus::Pass,
+            "{}",
+            render(&report)
+        );
+        let component = report
+            .components
+            .iter()
+            .find(|c| c.name == "delta_guard")
+            .expect("составляющая");
+        assert!(
+            component
+                .detail
+                .contains("покрытие: ARCHITECTURE-SPINE.md ← 'spine-update'"),
+            "{}",
+            component.detail
+        );
     }
 }
