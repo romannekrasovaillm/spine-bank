@@ -134,10 +134,15 @@ fn default_constraints(repo: &Path) -> String {
     } else {
         "generic"
     };
+    // Контент каждого шаблона начинается сразу после открывающей кавычки на
+    // той же строке: форма `"\<перевод строки>` съедала бы перевод строки И
+    // ведущие пробелы первой строки, ломая отступы YAML (дефект A1 живого
+    // эксперимента — исполнителю уезжал нечитаемый CONSTRAINTS.yaml).
+    // Отступы консистентны с корневым CONSTRAINTS.yaml репозитория: пункты
+    // списка — 2 пробела под `rules:`, ключи правила — 4 пробела.
     let rules = match stack {
         "Rust" => {
-            "\
-  - name: no-unwrap-in-src
+            "  - name: no-unwrap-in-src
     type: must_not_contain
     glob: \"src/**\"
     pattern: 'unwrap\\('
@@ -159,8 +164,7 @@ fn default_constraints(repo: &Path) -> String {
 "
         }
         "Python" => {
-            "\
-  - name: no-print-in-py
+            "  - name: no-print-in-py
     type: must_not_contain
     glob: \"**/*.py\"
     pattern: 'print\\('
@@ -177,8 +181,7 @@ fn default_constraints(repo: &Path) -> String {
 "
         }
         "Go" => {
-            "\
-  - name: go-build-passes
+            "  - name: go-build-passes
     type: command_succeeds
     command: 'go build ./...'
     timeout_secs: 180
@@ -195,8 +198,7 @@ fn default_constraints(repo: &Path) -> String {
 "
         }
         "Node" => {
-            "\
-  - name: readme-exists
+            "  - name: readme-exists
     type: file_exists
     path: README.md
     severity: warn
@@ -208,8 +210,7 @@ fn default_constraints(repo: &Path) -> String {
 "
         }
         _ => {
-            "\
-  - name: readme-exists
+            "  - name: readme-exists
     type: file_exists
     path: README.md
     severity: warn
@@ -223,6 +224,24 @@ fn default_constraints(repo: &Path) -> String {
          # перепишите правила под spine-инварианты (AD-n) эпика.\n\
          rules:\n{rules}"
     )
+}
+
+/// Самовалидация генератора: сгенерированный текст CONSTRAINTS.yaml обязан
+/// парситься как YAML ДО записи в пакет — битый файл лучше отклонить здесь,
+/// чем выдать исполнителю нечитаемый (дефект A1: шаблоны теряли отступ
+/// первой строки и выдавали YAML с `ScannerError`).
+///
+/// # Errors
+/// Текст не парсится как YAML — это дефект генератора, а не данных репозитория.
+fn validate_constraints_text(text: &str) -> Result<()> {
+    serde_yaml_ng::from_str::<serde_yaml_ng::Value>(text)
+        .map(|_| ())
+        .map_err(|e| {
+            HarnessError::Harness(format!(
+                "сгенерированный CONSTRAINTS.yaml невалиден как YAML: {e} — пакет не \
+                 собирается (это дефект шаблонов генератора, а не данных репозитория)"
+            ))
+        })
 }
 
 /// Итог генерации handoff-пакета.
@@ -371,7 +390,11 @@ pub fn generate_handoff(
     // Дефолт — под стек репозитория (Cargo.toml/pyproject.toml/go.mod/package.json).
     let constraints_path = dir.join("CONSTRAINTS.yaml");
     if !constraints_path.exists() {
-        std::fs::write(&constraints_path, default_constraints(repo))
+        let constraints_text = default_constraints(repo);
+        // Самовалидация генератора до записи: падение здесь — дефект шаблонов,
+        // а не данных репозитория (лучше ошибка, чем битый файл исполнителю).
+        validate_constraints_text(&constraints_text)?;
+        std::fs::write(&constraints_path, constraints_text)
             .map_err(|e| HarnessError::io(&constraints_path, e))?;
     }
 
@@ -1679,5 +1702,85 @@ mod tests {
         assert!(!out.is_error, "{}", out.content);
         assert!(out.content.contains("Handoff-пакет создан"));
         assert!(repo.join(".arch-handoff/TASK.md").is_file());
+    }
+
+    #[test]
+    fn default_constraints_yaml_is_valid_for_every_stack() {
+        // Дефект A1: шаблоны теряли 2-пробельный отступ первой строки и
+        // выдавали YAML с ScannerError. Для каждого из 5 стеков итоговый
+        // документ (с корнем `rules:`) обязан парситься и как YAML, и по
+        // боевой схеме fitness-правил.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("mkdir repo");
+        let stacks: [(&str, &str, &str); 5] = [
+            ("generic", "", ""),
+            ("Rust", "Cargo.toml", "[package]\nname = \"demo\"\n"),
+            ("Python", "requirements.txt", "pytest\n"),
+            ("Go", "go.mod", "module demo\n"),
+            ("Node", "package.json", "{}\n"),
+        ];
+        let mut marker: Option<&str> = None;
+        for (stack, file, content) in stacks {
+            if let Some(prev) = marker.take() {
+                std::fs::remove_file(repo.join(prev)).expect("remove marker");
+            }
+            if !file.is_empty() {
+                write_file(&repo.join(file), content);
+                marker = Some(file);
+            }
+            let text = default_constraints(&repo);
+            assert!(text.contains(&format!("Стек: {stack}")), "{text}");
+            let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&text)
+                .unwrap_or_else(|e| panic!("стек {stack}: YAML не парсится: {e}\n{text}"));
+            let rules = parsed["rules"]
+                .as_sequence()
+                .unwrap_or_else(|| panic!("стек {stack}: нет списка rules:\n{text}"));
+            assert!(!rules.is_empty(), "стек {stack}: пустые rules:\n{text}");
+            for rule in rules {
+                for key in ["name", "type", "severity"] {
+                    assert!(
+                        rule[key].is_string(),
+                        "стек {stack}: у правила нет '{key}':\n{text}"
+                    );
+                }
+            }
+            // Боевая схема (control::check): файл читается загрузчиком правил.
+            let path = tmp.path().join("CONSTRAINTS.yaml");
+            write_file(&path, &text);
+            let loaded = crate::control::load_fitness_rules(&path)
+                .unwrap_or_else(|e| panic!("стек {stack}: схема не принимает: {e}\n{text}"));
+            assert_eq!(loaded.len(), rules.len(), "стек {stack}");
+        }
+    }
+
+    #[test]
+    fn constraints_self_validation_rejects_broken_yaml() {
+        // Самовалидация генератора: битый YAML отклоняется до записи файла —
+        // лучше упасть, чем выдать исполнителю нечитаемый CONSTRAINTS.yaml.
+        let broken = "rules:\n- name: x\n    type: must_not_contain\n";
+        let err = validate_constraints_text(broken).expect_err("битый YAML — ошибка");
+        assert!(err.to_string().contains("дефект шаблонов"), "{err}");
+        let valid =
+            "rules:\n  - name: x\n    type: file_exists\n    path: README.md\n    severity: warn\n";
+        validate_constraints_text(valid).expect("валидный YAML проходит");
+    }
+
+    #[test]
+    fn handoff_writes_parseable_constraints_yaml() {
+        // Сквозная проверка A1: записанный в пакет CONSTRAINTS.yaml парсится
+        // (раньше исполнителю уезжал файл с ScannerError).
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("mkdir repo");
+        write_file(&repo.join("Cargo.toml"), "[package]\nname = \"demo\"\n");
+        let cfg = cfg_in(tmp.path());
+        let packet =
+            generate_handoff(&repo, "задача", &[], &cfg, None, Route::Fast).expect("handoff");
+        let text =
+            std::fs::read_to_string(packet.dir.join("CONSTRAINTS.yaml")).expect("CONSTRAINTS.yaml");
+        let parsed: serde_yaml_ng::Value =
+            serde_yaml_ng::from_str(&text).expect("CONSTRAINTS.yaml пакета парсится");
+        assert!(parsed["rules"].as_sequence().is_some_and(|r| !r.is_empty()));
     }
 }
