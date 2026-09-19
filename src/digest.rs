@@ -624,14 +624,21 @@ mod tests {
         );
         assert!(!report.top_failed_rules.iter().any(|(r, _)| r == "old-rule"));
         assert_eq!(report.fail_calls, 3);
-        // Две пометки FP: одна в окне, одна вне.
-        fp_register_mark(tmp.path(), "no-pan", "src/a.rs:1", None).expect("fp"); // сегодня (в окне)
+        // Две пометки FP: одна в окне, одна вне. Даты пишем фиксированные —
+        // окно дайджеста закрыто fixed_now() (2026-09-18 12:00), поэтому
+        // реальное «сегодня» из fp_register_mark в это окно попадает не
+        // всегда (тест обязан быть воспроизводим в любой день).
+        let dir = tmp.path().join("evidence");
+        std::fs::create_dir_all(&dir).expect("mkdir");
         let marks_path = tmp.path().join(FP_REGISTER_REL);
-        let mut f = std::fs::OpenOptions::new()
-            .append(true)
-            .open(&marks_path)
-            .expect("open");
-        writeln!(f, "| 2026-09-01 | old-rule | src/b.rs | вне окна |").expect("row");
+        std::fs::write(
+            &marks_path,
+            "| Дата | Правило | Файл | Примечание |\n\
+             |---|---|---|---|\n\
+             | 2026-09-18 | no-pan | src/a.rs:1 | — |\n\
+             | 2026-09-01 | old-rule | src/b.rs | вне окна |\n",
+        )
+        .expect("fp register");
         let report = build_at(tmp.path(), 7, fixed_now()).expect("дайджест 2");
         assert_eq!(report.fp_marks, 1);
         let share = report.fp_share_pct.expect("доля есть — fail-вызовы были");
