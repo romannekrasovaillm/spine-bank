@@ -4,8 +4,9 @@
 //! `C{label}`/`D((label))`, рёбра `-->`, `---`, `-.->`, `-- метка -->`,
 //! цепочки `A --> B --> C`. Sequence: `participant X as Label`, `->>`, `-->>`,
 //! `Note left of|right of X: текст`. Комментарии `%%` и пустые строки
-//! игнорируются; известные неподдерживаемые конструкции (`subgraph`, `style`,
-//! `click`, `loop`, …) пропускаются с предупреждением.
+//! игнорируются; `;` вне кавычек — разделитель операторов flowchart
+//! (`graph TD; A-->B;`); известные неподдерживаемые конструкции (`subgraph`,
+//! `style`, `click`, `loop`, …) пропускаются с предупреждением.
 
 use std::collections::HashMap;
 
@@ -338,6 +339,27 @@ fn parse_flow_header(text: &str, line_no: usize) -> Result<Direction> {
     }
 }
 
+/// Разбивает строку flowchart на операторы по `;` вне двойных кавычек:
+/// mermaid допускает `;` как разделитель операторов, и генераторы часто
+/// присылают диаграмму одной строкой (`graph TD; A-->B;`). Каждый кусок
+/// разбирается как самостоятельная строка; пустые куски отбрасываются
+/// вызывающим. Кавычки защищают `;` внутри меток (`A["текст; с запятой"]`).
+fn split_flow_statements(line: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut in_quotes = false;
+    let mut start = 0usize;
+    for (i, c) in line.char_indices() {
+        if c == '"' {
+            in_quotes = !in_quotes;
+        } else if c == ';' && !in_quotes {
+            parts.push(line[start..i].trim());
+            start = i + 1;
+        }
+    }
+    parts.push(line[start..].trim());
+    parts
+}
+
 /// Разбирает flowchart-диаграмму целиком.
 ///
 /// # Ошибки
@@ -355,18 +377,25 @@ pub(crate) fn parse_flowchart(input: &str) -> Result<FlowAst> {
         if text.is_empty() {
             continue;
         }
-        if dir.is_none() {
-            dir = Some(parse_flow_header(text, line_no)?);
-            continue;
+        // `;` — разделитель операторов: одна физическая строка может нести
+        // и заголовок, и связи («graph TD; A-->B;»).
+        for stmt in split_flow_statements(text) {
+            if stmt.is_empty() {
+                continue;
+            }
+            if dir.is_none() {
+                dir = Some(parse_flow_header(stmt, line_no)?);
+                continue;
+            }
+            if is_skippable_flow(stmt) {
+                skipped.push(Skipped {
+                    line: line_no,
+                    text: stmt.to_owned(),
+                });
+                continue;
+            }
+            parse_flow_statement(stmt, line_no, &mut nodes, &mut ids, &mut edges)?;
         }
-        if is_skippable_flow(text) {
-            skipped.push(Skipped {
-                line: line_no,
-                text: text.to_owned(),
-            });
-            continue;
-        }
-        parse_flow_statement(text, line_no, &mut nodes, &mut ids, &mut edges)?;
     }
     let Some(dir) = dir else {
         return Err(HarnessError::Mermaid(
@@ -1097,6 +1126,31 @@ pub(crate) fn parse_c4(input: &str) -> Result<C4Ast> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_semicolon_separated_statements() {
+        // Однострочная форма из отчёта полигона (E6): заголовок и связь
+        // в одной строке через `;`.
+        let one_line = parse_flowchart("graph TD; A-->B;").unwrap();
+        let multi_line = parse_flowchart("graph TD\nA-->B").unwrap();
+        assert_eq!(one_line.dir, multi_line.dir);
+        assert_eq!(one_line.nodes.len(), 2);
+        assert_eq!(one_line.edges.len(), 1);
+        // Цепочка и направление LR в одной строке.
+        let ast = parse_flowchart("flowchart LR; A --> B --> C; B --- D;").unwrap();
+        assert_eq!(ast.edges.len(), 3);
+        assert!(ast.edges[2].plain);
+        // `;` внутри quoted-метки — не разделитель.
+        let ast = parse_flowchart("graph LR; A[\"текст; с запятой\"] --> B;").unwrap();
+        assert_eq!(ast.nodes[0].label, "текст; с запятой");
+        assert_eq!(ast.edges.len(), 1);
+        // Заголовок с хвостовой `;` без связей — честная ошибка про узлы.
+        let err = parse_flowchart("graph TD;").unwrap_err();
+        assert!(err.to_string().contains("ни одного узла"), "{err}");
+        // Мусор после `;` — ошибка с номером строки, как прежде.
+        let err = parse_flowchart("graph TD; A -->").unwrap_err();
+        assert!(err.to_string().contains("строка 1"), "{err}");
+    }
 
     #[test]
     fn parses_chain_and_updates_labels() {

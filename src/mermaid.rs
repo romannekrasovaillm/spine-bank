@@ -3,7 +3,8 @@
 //! КОНТРАКТ (владелец: агент `mermaid`): подмножество mermaid —
 //! `graph|flowchart TD|TB|BT|LR|RL` (узлы `A[label]`, `B(label)`, `C{label}`,
 //! `D((label))`, рёбра `-->`, `---`, `-.->`, `-- label -->`, цепочки
-//! `A --> B --> C`, quoted-метки `A["текст с --> внутри"]`), `sequenceDiagram`
+//! `A --> B --> C`, quoted-метки `A["текст с --> внутри"]`, `;` вне кавычек —
+//! разделитель операторов: `graph TD; A-->B;`), `sequenceDiagram`
 //! (участники `participant X as Label`, `->>`/`-->>`, `Note left/right of`),
 //! `erDiagram` (сущности с блоками атрибутов `{ тип имя [PK] }`, связи
 //! `A ||--o{ B : label` с кардинальностями; ADR-009) и C4-подмножество
@@ -273,6 +274,24 @@ mod tests {
             diagram_kind("C4Deployment\nSystem(a, \"A\")"),
             DiagramKind::C4Unsupported
         );
+    }
+
+    #[test]
+    fn renders_single_line_semicolon_form() {
+        // E6: однострочная форма рендерится как многострочная.
+        assert_eq!(
+            render("graph TD; A-->B;").unwrap(),
+            render("graph TD\nA-->B").unwrap()
+        );
+        assert_eq!(
+            render("flowchart LR; A --> B --> C;").unwrap(),
+            render("flowchart LR\nA --> B --> C").unwrap()
+        );
+        // Мусор по-прежнему даёт понятную ошибку, а не панику/тишину.
+        let err = render("graph TD; A -->").unwrap_err();
+        assert!(err.to_string().contains("строка 1"), "{err}");
+        let err = render("graph XX; A-->B;").unwrap_err();
+        assert!(err.to_string().contains("направление"), "{err}");
     }
 
     #[test]
