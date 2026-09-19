@@ -10,7 +10,10 @@
 
 Stdio-сервер JSON-RPC 2.0 (NDJSON, как у клиента): кодовый агент получает
 architectural verdict (`passed` + находки) **в момент написания кода**, а не
-на приёмке handoff-пакета. По умолчанию сервер строго read-only: ничего не
+на приёмке handoff-пакета. Состав read-only режима: **34 инструмента** —
+14 ручных (контроль, знания, split-judge, `rules_suggest`) + 20 мостовых из
+реестра — и 7 промптов-плейбуков `spine-*` (capability `prompts`).
+По умолчанию сервер строго read-only: ничего не
 пишет в репозиторий клиента, все цели — аргументами вызова; write/exec-
 инструменты агента (`bash`, `write_file`, `harness_run`, `subagent_*`,
 `web_*`, …) наружу не отдаются **ни в одном режиме** — это принадлежность
@@ -103,13 +106,14 @@ exit 2, stderr уходит агенту; строки вывода хук не 
 |---|---|---|
 | `spine_lint` | `path` | линтер ARCHITECTURE-SPINE.md: `passed=false` при находках error (дубли AD-id, пустые Binds/Prevents/Rule, заглушки, непиннутые версии, битые ссылки AD) |
 | `fitness_check` | `repo`, `constraints?` | прогон CONSTRAINTS.yaml (дефолт `<repo>/.arch-handoff/CONSTRAINTS.yaml`): must_contain / must_not_contain / each_file_must_contain / file_exists / dir_must_have_file / max_age / command_succeeds; `passed=false` — правила нарушены |
-| `significance_score` | `triggers` | маршрут значимости Fast/Standard/Critical по 15 триггерам (информационный, без `passed`) |
+| `significance_score` | `triggers` | маршрут значимости Fast/Standard/Critical по 15 триггерам (информационный, без `passed`); `triggers` — карта «триггер → bool» ЛИБО массив строк `"name=true"` / `"name=false"` / голое `"name"` (= true) |
 | `significance_from_diff` | `path?`, `base_ref?`, `declared?` | anti-bypass floor (S-1, ADR-034): триггеры выводятся из git-диффа `path` (без `base_ref` — рабочее дерево против `HEAD`, включая untracked; с `base_ref` — `git diff BASE_REF...HEAD`) и **объединяются** с заявленными `declared` (детектор только добавляет). Ответ: `route`+`score`, `sources` каждого триггера (`declared`/`diff`/`declared+diff`), `undeclared` — найденные диффом, но не заявленные триггеры с файлами-основаниями (`evidence`). Информационный, без `passed`; пороги — из `[significance]` конфига сервера |
 | `trace_check` | `case` | позвенная трассируемость `REQ → NFR → AD/ADR → CMP → правило`: AD без правила и без `unverifiable` — error; verdict + `report_markdown` для evidence bundle |
 | `model_query` | `dir?`, `id?`, `type?` | список сущностей модели (фильтр по типу) или карточка сущности со связями и обратными ссылками |
-| `rubric_run` | `rubric`, `target` \| `target_text`, `model?` | оценка документа рубрикой LLM-судьёй (ADR-004; нужен API-ключ из конфига arch-be; для моделей `kind = "cli"` ключ не нужен — судья — внешний CLI-харнесс) |
+| `rubric_run` | `rubric`, `target` \| `target_text`, `model?`, `cwd?` | оценка документа рубрикой LLM-судьёй (ADR-004; нужен API-ключ из конфига arch-be; для моделей `kind = "cli"` ключ не нужен — судья — внешний CLI-харнесс); относительный `target` резолвится от `cwd` (по умолчанию — cwd процесса сервера) |
 | `rubric_prompt` | `rubric`, `target` \| `target_text` | split-judge, фаза 1 (без ключа): system+user промпты судьи + JSON-схема ответа + `judge_config` (число сэмплов k). Промпт исполняет модель хоста, ответы идут в `rubric_verify` |
-| `rubric_verify` | `rubric`, `target` \| `target_text`, `answers`, `model?` | split-judge, фаза 2: отчёт рубрики из сырых ответов хоста (медиана, `unstable`, `evidence_not_found`) тем же кодом, что у `rubric_run`; битые ответы отбрасываются со счётчиком `answers.dropped` |
+| `rubric_verify` | `rubric`, `target` \| `target_text`, `answers`, `model?`, `judge_model?` | split-judge, фаза 2: отчёт рубрики из сырых ответов хоста (медиана, `unstable`, `evidence_not_found`) тем же кодом, что у `rubric_run`; битые ответы отбрасываются со счётчиком `answers.dropped`; `judge_model` — метка фактического судьи (перекрывает `model`, anti-bias «автор = судья»: эхо в поле `judge_model` и строке «Судья: …» markdown-отчёта) |
+| `rules_suggest` | `path`, `cwd?` | кандидатные fitness-правила из содержательных пробелов кейса (read-only эвристики): EARS-критерии приёмки, численные таймауты в контрактах, декомпозиция REQ→работы, RTO/RPO без ADR, аудит операторских действий. Ответ: `candidates` (`id`, `rationale`, `source_skill`, `yaml` — готовый фрагмент CONSTRAINTS.yaml или `null` для честного advisory) + `report_markdown`; CLI-эквивалент: `arch-be control rules-suggest <path>`. Информационный, без `passed` |
 
 Мостовые read-only инструменты реестра (спеки — из `Tool::spec()`, плюс
 опциональный `cwd`): `openapi_lint` (`path`), `asyncapi_lint` (`path`),

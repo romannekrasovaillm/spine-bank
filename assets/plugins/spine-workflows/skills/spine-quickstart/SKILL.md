@@ -5,11 +5,11 @@ description: Подключение Spine (arch-be) к текущему харн
 
 # Spine Quickstart для агента-хоста
 
-Spine = MCP-сервер `arch-be mcp serve` (stdio JSON-RPC): 20 read-only
-инструментов контроля и знаний; с `--rw` — ещё и записывающие
-(`adr_new`, `handoff_create`, `agentsmd_generate`, …). Тебе (агенту) они
-видны как `mcp__spine__*` (Claude/Kimi) или `spine__*` (OpenClaw) или по
-имени сервера в omp/Qwen.
+Spine = MCP-сервер `arch-be mcp serve` (stdio JSON-RPC): read-only
+инструменты контроля и знаний (точный состав — `tools/list`); с `--rw` —
+ещё и записывающие (`adr_new`, `handoff_create`, `agentsmd_generate`, …).
+Тебе (агенту) они видны как `mcp__spine__*` (Claude/Kimi) или `spine__*`
+(OpenClaw) или по имени сервера в omp/Qwen.
 
 ## Проверка подключения (всегда начинай с неё)
 
@@ -19,6 +19,31 @@ Spine = MCP-сервер `arch-be mcp serve` (stdio JSON-RPC): 20 read-only
    корне проекта и перезапустить харнесс (для Qwen/GigaCode ≥ 0.24 ещё и
    `qwen mcp approve spine`).
 2. `plugin_list` — сколько плагинов/скиллов зашито в бинарь.
+
+## Первая ценность за 5 минут (демо FAIL → fix → PASS)
+
+Сценарий на кейсе `drift-control` из репозитория Spine (`кейсы/drift-control/`):
+рука A — качественный код с ЗАСЕЯННЫМ архитектурным дрейфом (нет thiserror,
+нет идемпотентности), невидимым при зелёных тестах. Гоняй его, когда
+архитектор просит «покажи, что Spine даёт за 5 минут»:
+
+1. Найди кейс: репозиторий Spine → `кейсы/drift-control/` (рука A —
+   `armA-solution/`, гейт — `handoff-example/CONSTRAINTS.yaml`). Если
+   репозитория нет под рукой — возьми любой свой репозиторий с
+   `.arch-handoff/CONSTRAINTS.yaml` и осознанно нарушь одно error-правило
+   (тот же эффект).
+2. Вызови `fitness_check` с `repo` = решение руки A и `constraints` =
+   `handoff-example/CONSTRAINTS.yaml` (пути — абсолютные или через `cwd`
+   мостовых инструментов). Вердикт: `passed: false`, находки C-02
+   (`thiserror` в Cargo.toml) и C-05 (идемпотентность) — покажи их
+   архитектору с полями `rationale`/`fix_hint`.
+3. Почини своими файловыми инструментами: добавь `thiserror` в зависимости,
+   реализуй inbox идемпотентности (дедупликация по ключу в `authorize` —
+   повтор возвращает первый результат без повторного эффекта).
+4. Повтори `fitness_check` теми же аргументами → `passed: true` (6/6).
+5. Доложи квитанцию одной строкой: «гейт поймал N нарушений до ревью —
+   FAIL → fix → PASS за ~5 минут; дрейф при зелёных тестах виден только
+   механике». Эталон результата — `evidence/runs.md` кейса.
 
 ## Границы (не нарушай)
 

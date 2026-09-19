@@ -195,6 +195,7 @@ fn handshake_then_tools_list_over_stdio() {
         "skill_search",
         "skill_load",
         "mermaid_render",
+        "rules_suggest",
     ] {
         assert!(names.contains(&want), "нет инструмента {want}: {names:?}");
     }
@@ -229,8 +230,8 @@ fn handshake_then_tools_list_over_stdio() {
     }
     assert_eq!(
         tools.len(),
-        33,
-        "ровно 33 инструмента в ro-режиме (13 ручных + 20 read-only моста; model_drift — п.15)"
+        34,
+        "ровно 34 инструмента в ro-режиме (14 ручных + 20 read-only моста; rules_suggest — волна A2)"
     );
     // rw-контур и write/exec-принадлежность хоста закрыты в ro-режиме.
     for banned in [

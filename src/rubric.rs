@@ -196,10 +196,18 @@ impl RubricReport {
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
+            // Балл с неподтверждённой цитатой печатается с маркером ⚠: голая
+            // пятёрка не должна читаться глазами как полноценная (штраф уже
+            // учтён во взвешенном итоге — см. легенду под таблицей).
+            let score_cell = if s.has_flag(CriterionFlag::EvidenceNotFound) {
+                format!("{} ⚠", s.score)
+            } else {
+                s.score.to_string()
+            };
             let _ = writeln!(
                 out,
                 "| {} | {:.2} | {} | {} | {} |",
-                s.criterion_id, s.weight, s.score, flags, rationale
+                s.criterion_id, s.weight, score_cell, flags, rationale
             );
         }
         let _ = writeln!(out, "\n**Взвешенный итог:** {:.2}/5", self.weighted_total);
@@ -214,6 +222,11 @@ impl RubricReport {
                 out,
                 "**В итог не засчитаны (evidence_not_found):** {}",
                 excluded.join(", ")
+            );
+            let _ = writeln!(
+                out,
+                "⚠ — оценка с неподтверждённой цитатой: критерий исключён из взвешенного \
+                 итога (штраф учтён выше), а вердикт механически ограничен CONCERNS."
             );
         }
         let _ = writeln!(out, "**Вердикт:** {}", self.verdict);
@@ -631,7 +644,9 @@ fn extract_yaml_payload(text: &str) -> &str {
 /// Собирает отчёт по k сэмплам судьи (ADR-004): итоговый балл критерия —
 /// округлённая медиана сэмплов (пропуск судьёй в сэмпле = 1); σ выше порога —
 /// метка `unstable`; балл ≥ 2 без подтверждённой цитаты — `evidence_not_found`
-/// и исключение из взвешенного итога.
+/// и исключение из взвешенного итога. Финальный этап — потолок вердикта:
+/// есть `evidence_not_found` → вердикт отчёта не выше CONCERNS
+/// ([`cap_verdict_at_concerns`]).
 ///
 /// # Errors
 /// Ни один критерий не засчитан (все без подтверждённых свидетельств) или
@@ -682,14 +697,44 @@ pub(crate) fn build_report(
         });
     }
     let weighted_total = weighted_total(&rubric.criteria, &scores)?;
+    let unconfirmed = scores
+        .iter()
+        .filter(|s| s.has_flag(CriterionFlag::EvidenceNotFound))
+        .count();
+    let judge_verdict = runs.last().map_or_else(String::new, |r| r.verdict.clone());
     Ok(RubricReport {
         rubric_name: rubric.name.clone(),
         judge_model: judge_model.to_string(),
         judge_samples: runs.len(),
         scores,
         weighted_total,
-        verdict: runs.last().map_or_else(String::new, |r| r.verdict.clone()),
+        verdict: cap_verdict_at_concerns(judge_verdict, unconfirmed),
     })
+}
+
+/// Механический потолок вердикта отчёта (находка живого прогона 0.3.0 на
+/// кейсе цифрового рубля): хотя бы один критерий помечен
+/// `evidence_not_found` → итоговый вердикт НЕ ВЫШЕ CONCERNS, независимо от
+/// вердикта судьи (судья может прислать PASS с выдуманной цитатой — метка
+/// одного критерия не должна тонуть в отчёте). Штраф к итогу (исключение
+/// критерия из взвешенного) не меняется — только потолок вердикта.
+/// `unconfirmed` — число критериев с `evidence_not_found`.
+fn cap_verdict_at_concerns(judge_verdict: String, unconfirmed: usize) -> String {
+    if unconfirmed == 0 {
+        return judge_verdict;
+    }
+    let trimmed = judge_verdict.trim();
+    if trimmed.eq_ignore_ascii_case("pass") {
+        return format!(
+            "CONCERNS — вердикт судьи PASS понижен до CONCERNS: неподтверждённые цитаты ({unconfirmed})"
+        );
+    }
+    if trimmed.is_empty() {
+        return format!("CONCERNS (механический потолок: неподтверждённые цитаты — {unconfirmed})");
+    }
+    // Свободный вердикт судьи сохраняется после маркера потолка (FAIL и
+    // прочие не поднимаются — потолок только прижимает к CONCERNS сверху).
+    format!("CONCERNS (потолок: неподтверждённые цитаты — {unconfirmed}): {trimmed}")
 }
 
 /// Медиана баллов сэмплов; для чётного k — среднее двух центральных.
@@ -1574,6 +1619,81 @@ mod tests {
             "выдуманная цитата не проходит fuzzy-порог"
         );
         assert!(!report.scores[1].has_flag(CriterionFlag::EvidenceNotFound));
+    }
+
+    #[tokio::test]
+    async fn fabricated_quote_caps_verdict_at_concerns() {
+        // (а) Судья прислал verdict PASS с одной выдуманной цитатой →
+        // механический потолок: вердикт отчёта CONCERNS с явной строкой
+        // о понижении; балл критерия в markdown — с маркером ⚠ и легендой.
+        let judge = "{\"scores\": [\
+             {\"criterion_id\": \"context\", \"score\": 5, \"rationale\": \"Цитата: \\\"выдуманная фраза вне текста\\\" — якобы есть\"}, \
+             {\"criterion_id\": \"alternatives\", \"score\": 3, \"rationale\": \"Цитата: \\\"контекст описан\\\" — частично\"}], \
+             \"verdict\": \"PASS\"}";
+        let llm = FakeLlm::new(&[judge]);
+        let report = evaluate_with_options(
+            &sample_rubric(),
+            "контекст описан кратко",
+            &llm,
+            &one_sample(),
+        )
+        .await
+        .expect("evaluate");
+        assert_eq!(
+            report.verdict,
+            "CONCERNS — вердикт судьи PASS понижен до CONCERNS: неподтверждённые цитаты (1)"
+        );
+        let md = report.to_markdown();
+        assert!(
+            md.contains("**Вердикт:** CONCERNS — вердикт судьи PASS понижен до CONCERNS"),
+            "явная строка понижения: {md}"
+        );
+        assert!(
+            md.contains("| context | 1.00 | 5 ⚠ | evidence_not_found |"),
+            "балл с маркером: {md}"
+        );
+        assert!(
+            md.contains("⚠ — оценка с неподтверждённой цитатой"),
+            "легенда о штрафе: {md}"
+        );
+        // Свободный вердикт судьи (не PASS) — за маркером потолка.
+        let judge2 = "{\"scores\": [\
+             {\"criterion_id\": \"context\", \"score\": 5, \"rationale\": \"Цитата: \\\"тоже выдумка\\\" — якобы\"}, \
+             {\"criterion_id\": \"alternatives\", \"score\": 1, \"rationale\": \"свидетельство отсутствует\"}], \
+             \"verdict\": \"годно\"}";
+        let llm = FakeLlm::new(&[judge2]);
+        let report =
+            evaluate_with_options(&sample_rubric(), "контекст описан", &llm, &one_sample())
+                .await
+                .expect("evaluate 2");
+        assert!(
+            report
+                .verdict
+                .starts_with("CONCERNS (потолок: неподтверждённые цитаты — 1): годно"),
+            "{}",
+            report.verdict
+        );
+    }
+
+    #[tokio::test]
+    async fn valid_quotes_do_not_cap_verdict() {
+        // (б) Все цитаты валидны → эскалации нет, PASS судьи остаётся.
+        let judge = "{\"scores\": [\
+             {\"criterion_id\": \"context\", \"score\": 5, \"rationale\": \"Цитата: \\\"контекст описан\\\" — есть\"}, \
+             {\"criterion_id\": \"alternatives\", \"score\": 4, \"rationale\": \"Цитата: \\\"контекст описан\\\" — частично\"}], \
+             \"verdict\": \"PASS\"}";
+        let llm = FakeLlm::new(&[judge]);
+        let report = evaluate_with_options(
+            &sample_rubric(),
+            "контекст описан подробно",
+            &llm,
+            &one_sample(),
+        )
+        .await
+        .expect("evaluate");
+        assert_eq!(report.verdict, "PASS", "потолка нет: {}", report.verdict);
+        let md = report.to_markdown();
+        assert!(!md.contains('⚠'), "маркера нет при валидных цитатах: {md}");
     }
 
     #[tokio::test]

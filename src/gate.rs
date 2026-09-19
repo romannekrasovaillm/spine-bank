@@ -812,6 +812,20 @@ pub fn render(report: &GateReport) -> String {
             format!("FAIL — провалено составляющих: {failed} (exit 1)")
         }
     );
+    // Квитанция ценности (аддитивная строка): сумма error-находок всех
+    // составляющих — это дефекты, остановленные механикой до ревью.
+    if !report.passed {
+        let caught = report
+            .components
+            .iter()
+            .flat_map(|c| &c.findings)
+            .filter(|f| f.severity == "error")
+            .count();
+        let _ = writeln!(
+            out,
+            "Гейт поймал {caught} нарушений до ревью — исправьте и перепроверьте"
+        );
+    }
     out
 }
 
@@ -910,6 +924,10 @@ mod tests {
         assert!(text.contains("rule_weakened"), "{text}");
         assert!(text.contains("no_pan"), "{text}");
         assert!(text.contains("Итог: FAIL"), "{text}");
+        assert!(
+            text.contains("Гейт поймал 1 нарушений до ревью — исправьте и перепроверьте"),
+            "квитанция ценности при FAIL: {text}"
+        );
     }
 
     #[test]

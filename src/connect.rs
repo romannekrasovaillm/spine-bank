@@ -13,9 +13,12 @@
 //! - `claude`: `.mcp.json` (мердж ключа `mcpServers.spine`, чужие серверы
 //!   сохраняются), `.claude/settings.json` (мердж хуков; наши помечены
 //!   комментарием `# spine-connect:*` в команде и не дублируются при
-//!   повторном запуске), `.claude/skills/<имя>/` (копии скиллов из
-//!   встроенных плагинов [`crate::assets::embedded_plugin_files`] —
-//!   работает из релизного бинаря без `arch-be init`), `CLAUDE.md`
+//!   повторном запуске), `.claude/skills/<имя>/` (скиллы: источник истины —
+//!   библиотека пользователя из `[plugins].dirs` конфига, включая плагины
+//!   без манифеста и правки пользователя; встроенные плагины
+//!   [`crate::assets::embedded_plugin_files`] — fallback для скиллов,
+//!   которых на диске нет, т.е. работает и из релизного бинаря без
+//!   `arch-be init`), `CLAUDE.md`
 //!   (создаётся краткий либо блок между маркерами
 //!   `<!-- SPINE:BEGIN -->`/`<!-- SPINE:END -->`; рукописное не затирается);
 //! - `qwen`: `.qwen/settings.json` (мердж `mcpServers`; Qwen Code — форк
@@ -28,7 +31,7 @@
 //!   `.qwen/` (совместимость layout форка); иначе создаётся `.gigacode/`.
 //!   Дальше механика qwen (мердж `mcpServers.spine` в `<каталог>/settings.json`),
 //!   скиллы — как у `claude` (раскладка в `<каталог>/skills/` с обновлением
-//!   встроенных версий), хуки — печать сниппета (как у qwen);
+//!   версий источника), хуки — печать сниппета (как у qwen);
 //! - `codex`: MCP у Codex — только пользовательский `~/.codex/config.toml`
 //!   (`[mcp_servers.spine]`); молча в дом пользователя не пишем: печать
 //!   готового TOML-блока, запись с мерджем — только по явному
@@ -49,7 +52,7 @@
 //! - `omp` (oh-my-pi): `.mcp.json` (мердж, как у claude — omp дискаверит
 //!   проектный файл автоматически, регистрация не нужна). Скиллы omp читает
 //!   нативно из `.claude/skills/`: если такого каталога в проекте ещё нет,
-//!   встроенные скиллы раскладываются туда же, как у claude; каталог уже
+//!   скиллы библиотеки раскладываются туда же, как у claude; каталог уже
 //!   есть — не трогаем (чужую библиотеку не перетираем). Хуков через
 //!   connect нет: механизм хуков omp — TypeScript-расширения, печатается
 //!   указание на `omp --hook <file.ts>`;
@@ -204,11 +207,17 @@ pub struct ConnectOptions {
     pub dry_run: bool,
     /// Домашний каталог пользователя для `--apply-global` (в тестах — tempdir).
     pub home: Option<PathBuf>,
+    /// Каталоги библиотеки плагинов пользователя (`[plugins].dirs` конфига):
+    /// источник скиллов для доставки в хост — диск приоритетен над
+    /// встроенными ассетами (см. `install_skills`); пусто — только встроенные
+    /// (поведение до волны A2).
+    pub plugins_dirs: Vec<PathBuf>,
 }
 
 impl ConnectOptions {
     /// Дефолтные параметры для хоста и каталога: всё включено, запись в дом
-    /// выключена, dry-run выключен.
+    /// выключена, dry-run выключен, библиотека пользователя не подключена
+    /// (скиллы — только встроенные).
     #[must_use]
     pub fn new(host: Host, dir: PathBuf) -> Self {
         Self {
@@ -222,6 +231,7 @@ impl ConnectOptions {
             apply_global: false,
             dry_run: false,
             home: None,
+            plugins_dirs: Vec::new(),
         }
     }
 }
@@ -231,7 +241,7 @@ impl ConnectOptions {
 pub enum SkillAction {
     /// Скопирован заново (число записанных файлов).
     Copied(usize),
-    /// Обновлён встроенной версией (число перезаписанных файлов; прежняя
+    /// Обновлён версией источника (число перезаписанных файлов; прежняя
     /// локальная правка заменена).
     Updated(usize),
     /// Уже актуален (число файлов, побайтово совпадают).
@@ -260,6 +270,12 @@ pub struct ConnectReport {
     pub skills: Vec<SkillOutcome>,
     /// Пропущенные файлы скиллов (с причиной).
     pub skills_skipped: Vec<String>,
+    /// Скиллов доставлено из библиотеки пользователя (`[plugins].dirs`;
+    /// диск — источник истины для всего, что на нём есть).
+    pub skills_from_library: usize,
+    /// Скиллов доставлено из встроенных ассетов бинаря (на диске их нет
+    /// вообще — fallback свежей машины без `arch-be init`).
+    pub skills_from_embedded: usize,
     /// Заметки (сохранённые чужие ключи, отступления, пропуски).
     pub notes: Vec<String>,
     /// Сниппеты для ручной вставки: (заголовок, текст).
@@ -644,28 +660,183 @@ fn collect_skill_files_from(files: &[(&str, &str)]) -> (Vec<(PathBuf, String)>, 
     (out, skipped)
 }
 
-/// Раскладывает встроенные скиллы в `root` (`.claude/skills` хоста):
-/// новые копируются, отличающиеся — перезаписываются встроенной версией
-/// (заметка в отчёте), совпадающие — пропускаются (идемпотентность).
-fn install_skills(root: &Path, dry_run: bool, report: &mut ConnectReport) -> Result<()> {
-    let (files, skipped) = collect_skill_files_from(crate::assets::embedded_plugin_files());
-    report.skills_skipped.extend(skipped);
-    // Агрегация по имени скилла: (новых, перезаписанных, без изменений).
-    let mut by_skill: BTreeMap<String, (usize, usize, usize)> = BTreeMap::new();
-    for (rel, content) in &files {
-        let path = root.join(rel);
-        let skill = rel.components().next().map_or_else(
+/// Собирает файлы скиллов из библиотеки пользователя на диске
+/// (`[plugins].dirs`): для каждого каталога — каждый подкаталог с `skills/`
+/// (манифест `plugin.json` НЕ требуется: плагины-мешки вроде arch-distilled
+/// и самодельные каталоги скиллов доставляются тоже — тот же критерий, что
+/// у синтеза манифеста в [`crate::plugin::discover`]), рекурсивно
+/// `skills/<скилл>/<файл>`. Потолок размера и дедуп путей назначения — как
+/// у встроенного сборщика [`collect_skill_files_from`]; не-UTF-8 файлы
+/// пропускаются с заметкой (конвейер доставки текстовый).
+fn collect_skill_files_from_disk(dirs: &[PathBuf]) -> (Vec<(PathBuf, String)>, Vec<String>) {
+    let mut out: Vec<(PathBuf, String)> = Vec::new();
+    let mut skipped = Vec::new();
+    let mut seen: BTreeSet<PathBuf> = BTreeSet::new();
+    for dir in dirs {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            continue; // каталога нет — источник просто пуст (свежая машина)
+        };
+        let mut plugins: Vec<PathBuf> = rd
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+            .collect();
+        plugins.sort();
+        for plugin in plugins {
+            let skills_root = plugin.join("skills");
+            if !skills_root.is_dir() {
+                continue;
+            }
+            for entry in walkdir::WalkDir::new(&skills_root)
+                .follow_links(false)
+                .sort_by_file_name()
+                .into_iter()
+                .flatten()
+            {
+                if !entry.file_type().is_file() {
+                    continue;
+                }
+                let path = entry.path();
+                let Ok(rel) = path.strip_prefix(&skills_root) else {
+                    continue; // вне корня скиллов — недостижимо для WalkDir
+                };
+                let segs: Vec<&str> = rel
+                    .components()
+                    .filter_map(|c| c.as_os_str().to_str())
+                    .collect();
+                // Назначение — <скилл>/<файл…>; файл прямо в skills/ (без
+                // каталога скилла) — не layout, пропускаем с заметкой.
+                let [skill, rest @ ..] = segs.as_slice() else {
+                    continue;
+                };
+                if rest.is_empty() {
+                    skipped.push(format!(
+                        "{}: файл вне layout skills/<имя>/ — пропущен",
+                        path.display()
+                    ));
+                    continue;
+                }
+                let dest = PathBuf::from(skill).join(rest.join("/"));
+                if !seen.insert(dest.clone()) {
+                    skipped.push(format!(
+                        "{}: дубль пути назначения {}",
+                        path.display(),
+                        dest.display()
+                    ));
+                    continue;
+                }
+                let Ok(content) = std::fs::read_to_string(path) else {
+                    skipped.push(format!(
+                        "{}: не текстовый файл (UTF-8) — пропущен",
+                        path.display()
+                    ));
+                    continue;
+                };
+                if content.len() > MAX_SKILL_FILE_BYTES {
+                    skipped.push(format!(
+                        "{}: {} КБ — больше потолка {} КБ",
+                        path.display(),
+                        content.len() / 1024,
+                        MAX_SKILL_FILE_BYTES / 1024
+                    ));
+                    continue;
+                }
+                let body = if rest == ["SKILL.md"] {
+                    ensure_frontmatter(&content, skill)
+                } else {
+                    content
+                };
+                out.push((dest, body));
+            }
+        }
+    }
+    out.sort();
+    (out, skipped)
+}
+
+/// Раскладывает скиллы в `root` (`.claude/skills` хоста). Источник истины —
+/// библиотека пользователя на диске (`plugin_dirs`, т.е. `[plugins].dirs`
+/// конфига): всё, что там есть (включая плагины без манифеста и правки
+/// пользователя), едет в хост; встроенные ассеты бинаря — fallback для
+/// скиллов, которых на диске нет вообще (свежая машина без `arch-be init`).
+/// Прецедент приоритета диска — MCP-промпты и `skill_load`
+/// (`mcp_server.rs::resolve_playbook`). Новые копируются, отличающиеся —
+/// перезаписываются версией источника (заметка в отчёте), совпадающие —
+/// пропускаются (идемпотентность).
+fn install_skills(
+    root: &Path,
+    dry_run: bool,
+    report: &mut ConnectReport,
+    plugin_dirs: &[PathBuf],
+) -> Result<()> {
+    let (embedded, skipped_embedded) =
+        collect_skill_files_from(crate::assets::embedded_plugin_files());
+    let (disk, skipped_disk) = collect_skill_files_from_disk(plugin_dirs);
+    report.skills_skipped.extend(skipped_embedded);
+    report.skills_skipped.extend(skipped_disk);
+    // Слияние источников: диск побеждает пофайлово; скилл «из библиотеки»,
+    // если хотя бы один его файл пришёл с диска.
+    let mut by_dest: BTreeMap<PathBuf, (&str, bool)> = BTreeMap::new(); // → (содержимое, с_диска)
+    let embedded_map: BTreeMap<&Path, &str> = embedded
+        .iter()
+        .map(|(p, c)| (p.as_path(), c.as_str()))
+        .collect();
+    let disk_map: BTreeMap<&Path, &str> = disk
+        .iter()
+        .map(|(p, c)| (p.as_path(), c.as_str()))
+        .collect();
+    for (dest, content) in &embedded_map {
+        by_dest.insert(dest.to_path_buf(), (*content, false));
+    }
+    for (dest, content) in &disk_map {
+        by_dest.insert(dest.to_path_buf(), (*content, true));
+    }
+    // Имена скиллов (первый сегмент назначения) по источникам + счёт
+    // расходящихся копий (диск отличается от встроенной по тому же пути).
+    let skill_of = |dest: &Path| {
+        dest.components().next().map_or_else(
             || "?".into(),
             |c| c.as_os_str().to_string_lossy().into_owned(),
-        );
+        )
+    };
+    let library_skills: BTreeSet<String> = disk_map.keys().map(|p| skill_of(p)).collect();
+    report.skills_from_library = library_skills.len();
+    report.skills_from_embedded = embedded_map
+        .keys()
+        .map(|p| skill_of(p))
+        .collect::<BTreeSet<_>>()
+        .difference(&library_skills)
+        .count();
+    let overriding = library_skills
+        .iter()
+        .filter(|skill| {
+            disk_map.iter().any(|(dest, disk_content)| {
+                skill_of(dest) == **skill
+                    && embedded_map
+                        .get(dest)
+                        .is_some_and(|embedded_content| embedded_content != disk_content)
+            })
+        })
+        .count();
+    if overriding > 0 {
+        report.notes.push(format!(
+            "{overriding} скиллов берутся из библиотеки пользователя поверх встроенных \
+             копий (правки и новые версии пользователя в силе)"
+        ));
+    }
+    // Агрегация по имени скилла: (новых, перезаписанных, без изменений).
+    let mut by_skill: BTreeMap<String, (usize, usize, usize)> = BTreeMap::new();
+    for (rel, (content, _from_disk)) in &by_dest {
+        let path = root.join(rel);
+        let skill = skill_of(rel);
         let old = std::fs::read_to_string(&path).ok();
         let counts = by_skill.entry(skill).or_default();
         match old.as_deref() {
             None => counts.0 += 1,
-            Some(prev) if prev == content => counts.2 += 1,
+            Some(prev) if prev == *content => counts.2 += 1,
             Some(_) => counts.1 += 1,
         }
-        if dry_run || old.as_deref() == Some(content.as_str()) {
+        if dry_run || old.as_deref() == Some(*content) {
             continue;
         }
         if let Some(parent) = path.parent() {
@@ -683,7 +854,7 @@ fn install_skills(root: &Path, dry_run: bool, report: &mut ConnectReport) -> Res
         };
         if updated > 0 {
             report.notes.push(format!(
-                "скилл «{name}»: прежняя локальная правка заменена встроенной версией \
+                "скилл «{name}»: прежняя локальная правка заменена версией источника \
                  ({updated} файлов)"
             ));
         }
@@ -747,6 +918,12 @@ fn upsert_claude_md(path: &Path, dry_run: bool, report: &mut ConnectReport) -> R
     commit_file(path, old.as_deref(), &new, dry_run, report)
 }
 
+/// Финальная строка `next_steps` каждого хоста («первая ценность за
+/// 5 минут», C-1): плейбук-промпт MCP-сервера и демо-кейс FAIL→fix→PASS.
+const FIRST_VALUE_STEP: &str = "Первая ценность за 5 минут: попросите агента \
+     «действуй по плейбуку spine-quickstart»; демо FAIL→fix→PASS — кейс \
+     drift-control из репозитория Spine.";
+
 /// `arch-be connect claude`: проектный `.mcp.json`, хуки в
 /// `.claude/settings.json`, скиллы в `.claude/skills/`, блок в CLAUDE.md.
 fn connect_claude(opts: &ConnectOptions, report: &mut ConnectReport) -> Result<()> {
@@ -766,7 +943,12 @@ fn connect_claude(opts: &ConnectOptions, report: &mut ConnectReport) -> Result<(
         )?;
     }
     if opts.skills {
-        install_skills(&opts.dir.join(".claude/skills"), opts.dry_run, report)?;
+        install_skills(
+            &opts.dir.join(".claude/skills"),
+            opts.dry_run,
+            report,
+            &opts.plugins_dirs,
+        )?;
         report.notes.push(
             "субагенты плагинов (agents/*.md) не разворачиваются — при необходимости \
              скопируйте вручную из ~/.arch-harness/plugins после `arch-be init`"
@@ -787,6 +969,7 @@ fn connect_claude(opts: &ConnectOptions, report: &mut ConnectReport) -> Result<(
                 "read-only"
             }
         ),
+        FIRST_VALUE_STEP.to_string(),
     ]);
     Ok(())
 }
@@ -957,12 +1140,12 @@ fn connect_qwen(opts: &ConnectOptions, report: &mut ConnectReport) -> Result<()>
         let skills_root = opts.dir.join(".qwen/skills");
         if skills_root.exists() {
             report.notes.push(format!(
-                "{} уже существует — встроенные скиллы НЕ раскладываются (чужую \
+                "{} уже существует — скиллы НЕ раскладываются (чужую \
                  библиотеку не перетираем)",
                 skills_root.display()
             ));
         } else {
-            install_skills(&skills_root, opts.dry_run, report)?;
+            install_skills(&skills_root, opts.dry_run, report, &opts.plugins_dirs)?;
             report.notes.push(
                 "скиллы разложены в .qwen/skills/ — Qwen Code ≥ 0.24 читает этот \
                  каталог нативно (project scope)"
@@ -984,6 +1167,7 @@ fn connect_qwen(opts: &ConnectOptions, report: &mut ConnectReport) -> Result<()>
     report.next_steps.extend([
         "перезапустите Qwen Code (`qwen`) в этом каталоге".to_string(),
         "проверьте список MCP-серверов хоста — в нём «spine»".to_string(),
+        FIRST_VALUE_STEP.to_string(),
     ]);
     Ok(())
 }
@@ -1054,7 +1238,12 @@ fn connect_gigacode(opts: &ConnectOptions, report: &mut ConnectReport) -> Result
         report,
     )?;
     if opts.skills {
-        install_skills(&settings_dir.join("skills"), opts.dry_run, report)?;
+        install_skills(
+            &settings_dir.join("skills"),
+            opts.dry_run,
+            report,
+            &opts.plugins_dirs,
+        )?;
         report.notes.push(
             "скиллы разложены в <каталог настроек>/skills/ — layout project-скиллов \
              Qwen Code ≥ 0.24, унаследован форком"
@@ -1083,6 +1272,7 @@ fn connect_gigacode(opts: &ConnectOptions, report: &mut ConnectReport) -> Result
          `qwen mcp approve spine`; в GigaCode — аналог вашей сборки)"
             .to_string(),
         "проверьте подключение: `arch-be doctor --host gigacode`".to_string(),
+        FIRST_VALUE_STEP.to_string(),
     ]);
     Ok(())
 }
@@ -1122,6 +1312,7 @@ fn connect_codex(opts: &ConnectOptions, report: &mut ConnectReport) -> Result<()
     report.next_steps.extend([
         "перезапустите `codex` в этом каталоге".to_string(),
         "проверьте список MCP-серверов: `codex mcp list` — в нём «spine»".to_string(),
+        FIRST_VALUE_STEP.to_string(),
     ]);
     Ok(())
 }
@@ -1190,6 +1381,7 @@ fn connect_kimi(opts: &ConnectOptions, report: &mut ConnectReport) -> Result<()>
                 "read-only"
             }
         ),
+        FIRST_VALUE_STEP.to_string(),
     ]);
     Ok(())
 }
@@ -1223,7 +1415,7 @@ fn toml_escape_basic(text: &str) -> String {
 /// `arch-be connect omp` (oh-my-pi): проектный `.mcp.json` формата Claude
 /// Desktop — omp дискаверит его автоматически, регистрация не нужна.
 /// Скиллы omp читает нативно из `.claude/skills/`: если такого каталога в
-/// проекте ещё нет, встроенные скиллы раскладываются туда тем же
+/// проекте ещё нет, скиллы библиотеки раскладываются туда тем же
 /// `install_skills`, что у claude; каталог уже есть — не трогаем, чтобы не
 /// перетирать чужую библиотеку (об этом заметка). Хуков через connect нет:
 /// механизм хуков omp — TypeScript-расширения (`omp --hook <file.ts>`),
@@ -1245,13 +1437,13 @@ fn connect_omp(opts: &ConnectOptions, report: &mut ConnectReport) -> Result<()> 
         let skills_root = opts.dir.join(".claude/skills");
         if skills_root.exists() {
             report.notes.push(format!(
-                "{} уже существует — встроенные скиллы НЕ раскладываются (чужую \
+                "{} уже существует — скиллы НЕ раскладываются (чужую \
                  библиотеку не перетираем; omp читает .claude/skills нативно, \
                  принудительно разложить встроенные может `arch-be connect claude`)",
                 skills_root.display()
             ));
         } else {
-            install_skills(&skills_root, opts.dry_run, report)?;
+            install_skills(&skills_root, opts.dry_run, report, &opts.plugins_dirs)?;
             report.notes.push(
                 "скиллы разложены в .claude/skills/ — omp читает этот каталог \
                  нативно (тот же layout, что у Claude Code)"
@@ -1277,6 +1469,7 @@ fn connect_omp(opts: &ConnectOptions, report: &mut ConnectReport) -> Result<()> 
                 "read-only"
             }
         ),
+        FIRST_VALUE_STEP.to_string(),
     ]);
     Ok(())
 }
@@ -1319,6 +1512,7 @@ fn connect_generic(opts: &ConnectOptions, report: &mut ConnectReport) {
     report.next_steps.extend([
         "вставьте сниппеты выше в конфигурацию вашего агента".to_string(),
         "перезапустите агента и проверьте, что MCP-сервер «spine» поднялся".to_string(),
+        FIRST_VALUE_STEP.to_string(),
     ]);
 }
 
@@ -1849,10 +2043,15 @@ pub fn render_plan(title: &str, report: &ConnectReport) -> String {
     if !report.skills.is_empty() {
         let total = report.skills.len();
         let _ = writeln!(out, "Скиллы ({total}):");
+        let _ = writeln!(
+            out,
+            "  источник: из библиотеки пользователя: {}, из встроенных: {}",
+            report.skills_from_library, report.skills_from_embedded
+        );
         for s in &report.skills {
             let line = match &s.action {
                 SkillAction::Copied(n) => format!("скопирован ({n} файлов)"),
-                SkillAction::Updated(n) => format!("обновлён встроенной версией ({n} файлов)"),
+                SkillAction::Updated(n) => format!("обновлён ({n} файлов)"),
                 SkillAction::Unchanged(n) => format!("без изменений ({n} файлов)"),
             };
             let _ = writeln!(out, "  ✓ {} — {line}", s.name);
@@ -1936,6 +2135,41 @@ mod tests {
                 })
                 .count()
         })
+    }
+
+    /// Финальной строкой `next_steps` каждого хоста идёт «первая ценность
+    /// за 5 минут» (C-1): плейбук spine-quickstart + демо-кейс drift-control.
+    #[test]
+    fn every_host_next_steps_end_with_first_value() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        for (i, host) in [
+            Host::Claude,
+            Host::Qwen,
+            Host::GigaCode,
+            Host::Codex,
+            Host::Kimi,
+            Host::Omp,
+            Host::Generic,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let dir = tmp.path().join(format!("proj-{i}"));
+            std::fs::create_dir_all(&dir).expect("mkdir");
+            let report = connect(&ConnectOptions::new(host, dir)).expect("connect");
+            let last = report
+                .next_steps
+                .last()
+                .unwrap_or_else(|| panic!("{host:?}: next_steps пуст"));
+            assert_eq!(
+                last, FIRST_VALUE_STEP,
+                "{host:?}: финальная строка — «первая ценность за 5 минут»"
+            );
+            assert!(
+                last.contains("spine-quickstart") && last.contains("drift-control"),
+                "{host:?}: {last}"
+            );
+        }
     }
 
     /// (a) connect claude в пустой каталог: .mcp.json, settings.json,
@@ -2368,6 +2602,141 @@ mod tests {
                 .any(|s| s.name == "bulkhead" && s.action == SkillAction::Unchanged(1)),
             "{:?}",
             report.skills
+        );
+    }
+
+    /// Библиотека пользователя на диске (plugins.dirs) с фикстурой: плагин
+    /// без plugin.json + один скилл.
+    fn user_library(root: &Path, plugin: &str, skill: &str, body: &str) -> PathBuf {
+        let lib = root.join("lib");
+        let skill_dir = lib.join(plugin).join("skills").join(skill);
+        std::fs::create_dir_all(&skill_dir).expect("mkdir lib");
+        std::fs::write(skill_dir.join("SKILL.md"), body).expect("write skill");
+        lib
+    }
+
+    /// (а) Скилл, существующий только в библиотеке пользователя (плагин без
+    /// манифеста), доставляется в хост; счётчик `from_library` его считает.
+    #[test]
+    fn skills_from_user_library_delivered_when_absent_from_embedded() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let lib = user_library(
+            tmp.path(),
+            "arch-distilled",
+            "user-only-skill",
+            "---\nname: user-only-skill\ndescription: свой\n---\n\n# Свой скилл\n",
+        );
+        let dir = tmp.path().join("proj");
+        let opts = ConnectOptions {
+            plugins_dirs: vec![lib],
+            ..ConnectOptions::new(Host::Claude, dir.clone())
+        };
+        let report = connect(&opts).expect("connect");
+        let delivered = dir.join(".claude/skills/user-only-skill/SKILL.md");
+        assert!(delivered.is_file(), "скилл из библиотеки доставлен");
+        assert!(read(&delivered).contains("Свой скилл"));
+        assert_eq!(
+            report.skills_from_library, 1,
+            "один скилл — из библиотеки пользователя"
+        );
+        assert!(
+            report.skills_from_embedded > 0,
+            "встроенные тоже доехали (fallback)"
+        );
+        // Идемпотентность: повтор — без изменений.
+        let report2 = connect(&opts).expect("повтор");
+        assert!(
+            report2
+                .skills
+                .iter()
+                .any(|s| s.name == "user-only-skill" && s.action == SkillAction::Unchanged(1)),
+            "{:?}",
+            report2.skills
+        );
+    }
+
+    /// (б) Дисковая копия скилла отличается от встроенной → в хост пишется
+    /// дисковая версия; сводная заметка «поверх встроенных копий» — одна.
+    #[test]
+    fn library_copy_overrides_embedded_with_summary_note() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let lib = user_library(
+            tmp.path(),
+            "arch-core",
+            "adr-authoring",
+            "---\nname: adr-authoring\ndescription: пользовательская редакция\n---\n\n# Моя редакция ADR\n",
+        );
+        let dir = tmp.path().join("proj");
+        let opts = ConnectOptions {
+            plugins_dirs: vec![lib],
+            ..ConnectOptions::new(Host::Claude, dir.clone())
+        };
+        let report = connect(&opts).expect("connect");
+        let delivered = dir.join(".claude/skills/adr-authoring/SKILL.md");
+        assert!(
+            read(&delivered).contains("Моя редакция ADR"),
+            "в хосте — версия библиотеки пользователя, не встроенная"
+        );
+        let overriding: Vec<_> = report
+            .notes
+            .iter()
+            .filter(|n| n.contains("поверх встроенных копий"))
+            .collect();
+        assert_eq!(
+            overriding.len(),
+            1,
+            "ровно одна сводная заметка: {:?}",
+            report.notes
+        );
+        assert!(overriding[0].contains("1 скиллов"), "{overriding:?}");
+        assert_eq!(report.skills_from_library, 1);
+    }
+
+    /// (в) Пустой plugins.dirs — поведение как раньше: все скиллы из
+    /// встроенных, заметок о библиотеке нет.
+    #[test]
+    fn empty_plugins_dirs_keeps_embedded_only_behavior() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path().join("proj");
+        let report = connect(&ConnectOptions::new(Host::Claude, dir.clone())).expect("connect");
+        assert_eq!(report.skills_from_library, 0);
+        assert_eq!(
+            report.skills_from_embedded,
+            report.skills.len(),
+            "все скиллы — из встроенных: {} vs {}",
+            report.skills_from_embedded,
+            report.skills.len()
+        );
+        assert!(
+            !report
+                .notes
+                .iter()
+                .any(|n| n.contains("поверх встроенных копий")),
+            "{:?}",
+            report.notes
+        );
+    }
+
+    /// (г) Печать результата несёт раздельные счётчики источников.
+    #[test]
+    fn render_prints_skill_source_counters() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let lib = user_library(
+            tmp.path(),
+            "arch-distilled",
+            "user-only-skill",
+            "---\nname: user-only-skill\ndescription: свой\n---\n\n# Свой\n",
+        );
+        let dir = tmp.path().join("proj");
+        let opts = ConnectOptions {
+            plugins_dirs: vec![lib],
+            ..ConnectOptions::new(Host::Claude, dir.clone())
+        };
+        let report = connect(&opts).expect("connect");
+        let text = render_report(&opts, &report);
+        assert!(
+            text.contains("источник: из библиотеки пользователя: 1, из встроенных:"),
+            "раздельные счётчики в печати: {text}"
         );
     }
 
