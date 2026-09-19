@@ -800,19 +800,11 @@ impl SignificanceConfig {
 /// Имена — имена составляющих `arch-be gate`: `fitness`, `delta_guard`,
 /// `rule_weakened`, `spine_lint`, `trace_check`, `sensors`, `nfr`,
 /// `evidence_verify`. Пустой список = на маршруте обязательных нет.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GateConfig {
     /// Обязательные составляющие по маршрутам.
     pub required: RequiredRules,
-}
-
-impl Default for GateConfig {
-    fn default() -> Self {
-        Self {
-            required: RequiredRules::default(),
-        }
-    }
 }
 
 /// Списки обязательных составляющих для Fast / Standard / Critical.

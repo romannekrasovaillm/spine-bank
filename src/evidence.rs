@@ -143,11 +143,16 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 
 /// Временный/служебный файл, не влияющий на смысл артефакта.
 fn is_transient(name: &str) -> bool {
-    name.ends_with('~')
-        || name.ends_with(".tmp")
-        || name.ends_with(".swp")
-        || name.ends_with(".swo")
-        || name == ".DS_Store"
+    if name.ends_with('~') || name == ".DS_Store" {
+        return true;
+    }
+    let ext = Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default();
+    ["tmp", "swp", "swo"]
+        .iter()
+        .any(|e| ext.eq_ignore_ascii_case(e))
 }
 
 /// Файлы каталога рекурсивно (П2: правка во вложенном подкаталоге обязана
@@ -206,7 +211,7 @@ fn hash_artifact(path: &Path, alg: &str) -> Result<(String, u64)> {
             |p| p.to_string_lossy().replace('\\', "/"),
         );
         // Запись в String не может завершиться ошибкой — игнор безопасен.
-        let _ = write!(acc, "{rel}\0{h}\n");
+        let _ = writeln!(acc, "{rel}\0{h}");
         size += s;
     }
     let digest = if alg == HASH_ALG_SHA256 {

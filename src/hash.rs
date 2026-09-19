@@ -91,6 +91,8 @@ const H0: [u32; 8] = [
 ];
 
 /// SHA-256 от байтов — 32 байта.
+// Имена a..h — канонические обозначения раунда FIPS 180-4.
+#[allow(clippy::many_single_char_names)]
 #[must_use]
 pub fn sha256(data: &[u8]) -> [u8; 32] {
     let mut h = H0;
