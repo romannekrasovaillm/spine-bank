@@ -599,17 +599,11 @@ fn check_plugins(cfg: &Config) -> Check {
             missing.push(dir.display().to_string());
         }
     }
-    let discovered = crate::plugin::discover(&existing);
-    let plugins = discovered.len();
-    let skills: usize = discovered.iter().map(|p| p.skills.len()).sum();
-    // Контрольный сырой обход (та же глубина, что давала layout
-    // `<dir>/<плагин>/skills/<имя>/SKILL.md` от записи каталога): всё,
-    // найденное сверх манифестных скиллов, — кандидаты в дрейф: SKILL.md
-    // без plugin.json, с битым frontmatter, дубли имён, плоский layout.
-    let raw: usize = existing
-        .iter()
-        .map(|d| count_files_named(d, "SKILL.md", 4))
-        .sum();
+    // Единая сводка с инструментом `plugin_list` (Н11 волны C 0.3.4):
+    // раньше два канала называли разные числа, и расхождение выглядело
+    // дефектом библиотеки, а не разницей между «скиллами в манифестах» и
+    // «файлами SKILL.md» (без plugin.json, с битым frontmatter, дубли имён).
+    let (plugins, skills, raw) = crate::plugin::library_stats(&existing);
     let drift = raw.saturating_sub(skills);
     let verdict = if plugins == 0 {
         Verdict::Fail
@@ -618,9 +612,10 @@ fn check_plugins(cfg: &Config) -> Check {
     } else {
         Verdict::Warn
     };
-    let mut text = format!("{plugins} плагинов, {skills} скиллов");
+    let mut text =
+        format!("{plugins} плагинов, {skills} скиллов в манифестах (файлов SKILL.md: {raw})");
     if drift > 0 {
-        let _ = write!(text, "; +{drift} скиллов вне манифестов (дрейф библиотеки)");
+        let _ = write!(text, "; +{drift} вне манифестов (дрейф библиотеки)");
     }
     if !missing.is_empty() {
         let _ = write!(text, "; нет каталогов: {}", missing.join(", "));
@@ -944,14 +939,14 @@ mod tests {
             .expect("plugins");
         assert_eq!(plugins.verdict, Verdict::Ok, "{plugins:?}");
         assert!(
-            plugins.text.contains("1 плагинов, 1 скиллов"),
+            plugins.text.contains("1 плагинов, 1 скиллов в манифестах"),
             "счёт по манифестам, как у skills list: {}",
             plugins.text
         );
         assert!(
             plugins
                 .text
-                .contains("+1 скиллов вне манифестов (дрейф библиотеки)"),
+                .contains("+1 вне манифестов (дрейф библиотеки)"),
             "пометка дрейфа: {}",
             plugins.text
         );

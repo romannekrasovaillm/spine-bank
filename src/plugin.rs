@@ -257,6 +257,47 @@ pub fn parse_frontmatter_text(text: &str) -> Option<(String, String)> {
     Some((name, description))
 }
 
+/// Сводка по библиотеке плагинов: `(плагинов, скиллов в манифестах,
+/// файлов SKILL.md в каталогах)`.
+///
+/// Одна функция на двух потребителей (`doctor` и инструмент `plugin_list`):
+/// раньше `doctor` печатал «62 скилла», а читатель, сложивший строки
+/// `plugin_list` или посчитавший файлы, получал другое число — расхождение в
+/// отчётах выглядело как дефект библиотеки. Разница объяснима (SKILL.md без
+/// `plugin.json`, битый frontmatter, дубли имён) и печатается как «вне
+/// манифестов», а не замалчивается.
+#[must_use]
+pub fn library_stats(dirs: &[PathBuf]) -> (usize, usize, usize) {
+    let plugins = discover(dirs);
+    let skills: usize = plugins.iter().map(|p| p.skills.len()).sum();
+    let raw: usize = dirs
+        .iter()
+        .filter(|d| d.is_dir())
+        .map(|d| count_skill_files(d, 4))
+        .sum();
+    (plugins.len(), skills, raw)
+}
+
+/// Файлы `SKILL.md` на глубине не больше `depth` (сырой обход библиотеки).
+fn count_skill_files(dir: &Path, depth: usize) -> usize {
+    if depth == 0 {
+        return 0;
+    }
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut n = 0;
+    for entry in rd.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            n += count_skill_files(&path, depth - 1);
+        } else if path.file_name().is_some_and(|f| f == "SKILL.md") {
+            n += 1;
+        }
+    }
+    n
+}
+
 /// Поиск по библиотеке скиллов: name ×12, description ×6, keywords ×4,
 /// тело ×1 (лениво, файлы ≤1 МБ). Сниппет — первое вхождение в теле.
 #[must_use]
@@ -593,6 +634,20 @@ impl Tool for PluginListTool {
             ));
         }
         let mut out = String::new();
+        // Сводка — теми же числами и словами, что у `doctor`: одно число на
+        // двух каналах (Н11 волны C 0.3.4).
+        let (total_plugins, total_skills, raw) = library_stats(&self.dirs);
+        let drift = raw.saturating_sub(total_skills);
+        let _ = writeln!(
+            out,
+            "Итого: {total_plugins} плагинов, {total_skills} скиллов{}",
+            if drift > 0 {
+                format!("; +{drift} файлов SKILL.md вне манифестов (дрейф библиотеки)")
+            } else {
+                String::new()
+            }
+        );
+        out.push('\n');
         for p in &plugins {
             let extras = p.extra_components().len();
             let mcp = mcp_servers(std::slice::from_ref(p)).len();
@@ -749,5 +804,77 @@ mod tests {
         let mut names: Vec<String> = list.iter().map(|t| t.spec().name).collect();
         names.sort();
         assert_eq!(names, ["plugin_list", "skill_load", "skill_search"]);
+    }
+}
+
+#[cfg(test)]
+mod tests_library_stats {
+    //! Н11 волны C 0.3.4: `doctor` и `plugin_list` обязаны называть ОДНО число
+    //! скиллов, а расхождение «файлов SKILL.md» — объяснять, а не прятать.
+
+    use super::*;
+
+    fn put(root: &Path, rel: &str, content: &str) {
+        let p = root.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, content).unwrap();
+    }
+
+    fn library(dir: &Path) {
+        put(
+            dir,
+            "p1/plugin.json",
+            r#"{"name":"p1","version":"1.0.0","description":"тест"}"#,
+        );
+        put(
+            dir,
+            "p1/skills/one/SKILL.md",
+            "---\nname: one\ndescription: первый\n---\n\nТело.\n",
+        );
+        // Второй SKILL.md без манифестной записи — дрейф библиотеки.
+        put(
+            dir,
+            "p1/skills/two/SKILL.md",
+            "---\nname: two\n---\n\nТело.\n",
+        );
+    }
+
+    #[test]
+    fn stats_match_plugin_list_summary() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        library(tmp.path());
+        let dirs = vec![tmp.path().to_path_buf()];
+        let (plugins, skills, raw) = library_stats(&dirs);
+        assert_eq!(plugins, 1);
+        assert_eq!(skills, 2, "оба скилла в манифесте плагина");
+        assert_eq!(raw, 2);
+
+        let ctx = crate::tool::ToolContext::new(
+            tmp.path().to_path_buf(),
+            std::sync::Arc::new(crate::config::Config::default()),
+        );
+        let out = tokio::runtime::Runtime::new()
+            .expect("runtime")
+            .block_on(PluginListTool { dirs }.call(serde_json::json!({}), &ctx))
+            .expect("вызов");
+        assert!(
+            out.content
+                .contains(&format!("Итого: {plugins} плагинов, {skills} скиллов")),
+            "сводка обязана совпадать с doctor: {}",
+            out.content
+        );
+    }
+
+    #[test]
+    fn drift_is_named_not_hidden() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        library(tmp.path());
+        // Битый манифест: SKILL.md остаётся, плагин не обнаруживается.
+        std::fs::write(tmp.path().join("p1/plugin.json"), "{ битый").expect("write");
+        let dirs = vec![tmp.path().to_path_buf()];
+        let (plugins, skills, raw) = library_stats(&dirs);
+        assert_eq!(plugins, 0);
+        assert_eq!(skills, 0);
+        assert_eq!(raw, 2, "файлы на месте — дрейф обязан быть виден числом");
     }
 }
