@@ -50,7 +50,10 @@ use crate::tool::{Tool, ToolContext, ToolOutput};
 pub use drift::{DriftReport, ModelDriftTool, drift_check};
 pub use exchange::{ExportFormat, ImportReport, export_model, import_structurizr};
 pub use graph::{find_cycle, graph_mermaid, graph_text};
-pub use parse::{Entity, LinkKind, Model, load_model, parse_entity, split_frontmatter};
+pub use parse::{
+    Entity, LinkKind, Model, ModelLoadIssue, load_issues_note, load_model, load_model_tolerant,
+    parse_entity, split_frontmatter,
+};
 pub use project::{ProjectReport, project_adr, render_adr};
 pub use registry::{RegistryFormat, RegistryImportOptions, RegistryImportReport, import_registry};
 pub use validate::{ModelIssue, Severity, ValidationReport, validate};
@@ -307,7 +310,9 @@ impl Tool for ModelValidateTool {
             }
         };
         let dir = ctx.resolve(args.dir.as_deref().unwrap_or("model"));
-        let model = match load_model(&dir) {
+        // Толерантная загрузка (E3): битая сущность — error-находка отчёта
+        // (её добавляет `validate`), а не отказ всего инструмента.
+        let model = match load_model_tolerant(&dir) {
             Ok(m) => m,
             Err(e) => return Ok(ToolOutput::err(format!("model_validate: {e}"))),
         };
@@ -381,13 +386,19 @@ impl Tool for ModelQueryTool {
             }
         };
         let dir = ctx.resolve(args.dir.as_deref().unwrap_or("model"));
-        let model = match load_model(&dir) {
+        // Толерантная загрузка (E3): работа по валидному подмножеству +
+        // warn-пометка о пропущенных сущностях первой строкой.
+        let model = match load_model_tolerant(&dir) {
             Ok(m) => m,
             Err(e) => return Ok(ToolOutput::err(format!("model_query: {e}"))),
         };
+        let mut prefix = String::new();
+        if let Some(note) = load_issues_note(&model.load_issues) {
+            let _ = writeln!(prefix, "Внимание: {note}"); // записи в String не падают
+        }
         if let Some(id) = args.id {
             return match model.get(&id) {
-                Some(e) => Ok(ToolOutput::ok(card(&model, e))),
+                Some(e) => Ok(ToolOutput::ok(format!("{prefix}{}", card(&model, e)))),
                 None => Ok(ToolOutput::err(format!(
                     "model_query: сущность '{id}' не найдена (всего сущностей: {})",
                     model.entities.len()
@@ -412,7 +423,7 @@ impl Tool for ModelQueryTool {
             None => None,
         };
         let mut out = format!(
-            "Модель {}: {} сущностей{}\n",
+            "{prefix}Модель {}: {} сущностей{}\n",
             dir.display(),
             model.entities.len(),
             kind.map_or_else(String::new, |k| format!(", тип {}", k.type_str()))
@@ -495,7 +506,9 @@ impl Tool for ModelGraphTool {
             )));
         }
         let dir = ctx.resolve(args.dir.as_deref().unwrap_or("model"));
-        let model = match load_model(&dir) {
+        // Толерантная загрузка (E3): граф по валидному подмножеству +
+        // поле `load_issues` в JSON-ответе.
+        let model = match load_model_tolerant(&dir) {
             Ok(m) => m,
             Err(e) => return Ok(ToolOutput::err(format!("model_graph: {e}"))),
         };
@@ -514,12 +527,15 @@ impl Tool for ModelGraphTool {
         } else {
             graph_text(&model)
         };
-        let summary = format!(
+        let mut summary = format!(
             "Граф модели {}: {} сущностей, {} связей ({format})",
             model.dir.display(),
             model.entities.len(),
             edges
         );
+        if let Some(note) = load_issues_note(&model.load_issues) {
+            let _ = write!(summary, "; внимание: {note}"); // записи в String не падают
+        }
         let verdict = json!({
             "tool": "model_graph",
             "format": format,
@@ -527,6 +543,7 @@ impl Tool for ModelGraphTool {
             "edges": edges,
             "summary": summary,
             "graph": graph,
+            "load_issues": model.load_issues,
         });
         // Сериализация собранного объекта не падает; запасной вариант — компактная форма.
         let text = serde_json::to_string_pretty(&verdict).unwrap_or_else(|_| verdict.to_string());
@@ -610,6 +627,15 @@ mod tests {
             "---\nid: ADR-001\ntype: adr\ntitle: Решение\nstatus: Accepted\ndate: 2026-08-17\nimplements: [AD-1]\n---\n\nКонтекст и решение.\n",
         )
         .expect("фикстура ADR");
+    }
+
+    /// Битая сущность E3: `availability_target` строкой вместо числа.
+    fn fixture_broken_nfr(dir: &Path) {
+        std::fs::write(
+            dir.join("NFR-001-broken.md"),
+            "---\nid: NFR-001\ntype: nfr\ntitle: SLA\nstatus: accepted\navailability_target: \"99.9\"\n---\n",
+        )
+        .expect("битая фикстура NFR");
     }
 
     #[tokio::test]
@@ -725,6 +751,103 @@ mod tests {
             .await
             .expect("вызов");
         assert!(out.is_error, "{}", out.content);
+    }
+
+    /// E3: битая сущность — error-находка `load-error` отчёта (не отказ
+    /// инструмента), валидные сущности проверяются.
+    #[tokio::test]
+    async fn model_validate_reports_broken_entity_as_error_finding() {
+        let dir = tempfile::tempdir().expect("tmp");
+        fixture_model(dir.path());
+        fixture_broken_nfr(dir.path());
+        let ctx = ToolContext::new(
+            dir.path().to_path_buf(),
+            Arc::new(crate::config::Config::default()),
+        );
+        let out = ModelValidateTool
+            .call(json!({"dir": "."}), &ctx)
+            .await
+            .expect("вызов");
+        assert!(!out.is_error, "инструмент не падает: {}", out.content);
+        let v: Value = serde_json::from_str(&out.content).expect("JSON-вердикт");
+        assert_eq!(v["passed"], false, "{v}");
+        let issues = v["issues"].as_array().expect("issues");
+        let load = issues
+            .iter()
+            .find(|i| i["rule"] == "load-error")
+            .expect("error-находка по битой сущности");
+        assert_eq!(load["severity"], "error", "{load}");
+        assert!(
+            load["file"].as_str().expect("file").contains("NFR-001"),
+            "{load}"
+        );
+        // Валидные сущности проверены: сводка считает именно их (2).
+        let summary = v["summary"].as_str().expect("summary");
+        assert!(summary.contains("Сущностей: 2"), "{summary}");
+    }
+
+    /// E3: `model_query` работает по валидному подмножеству + warn-пометка.
+    #[tokio::test]
+    async fn model_query_tolerates_broken_entity_with_note() {
+        let dir = tempfile::tempdir().expect("tmp");
+        fixture_model(dir.path());
+        fixture_broken_nfr(dir.path());
+        let ctx = ToolContext::new(
+            dir.path().to_path_buf(),
+            Arc::new(crate::config::Config::default()),
+        );
+        let out = ModelQueryTool
+            .call(json!({"dir": "."}), &ctx)
+            .await
+            .expect("вызов");
+        assert!(!out.is_error, "{}", out.content);
+        assert!(
+            out.content.contains("Внимание: 1 сущностей пропущено"),
+            "{}",
+            out.content
+        );
+        assert!(out.content.contains("ADR-001"), "{}", out.content);
+        // Карточка валидной сущности тоже несёт пометку.
+        let out = ModelQueryTool
+            .call(json!({"dir": ".", "id": "ADR-001"}), &ctx)
+            .await
+            .expect("вызов");
+        assert!(out.content.contains("Внимание:"), "{}", out.content);
+    }
+
+    /// E3: `model_graph` — граф по валидным сущностям + поле `load_issues`.
+    #[tokio::test]
+    async fn model_graph_tolerates_broken_entity_with_load_issues() {
+        let dir = tempfile::tempdir().expect("tmp");
+        fixture_model(dir.path());
+        fixture_broken_nfr(dir.path());
+        let ctx = ToolContext::new(
+            dir.path().to_path_buf(),
+            Arc::new(crate::config::Config::default()),
+        );
+        let out = ModelGraphTool
+            .call(json!({"dir": "."}), &ctx)
+            .await
+            .expect("вызов");
+        assert!(!out.is_error, "{}", out.content);
+        let v: Value = serde_json::from_str(&out.content).expect("JSON-вердикт");
+        assert_eq!(v["entities"], 2, "{v}");
+        let issues = v["load_issues"].as_array().expect("load_issues");
+        assert_eq!(issues.len(), 1, "{v}");
+        assert!(
+            issues[0]["file"]
+                .as_str()
+                .expect("file")
+                .contains("NFR-001"),
+            "{v}"
+        );
+        assert!(
+            v["summary"]
+                .as_str()
+                .expect("summary")
+                .contains("пропущено"),
+            "{v}"
+        );
     }
 
     /// Инструмент `model_graph`: text-список и mermaid flowchart на фикстуре,

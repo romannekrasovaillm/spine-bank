@@ -41,7 +41,7 @@ use serde_json::{Value, json};
 use crate::error::{HarnessError, Result};
 use crate::gate::{self, GateComponent, GateFinding, GateReport, GateStatus};
 use crate::llm::ToolSpec;
-use crate::model::{EntityKind, LinkKind, Model, load_model, validate};
+use crate::model::{EntityKind, LinkKind, Model, load_model_tolerant, validate};
 use crate::tool::{Tool, ToolContext, ToolOutput};
 use crate::{asyncapi, control, openapi};
 
@@ -109,7 +109,9 @@ fn status_label(status: GateStatus) -> &'static str {
 
 /// Секция `model_validate`: ссылочная целостность `model/`
 /// ([`crate::model::validate`]). Входа нет — SKIP; модель не разбирается
-/// или есть error-находки — FAIL.
+/// ВООБЩЕ или есть error-находки — FAIL. Толерантная загрузка (E3): битые
+/// сущности — error-находки `load-error` отчёта `validate`, валидное
+/// подмножество проверяется.
 fn component_model_validate(repo: &Path) -> GateComponent {
     let model_dir = repo.join("model");
     if !model_dir.is_dir() {
@@ -120,7 +122,7 @@ fn component_model_validate(repo: &Path) -> GateComponent {
             findings: Vec::new(),
         };
     }
-    let model = match load_model(&model_dir) {
+    let model = match load_model_tolerant(&model_dir) {
         Ok(m) => m,
         Err(e) => {
             return GateComponent {
@@ -214,9 +216,10 @@ fn contract_candidates(repo: &Path) -> (Vec<PathBuf>, usize) {
     let mut missing = 0usize;
     let model_dir = repo.join("model");
     if model_dir.is_dir() {
-        // Ошибку загрузки модели осознанно игнорируем: её отразит секция
-        // model_validate, а секция контрактов работает с тем, что есть.
-        if let Ok(model) = load_model(&model_dir) {
+        // Толерантная загрузка (E3): битые сущности пропускаем — их ошибку
+        // покажет секция model_validate, а секция контрактов работает с
+        // валидным подмножеством.
+        if let Ok(model) = load_model_tolerant(&model_dir) {
             for e in &model.entities {
                 if e.kind != EntityKind::Int {
                     continue;
@@ -513,6 +516,9 @@ pub struct ImpactReport {
     /// Пути из `paths`, не покрытые ни одним `code_roots` CMP (разрыв
     /// покрытия модели — сигнал дописать модель, ADR-030).
     pub gaps: Vec<String>,
+    /// Сущности, пропущенные при толерантной загрузке модели (E3): обход
+    /// выполнен по валидному подмножеству.
+    pub load_issues: Vec<crate::model::ModelLoadIssue>,
     /// Затронутые сущности (транзитивно, включая источники), по типам и ID.
     pub affected: Vec<AffectedEntity>,
     /// Затронутые правила CONSTRAINTS.yaml (по `verified_by` C-NNN).
@@ -595,8 +601,9 @@ fn rule_cards(case: &Path) -> Option<BTreeMap<String, (String, Option<String>)>>
     Some(cards)
 }
 
-/// Загружает модель кейса (`<case>/model/`) с честной ошибкой при
-/// отсутствии каталога.
+/// Загружает модель кейса (`<case>/model/`) толерантно (E3: битые сущности
+/// — в `Model::load_issues`, обход идёт по валидному подмножеству) с честной
+/// ошибкой при отсутствии каталога.
 fn load_case_model(case: &Path) -> Result<Model> {
     let model_dir = case.join("model");
     if !model_dir.is_dir() {
@@ -605,7 +612,7 @@ fn load_case_model(case: &Path) -> Result<Model> {
             model_dir.display()
         )));
     }
-    load_model(&model_dir)
+    load_model_tolerant(&model_dir)
 }
 
 /// Обход «что я задену»: от `id` (сущность модели) или `paths` (файлы →
@@ -811,6 +818,7 @@ fn impact_core(
         case: case.to_path_buf(),
         seeds: seeds.into_iter().collect(),
         gaps,
+        load_issues: model.load_issues.clone(),
         affected,
         rules,
         contracts,
@@ -827,6 +835,9 @@ pub fn render_impact(report: &ImpactReport) -> String {
     // Запись в String не может завершиться ошибкой — игноры безопасны.
     let _ = writeln!(out, "Радиус изменения: {}", report.case.display());
     let _ = writeln!(out, "Источники: {}", report.seeds.join(", "));
+    if let Some(note) = crate::model::load_issues_note(&report.load_issues) {
+        let _ = writeln!(out, "Внимание: {note}");
+    }
     if !report.gaps.is_empty() {
         let _ = writeln!(
             out,
@@ -878,6 +889,7 @@ pub fn impact_json(report: &ImpactReport) -> Value {
         "case": report.case.display().to_string(),
         "seeds": report.seeds,
         "gaps": report.gaps,
+        "load_issues": report.load_issues,
         "affected": report.affected.iter().map(|a| json!({
             "id": a.id,
             "kind": a.kind,
@@ -1330,6 +1342,33 @@ mod tests {
         let empty = tmp.path().join("empty");
         std::fs::create_dir_all(&empty).expect("mkdir");
         assert!(change_impact(&empty, Some("CMP-001"), &[]).is_err());
+    }
+
+    /// E3: битая сущность не роняет обход — warn-пометка `load_issues` в
+    /// отчёте/JSON, обход по валидному подмножеству.
+    #[test]
+    fn impact_tolerates_broken_entity_with_load_issues_note() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let case = tmp.path().join("case");
+        std::fs::create_dir_all(&case).expect("mkdir");
+        make_case(&case);
+        std::fs::write(
+            case.join("model/NFR-777-broken.md"),
+            "---\nid: NFR-777\ntype: nfr\ntitle: SLA\nstatus: accepted\navailability_target: \"99.9\"\n---\n",
+        )
+        .expect("битая сущность");
+        let report = change_impact(&case, Some("CMP-001"), &[]).expect("impact");
+        assert_eq!(report.load_issues.len(), 1);
+        assert!(report.load_issues[0].file.ends_with("NFR-777-broken.md"));
+        // Валидное подмножество обошлось полностью (как без битой сущности).
+        assert_eq!(report.affected.len(), 10);
+        let text = render_impact(&report);
+        assert!(text.contains("Внимание: 1 сущностей пропущено"), "{text}");
+        let json = impact_json(&report);
+        assert_eq!(
+            json["load_issues"].as_array().expect("load_issues").len(),
+            1
+        );
     }
 
     #[tokio::test]

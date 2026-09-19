@@ -29,7 +29,7 @@ use serde_json::{Value, json};
 use crate::error::{HarnessError, Result};
 use crate::llm::ToolSpec;
 use crate::model::validate::{Constraints, load_constraint_ids};
-use crate::model::{EntityKind, LinkKind, Model, Severity, load_model};
+use crate::model::{EntityKind, LinkKind, Model, Severity, load_issues_note, load_model_tolerant};
 use crate::tool::{Tool, ToolContext, ToolOutput};
 
 /// Звено цепочки трассировки.
@@ -151,13 +151,20 @@ fn is_constraint_ref(raw: &str) -> bool {
 
 /// Трассировка кейса: покрытие звеньев + сверка со spine.
 ///
+/// Толерантная загрузка модели (E3): битые сущности — warn-находка
+/// `load-skip`, звенья проверяются по валидному подмножеству; полный отказ
+/// — только когда не загрузилось ничего.
+///
 /// # Errors
-/// Каталог модели не читается/не разбирается.
+/// Каталог модели не читается/ни один файл не разбирается.
 pub fn trace_check(case_dir: &Path) -> Result<TraceReport> {
     let model_dir = case_dir.join("model");
-    let model = load_model(&model_dir)?;
+    let model = load_model_tolerant(&model_dir)?;
     let constraints = load_constraint_ids(&model_dir);
     let mut issues = Vec::new();
+    if let Some(note) = load_issues_note(&model.load_issues) {
+        issue(&mut issues, Severity::Warn, "load-skip", note);
+    }
     let constraint_rules = constraints_status(case_dir, &constraints, &mut issues);
     let index = LinkIndex::build(&model);
     let levels = vec![
@@ -711,6 +718,32 @@ mod tests {
         }
         assert_eq!(report.constraint_rules, Some(1));
         assert_eq!(report.spine_ads, Some(1));
+    }
+
+    /// E3: битая сущность — warn `load-skip`, звенья валидного подмножества
+    /// проверяются полностью (как без неё).
+    #[test]
+    fn broken_entity_is_load_skip_warn_and_chain_still_checked() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let case = write_case(dir.path(), &full_entities(), Some(CONSTRAINTS), Some(SPINE));
+        std::fs::write(
+            case.join("model/NFR-777-broken.md"),
+            "---\nid: NFR-777\ntype: nfr\ntitle: SLA\nstatus: accepted\navailability_target: \"99.9\"\n---\n",
+        )
+        .expect("битая сущность");
+        let report = trace_check(&case).expect("trace");
+        let skip = report
+            .issues
+            .iter()
+            .find(|i| i.rule == "load-skip")
+            .expect("warn-находка пропуска");
+        assert_eq!(skip.severity, Severity::Warn);
+        assert!(skip.message.contains("1 сущностей пропущено"), "{skip:?}");
+        assert!(!report.has_errors(), "{:?}", report.issues);
+        for level in &report.levels {
+            assert_eq!(level.percent(), Some(100), "{}", level.name);
+        }
+        assert_eq!(report.entities, 6, "валидные сущности посчитаны");
     }
 
     #[test]
