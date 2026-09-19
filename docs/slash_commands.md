@@ -164,6 +164,8 @@ user/assistant; вызовы инструментов остаются в жур
 ### `/adr new <title>`
 Новый ADR по шаблону AI-DLC в `docs/adr` рабочего каталога
 (`control::adr_new`): файл `ADR-NNN-kebab-title.md` с очередным номером.
+CLI-эквивалент — `arch-be control adr <TITLE>` (у команды `arch-be adr`
+есть только подкоманда `registry`).
 
 ```
 /adr new Выбор брокера событий для платёжного контура
