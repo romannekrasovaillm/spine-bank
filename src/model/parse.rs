@@ -350,8 +350,51 @@ pub struct Model {
     pub dir: PathBuf,
     /// Сущности в детерминированном порядке (по имени файла).
     pub entities: Vec<Entity>,
+    /// Файлы, пропущенные при толерантной загрузке (E3): битая сущность не
+    /// роняет модель — собирается как issue (файл + причина). При строгой
+    /// загрузке ([`load_model`]) всегда пусто.
+    pub load_issues: Vec<ModelLoadIssue>,
     /// Индекс `id → позиция первого вхождения` (дубли отслеживает валидация).
     index: BTreeMap<String, usize>,
+}
+
+/// Проблема разбора одного файла модели при толерантной загрузке (E3,
+/// [`load_model_tolerant`]): файл не разобран как сущность, валидные
+/// сущности при этом продолжают работать.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ModelLoadIssue {
+    /// Файл, который не удалось разобрать.
+    pub file: PathBuf,
+    /// Причина (текст ошибки разбора/чтения).
+    pub reason: String,
+}
+
+/// Потолок числа имён файлов в строке-предупреждении [`load_issues_note`]
+/// (длинный список битых файлов не раздувает вывод инструментов).
+const MAX_LOAD_ISSUE_FILES: usize = 5;
+
+/// Строка-предупреждение «N сущностей пропущено из-за ошибок разбора
+/// (файлы: …)» для выводов инструментов (E3); `None` — пропусков нет.
+#[must_use]
+pub fn load_issues_note(issues: &[ModelLoadIssue]) -> Option<String> {
+    if issues.is_empty() {
+        return None;
+    }
+    let names: Vec<String> = issues
+        .iter()
+        .take(MAX_LOAD_ISSUE_FILES)
+        .map(|i| i.file.display().to_string())
+        .collect();
+    let more = if issues.len() > MAX_LOAD_ISSUE_FILES {
+        format!(" и ещё {}", issues.len() - MAX_LOAD_ISSUE_FILES)
+    } else {
+        String::new()
+    };
+    Some(format!(
+        "{} сущностей пропущено из-за ошибок разбора (файлы: {}{more})",
+        issues.len(),
+        names.join(", ")
+    ))
 }
 
 impl Model {
@@ -376,12 +419,9 @@ impl Model {
     }
 }
 
-/// Загружает модель из каталога `dir`: все `*.md` верхнего уровня,
-/// сортировка по имени файла (детерминированность).
-///
-/// # Errors
-/// Каталог не читается; любой `.md`-файл не разбирается как сущность.
-pub fn load_model(dir: &Path) -> Result<Model> {
+/// Список `*.md`-файлов верхнего уровня каталога, отсортированных по имени
+/// (детерминированность). Общий обход для строгой и толерантной загрузки.
+fn list_entity_files(dir: &Path) -> Result<Vec<PathBuf>> {
     let rd = std::fs::read_dir(dir).map_err(|e| HarnessError::io(dir, e))?;
     let mut files: Vec<PathBuf> = Vec::new();
     for entry in rd {
@@ -392,20 +432,87 @@ pub fn load_model(dir: &Path) -> Result<Model> {
         }
     }
     files.sort();
-    let mut entities = Vec::with_capacity(files.len());
-    for file in files {
-        let text = std::fs::read_to_string(&file).map_err(|e| HarnessError::io(&file, e))?;
-        entities.push(parse_entity(&file, &text)?);
-    }
+    Ok(files)
+}
+
+/// Собирает модель из сущностей: индекс `id → первое вхождение`.
+fn build_model(dir: &Path, entities: Vec<Entity>, load_issues: Vec<ModelLoadIssue>) -> Model {
     let mut index = BTreeMap::new();
     for (i, e) in entities.iter().enumerate() {
         index.entry(e.id.clone()).or_insert(i);
     }
-    Ok(Model {
+    Model {
         dir: dir.to_path_buf(),
         entities,
+        load_issues,
         index,
-    })
+    }
+}
+
+/// Загружает модель из каталога `dir`: все `*.md` верхнего уровня,
+/// сортировка по имени файла (детерминированность).
+///
+/// СТРОГИЙ режим: первый битый `.md` роняет загрузку. Оставлен там, где
+/// частичная модель хуже ошибки: проекция ADR и обмен с отраслевыми
+/// форматами ([`crate::model::project`], [`crate::model::exchange`],
+/// [`crate::model::registry`]) молча потеряли бы сущности в записываемых
+/// артефактах, а fitness-правило `context_boundary` (`crate::control`) —
+/// fail-closed гейт, который не должен зеленеть по частичной модели.
+/// Толерантный режим для читающих инструментов — [`load_model_tolerant`].
+///
+/// # Errors
+/// Каталог не читается; любой `.md`-файл не разбирается как сущность.
+pub fn load_model(dir: &Path) -> Result<Model> {
+    let mut entities = Vec::new();
+    for file in list_entity_files(dir)? {
+        let text = std::fs::read_to_string(&file).map_err(|e| HarnessError::io(&file, e))?;
+        entities.push(parse_entity(&file, &text)?);
+    }
+    Ok(build_model(dir, entities, Vec::new()))
+}
+
+/// Толерантная загрузка модели (E3): битый `.md` НЕ роняет загрузку —
+/// собирается в [`Model::load_issues`] (файл + причина), валидные сущности
+/// продолжают работать. Режим читающих инструментов: `model_validate`
+/// отчитывает пропуски error-находками ([`crate::model::validate`]),
+/// остальные (`model_query`/`model_graph`/`model_drift`/`nfr_check`/
+/// `trace_check`/`change_impact`/`landscape_report`) работают по валидному
+/// подмножеству с warn-пометкой [`load_issues_note`].
+///
+/// Полный отказ — только когда не удалось загрузить НИЧЕГО: каталог не
+/// читается (как у [`load_model`]) либо все найденные `.md` битые. Пустой
+/// каталог без `.md` — валидная пустая модель (как у [`load_model`]).
+///
+/// # Errors
+/// Каталог не читается; ни один `.md`-файл не разобрался (ошибка с первой
+/// причиной из накопленных).
+pub fn load_model_tolerant(dir: &Path) -> Result<Model> {
+    let mut entities = Vec::new();
+    let mut load_issues = Vec::new();
+    for file in list_entity_files(dir)? {
+        let parsed = std::fs::read_to_string(&file)
+            .map_err(|e| HarnessError::io(&file, e))
+            .and_then(|text| parse_entity(&file, &text));
+        match parsed {
+            Ok(entity) => entities.push(entity),
+            Err(e) => load_issues.push(ModelLoadIssue {
+                file,
+                reason: e.to_string(),
+            }),
+        }
+    }
+    if entities.is_empty() {
+        if let Some(first) = load_issues.first() {
+            return Err(HarnessError::Model(format!(
+                "{}: не удалось загрузить ни одной сущности — все {} файлов с ошибками разбора; первая: {}: {}",
+                dir.display(),
+                load_issues.len(),
+                first.file.display(),
+                first.reason
+            )));
+        }
+    }
+    Ok(build_model(dir, entities, load_issues))
 }
 
 #[cfg(test)]
@@ -620,6 +727,65 @@ mod tests {
     fn load_model_missing_dir_is_error() {
         let dir = tempfile::tempdir().expect("tmp");
         assert!(load_model(&dir.path().join("ghost")).is_err());
+    }
+
+    #[test]
+    fn load_model_strict_fails_on_broken_entity() {
+        let dir = tempfile::tempdir().expect("tmp");
+        write(dir.path(), "a.md", VALID);
+        // availability_target строкой вместо числа (кейс E3) — битый frontmatter.
+        write(
+            dir.path(),
+            "b.md",
+            "---\nid: NFR-001\ntype: nfr\ntitle: SLA\nstatus: accepted\navailability_target: \"99.9\"\n---\n",
+        );
+        let err = load_model(dir.path()).expect_err("строгий режим падает");
+        assert!(err.to_string().contains("frontmatter"), "{err}");
+    }
+
+    #[test]
+    fn load_model_tolerant_skips_broken_and_keeps_valid() {
+        let dir = tempfile::tempdir().expect("tmp");
+        write(dir.path(), "a.md", VALID);
+        write(
+            dir.path(),
+            "b.md",
+            "---\nid: NFR-001\ntype: nfr\ntitle: SLA\nstatus: accepted\navailability_target: \"99.9\"\n---\n",
+        );
+        write(
+            dir.path(),
+            "c.md",
+            "---\nid: AD-1\ntype: ad\ntitle: Инвариант\nstatus: ADOPTED\n---\nтекст\n",
+        );
+        let m = load_model_tolerant(dir.path()).expect("толерантная загрузка");
+        assert_eq!(m.entities.len(), 2, "валидные сущности загружены");
+        assert_eq!(m.load_issues.len(), 1);
+        assert!(m.load_issues[0].file.ends_with("b.md"));
+        assert!(m.load_issues[0].reason.contains("frontmatter"));
+        // Пометка для выводов инструментов: число и файл.
+        let note = load_issues_note(&m.load_issues).expect("пометка");
+        assert!(note.contains("1 сущностей пропущено"), "{note}");
+        assert!(note.contains("b.md"), "{note}");
+        assert!(
+            load_issues_note(&[]).is_none(),
+            "без пропусков — без пометки"
+        );
+    }
+
+    #[test]
+    fn load_model_tolerant_fails_when_nothing_loaded() {
+        let dir = tempfile::tempdir().expect("tmp");
+        write(
+            dir.path(),
+            "b.md",
+            "---\nid: NFR-001\ntype: nfr\ntitle: SLA\nstatus: accepted\navailability_target: \"99.9\"\n---\n",
+        );
+        let err = load_model_tolerant(dir.path()).expect_err("все файлы битые");
+        assert!(err.to_string().contains("ни одной сущности"), "{err}");
+        // Пустой каталог (без .md) — валидная пустая модель, как у load_model.
+        let empty = tempfile::tempdir().expect("tmp");
+        let m = load_model_tolerant(empty.path()).expect("пустой каталог — не ошибка");
+        assert!(m.entities.is_empty() && m.load_issues.is_empty());
     }
 
     #[test]

@@ -1008,19 +1008,31 @@ impl McpServe {
         struct Args {
             /// Корень репозитория клиента.
             repo: String,
-            /// Файл ограничений (дефолт `<repo>/.arch-handoff/CONSTRAINTS.yaml`).
+            /// Файл ограничений (дефолт `<repo>/.arch-handoff/CONSTRAINTS.yaml`,
+            /// иначе `<repo>/CONSTRAINTS.yaml`).
             constraints: Option<String>,
         }
         let args: Args = parse_args(args, "fitness_check")?;
         let repo = PathBuf::from(args.repo);
-        let constraints = args.constraints.map_or_else(
-            || repo.join(".arch-handoff/CONSTRAINTS.yaml"),
-            PathBuf::from,
+        // Единый резолвер реестра (E2): явный путь → пакетная копия →
+        // корневой fallback; ни одной копии — канонический дефолт, чтобы
+        // ошибка «файл не читается» ссылалась на пакетный путь.
+        let resolution = control::resolve_constraints_path_detailed(
+            &repo,
+            args.constraints.as_deref().map(Path::new),
         );
+        let drift_note = resolution
+            .as_ref()
+            .and_then(control::ConstraintsPathResolution::drift_note);
+        let constraints =
+            resolution.map_or_else(|| repo.join(control::HANDOFF_CONSTRAINTS_PATH), |r| r.path);
+        let constraints_label = constraints.display().to_string();
         let report = blocking("fitness_check", move || control::check(&repo, &constraints)).await?;
         Ok(json!({
             "passed": report.passed,
             "repo": report.repo,
+            "constraints": constraints_label,
+            "drift_note": drift_note,
             "issue_count": report.issues.len(),
             "issues": report.issues,
             "summary": report.summary,
@@ -1263,7 +1275,9 @@ impl McpServe {
         let dir = PathBuf::from(args.dir.unwrap_or_else(|| "model".into()));
         let id = args.id;
         blocking("model_query", move || {
-            let m = model::load_model(&dir)?;
+            // Толерантная загрузка (E3): ответ по валидному подмножеству +
+            // поле `load_issues` в JSON.
+            let m = model::load_model_tolerant(&dir)?;
             model_query_value(&m, id.as_deref(), kind, &dir)
         })
         .await
@@ -1741,6 +1755,9 @@ fn model_query_value(
     kind: Option<model::EntityKind>,
     dir: &Path,
 ) -> Result<Value> {
+    // E3: сущности, пропущенные при толерантной загрузке (пусто — модель
+    // разобралась целиком).
+    let load_issues = json!(m.load_issues);
     if let Some(id) = id {
         let e = m.get(id).ok_or_else(|| {
             crate::error::HarnessError::Model(format!(
@@ -1775,6 +1792,7 @@ fn model_query_value(
                 "body": e.body,
             },
             "card": model::card(m, e),
+            "load_issues": load_issues,
         }));
     }
     let entities: Vec<Value> = m
@@ -1799,6 +1817,7 @@ fn model_query_value(
         "dir": dir,
         "total": entities.len(),
         "entities": entities,
+        "load_issues": load_issues,
     }))
 }
 

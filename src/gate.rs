@@ -362,7 +362,8 @@ fn git_show_file(repo: &Path, rev: &str, rel: &str) -> Result<String> {
 }
 
 /// Разрешённый путь к файлу ограничений гейта: явный `--constraints` либо
-/// дефолт с fallback'ом на корневой `CONSTRAINTS.yaml` (D6).
+/// дефолт с fallback'ом на корневой `CONSTRAINTS.yaml` (D6); резолв —
+/// единый [`control::resolve_constraints_path_detailed`] (E2).
 struct ConstraintsPath {
     /// Файл ограничений (может не существовать — составляющие дадут SKIP).
     path: PathBuf,
@@ -370,6 +371,9 @@ struct ConstraintsPath {
     /// валит `rule_weakened` (fail-closed), а не молча отключает
     /// анти-ослабление (раньше — SKIP «git-сравнение невозможно»).
     explicit: bool,
+    /// Вторая копия реестра, отличающаяся от использованной (drift, E2) —
+    /// пометка в детали составляющей `fitness`.
+    drift: Option<PathBuf>,
 }
 
 /// Путь к файлу ограничений для отчёта: относительный к репозиторию, когда
@@ -404,13 +408,21 @@ fn component_fitness(repo: &Path, constraints: &ConstraintsPath) -> GateComponen
         );
     }
     let label = constraints_label(repo, &constraints.path);
+    // Пометка дрейфа двух копий реестра (E2): обе существуют и различаются.
+    let drift_note = constraints.drift.as_ref().map_or_else(String::new, |d| {
+        format!(
+            "; {}",
+            control::constraints_drift_note(&constraints.path, d)
+        )
+    });
     match control::check(repo, &constraints.path) {
-        Ok(report) if report.passed => {
-            GateComponent::pass("fitness", format!("{} — файл: {label}", report.summary))
-        }
+        Ok(report) if report.passed => GateComponent::pass(
+            "fitness",
+            format!("{} — файл: {label}{drift_note}", report.summary),
+        ),
         Ok(report) => GateComponent::fail(
             "fitness",
-            format!("{} — файл: {label}", report.summary),
+            format!("{} — файл: {label}{drift_note}", report.summary),
             report.issues.iter().map(GateFinding::lint).collect(),
         ),
         Err(e) => GateComponent::fail("fitness", format!("сбой выполнения: {e}"), Vec::new()),
@@ -965,23 +977,23 @@ pub fn run(
         ConstraintsPath {
             path: path.to_path_buf(),
             explicit: true,
+            drift: None,
         }
     } else {
-        let handoff = repo.join(".arch-handoff/CONSTRAINTS.yaml");
-        // Fallback (D6): на кейсе без handoff-пакета fitness и
-        // rule_weakened по дефолту уходили в SKIP — гейт зеленел
-        // «из-за пропусков», хотя в корне лежал настоящий реестр правил.
-        let root = repo.join("CONSTRAINTS.yaml");
-        if handoff.is_file() || !root.is_file() {
-            ConstraintsPath {
-                path: handoff,
+        // Единый резолвер (E2): пакетная копия → корневой fallback (D6);
+        // ни одной копии — дефолтный путь, составляющие дадут SKIP (раньше
+        // на кейсе без handoff-пакета гейт зеленел «из-за пропусков»).
+        match control::resolve_constraints_path_detailed(repo, None) {
+            Some(resolution) => ConstraintsPath {
+                path: resolution.path,
                 explicit: false,
-            }
-        } else {
-            ConstraintsPath {
-                path: root,
+                drift: resolution.drift,
+            },
+            None => ConstraintsPath {
+                path: repo.join(control::HANDOFF_CONSTRAINTS_PATH),
                 explicit: false,
-            }
+                drift: None,
+            },
         }
     };
     let git = GitProbe::probe(repo);

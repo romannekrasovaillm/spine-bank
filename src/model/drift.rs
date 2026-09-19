@@ -31,7 +31,7 @@ use walkdir::WalkDir;
 use crate::control::LintIssue;
 use crate::error::Result;
 use crate::llm::ToolSpec;
-use crate::model::{EntityKind, load_model};
+use crate::model::{EntityKind, load_model_tolerant};
 use crate::tool::{Tool, ToolContext, ToolOutput};
 
 /// Отчёт проверки дрейфа «модель ↔ код».
@@ -211,13 +211,29 @@ fn push_issue(
 
 /// Проверяет дрейф «модель ↔ код» для кейса `case_dir`.
 ///
+/// Толерантная загрузка модели (E3): битые сущности — warn-находки
+/// `model-load-skip`, проверки идут по валидному подмножеству; полный отказ
+/// — только когда не загрузилось ничего.
+///
 /// # Errors
-/// Каталог недоступен, `model/` внутри него отсутствует или не разбирается,
-/// ошибка обхода репозитория.
+/// Каталог недоступен, `model/` внутри него отсутствует, ни один файл
+/// модели не разбирается, ошибка обхода репозитория.
 pub fn drift_check(case_dir: &Path) -> Result<DriftReport> {
     let model_dir = case_dir.join("model");
-    let model = load_model(&model_dir)?;
+    let model = load_model_tolerant(&model_dir)?;
     let mut issues = Vec::new();
+    // E3: пропущенные при загрузке сущности — warn-находки, дрейф считается
+    // по валидному подмножеству.
+    for li in &model.load_issues {
+        issues.push(LintIssue {
+            file: li.file.clone(),
+            line: 0,
+            rule: "model-load-skip".to_string(),
+            message: format!("сущность пропущена из-за ошибки разбора: {}", li.reason),
+            severity: "warn".to_string(),
+            ..LintIssue::default()
+        });
+    }
 
     // 1. CMP → код: каждый корень code_roots обязан существовать.
     let mut covered_roots: Vec<String> = Vec::new();
@@ -462,6 +478,33 @@ mod tests {
         assert_eq!(report.entities, 2);
         assert_eq!(report.components_with_roots, 1);
         assert_eq!(report.manifest_dirs, 1);
+        let text = render_text(&report);
+        assert!(text.contains("Итог: PASS"), "{text}");
+    }
+
+    /// E3: битая сущность — warn-находка `model-load-skip`, дрейф валидного
+    /// подмножества считается, инструмент не падает.
+    #[test]
+    fn broken_entity_is_warn_and_valid_subset_checked() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let case = fixture_case(dir.path());
+        write_file(
+            &case,
+            "model/NFR-001-broken.md",
+            "---\nid: NFR-001\ntype: nfr\ntitle: SLA\nstatus: accepted\navailability_target: \"99.9\"\n---\n",
+        );
+        let report = drift_check(&case).expect("drift");
+        let skip = report
+            .issues
+            .iter()
+            .find(|i| i.rule == "model-load-skip")
+            .expect("warn-находка пропуска");
+        assert_eq!(skip.severity, "warn");
+        assert!(skip.file.ends_with("NFR-001-broken.md"));
+        assert!(!report.has_errors(), "{}", report.summary());
+        assert_eq!(report.entities, 2, "валидные сущности посчитаны");
+        let v = verdict_json(&report);
+        assert_eq!(v["passed"], true, "{v}");
         let text = render_text(&report);
         assert!(text.contains("Итог: PASS"), "{text}");
     }

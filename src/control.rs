@@ -948,6 +948,12 @@ pub struct FitnessReport {
     /// Аддитивное поле SDK-контракта v1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub changed_files: Option<usize>,
+    /// Правила, пропущенные при разборе реестра из-за неизвестного типа
+    /// (словарь другой редакции, E8): отражены warn-находками
+    /// `unknown_rule_type`, вердикт не ломают. Аддитивное поле SDK-контракта
+    /// v1.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped_unknown: Vec<SkippedUnknownRule>,
 }
 
 /// Тип fitness-правила из `CONSTRAINTS.yaml`.
@@ -1364,6 +1370,101 @@ pub struct OverrideInfo {
     pub note: String,
 }
 
+/// Пакетная копия реестра ограничений (handoff-пакет) — приоритетная в
+/// резолвере пути (E2).
+pub const HANDOFF_CONSTRAINTS_PATH: &str = ".arch-handoff/CONSTRAINTS.yaml";
+
+/// Корневая копия реестра ограничений — fallback резолвера пути (E2, D6).
+pub const ROOT_CONSTRAINTS_PATH: &str = "CONSTRAINTS.yaml";
+
+/// Результат резолва пути к реестру ограничений (E2): использованный путь
+/// и пометка дрейфа второй копии.
+#[derive(Debug, Clone)]
+pub struct ConstraintsPathResolution {
+    /// Использованный файл ограничений.
+    pub path: PathBuf,
+    /// Вторая копия реестра: существует и отличается от использованной
+    /// (drift). `None` — копия одна, идентична либо путь задан явно.
+    pub drift: Option<PathBuf>,
+}
+
+impl ConstraintsPathResolution {
+    /// Строка-пометка дрейфа для выводов инструментов (E2); `None` — дрейфа
+    /// нет.
+    #[must_use]
+    pub fn drift_note(&self) -> Option<String> {
+        self.drift
+            .as_ref()
+            .map(|other| constraints_drift_note(&self.path, other))
+    }
+}
+
+/// Единый резолвер пути к реестру ограничений (E2): явный путь →
+/// `<repo>/.arch-handoff/CONSTRAINTS.yaml` → fallback `<repo>/CONSTRAINTS.yaml`.
+///
+/// `None` — нет ни одной копии (явно заданный путь возвращается как есть:
+/// его существование проверяет вызывающий — гейту нужен дефолтный путь для
+/// честного SKIP). Порядок совпадает с резолвером гейта (`src/gate.rs`).
+#[must_use]
+pub fn resolve_constraints_path(repo: &Path, explicit: Option<&Path>) -> Option<PathBuf> {
+    resolve_constraints_path_detailed(repo, explicit).map(|r| r.path)
+}
+
+/// Полный вариант [`resolve_constraints_path`] с пометкой дрейфа двух
+/// копий: когда существуют ОБЕ (корневая и пакетная) и они различаются —
+/// `drift` указывает на вторую (неиспользованную) копию. Сравнение
+/// побайтовое: содержимое по правилам не сопоставляется.
+#[must_use]
+pub fn resolve_constraints_path_detailed(
+    repo: &Path,
+    explicit: Option<&Path>,
+) -> Option<ConstraintsPathResolution> {
+    if let Some(p) = explicit {
+        return Some(ConstraintsPathResolution {
+            path: p.to_path_buf(),
+            drift: None,
+        });
+    }
+    let handoff = repo.join(HANDOFF_CONSTRAINTS_PATH);
+    let root = repo.join(ROOT_CONSTRAINTS_PATH);
+    let handoff_exists = handoff.is_file();
+    let root_exists = root.is_file();
+    let (path, other) = if handoff_exists {
+        (handoff, root)
+    } else if root_exists {
+        (root, handoff)
+    } else {
+        return None;
+    };
+    let drift = if handoff_exists && root_exists && files_differ(&path, &other) {
+        Some(other)
+    } else {
+        None
+    };
+    Some(ConstraintsPathResolution { path, drift })
+}
+
+/// Побайтовое сравнение двух файлов. Прочитать не удалось — дрейф не
+/// утверждаем: ложная пометка хуже её отсутствия, а нечитаемый файл всё
+/// равно всплывёт ошибкой загрузки.
+fn files_differ(a: &Path, b: &Path) -> bool {
+    match (std::fs::read(a), std::fs::read(b)) {
+        (Ok(x), Ok(y)) => x != y,
+        _ => false,
+    }
+}
+
+/// Строка-пометка дрейфа двух копий реестра (E2):
+/// «копии реестра различаются: используется X; Y отличается (drift)».
+#[must_use]
+pub fn constraints_drift_note(used: &Path, other: &Path) -> String {
+    format!(
+        "копии реестра различаются: используется {}; {} отличается (drift)",
+        used.display(),
+        other.display()
+    )
+}
+
 /// Корень `CONSTRAINTS.yaml`.
 #[derive(Debug, Deserialize)]
 struct ConstraintsFile {
@@ -1378,10 +1479,6 @@ struct ConstraintsFile {
     /// источника, пин версии проверяется против поля `version` родителя.
     #[serde(default)]
     extends: Vec<String>,
-    /// Версия этого файла (обязательна у родительских constraint-файлов —
-    /// по ней дочерние проверяют свой пин в `extends`).
-    #[serde(default)]
-    version: Option<String>,
     /// Исключения правил через ADR (см. [`OverrideEntry`]).
     #[serde(default)]
     overrides: Vec<OverrideEntry>,
@@ -1394,6 +1491,108 @@ impl ConstraintsFile {
     }
 }
 
+/// Правило, пропущенное при разборе реестра из-за неизвестного типа (E8):
+/// запись, скорее всего, из словаря другой редакции — не падение и не
+/// тихий пропуск, а warn-находка `unknown_rule_type` в отчёте [`check`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkippedUnknownRule {
+    /// Имя правила как записано (`<без имени>`, если поля `name` нет).
+    pub name: String,
+    /// Неизвестный тип правила (значение поля `type`).
+    pub rule_type: String,
+}
+
+/// Тень корня `CONSTRAINTS.yaml` для толерантного разбора (E8): правила —
+/// сырыми значениями, чтобы неизвестный `type` одной записи не ронял весь
+/// файл. Остальные поля типизированы: синтаксически битый YAML, битые
+/// `extends`/`overrides` — по-прежнему ошибка разбора.
+#[derive(Debug, Deserialize)]
+struct ConstraintsFileShadow {
+    /// Канонический корень `rules:` (сырые записи).
+    #[serde(default)]
+    rules: Vec<serde_yaml_ng::Value>,
+    /// Альтернативный корень `constraints:` (сырые записи).
+    #[serde(default)]
+    constraints: Vec<serde_yaml_ng::Value>,
+    /// Наследование (типизировано — ошибки не смягчаются).
+    #[serde(default)]
+    extends: Vec<String>,
+    /// Версия этого файла (обязательна у родительских constraint-файлов —
+    /// по ней дочерние проверяют свой пин в `extends`).
+    #[serde(default)]
+    version: Option<String>,
+    /// Исключения правил через ADR (типизированы).
+    #[serde(default)]
+    overrides: Vec<OverrideEntry>,
+}
+
+/// Если значение — запись со строковым `type`, неизвестным словарю
+/// [`RuleKind`], вернуть (имя правила, тип) для warn-пропуска (E8).
+/// `None` — запись не «чужой словарь»: её ошибка разбора остаётся ошибкой
+/// (битые поля, `type` не строкой).
+fn unknown_rule_type(value: &serde_yaml_ng::Value) -> Option<(String, String)> {
+    let rule_type = value.get("type")?.as_str()?;
+    let known =
+        serde_yaml_ng::from_value::<RuleKind>(serde_yaml_ng::Value::String(rule_type.to_string()))
+            .is_ok();
+    if known {
+        return None;
+    }
+    let name = value
+        .get("name")
+        .and_then(|n| n.as_str())
+        .unwrap_or("<без имени>");
+    Some((name.to_string(), rule_type.to_string()))
+}
+
+/// Разбирает список сырых записей правил: валидные — в [`FitnessRule`],
+/// записи с неизвестным `type` — в `skipped` (E8). Остальные ошибки разбора
+/// записи — ошибка всего файла (строгость к битым правилам сохранена).
+fn parse_rules_tolerant(
+    values: Vec<serde_yaml_ng::Value>,
+    file: &Path,
+    skipped: &mut Vec<SkippedUnknownRule>,
+) -> Result<Vec<FitnessRule>> {
+    let mut out = Vec::with_capacity(values.len());
+    for value in values {
+        match serde_yaml_ng::from_value::<FitnessRule>(value.clone()) {
+            Ok(rule) => out.push(rule),
+            Err(e) => {
+                let Some((name, rule_type)) = unknown_rule_type(&value) else {
+                    return Err(HarnessError::Control(format!(
+                        "{}: правило не разбирается: {e}",
+                        file.display()
+                    )));
+                };
+                skipped.push(SkippedUnknownRule { name, rule_type });
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Толерантный разбор constraint-файла (E8): неизвестный `type` отдельного
+/// правила — warn-пропуск (второй элемент кортежа), а не падение файла;
+/// невалидный YAML и битые записи правил — по-прежнему ошибка.
+fn parse_constraints_file(
+    yaml: &str,
+    file: &Path,
+) -> Result<(ConstraintsFile, Vec<SkippedUnknownRule>)> {
+    let shadow: ConstraintsFileShadow = serde_yaml_ng::from_str(yaml)?;
+    let mut skipped = Vec::new();
+    let rules = parse_rules_tolerant(shadow.rules, file, &mut skipped)?;
+    let constraints = parse_rules_tolerant(shadow.constraints, file, &mut skipped)?;
+    Ok((
+        ConstraintsFile {
+            rules,
+            constraints,
+            extends: shadow.extends,
+            overrides: shadow.overrides,
+        },
+        skipped,
+    ))
+}
+
 /// Читает и разбирает `CONSTRAINTS.yaml` в список правил (оба корня —
 /// `rules:` и `constraints:`). Общий парсер для `check`, `ArchUnit`-моста
 /// (ADR-039) и CLI.
@@ -1402,16 +1601,35 @@ impl ConstraintsFile {
 /// полный резолв с метками источника и проверкой пинов — в
 /// [`load_constraints_resolved`].
 ///
+/// Правила с неизвестным `type` (словарь другой редакции, E8) пропускаются;
+/// отчётность о пропусках — у [`load_fitness_rules_with_skips`] и в
+/// warn-находках [`check`]. Здесь пропуски отбрасываются: вызывающим
+/// (ArchUnit-мост, fail-soft читатели карточек) нужен только исполняемый
+/// плоский список.
+///
 /// # Errors
-/// Файл не читается, YAML невалиден.
+/// Файл не читается, YAML невалиден, запись правила бита (кроме случая
+/// неизвестного `type` — он пропускается).
 pub fn load_fitness_rules(constraints: &Path) -> Result<Vec<FitnessRule>> {
+    let (rules, _skipped) = load_fitness_rules_with_skips(constraints)?;
+    Ok(rules)
+}
+
+/// Вариант [`load_fitness_rules`], возвращающий и пропущенные записи с
+/// неизвестным `type` (E8) — для отчётов, которым пропуск нельзя потерять.
+///
+/// # Errors
+/// Те же, что у [`load_fitness_rules`].
+pub fn load_fitness_rules_with_skips(
+    constraints: &Path,
+) -> Result<(Vec<FitnessRule>, Vec<SkippedUnknownRule>)> {
     let yaml =
         std::fs::read_to_string(constraints).map_err(|e| HarnessError::io(constraints, e))?;
-    let parsed: ConstraintsFile = serde_yaml_ng::from_str(&yaml)?;
+    let (parsed, skipped) = parse_constraints_file(&yaml, constraints)?;
     let ConstraintsFile {
         rules, constraints, ..
     } = parsed;
-    Ok(rules.into_iter().chain(constraints).collect())
+    Ok((rules.into_iter().chain(constraints).collect(), skipped))
 }
 
 /// Переменная окружения с каталогом-реестром родительских
@@ -1456,8 +1674,12 @@ pub struct ResolvedConstraints {
     pub parents: Vec<ResolvedParent>,
     /// Overrides всех уровней (родительские + собственные).
     pub overrides: Vec<OverrideEntry>,
-    /// Находки резолва (несовпадение пина версии, родитель без `version`).
+    /// Находки резолва (несовпадение пина версии, родитель без `version`,
+    /// warn-пропуски правил с неизвестным типом — E8).
     pub findings: Vec<LintIssue>,
+    /// Правила, пропущенные из-за неизвестного типа (E8; собственные и
+    /// унаследованные — по всем уровням `extends`).
+    pub skipped_unknown: Vec<SkippedUnknownRule>,
 }
 
 /// Разбирает запись `extends` на (ref, пин версии): разделитель — последний
@@ -1550,12 +1772,30 @@ fn resolve_constraints(path: &Path, stack: &mut Vec<PathBuf>) -> Result<Resolved
     stack.push(canonical);
 
     let yaml = std::fs::read_to_string(path).map_err(|e| HarnessError::io(path, e))?;
-    let parsed: ConstraintsFile = serde_yaml_ng::from_str(&yaml)?;
+    let (parsed, skipped) = parse_constraints_file(&yaml, path)?;
 
     let mut rules = Vec::new();
     let mut parents = Vec::new();
     let mut overrides = Vec::new();
     let mut findings = Vec::new();
+    let mut skipped_unknown = Vec::new();
+
+    // Неизвестный тип правила (словарь другой редакции, E8) — громкая
+    // warn-находка, а не падение резолва и не тихий пропуск.
+    for s in skipped {
+        findings.push(LintIssue {
+            file: path.to_path_buf(),
+            line: 0,
+            rule: "unknown_rule_type".to_string(),
+            message: format!(
+                "правило '{}': неизвестный тип '{}' — пропущено (словарь другой редакции?)",
+                s.name, s.rule_type
+            ),
+            severity: "warn".to_string(),
+            ..LintIssue::default()
+        });
+        skipped_unknown.push(s);
+    }
 
     for entry in &parsed.extends {
         let (reference, pinned) = parse_extends_ref(entry)?;
@@ -1609,6 +1849,7 @@ fn resolve_constraints(path: &Path, stack: &mut Vec<PathBuf>) -> Result<Resolved
         rules.extend(inherited);
         overrides.extend(parent.overrides);
         findings.extend(parent.findings);
+        skipped_unknown.extend(parent.skipped_unknown);
     }
 
     let own_rules: Vec<FitnessRule> = parsed.rules.into_iter().chain(parsed.constraints).collect();
@@ -1624,14 +1865,16 @@ fn resolve_constraints(path: &Path, stack: &mut Vec<PathBuf>) -> Result<Resolved
         parents,
         overrides,
         findings,
+        skipped_unknown,
     })
 }
 
 /// Версия constraint-файла (поле верхнего уровня `version`) — читается
-/// родителем дочернего файла при проверке пина.
+/// родителем дочернего файла при проверке пина. Разбор — тенью (E8):
+/// неизвестные типы правил родителя проверке пина не мешают.
 fn parent_actual_version(path: &Path) -> Result<Option<String>> {
     let yaml = std::fs::read_to_string(path).map_err(|e| HarnessError::io(path, e))?;
-    let parsed: ConstraintsFile = serde_yaml_ng::from_str(&yaml)?;
+    let parsed: ConstraintsFileShadow = serde_yaml_ng::from_str(&yaml)?;
     Ok(parsed.version)
 }
 
@@ -1845,15 +2088,31 @@ pub fn check_with_options(
 
     let resolved = load_constraints_resolved(constraints)?;
     if resolved.rules.is_empty() {
+        // E8: файл, где ВСЕ правила с неизвестными типами, — это не
+        // «нет правил», а чужой словарь; сообщение должно это различать.
+        if resolved.skipped_unknown.is_empty() {
+            return Err(HarnessError::Control(format!(
+                "{}: файл не содержит правил — ожидается непустой корень `rules:`/`constraints:` или `extends:`",
+                constraints.display()
+            )));
+        }
+        let types: BTreeSet<&str> = resolved
+            .skipped_unknown
+            .iter()
+            .map(|s| s.rule_type.as_str())
+            .collect();
         return Err(HarnessError::Control(format!(
-            "{}: файл не содержит правил — ожидается непустой корень `rules:`/`constraints:` или `extends:`",
-            constraints.display()
+            "{}: исполняемых правил нет — все {} записей пропущены из-за неизвестных типов ({}) — словарь другой редакции?",
+            constraints.display(),
+            resolved.skipped_unknown.len(),
+            types.into_iter().collect::<Vec<_>>().join(", ")
         )));
     }
     let (override_infos, override_findings, disabled) =
         evaluate_overrides(&resolved.overrides, &resolved.rules, constraints);
 
     let rules = resolved.rules;
+    let skipped_unknown = resolved.skipped_unknown;
     let rule_refs: Vec<&FitnessRule> = rules
         .iter()
         .filter(|r| !disabled.contains(&r.name) && !r.unverifiable)
@@ -2009,6 +2268,18 @@ pub fn check_with_options(
     if let (Some(reference), Some(changed_set)) = (&options.changed_since, &changed) {
         let _ = write!(summary, "; срез {reference}: файлов {}", changed_set.len());
     }
+    if !skipped_unknown.is_empty() {
+        let types: BTreeSet<&str> = skipped_unknown
+            .iter()
+            .map(|s| s.rule_type.as_str())
+            .collect();
+        let _ = write!(
+            summary,
+            "; пропущено правил: {} (неизвестные типы: {})",
+            skipped_unknown.len(),
+            types.into_iter().collect::<Vec<_>>().join(", ")
+        );
+    }
     Ok(FitnessReport {
         repo: repo.to_path_buf(),
         passed: errors == 0,
@@ -2021,6 +2292,7 @@ pub fn check_with_options(
         skipped,
         changed_since: options.changed_since.clone(),
         changed_files: changed.as_ref().map(BTreeSet::len),
+        skipped_unknown,
     })
 }
 
@@ -2124,8 +2396,11 @@ fn rules_snapshot(parsed: &ConstraintsFile) -> Result<BTreeMap<String, RuleSnaps
 /// # Errors
 /// YAML любой из версий невалиден, severity правила вне допустимых значений.
 pub fn rule_weakened(current_src: &str, base_src: &str, file: &Path) -> Result<Vec<LintIssue>> {
-    let current: ConstraintsFile = serde_yaml_ng::from_str(current_src)?;
-    let base: ConstraintsFile = serde_yaml_ng::from_str(base_src)?;
+    // Толерантный разбор (E8): записи с неизвестными типами в сравнении не
+    // участвуют (сравнивать не с чем — они не из нашего словаря); их
+    // warn-пропуск покажет `check`.
+    let (current, _) = parse_constraints_file(current_src, file)?;
+    let (base, _) = parse_constraints_file(base_src, file)?;
     let current_rules = rules_snapshot(&current)?;
     let base_rules = rules_snapshot(&base)?;
     let legalized = active_override_keys(&current.overrides);
@@ -2228,6 +2503,9 @@ fn constraint_churn_90d(repo: &Path, constraints: &Path) -> Option<usize> {
 /// ограничений; «недоступно» вне git-репозитория) и итоговая строка
 /// «правил N, суммарный `effort_hours` X (покрыто Y правил)».
 ///
+/// Правила с неизвестным `type` (словарь другой редакции, E8) не роняют
+/// отчёт: перечисляются отдельным разделом «Пропущено (неизвестный тип)».
+///
 /// # Errors
 /// Те же, что у [`check`]: репозиторий/файл недоступны, YAML невалиден,
 /// правил нет.
@@ -2240,9 +2518,9 @@ pub fn rules_report(repo: &Path, constraints: &Path) -> Result<String> {
     }
     let yaml =
         std::fs::read_to_string(constraints).map_err(|e| HarnessError::io(constraints, e))?;
-    let parsed: ConstraintsFile = serde_yaml_ng::from_str(&yaml)?;
+    let (parsed, skipped_unknown) = parse_constraints_file(&yaml, constraints)?;
     let rules: Vec<&FitnessRule> = parsed.all_rules().collect();
-    if rules.is_empty() {
+    if rules.is_empty() && skipped_unknown.is_empty() {
         return Err(HarnessError::Control(format!(
             "{}: файл не содержит правил — ожидается непустой корень `rules:` или `constraints:`",
             constraints.display()
@@ -2252,6 +2530,18 @@ pub fn rules_report(repo: &Path, constraints: &Path) -> Result<String> {
     let mut out = String::new();
     let _ = writeln!(out, "# Отчёт по правилам: {}", constraints.display());
     let _ = writeln!(out, "\nВсего правил: {}", rules.len());
+    if !skipped_unknown.is_empty() {
+        let types: BTreeSet<&str> = skipped_unknown
+            .iter()
+            .map(|s| s.rule_type.as_str())
+            .collect();
+        let _ = writeln!(
+            out,
+            "Пропущено правил: {} (неизвестные типы: {})",
+            skipped_unknown.len(),
+            types.into_iter().collect::<Vec<_>>().join(", ")
+        );
+    }
 
     let mut by_kind: BTreeMap<&str, usize> = BTreeMap::new();
     let mut by_severity: BTreeMap<&str, usize> = BTreeMap::new();
@@ -2375,6 +2665,16 @@ pub fn rules_report(repo: &Path, constraints: &Path) -> Result<String> {
         "\nправил {}, суммарный effort_hours {total} (покрыто {covered} правил)",
         rules.len()
     );
+
+    if !skipped_unknown.is_empty() {
+        let _ = writeln!(
+            out,
+            "\n## Пропущено (неизвестный тип — словарь другой редакции?)"
+        );
+        for s in &skipped_unknown {
+            let _ = writeln!(out, "- `{}` — неизвестный тип `{}`", s.name, s.rule_type);
+        }
+    }
     Ok(out)
 }
 
@@ -3863,7 +4163,8 @@ pub struct RulesReportTool;
 struct RulesReportArgs {
     /// Корень репозитория.
     repo: String,
-    /// Путь к `CONSTRAINTS.yaml` (дефолт `<repo>/.arch-handoff/CONSTRAINTS.yaml`).
+    /// Путь к `CONSTRAINTS.yaml` (дефолт `<repo>/.arch-handoff/CONSTRAINTS.yaml`,
+    /// иначе `<repo>/CONSTRAINTS.yaml`).
     constraints: Option<String>,
 }
 
@@ -3885,7 +4186,7 @@ impl Tool for RulesReportTool {
                     "repo": {"type": "string", "description": "Корень репозитория"},
                     "constraints": {
                         "type": "string",
-                        "description": "Путь к CONSTRAINTS.yaml (по умолчанию <repo>/.arch-handoff/CONSTRAINTS.yaml)"
+                        "description": "Путь к CONSTRAINTS.yaml (по умолчанию <repo>/.arch-handoff/CONSTRAINTS.yaml, иначе <repo>/CONSTRAINTS.yaml)"
                     }
                 },
                 "required": ["repo"]
@@ -3903,40 +4204,56 @@ impl Tool for RulesReportTool {
             }
         };
         let repo = ctx.resolve(&args.repo);
-        let constraints = args.constraints.map_or_else(
-            || repo.join(".arch-handoff/CONSTRAINTS.yaml"),
-            |c| ctx.resolve(c),
-        );
+        // Единый резолвер реестра (E2): явный путь → пакетная копия →
+        // корневой fallback; дрейф двух копий — пометкой в ответе.
+        let explicit = args.constraints.map(|c| ctx.resolve(c));
+        let Some(resolution) = resolve_constraints_path_detailed(&repo, explicit.as_deref()) else {
+            return Ok(ToolOutput::err(format!(
+                "rules_report: реестр ограничений не найден: ни {HANDOFF_CONSTRAINTS_PATH}, ни {ROOT_CONSTRAINTS_PATH} в {}",
+                repo.display()
+            )));
+        };
+        let constraints = resolution.path.clone();
         let report = match rules_report(&repo, &constraints) {
             Ok(r) => r,
             Err(e) => return Ok(ToolOutput::err(format!("rules_report: {e}"))),
         };
         // Счётчики — из того же файла ограничений (тот же разбор, что и в
-        // rules_report; отчёт выше уже доказал, что YAML валиден и не пуст).
-        // Недостижимый здесь None оставил бы счётчики нулевыми — отчёт
-        // markdown всё равно отдаётся.
+        // rules_report; отчёт выше уже доказал, что YAML валиден). Записи с
+        // неизвестными типами (E8) идут отдельным списком skipped_unknown.
         let (mut rules_total, mut by_kind, mut by_severity) =
             (0usize, BTreeMap::new(), BTreeMap::new());
-        if let Some(parsed) = std::fs::read_to_string(&constraints)
-            .ok()
-            .and_then(|y| serde_yaml_ng::from_str::<ConstraintsFile>(&y).ok())
-        {
-            for r in parsed.all_rules() {
+        let mut skipped_unknown: Vec<SkippedUnknownRule> = Vec::new();
+        // Повторное чтение уже проверенного файла не падает; при гонке
+        // (файл изменён между вызовами) счётчики остаются нулевыми — отчёт
+        // markdown всё равно отдаётся.
+        if let Ok((rules, skipped)) = load_fitness_rules_with_skips(&constraints) {
+            for r in &rules {
                 rules_total += 1;
                 *by_kind.entry(r.kind.as_str().to_string()).or_insert(0usize) += 1;
                 *by_severity.entry(r.severity.clone()).or_insert(0usize) += 1;
             }
+            skipped_unknown = skipped;
         }
+        let drift_note = resolution.drift_note();
         let summary = format!(
-            "Реестр правил {}: {rules_total} правил; отчёт markdown в поле report_markdown",
-            constraints.display()
+            "Реестр правил {}: {rules_total} правил{}; отчёт markdown в поле report_markdown",
+            constraints.display(),
+            if skipped_unknown.is_empty() {
+                String::new()
+            } else {
+                format!(", пропущено с неизвестным типом: {}", skipped_unknown.len())
+            }
         );
         let verdict = json!({
             "tool": "rules_report",
             "passed": true,
+            "constraints": constraints.display().to_string(),
+            "drift_note": drift_note,
             "rules_total": rules_total,
             "by_kind": by_kind,
             "by_severity": by_severity,
+            "skipped_unknown": skipped_unknown,
             "summary": summary,
             "report_markdown": report,
         });
@@ -4061,7 +4378,8 @@ pub struct FitnessCheckTool;
 struct FitnessCheckArgs {
     /// Корень репозитория.
     repo: String,
-    /// Путь к `CONSTRAINTS.yaml` (дефолт `<repo>/.arch-handoff/CONSTRAINTS.yaml`).
+    /// Путь к `CONSTRAINTS.yaml` (дефолт `<repo>/.arch-handoff/CONSTRAINTS.yaml`,
+    /// иначе `<repo>/CONSTRAINTS.yaml`).
     constraints: Option<String>,
 }
 
@@ -4086,7 +4404,7 @@ impl Tool for FitnessCheckTool {
                     "repo": {"type": "string", "description": "Корень репозитория"},
                     "constraints": {
                         "type": "string",
-                        "description": "Путь к CONSTRAINTS.yaml (по умолчанию <repo>/.arch-handoff/CONSTRAINTS.yaml)"
+                        "description": "Путь к CONSTRAINTS.yaml (по умолчанию <repo>/.arch-handoff/CONSTRAINTS.yaml, иначе <repo>/CONSTRAINTS.yaml)"
                     }
                 },
                 "required": ["repo"]
@@ -4104,14 +4422,22 @@ impl Tool for FitnessCheckTool {
             }
         };
         let repo = ctx.resolve(&args.repo);
-        let constraints = args.constraints.map_or_else(
-            || repo.join(".arch-handoff/CONSTRAINTS.yaml"),
-            |c| ctx.resolve(c),
-        );
+        // Единый резолвер реестра (E2): явный путь → пакетная копия →
+        // корневой fallback; ни одной копии — канонический дефолт, чтобы
+        // ошибка «файл не читается» ссылалась на пакетный путь.
+        let explicit = args.constraints.map(|c| ctx.resolve(c));
+        let resolution = resolve_constraints_path_detailed(&repo, explicit.as_deref());
+        let constraints = resolution
+            .as_ref()
+            .map_or_else(|| repo.join(HANDOFF_CONSTRAINTS_PATH), |r| r.path.clone());
+        let drift_note = resolution.and_then(|r| r.drift_note());
         // Прогон может занимать минуты (command_succeeds) — уводим с worker'а runtime.
         match tokio::task::spawn_blocking(move || check(&repo, &constraints)).await {
             Ok(Ok(report)) => {
                 let mut out = String::new();
+                if let Some(note) = drift_note {
+                    let _ = writeln!(out, "Внимание: {note}");
+                }
                 let _ = writeln!(out, "{}", report.summary);
                 for i in &report.issues {
                     let _ = writeln!(
@@ -6534,5 +6860,242 @@ mod command_capture_tests {
             .await
             .expect("вызов");
         assert!(out.is_error, "{}", out.content);
+    }
+
+    // --- E2: единый резолвер пути реестра ограничений + дрейф двух копий ---
+
+    /// Пишет файл в каталог и возвращает его путь (локальный дубль хелпера
+    /// из `mod tests` — этот модуль своим набором помощников).
+    fn write_file(dir: &Path, name: &str, content: &str) -> PathBuf {
+        let p = dir.join(name);
+        if let Some(parent) = p.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&p, content).unwrap();
+        p
+    }
+
+    #[test]
+    fn resolve_constraints_path_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        // Нет ни одной копии — None.
+        assert!(resolve_constraints_path(repo, None).is_none());
+        // Только корневая — fallback на неё.
+        write_file(repo, "CONSTRAINTS.yaml", "rules: []\n");
+        assert_eq!(
+            resolve_constraints_path(repo, None),
+            Some(repo.join("CONSTRAINTS.yaml"))
+        );
+        // Пакетная приоритетнее корневой.
+        write_file(repo, ".arch-handoff/CONSTRAINTS.yaml", "rules: []\n");
+        assert_eq!(
+            resolve_constraints_path(repo, None),
+            Some(repo.join(".arch-handoff/CONSTRAINTS.yaml"))
+        );
+        // Явный путь сильнее всего (существование не проверяется).
+        let explicit = repo.join("custom.yaml");
+        assert_eq!(
+            resolve_constraints_path(repo, Some(&explicit)),
+            Some(explicit)
+        );
+    }
+
+    #[test]
+    fn resolve_constraints_path_drift_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        // Обе копии различаются — дрейф: используется пакетная, корневая отличается.
+        write_file(repo, "CONSTRAINTS.yaml", "rules: []\n");
+        write_file(
+            repo,
+            ".arch-handoff/CONSTRAINTS.yaml",
+            "rules: []\n# дрейф\n",
+        );
+        let r = resolve_constraints_path_detailed(repo, None).expect("резолв");
+        assert_eq!(r.path, repo.join(".arch-handoff/CONSTRAINTS.yaml"));
+        assert_eq!(r.drift, Some(repo.join("CONSTRAINTS.yaml")));
+        let note = r.drift_note().expect("пометка дрейфа");
+        assert!(note.contains("копии реестра различаются"), "{note}");
+        assert!(note.contains("отличается (drift)"), "{note}");
+        // Одинаковое содержимое — без пометки.
+        write_file(repo, "CONSTRAINTS.yaml", "rules: []\n# дрейф\n");
+        let r = resolve_constraints_path_detailed(repo, None).expect("резолв");
+        assert_eq!(r.drift, None);
+        assert!(r.drift_note().is_none());
+        // Одна копия — без пометки.
+        std::fs::remove_file(repo.join("CONSTRAINTS.yaml")).unwrap();
+        let r = resolve_constraints_path_detailed(repo, None).expect("резолв");
+        assert_eq!(r.drift, None);
+    }
+
+    /// `rules_report` по умолчанию читает корневой реестр, когда пакетной
+    /// копии нет (E2, fallback); дрейф двух копий — пометка в JSON.
+    #[tokio::test]
+    async fn rules_report_tool_root_fallback_and_drift_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        write_file(
+            &repo,
+            "CONSTRAINTS.yaml",
+            "rules:\n  - name: readme\n    type: file_exists\n    path: README.md\n",
+        );
+        let ctx = ToolContext::new(
+            dir.path().to_path_buf(),
+            Arc::new(crate::config::Config::default()),
+        );
+        let out = RulesReportTool
+            .call(json!({"repo": "repo"}), &ctx)
+            .await
+            .expect("вызов");
+        assert!(!out.is_error, "{}", out.content);
+        let v: serde_json::Value = serde_json::from_str(&out.content).expect("JSON");
+        assert!(
+            v["constraints"]
+                .as_str()
+                .expect("constraints")
+                .ends_with("repo/CONSTRAINTS.yaml"),
+            "{v}"
+        );
+        assert_eq!(v["drift_note"], serde_json::Value::Null, "{v}");
+        // Появилась пакетная копия с другим содержимым — пометка дрейфа,
+        // используется пакетная.
+        write_file(
+            &repo,
+            ".arch-handoff/CONSTRAINTS.yaml",
+            "rules:\n  - name: readme\n    type: file_exists\n    path: README.md\n    severity: warn\n",
+        );
+        let out = RulesReportTool
+            .call(json!({"repo": "repo"}), &ctx)
+            .await
+            .expect("вызов");
+        let v: serde_json::Value = serde_json::from_str(&out.content).expect("JSON");
+        let note = v["drift_note"].as_str().expect("drift_note");
+        assert!(note.contains("копии реестра различаются"), "{v}");
+        assert!(
+            v["constraints"]
+                .as_str()
+                .expect("constraints")
+                .contains(".arch-handoff/CONSTRAINTS.yaml"),
+            "{v}"
+        );
+        // Нет ни одной копии — понятная мягкая ошибка.
+        let out = RulesReportTool
+            .call(json!({"repo": "."}), &ctx)
+            .await
+            .expect("вызов");
+        assert!(out.is_error, "{}", out.content);
+        assert!(
+            out.content.contains("реестр ограничений не найден"),
+            "{}",
+            out.content
+        );
+    }
+
+    // --- E8: неизвестные типы правил — warn-пропуск, не падение парсера ---
+
+    /// Реестр «другой редакции»: два неизвестных типа + одно валидное правило.
+    const ALIEN_CONSTRAINTS: &str = "rules:\n\
+         \x20 - name: readme\n\
+         \x20   type: file_exists\n\
+         \x20   path: README.md\n\
+         \x20 - name: skill-gate\n\
+         \x20   type: skill_contract\n\
+         \x20   glob: 'skills/**'\n\
+         \x20 - name: addr-trace\n\
+         \x20   type: address_trace\n";
+
+    #[test]
+    fn check_skips_unknown_rule_types_with_warn() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        write_file(repo, "README.md", "ридми\n");
+        let c = write_file(repo, "CONSTRAINTS.yaml", ALIEN_CONSTRAINTS);
+        let report = check(repo, &c).expect("чужой реестр не валит прогон");
+        assert!(report.passed, "{}", report.summary);
+        // Валидное правило исполнилось и прошло; два чужих — warn-находки.
+        let skipped: Vec<&LintIssue> = report
+            .issues
+            .iter()
+            .filter(|i| i.rule == "unknown_rule_type")
+            .collect();
+        assert_eq!(skipped.len(), 2, "{}", report.summary);
+        assert!(skipped.iter().all(|i| i.severity == "warn"));
+        assert!(
+            skipped
+                .iter()
+                .any(|i| i.message.contains("правило 'skill-gate': неизвестный тип 'skill_contract' — пропущено (словарь другой редакции?)")),
+            "{skipped:?}"
+        );
+        assert_eq!(report.skipped_unknown.len(), 2);
+        assert!(
+            report
+                .summary
+                .contains("пропущено правил: 2 (неизвестные типы: address_trace, skill_contract)"),
+            "{}",
+            report.summary
+        );
+        // Сводка по-прежнему считает исполняемые правила.
+        assert!(report.summary.contains("Правил: 1"), "{}", report.summary);
+    }
+
+    #[test]
+    fn check_broken_yaml_is_still_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = write_file(dir.path(), "CONSTRAINTS.yaml", "{битый yaml");
+        assert!(check(dir.path(), &c).is_err(), "невалидный YAML — ошибка");
+    }
+
+    #[test]
+    fn check_all_unknown_types_is_clear_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = write_file(
+            dir.path(),
+            "CONSTRAINTS.yaml",
+            "rules:\n  - name: x\n    type: playbook_graduation\n",
+        );
+        let err = check(dir.path(), &c).expect_err("исполняемых правил нет");
+        assert!(err.to_string().contains("неизвестных типов"), "{err}");
+    }
+
+    #[test]
+    fn rules_report_lists_unknown_types_section() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        let c = write_file(repo, "CONSTRAINTS.yaml", ALIEN_CONSTRAINTS);
+        let md = rules_report(repo, &c).expect("отчёт");
+        assert!(md.contains("Всего правил: 1"), "{md}");
+        assert!(
+            md.contains("Пропущено правил: 2 (неизвестные типы: address_trace, skill_contract)"),
+            "{md}"
+        );
+        assert!(md.contains("## Пропущено (неизвестный тип"), "{md}");
+        assert!(
+            md.contains("`skill-gate` — неизвестный тип `skill_contract`"),
+            "{md}"
+        );
+        // Валидное правило — в таблице.
+        assert!(md.contains("| readme | file_exists |"), "{md}");
+    }
+
+    #[test]
+    fn load_fitness_rules_tolerates_unknown_types() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = write_file(dir.path(), "CONSTRAINTS.yaml", ALIEN_CONSTRAINTS);
+        let rules = load_fitness_rules(&c).expect("плоский список");
+        assert_eq!(rules.len(), 1);
+        let (rules, skipped) = load_fitness_rules_with_skips(&c).expect("с пропусками");
+        assert_eq!(rules.len(), 1);
+        assert_eq!(skipped.len(), 2);
+        assert_eq!(skipped[0].name, "skill-gate");
+        assert_eq!(skipped[0].rule_type, "skill_contract");
+        // Битая запись (не неизвестный тип) — по-прежнему ошибка.
+        let c = write_file(
+            dir.path(),
+            "BROKEN.yaml",
+            "rules:\n  - name: x\n    type: must_contain\n    glob: 123\n",
+        );
+        assert!(load_fitness_rules(&c).is_err(), "битая запись — ошибка");
     }
 }

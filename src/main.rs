@@ -1935,7 +1935,7 @@ async fn cmd_archunit(cmd: ArchunitCmd) -> Result<()> {
             out_dir,
             base_package,
         } => {
-            let c = constraints.unwrap_or_else(|| repo.join(".arch-handoff/CONSTRAINTS.yaml"));
+            let c = resolve_constraints_cli(&repo, constraints);
             let rules = arch_harness::control::load_fitness_rules(&c)?;
             let refs: Vec<&arch_harness::control::FitnessRule> = rules.iter().collect();
             let mut spec =
@@ -1972,7 +1972,7 @@ async fn cmd_archunit(cmd: ArchunitCmd) -> Result<()> {
             timeout_secs,
             json,
         } => {
-            let c = constraints.unwrap_or_else(|| repo.join(".arch-handoff/CONSTRAINTS.yaml"));
+            let c = resolve_constraints_cli(&repo, constraints);
             let rules = arch_harness::control::load_fitness_rules(&c)?;
             let refs: Vec<&arch_harness::control::FitnessRule> = rules.iter().collect();
             let spec =
@@ -2800,6 +2800,17 @@ fn cmd_publish(cmd: PublishCmd) -> Result<()> {
     Ok(())
 }
 
+/// Единый резолвер реестра ограничений для CLI-арм (E2): явный путь →
+/// пакетная копия (`.arch-handoff/CONSTRAINTS.yaml`) → корневая
+/// (`CONSTRAINTS.yaml`); ни одной копии — канонический дефолт, чтобы
+/// ошибка «файл не читается» ссылалась на пакетный путь.
+fn resolve_constraints_cli(repo: &Path, explicit: Option<PathBuf>) -> PathBuf {
+    explicit.unwrap_or_else(|| {
+        arch_harness::control::resolve_constraints_path(repo, None)
+            .unwrap_or_else(|| repo.join(arch_harness::control::HANDOFF_CONSTRAINTS_PATH))
+    })
+}
+
 fn cmd_control(cfg: &arch_harness::config::Config, cmd: ControlCmd) -> Result<()> {
     match cmd {
         ControlCmd::Check {
@@ -2811,7 +2822,7 @@ fn cmd_control(cfg: &arch_harness::config::Config, cmd: ControlCmd) -> Result<()
             changed_since,
             format,
         } => {
-            let c = constraints.unwrap_or_else(|| repo.join(".arch-handoff/CONSTRAINTS.yaml"));
+            let c = resolve_constraints_cli(&repo, constraints);
             let options = arch_harness::control::baseline::CheckOptions {
                 baseline,
                 baseline_update,
@@ -3042,7 +3053,17 @@ fn cmd_control(cfg: &arch_harness::config::Config, cmd: ControlCmd) -> Result<()
             }
         }
         ControlCmd::RulesReport { repo, constraints } => {
-            let c = constraints.unwrap_or_else(|| repo.join(".arch-handoff/CONSTRAINTS.yaml"));
+            let resolution = arch_harness::control::resolve_constraints_path_detailed(
+                &repo,
+                constraints.as_deref(),
+            );
+            let c = resolution.as_ref().map_or_else(
+                || repo.join(arch_harness::control::HANDOFF_CONSTRAINTS_PATH),
+                |r| r.path.clone(),
+            );
+            if let Some(note) = resolution.and_then(|r| r.drift_note()) {
+                println!("Внимание: {note}");
+            }
             print!("{}", arch_harness::control::rules_report(&repo, &c)?);
         }
         ControlCmd::RulesSuggest { path } => {
@@ -3055,7 +3076,7 @@ fn cmd_control(cfg: &arch_harness::config::Config, cmd: ControlCmd) -> Result<()
             level,
             json,
         } => {
-            let c = constraints.unwrap_or_else(|| repo.join(".arch-handoff/CONSTRAINTS.yaml"));
+            let c = resolve_constraints_cli(&repo, constraints);
             let report = arch_harness::control::control_report(&repo, &c, &level)?;
             if json {
                 // SDK-контракт v1: машиночитаемый отчёт; report — отчётность,
@@ -3136,10 +3157,16 @@ fn cmd_control(cfg: &arch_harness::config::Config, cmd: ControlCmd) -> Result<()
 }
 
 /// `arch-be model`: типизированная модель архитектуры (ADR-003).
+///
+/// Читающие команды (validate/show/graph) грузят модель толерантно (E3):
+/// битая сущность не обнуляет весь модельный контроль — validate отчитывает
+/// её error-находкой, show/graph работают по валидному подмножеству с
+/// warn-пометкой. Пишущие/обменные (project/export/import) — строгие:
+/// частичная модель молча потеряла бы сущности в артефактах.
 fn cmd_model(cmd: ModelCmd) -> Result<()> {
     match cmd {
         ModelCmd::Validate { dir } => {
-            let model = arch_harness::model::load_model(&dir)
+            let model = arch_harness::model::load_model_tolerant(&dir)
                 .with_context(|| format!("загрузка модели {}", dir.display()))?;
             let report = arch_harness::model::validate(&model);
             for i in &report.issues {
@@ -3161,16 +3188,22 @@ fn cmd_model(cmd: ModelCmd) -> Result<()> {
             }
         }
         ModelCmd::Show { id, dir } => {
-            let model = arch_harness::model::load_model(&dir)
+            let model = arch_harness::model::load_model_tolerant(&dir)
                 .with_context(|| format!("загрузка модели {}", dir.display()))?;
+            if let Some(note) = arch_harness::model::load_issues_note(&model.load_issues) {
+                println!("Внимание: {note}");
+            }
             let entity = model
                 .get(&id)
                 .with_context(|| format!("сущность '{id}' не найдена в {}", dir.display()))?;
             print!("{}", arch_harness::model::card(&model, entity));
         }
         ModelCmd::Graph { dir, format } => {
-            let model = arch_harness::model::load_model(&dir)
+            let model = arch_harness::model::load_model_tolerant(&dir)
                 .with_context(|| format!("загрузка модели {}", dir.display()))?;
+            if let Some(note) = arch_harness::model::load_issues_note(&model.load_issues) {
+                println!("Внимание: {note}");
+            }
             match format.as_str() {
                 "text" => print!("{}", arch_harness::model::graph_text(&model)),
                 "mermaid" => print!("{}", arch_harness::model::graph_mermaid(&model)),

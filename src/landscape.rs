@@ -95,6 +95,9 @@ pub struct LandscapeReport {
     pub systems: Vec<LandscapeSystem>,
     /// Находки.
     pub findings: Vec<LandscapeFinding>,
+    /// Сущности, пропущенные при толерантной загрузке моделей набора (E3):
+    /// агрегация выполнена по валидному подмножеству.
+    pub load_issues: Vec<crate::model::ModelLoadIssue>,
     /// Рёбра ландшафта: (канон. источник, канон. цель), отсортированные и
     /// дедуплицированные (для mermaid и топа связности).
     pub edges: Vec<(String, String)>,
@@ -126,13 +129,14 @@ fn project_name(dir: &Path) -> String {
 }
 
 /// Собирает сущности проекта с меткой проекта; `None` — нет `model/`
-/// (проект молча пропускается).
+/// (проект молча пропускается). Толерантная загрузка (E3): битые сущности
+/// одного проекта не роняют весь ландшафт — они в `Model::load_issues`.
 fn load_project(dir: &Path) -> Result<Option<(String, crate::model::Model)>> {
     let model_dir = dir.join("model");
     if !model_dir.is_dir() {
         return Ok(None);
     }
-    let model = crate::model::load_model(&model_dir)?;
+    let model = crate::model::load_model_tolerant(&model_dir)?;
     Ok(Some((project_name(dir), model)))
 }
 
@@ -163,8 +167,10 @@ pub fn build_landscape_with_aliases(
     }
 
     let mut projects: Vec<(String, crate::model::Model)> = Vec::new();
-    if let Some(p) = load_project(root)? {
-        projects.push(p);
+    let mut load_issues: Vec<crate::model::ModelLoadIssue> = Vec::new();
+    if let Some((name, mut model)) = load_project(root)? {
+        load_issues.append(&mut model.load_issues);
+        projects.push((name, model));
     }
     let mut dirs: Vec<PathBuf> = Vec::new();
     let rd = std::fs::read_dir(root).map_err(|e| HarnessError::io(root, e))?;
@@ -182,8 +188,9 @@ pub fn build_landscape_with_aliases(
     }
     dirs.sort();
     for d in &dirs {
-        if let Some(p) = load_project(d)? {
-            projects.push(p);
+        if let Some((name, mut model)) = load_project(d)? {
+            load_issues.append(&mut model.load_issues);
+            projects.push((name, model));
         }
     }
 
@@ -388,6 +395,7 @@ pub fn build_landscape_with_aliases(
         root: root.to_path_buf(),
         systems,
         findings,
+        load_issues,
         edges: edges.into_iter().collect(),
         top,
     })
@@ -398,6 +406,9 @@ pub fn build_landscape_with_aliases(
 pub fn render_markdown(report: &LandscapeReport) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "# Ландшафт систем: {}\n", report.root.display());
+    if let Some(note) = crate::model::load_issues_note(&report.load_issues) {
+        let _ = writeln!(out, "> Внимание: {note}\n");
+    }
     let _ = writeln!(out, "## Реестр систем\n");
     let _ = writeln!(out, "| Система | Проекты и ID | Статусы |");
     let _ = writeln!(out, "|---|---|---|");
@@ -554,19 +565,23 @@ impl Tool for LandscapeReportTool {
         } else {
             render_markdown(&report)
         };
-        let summary = format!(
+        let mut summary = format!(
             "Ландшафт {}: {} систем, {} связей, {} находок",
             report.root.display(),
             report.systems.len(),
             report.edges.len(),
             report.findings.len()
         );
+        if let Some(note) = crate::model::load_issues_note(&report.load_issues) {
+            let _ = write!(summary, "; внимание: {note}"); // записи в String не падают
+        }
         let verdict = json!({
             "tool": "landscape_report",
             "format": format,
             "systems": report.systems.len(),
             "edges": report.edges.len(),
             "findings": report.findings.len(),
+            "load_issues": report.load_issues,
             "summary": summary,
             "report": text,
         });
@@ -1034,6 +1049,30 @@ mod tests {
         let err = build_landscape(&root).unwrap_err();
         assert!(err.to_string().contains("model/"), "{err}");
         assert!(build_landscape(&root.join("missing")).is_err());
+    }
+
+    /// E3: битая сущность одного проекта не роняет ландшафт — warn-пометка
+    /// `load_issues`, агрегация по валидному подмножеству.
+    #[test]
+    fn landscape_tolerates_broken_entity_with_load_issues() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = fixture(dir.path());
+        write_file(
+            &root,
+            "p1/model/NFR-777-broken.md",
+            "---\nid: NFR-777\ntype: nfr\ntitle: SLA\nstatus: accepted\navailability_target: \"99.9\"\n---\n",
+        );
+        let report = build_landscape(&root).unwrap();
+        assert_eq!(report.load_issues.len(), 1);
+        assert!(
+            report.load_issues[0]
+                .file
+                .ends_with("p1/model/NFR-777-broken.md")
+        );
+        // Валидный набор систем не пострадал.
+        assert!(!report.systems.is_empty());
+        let md = render_markdown(&report);
+        assert!(md.contains("Внимание: 1 сущностей пропущено"), "{md}");
     }
 
     /// Инструмент `landscape_report`: markdown и mermaid на фикстуре, счётчики,

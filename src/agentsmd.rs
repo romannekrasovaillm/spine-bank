@@ -198,12 +198,13 @@ pub fn scan_repo(repo: &Path) -> Result<RepoFacts> {
             break;
         }
     }
-    for c in [".arch-handoff/CONSTRAINTS.yaml", "docs/CONSTRAINTS.yaml"] {
-        if repo.join(c).is_file() {
-            facts.constraints = Some(repo.join(c));
-            break;
-        }
-    }
+    // Единый резолвер реестра ограничений (E2): пакетная копия
+    // (.arch-handoff/) → корневая; `docs/CONSTRAINTS.yaml` — legacy-расположение,
+    // оставлено для старых репозиториев.
+    facts.constraints = crate::control::resolve_constraints_path(repo, None).or_else(|| {
+        let docs = repo.join("docs/CONSTRAINTS.yaml");
+        docs.is_file().then_some(docs)
+    });
     Ok(facts)
 }
 
@@ -349,6 +350,14 @@ pub fn render_generated(repo: &Path, facts: &RepoFacts) -> Result<String> {
                 "\nПроверка: `arch-be control check .` — источник `{}`\n",
                 rel(repo, c)
             );
+            // Дрейф двух копий реестра (E2): обе существуют и различаются —
+            // честная пометка в сгенерированной зоне.
+            if let Some(note) = crate::control::resolve_constraints_path_detailed(repo, None)
+                .filter(|r| r.path == *c)
+                .and_then(|r| r.drift_note())
+            {
+                let _ = write!(out, "\n> {note}\n");
+            }
         }
         None => {
             out.push_str("- CONSTRAINTS.yaml не найден (`arch-be handoff` создаёт стартовый)\n");
@@ -806,5 +815,55 @@ mod tests {
         assert_eq!(action, "appended");
         assert!(out.contains("Текст команды."));
         assert!(out.contains("ARCH:GENERATED"));
+    }
+
+    /// E2: без пакетной копии fitness-правила читаются из корневого
+    /// CONSTRAINTS.yaml (раньше раздел оставался пустым — искали только в
+    /// `.arch-handoff/`).
+    #[test]
+    fn scan_and_render_use_root_constraints_fallback() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("root-only");
+        std::fs::create_dir_all(&repo).expect("repo");
+        std::fs::write(repo.join("Cargo.toml"), "[package]\nname=\"ro\"\n").expect("cargo");
+        std::fs::write(
+            repo.join("CONSTRAINTS.yaml"),
+            "rules:\n  - name: no-unwrap\n    type: must_not_contain\n    glob: \"src/**\"\n    pattern: 'unwrap\\('\n",
+        )
+        .expect("constraints");
+        let facts = scan_repo(&repo).expect("scan");
+        assert_eq!(
+            facts.constraints,
+            Some(repo.join("CONSTRAINTS.yaml")),
+            "корневой реестр найден резолвером"
+        );
+        let r = generate(&repo).expect("gen");
+        assert!(r.has_constraints);
+        let text = std::fs::read_to_string(repo.join("AGENTS.md")).expect("read");
+        assert!(
+            text.contains("`no-unwrap` (must_not_contain, error)"),
+            "{text}"
+        );
+        assert!(text.contains("источник `CONSTRAINTS.yaml`"), "{text}");
+        assert!(!text.contains("drift"), "{text}");
+    }
+
+    /// E2: обе копии реестра различаются — пометка дрейфа в сгенерированной
+    /// зоне (используется пакетная).
+    #[test]
+    fn render_notes_constraints_drift() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = fixture_repo(tmp.path());
+        // Корневая копия с ДРУГИМ содержимым, чем пакетная фикстура.
+        std::fs::write(
+            repo.join("CONSTRAINTS.yaml"),
+            "rules:\n  - name: other\n    type: file_exists\n    path: README.md\n",
+        )
+        .expect("root constraints");
+        generate(&repo).expect("gen");
+        let text = std::fs::read_to_string(repo.join("AGENTS.md")).expect("read");
+        assert!(text.contains("`no-unwrap`"), "{text}");
+        assert!(text.contains("копии реестра различаются"), "{text}");
+        assert!(text.contains("отличается (drift)"), "{text}");
     }
 }

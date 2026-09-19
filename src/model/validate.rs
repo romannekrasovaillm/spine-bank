@@ -3,7 +3,9 @@
 //! Правила (ADR-003): битая ссылка — `error`; дубль ID — `error`; цикл
 //! `depends_on` — `error`; `ADR` без затронутых `CMP` — `warn`; `NFR` без
 //! способа проверки — `warn`; `unverifiable` без обоснования — `error`
-//! (ADR-006); `QAS` с незаполненными полями сценария — `warn` (ADR-007).
+//! (ADR-006); `QAS` с незаполненными полями сценария — `warn` (ADR-007);
+//! сущность, не разобранная при толерантной загрузке (`load-error`, E3), —
+//! `error`.
 //! Цели `verified_by` могут ссылаться на правила
 //! `C-NNN` файла `CONSTRAINTS.yaml`, лежащего рядом с каталогом модели
 //! (файл отсутствует — такие ссылки не проверяются).
@@ -153,6 +155,18 @@ fn classify_target(raw: &str) -> LinkTarget<'_> {
 #[must_use]
 pub fn validate(model: &Model) -> ValidationReport {
     let mut issues = Vec::new();
+    // Толерантная загрузка (E3): сущность, не разобранная при загрузке, —
+    // error-находка отчёта (та же критичность, что дала бы строгая ошибка),
+    // а не отказ проверки валидного подмножества.
+    for li in &model.load_issues {
+        issue(
+            &mut issues,
+            Severity::Error,
+            &li.file,
+            "load-error",
+            format!("сущность не разобрана: {}", li.reason),
+        );
+    }
     check_not_empty(model, &mut issues);
     check_ids(model, &mut issues);
     check_links(model, &mut issues);

@@ -25,7 +25,7 @@ use serde_json::{Value, json};
 
 use crate::error::{HarnessError, Result};
 use crate::llm::ToolSpec;
-use crate::model::{Entity, EntityKind, Model, Severity, load_model};
+use crate::model::{Entity, EntityKind, Model, Severity, load_issues_note, load_model_tolerant};
 use crate::tool::{Tool, ToolContext, ToolOutput};
 
 /// Максимум реплик параллельного участка: бóльшие значения не меняют
@@ -58,7 +58,9 @@ fn any_errors(issues: &[NfrIssue]) -> bool {
     issues.iter().any(|i| i.severity == Severity::Error)
 }
 
-/// Загружает модель кейса (`<case>/model`).
+/// Загружает модель кейса (`<case>/model`) толерантно (E3): битые сущности
+/// не роняют проверки — о них отчитывается [`push_load_skip_note`]; полный
+/// отказ — только когда не загрузилось ничего.
 fn load_case_model(case: &Path) -> Result<Model> {
     let dir = case.join("model");
     if !dir.is_dir() {
@@ -68,7 +70,15 @@ fn load_case_model(case: &Path) -> Result<Model> {
             dir.display()
         )));
     }
-    load_model(&dir)
+    load_model_tolerant(&dir)
+}
+
+/// Warn-находка о сущностях, пропущенных при толерантной загрузке (E3) —
+/// одна агрегированная на отчёт.
+fn push_load_skip_note(model: &Model, issues: &mut Vec<NfrIssue>) {
+    if let Some(note) = load_issues_note(&model.load_issues) {
+        issue(issues, Severity::Warn, "load-skip", note);
+    }
 }
 
 /// Валидирует неотрицательное числовое поле. Невалидное значение — `error`
@@ -242,6 +252,7 @@ impl BudgetReport {
 pub fn budget_check(case: &Path) -> Result<BudgetReport> {
     let model = load_case_model(case)?;
     let mut issues = Vec::new();
+    push_load_skip_note(&model, &mut issues);
     let mut targets = Vec::new();
     let mut covered: BTreeSet<&str> = BTreeSet::new();
     for nfr in model.entities.iter().filter(|e| e.kind == EntityKind::Nfr) {
@@ -495,6 +506,7 @@ impl AvailabilityReport {
 pub fn availability_check(case: &Path) -> Result<AvailabilityReport> {
     let model = load_case_model(case)?;
     let mut issues = Vec::new();
+    push_load_skip_note(&model, &mut issues);
     let mut chains = Vec::new();
     for nfr in model.entities.iter().filter(|e| e.kind == EntityKind::Nfr) {
         if let Some(c) = availability_chain(&model, nfr, &mut issues) {
@@ -726,6 +738,7 @@ impl CapacityReport {
 pub fn capacity_check(case: &Path) -> Result<CapacityReport> {
     let model = load_case_model(case)?;
     let mut issues = Vec::new();
+    push_load_skip_note(&model, &mut issues);
     let mut targets = Vec::new();
     for nfr in model.entities.iter().filter(|e| e.kind == EntityKind::Nfr) {
         let Some(raw_target) = nfr.rps_target else {
@@ -940,6 +953,7 @@ impl CostReport {
 pub fn cost_check(case: &Path) -> Result<CostReport> {
     let model = load_case_model(case)?;
     let mut issues = Vec::new();
+    push_load_skip_note(&model, &mut issues);
     let currency = model
         .entities
         .iter()
@@ -1098,6 +1112,9 @@ impl Tool for NfrCheckTool {
         let mut issues: Vec<Value> = Vec::new();
         let mut errors = 0usize;
         let mut warns = 0usize;
+        // Warn-пометка E3 (`load-skip`) одна и та же во всех четырёх
+        // проверках — при kind=all в JSON идёт один раз.
+        let mut seen_load_skips = BTreeSet::new();
         for name in &kinds {
             // Отчёты проверок — разных типов; объединяет их только `issues`.
             let found = match *name {
@@ -1109,12 +1126,15 @@ impl Tool for NfrCheckTool {
             match found {
                 Ok(found) => {
                     for i in &found {
+                        if i.rule == "load-skip" && !seen_load_skips.insert(i.message.clone()) {
+                            continue;
+                        }
                         match i.severity {
                             Severity::Error => errors += 1,
                             Severity::Warn => warns += 1,
                         }
+                        issues.push(issue_json(name, i));
                     }
-                    issues.extend(found.iter().map(|i| issue_json(name, i)));
                 }
                 Err(e) => return Ok(ToolOutput::err(format!("nfr_check/{name}: {e}"))),
             }
@@ -1185,6 +1205,64 @@ mod tests {
     }
 
     // --- budget ------------------------------------------------------------
+
+    /// Битая сущность E3 (`availability_target` строкой) рядом с валидными.
+    fn broken_entity(case: &Path) {
+        std::fs::write(
+            case.join("model").join("NFR-777-broken.md"),
+            "---\nid: NFR-777\ntype: nfr\ntitle: SLA\nstatus: accepted\navailability_target: \"99.9\"\n---\n",
+        )
+        .expect("битая сущность");
+    }
+
+    #[test]
+    fn budget_tolerates_broken_entity_with_load_skip_warn() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let case = tmp.path();
+        int(case, 1, Some(800.0));
+        int(case, 2, Some(300.0));
+        nfr(case, 1, "p99_target_ms: 2000\n", "INT-001, INT-002");
+        broken_entity(case);
+        let report = budget_check(case).expect("отчёт");
+        assert!(!report.has_errors(), "{:?}", report.issues);
+        let skip = report
+            .issues
+            .iter()
+            .find(|i| i.rule == "load-skip")
+            .expect("warn-находка пропуска");
+        assert_eq!(skip.severity, Severity::Warn);
+        assert!(skip.message.contains("1 сущностей пропущено"), "{skip:?}");
+        // Расчёт по валидному подмножеству не пострадал.
+        assert_eq!(report.targets.len(), 1);
+        assert!((report.targets[0].sum_ms - 1100.0).abs() < f64::EPSILON);
+    }
+
+    /// `nfr_check` (kind=all): пометка `load-skip` идёт в JSON один раз.
+    #[tokio::test]
+    async fn nfr_check_tool_dedups_load_skip_note() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let case = tmp.path();
+        int(case, 1, Some(800.0));
+        nfr(case, 1, "p99_target_ms: 2000\n", "INT-001");
+        broken_entity(case);
+        let ctx = ToolContext::new(
+            case.to_path_buf(),
+            std::sync::Arc::new(crate::config::Config::default()),
+        );
+        let out = NfrCheckTool
+            .call(json!({"path": "."}), &ctx)
+            .await
+            .expect("вызов");
+        assert!(!out.is_error, "{}", out.content);
+        let v: Value = serde_json::from_str(&out.content).expect("JSON");
+        let skips = v["issues"]
+            .as_array()
+            .expect("issues")
+            .iter()
+            .filter(|i| i["rule"] == "load-skip")
+            .count();
+        assert_eq!(skips, 1, "{v}");
+    }
 
     #[test]
     fn budget_converges_with_reserve() {
