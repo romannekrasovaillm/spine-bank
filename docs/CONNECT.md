@@ -70,7 +70,7 @@ lifecycle-хуков нет; CI и git-хуки — единственный г�
 | `ci --provider gitlab` | блок между `# spine-connect:begin/end` в `.gitlab-ci.yml` (мердж, чужие джобы сохраняются) | джоба `spine-gate`: `arch-be gate --route auto --format gitlab-codequality` в артефакт `reports.codequality` — **нарушения видны в интерфейсе merge request без ручной настройки** |
 | `ci --provider github` | новый `.github/workflows/spine-gate.yml` (существующий без маркера не затирается — отказ) | `gate --format sarif` артефактом прогона + markdown в Job Summary; загрузка в code scanning — закомментированным шагом (нужен Advanced Security) |
 | `ci --provider jenkins` | блок между `// spine-connect:begin/end` в `Jenkinsfile` | `gate --format junit` + публикация `junit(...)`; красный гейт — `error(...)` по коду возврата |
-| `git-hooks` | `.git/hooks/pre-commit` (быстрый `arch-be control check .`) и `pre-push` (полный `arch-be gate --route auto`); в worktree — в hooks основного git-каталога | блоки между маркерами, чужие строки хуков сохраняются; fail-soft: нет `arch-be` в PATH (у pre-commit — и `.arch-handoff/CONSTRAINTS.yaml`) — молча пропуск |
+| `git-hooks` | `.git/hooks/pre-commit` (быстрый `arch-be control check .`) и `pre-push` (полный `arch-be gate --route auto --base <remote sha>...HEAD` — база берётся из stdin git'а, для новой ветки `merge-base` с основной); в worktree — в hooks основного git-каталога | блоки между маркерами, чужие строки хуков сохраняются; fail-soft: нет `arch-be` в PATH (у pre-commit — и `.arch-handoff/CONSTRAINTS.yaml`) — молча пропуск |
 
 Установка бинаря в CI-джобах — curl из релизов (в публичных релизах GitHub
 артефакты — сырые бинари `arch-be-linux-x86_64` + `SHA256SUMS`; tar.gz —
@@ -193,10 +193,11 @@ project-scoped сервер из `.mcp.json` и доверие каталогу 
 
 А Stop-хук (записан в `.claude/settings.json`) не даёт агенту завершить
 работу, пока гейт красный: при попытке остановки хук запускает
-`arch-be gate --route auto` (единый гейт: fitness + delta guard +
-rule_weakened + spine + trace, на маршрутах Standard/Critical ещё nfr и
-evidence — см. `docs/control.md`), и при ненулевом коде возврата завершение
-блокируется (exit 2), находки уходят агенту как feedback:
+`arch-be gate --route auto --base <merge-base с основной веткой>...HEAD` (единый
+гейт: fitness + delta guard + rule_weakened + spine + trace + целостность
+модели, на маршрутах Standard/Critical ещё nfr и evidence — см.
+`docs/control.md`), и при ненулевом коде возврата завершение блокируется
+(exit 2), находки уходят агенту как feedback:
 
 ![Stop-хук](screenshots/connect/05-stop-hook.png)
 
