@@ -60,6 +60,10 @@ pub struct AdrFace {
     /// Дата (`None` — поле не заполнено).
     #[serde(default)]
     pub date: Option<String>,
+    /// Шапка есть, но не распознана ни в одной из понимаемых форм (Н9):
+    /// пустой статус тогда означает «не прочитали», а не «не заполнено».
+    #[serde(default)]
+    pub status_unparsed: bool,
 }
 
 /// Одна запись реестра ADR: решение проекта. Если решение описано и прозой,
@@ -91,6 +95,10 @@ pub struct RegistryEntry {
     /// Типизированная грань (`model/...`), если решение ею описано.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<AdrFace>,
+    /// Шапка прозы не распознана (Н9): живёт на записи, а не только на грани,
+    /// потому что `prose` строится ИЗ записи и флаг обязан доехать до неё.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub status_unparsed: bool,
 }
 
 impl RegistryEntry {
@@ -105,7 +113,7 @@ impl RegistryEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegistryFinding {
     /// Тип находки: `prose_model_divergence` | `number_collision` |
-    /// `title_duplicate` | `missing_fields`.
+    /// `title_duplicate` | `missing_fields` | `prose_header_unparsed`.
     pub kind: String,
     /// Описание (проекты, номера, заголовки).
     pub message: String,
@@ -142,19 +150,94 @@ struct ProseAdr {
     date: Option<String>,
     /// Статус из `- Status:` (может отсутствовать).
     status: Option<String>,
+    /// В шапке есть строка, похожая на статус, но ни одна форма не разобрана:
+    /// это находка `prose_header_unparsed`, а не «расхождение с моделью».
+    status_unparsed: bool,
+}
+
+/// Имена полей шапки ADR: английские и русские, в любом регистре.
+const DATE_NAMES: [&str; 2] = ["Date", "Дата"];
+const STATUS_NAMES: [&str; 2] = ["Status", "Статус"];
+
+/// Снимает markdown-разметку начала строки: список, заголовок, жирный.
+fn strip_prefix(line: &str) -> String {
+    let t = line.trim();
+    let t = t.trim_start_matches(['-', '*', '#', ' ']).trim();
+    t.trim_start_matches("**").trim().to_string()
+}
+
+/// Значение поля шапки из строки: `Status: X`, `**Статус**: X`,
+/// `- **Status:** X`. Сравнение имён — без учёта регистра; закрывающие `**`
+/// перед двоеточием допускаются. `None` — это не поле (или имя другое).
+fn field_value(line: &str, names: &[&str]) -> Option<String> {
+    let t = strip_prefix(line);
+    for name in names {
+        let Some(head) = t.get(..name.len()) else {
+            continue;
+        };
+        if !head.eq_ignore_ascii_case(name) {
+            continue;
+        }
+        let rest = &t[name.len()..];
+        let rest = rest.strip_prefix("**").unwrap_or(rest);
+        let Some(value) = rest.strip_prefix(':') else {
+            continue;
+        };
+        return Some(value.trim().trim_matches('*').trim().to_string());
+    }
+    None
+}
+
+/// Поле шапки ADR.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeaderField {
+    /// Дата решения.
+    Date,
+    /// Статус решения.
+    Status,
+}
+
+/// Имя поля, если строка — ГОЛОВНОЕ имя без значения (`## Статус`): тогда
+/// значение стоит следующей непустой строкой.
+fn bare_field_name(line: &str) -> Option<HeaderField> {
+    let t = strip_prefix(line);
+    let t = t.trim_end_matches(':').trim();
+    if STATUS_NAMES.iter().any(|n| t.eq_ignore_ascii_case(n)) {
+        return Some(HeaderField::Status);
+    }
+    if DATE_NAMES.iter().any(|n| t.eq_ignore_ascii_case(n)) {
+        return Some(HeaderField::Date);
+    }
+    None
+}
+
+/// Похожа ли строка на поле `Status`/`Статус`, которое не удалось разобрать
+/// ни в одной из понимаемых форм (`Status = Accepted`, `Статус — Accepted`).
+fn looks_like_status_field(line: &str) -> bool {
+    let lowered = strip_prefix(line).to_lowercase();
+    STATUS_NAMES
+        .iter()
+        .any(|n| lowered.starts_with(&n.to_lowercase()))
 }
 
 /// Парсит прозаический ADR из `docs/adr/*.md`: первый заголовок
-/// `# ADR-NNN.` / `# ADR-NNN:`, шапочные `- Date:` / `- Status:`.
+/// `# ADR-NNN.` / `# ADR-NNN:`, шапка — `Date`/`Дата` и `Status`/`Статус`.
+///
+/// Формы шапки, которые понимаются (Н9 волны C 0.3.4): `- Status: Accepted`,
+/// `- **Status**: Accepted`, `**Статус**: Accepted`, `Статус: Accepted`,
+/// `## Статус` со значением следующей строкой. Раньше понималась ровно одна
+/// форма, и документ, написанный по-русски, выглядел «расхождением с моделью»
+/// во всех записях проекта — ложная находка вместо честной.
+///
 /// `Ok(None)` — файл не является ADR (нет заголовка с номером).
 fn parse_prose_adr(text: &str) -> Result<Option<ProseAdr>> {
     let heading_re = regex::Regex::new(r"^#{1,3}\s+(ADR-[0-9]+)\s*[:.]\s*(.*?)\s*$")
         .map_err(|e| HarnessError::Model(format!("внутренний regex реестра: {e}")))?;
-    let field_re = regex::Regex::new(r"^-\s*(Date|Status)\s*:\s*(.*?)\s*$")
-        .map_err(|e| HarnessError::Model(format!("внутренний regex реестра: {e}")))?;
     let id_re = crate::model::id_re()?;
 
     let mut parsed: Option<ProseAdr> = None;
+    // Незакрытое «головное» поле: `## Статус` без значения на той же строке.
+    let mut pending: Option<HeaderField> = None;
     for line in text.lines() {
         if parsed.is_none() {
             if let Some(caps) = heading_re.captures(line) {
@@ -171,22 +254,57 @@ fn parse_prose_adr(text: &str) -> Result<Option<ProseAdr>> {
                     title: caps[2].to_string(),
                     date: None,
                     status: None,
+                    status_unparsed: false,
                 });
             }
             continue;
         }
-        if let Some(caps) = field_re.captures(line) {
-            let value = caps[2].trim().trim_matches('*').trim().to_string();
-            let value = (!value.is_empty()).then_some(value);
-            if let Some(p) = &mut parsed {
-                match &caps[1] {
-                    "Date" => p.date = value,
-                    _ => p.status = value,
+        if let Some(p) = &mut parsed {
+            if line.trim().is_empty() {
+                continue;
+            }
+            // Значение «головного» поля — следующая непустая строка.
+            if let Some(field) = pending.take() {
+                let value = strip_prefix(line).trim_matches('*').trim().to_string();
+                if !value.is_empty() {
+                    match field {
+                        HeaderField::Status => p.status.get_or_insert(value),
+                        HeaderField::Date => p.date.get_or_insert(value),
+                    };
                 }
+                continue;
+            }
+            if let Some(value) = field_value(line, &STATUS_NAMES) {
+                if !value.is_empty() {
+                    p.status.get_or_insert(value);
+                }
+                continue;
+            }
+            if let Some(value) = field_value(line, &DATE_NAMES) {
+                if !value.is_empty() {
+                    p.date.get_or_insert(value);
+                }
+                continue;
+            }
+            if let Some(field) = bare_field_name(line) {
+                pending = Some(field);
             }
         }
     }
+    if let Some(p) = &mut parsed {
+        p.status_unparsed = p.status.is_none() && unparsed_status_header(text);
+    }
     Ok(parsed)
+}
+
+/// Есть ли в шапке строка, похожая на поле `Status`/`Статус`, которое не
+/// удалось разобрать ни в одной форме.
+fn unparsed_status_header(text: &str) -> bool {
+    !text
+        .lines()
+        .take(60)
+        .any(|l| field_value(l, &STATUS_NAMES).is_some())
+        && text.lines().take(60).any(looks_like_status_field)
 }
 
 /// Собирает записи проекта `project` из каталога `dir` (два источника).
@@ -222,6 +340,7 @@ fn collect_project(project: &str, dir: &Path, entries: &mut Vec<RegistryEntry>) 
                 file: rel.to_string_lossy().replace('\\', "/"),
                 prose: None,
                 model: None,
+                status_unparsed: adr.status_unparsed,
             });
         }
     }
@@ -268,6 +387,7 @@ fn collect_project(project: &str, dir: &Path, entries: &mut Vec<RegistryEntry>) 
                 status: Some(entity.status),
                 date: entity.date,
                 source: "model".to_string(),
+                status_unparsed: false,
                 file: rel.to_string_lossy().replace('\\', "/"),
                 prose: None,
                 model: None,
@@ -301,6 +421,7 @@ fn face_of(entry: &RegistryEntry) -> AdrFace {
         title: entry.title.clone(),
         status: entry.status.clone(),
         date: entry.date.clone(),
+        status_unparsed: entry.status_unparsed,
     }
 }
 
@@ -324,6 +445,7 @@ fn merge_pair(prose: &RegistryEntry, model: &RegistryEntry) -> RegistryEntry {
         date,
         source: "docs/adr+model".to_string(),
         file: prose.file.clone(),
+        status_unparsed: prose.status_unparsed,
         prose: Some(face_of(prose)),
         model: Some(face_of(model)),
     }
@@ -387,7 +509,24 @@ fn find_issues(entries: &[RegistryEntry]) -> Vec<RegistryFinding> {
                 model.title.trim()
             ));
         }
-        if canonical_status(prose.status.as_deref()) != canonical_status(model.status.as_deref()) {
+        // Шапку не разобрали — это НЕ расхождение с моделью: неизвестно, чему
+        // она равна. Отдельная находка с примером ожидаемого формата (Н9).
+        if prose.status_unparsed {
+            findings.push(RegistryFinding {
+                kind: "prose_header_unparsed".to_string(),
+                message: format!(
+                    "{} {} — шапка прозы не распознана: строка статуса не в одной из \
+                     понимаемых форм (файл: {}). Ожидается `- Status: Accepted` или \
+                     `- **Статус**: Accepted`; поле, которое не удалось прочитать, \
+                     НЕ считается расхождением с моделью",
+                    e.project,
+                    e.id(),
+                    prose.file
+                ),
+            });
+        } else if canonical_status(prose.status.as_deref())
+            != canonical_status(model.status.as_deref())
+        {
             drift.push(format!(
                 "статус: проза «{}» ≠ модель «{}»",
                 prose.status.as_deref().unwrap_or("—"),
@@ -1291,5 +1430,130 @@ mod tests {
             .await
             .expect("вызов");
         assert!(out.is_error, "{}", out.content);
+    }
+}
+
+#[cfg(test)]
+mod tests_h9 {
+    //! Н9 волны C 0.3.4: шапка прозы ADR в формах, которые пишет человек.
+
+    use super::*;
+
+    fn write(root: &Path, rel: &str, text: &str) {
+        let p = root.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, text).unwrap();
+    }
+
+    /// Прогон реестра по каталогу с одним проектом и возвращает находки.
+    fn findings_for(root: &Path) -> Vec<RegistryFinding> {
+        let report = build_registry(root).expect("registry");
+        report.findings
+    }
+
+    /// Русская форма `- **Статус**: Accepted` читается как Accepted, и
+    /// расхождения с моделью НЕТ — это и была находка Н9.
+    #[test]
+    fn russian_status_header_is_parsed() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path();
+        write(
+            root,
+            "p/docs/adr/ADR-001-resh.md",
+            "# ADR-001. Решение\n\n- **Дата**: 2026-09-19\n- **Статус**: Accepted\n\nТело.\n",
+        );
+        write(
+            root,
+            "p/model/ADR-001-resh.md",
+            "---\nid: ADR-001\ntype: adr\ntitle: Решение\nstatus: Accepted\ndate: 2026-09-19\n---\nТело.\n",
+        );
+        let findings = findings_for(root);
+        assert!(
+            !findings.iter().any(|f| f.kind == "prose_model_divergence"),
+            "русская шапка обязана читаться: {findings:?}"
+        );
+        assert!(
+            !findings.iter().any(|f| f.kind == "prose_header_unparsed"),
+            "{findings:?}"
+        );
+    }
+
+    /// Секционная форма `## Статус` со значением следующей строкой.
+    #[test]
+    fn section_status_header_is_parsed() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path();
+        write(
+            root,
+            "p/docs/adr/ADR-001-resh.md",
+            "# ADR-001. Решение\n\n## Статус\n\nAccepted\n\n## Контекст\n\nТело.\n",
+        );
+        write(
+            root,
+            "p/model/ADR-001-resh.md",
+            "---\nid: ADR-001\ntype: adr\ntitle: Решение\nstatus: Accepted\n---\nТело.\n",
+        );
+        let findings = findings_for(root);
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.kind == "prose_model_divergence" || f.kind == "prose_header_unparsed"),
+            "{findings:?}"
+        );
+    }
+
+    /// Непонятная форма — находка «шапка не распознана», а НЕ «расхождение»:
+    /// неизвестно, чему равно поле, поэтому сравнивать нечего.
+    #[test]
+    fn unparsed_status_is_not_reported_as_divergence() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path();
+        write(
+            root,
+            "p/docs/adr/ADR-001-resh.md",
+            "# ADR-001. Решение\n\nСтатус = Accepted\n\nТело.\n",
+        );
+        write(
+            root,
+            "p/model/ADR-001-resh.md",
+            "---\nid: ADR-001\ntype: adr\ntitle: Решение\nstatus: Accepted\n---\nТело.\n",
+        );
+        let findings = findings_for(root);
+        let unparsed: Vec<&RegistryFinding> = findings
+            .iter()
+            .filter(|f| f.kind == "prose_header_unparsed")
+            .collect();
+        assert_eq!(unparsed.len(), 1, "{findings:?}");
+        assert!(
+            unparsed[0].message.contains("- **Статус**: Accepted"),
+            "подсказка обязана называть ожидаемый формат: {}",
+            unparsed[0].message
+        );
+        assert!(
+            !findings.iter().any(|f| f.kind == "prose_model_divergence"),
+            "нераспознанная шапка не может быть расхождением: {findings:?}"
+        );
+    }
+
+    /// Настоящее расхождение по-прежнему ловится.
+    #[test]
+    fn real_divergence_still_reported() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path();
+        write(
+            root,
+            "p/docs/adr/ADR-001-resh.md",
+            "# ADR-001. Решение\n\n- Status: Accepted\n\nТело.\n",
+        );
+        write(
+            root,
+            "p/model/ADR-001-resh.md",
+            "---\nid: ADR-001\ntype: adr\ntitle: Решение\nstatus: Proposed\n---\nТело.\n",
+        );
+        let findings = findings_for(root);
+        assert!(
+            findings.iter().any(|f| f.kind == "prose_model_divergence"),
+            "{findings:?}"
+        );
     }
 }
