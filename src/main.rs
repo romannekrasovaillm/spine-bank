@@ -203,6 +203,19 @@ enum Cmd {
         #[arg(long)]
         explain: bool,
     },
+    /// Метрика доверия к контуру (W4): положение на шкале 1–5 с ЯКОРЯМИ и
+    /// ДОКАЗАТЕЛЬСТВАМИ — какие якоря выполнены, какие нет и почему. Источники:
+    /// журнал MCP-вызовов, реестр правил и регистр FP, результат `redteam
+    /// --save`, вердикт гейта и отчёты рубрик. Ничего не блокирует: отвечает,
+    /// насколько можно верить зелёному этого контура.
+    Trust {
+        /// Репозиторий или кейс (по умолчанию — текущий каталог).
+        #[arg(default_value = ".")]
+        dir: PathBuf,
+        /// Формат: text (дефолт) | json.
+        #[arg(long, default_value = "text")]
+        format: String,
+    },
     /// Первый зелёный за 15 минут (W3): создать каркас кейса и назвать
     /// следующую красную находку с подсказкой — «дорожка до зелёного».
     /// Каркас намеренно красный: его заглушки ловит семантика бандла (Н1),
@@ -258,6 +271,11 @@ enum Cmd {
         /// (по умолчанию прогон её включает: иначе дефект D9 не проверяем).
         #[arg(long)]
         no_decision_quality: bool,
+        /// Сохранить итог измерения в `.arch-handoff/redteam.json` кейса —
+        /// его читает метрика доверия (`arch-be trust`): доля обнаружения
+        /// должна быть измерена, а не пересказана.
+        #[arg(long)]
+        save: bool,
     },
     /// Составное архитектурное ревью репозитория одним ответом (бэклог
     /// волны 3, п.13): маршрут значимости из git-диффа + весь контур
@@ -857,12 +875,12 @@ enum McpCmd {
         args: String,
     },
     /// MCP-сервер (stdio JSON-RPC, NDJSON): архитектурный контроль кодовым
-    /// агентам (Claude Code и др.), ADR-008. Read-only состав: 35 инструментов
-    /// + 7 промптов-плейбуков spine-* (capability prompts). Ручные (15):
+    /// агентам (Claude Code и др.), ADR-008. Read-only состав: 36 инструментов
+    /// + 8 промптов-плейбуков spine-* (capability prompts). Ручные (16):
     ///   `spine_lint`, `fitness_check`, `significance_score`,
     ///   `significance_from_diff`, `trace_check`, `model_query`, `rubric_run`,
     ///   `rubric_prompt`, `rubric_verify`, `kb_search`, `skill_search`,
-    ///   `skill_load`, `mermaid_render`, `rules_suggest`,
+    ///   `skill_load`, `mermaid_render`, `rules_suggest`, `trust_report`,
     ///   `verdict_explain`. Мостовые read-only
     ///   (20): `adr_registry`, `agentsmd_lint`, `archify_validate`,
     ///   `architect_review`, `asyncapi_lint`, `change_impact`, `contract_diff`,
@@ -1807,6 +1825,18 @@ async fn main() -> Result<()> {
                 std::process::exit(code);
             }
         }
+        Some(Cmd::Trust { dir, format }) => {
+            let trust = arch_harness::trust::assess(&dir, &cfg)?;
+            if format.trim().eq_ignore_ascii_case("json") {
+                let out = arch_harness::trust::to_json(&trust);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string())
+                );
+            } else {
+                print!("{}", arch_harness::trust::render(&trust));
+            }
+        }
         Some(Cmd::Bootstrap {
             name,
             dir,
@@ -1901,8 +1931,13 @@ async fn main() -> Result<()> {
             format,
             min_detection,
             no_decision_quality,
+            save,
         }) => {
             let report = arch_harness::redteam::run(&case, min_detection, !no_decision_quality)?;
+            if save {
+                let path = arch_harness::redteam::save_summary(&report)?;
+                eprintln!("Итог измерения сохранён: {}", path.display());
+            }
             match format.trim().to_ascii_lowercase().as_str() {
                 "json" => {
                     let out = report.to_json();

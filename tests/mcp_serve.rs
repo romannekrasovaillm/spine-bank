@@ -225,14 +225,16 @@ fn handshake_then_tools_list_over_stdio() {
         "model_graph",
         "architect_review",
         "change_impact",
+        "trust_report",
         "verdict_explain",
     ] {
         assert!(names.contains(&want), "нет инструмента {want}: {names:?}");
     }
     assert_eq!(
         tools.len(),
-        35,
-        "ровно 35 инструментов в ro-режиме (15 ручных + 20 read-only моста;          verdict_explain — волна W1)"
+        36,
+        "ровно 36 инструментов в ro-режиме (16 ручных + 20 read-only моста; \
+         verdict_explain и trust_report — волна W)"
     );
     // rw-контур и write/exec-принадлежность хоста закрыты в ro-режиме.
     for banned in [
@@ -1633,5 +1635,46 @@ fn verdict_explain_returns_the_three_blocks() {
                 .as_str()
                 .is_some_and(|t| t.contains("СУЩЕСТВУЮЩУЮ")))),
         "блок 2 обязан назвать семантику ссылок: {passport}"
+    );
+}
+
+/// W4: `trust_report` через MCP отдаёт шкалу с якорями, у каждого — чем
+/// подтверждён. Метрика, доступная только из CLI, не помогает агенту,
+/// который и есть источник журнала вызовов.
+#[test]
+fn trust_report_returns_anchors_with_evidence() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let home = tmp.path();
+    let project = home.join("project");
+    std::fs::create_dir_all(&project).expect("mkdir");
+    std::fs::write(project.join("ARCHITECTURE-SPINE.md"), "# Spine\n").expect("spine");
+
+    let resp = mcp_serve(
+        home,
+        &format!(
+            "{}\n",
+            call(
+                1,
+                "trust_report",
+                &json!({"path": project.display().to_string()})
+            )
+        ),
+    );
+    let trust = structured(&resp[0], 1);
+    assert_eq!(trust["schema"], "arch-be/trust/v1");
+    let anchors = trust["anchors"].as_array().expect("якоря");
+    assert_eq!(anchors.len(), 5, "шкала 1–5: {trust}");
+    for a in anchors {
+        assert!(
+            a["evidence"].as_str().is_some_and(|e| !e.is_empty()),
+            "у якоря нет доказательства: {a}"
+        );
+        assert_eq!(a["met"], a["why_not"].is_null(), "якорь несогласован: {a}");
+    }
+    assert!(
+        trust["report_markdown"]
+            .as_str()
+            .is_some_and(|m| m.contains("Доверие к контуру")),
+        "{trust}"
     );
 }

@@ -99,6 +99,7 @@ pub mod survey;
 pub mod tool;
 pub mod tools;
 pub mod trace;
+pub mod trust;
 #[cfg(feature = "harness")]
 pub mod tui;
 #[cfg(feature = "harness")]

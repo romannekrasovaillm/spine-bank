@@ -697,6 +697,70 @@ pub struct RedteamReport {
     pub control_ok: bool,
 }
 
+/// Сохранённый итог мутационного прогона (`.arch-handoff/redteam.json`,
+/// пишет `redteam --save`): метрика доверия (`crate::trust`) читает ИЗМЕРЕННУЮ
+/// долю, а не пересказ о ней — пересчитывать прогон при каждом `trust` было бы
+/// и медленно, и нечестно (кейс мог измениться после измерения).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RedteamSummary {
+    /// Схема файла.
+    pub schema: String,
+    /// Кейс, на котором измерено (подпись, в какой он был редакции).
+    pub case: String,
+    /// Момент измерения (RFC 3339).
+    pub measured_at: String,
+    /// Поймано дефектов (числитель доли).
+    pub caught: usize,
+    /// Дефектов в знаменателе.
+    pub total: usize,
+    /// Доля обнаружения `0..=1`.
+    pub ratio: f64,
+    /// Порог, при котором прогон считался пройденным.
+    pub min_detection: f64,
+    /// Контрольный мутатор: аттестация изменилась при том же вердикте.
+    pub control_ok: bool,
+}
+
+impl RedteamSummary {
+    /// Прогон прошёл порог и контроль аттестации.
+    #[must_use]
+    pub fn passed(&self) -> bool {
+        self.ratio >= self.min_detection && self.control_ok
+    }
+}
+
+/// Записывает итог прогона в `.arch-handoff/redteam.json` каталога кейса.
+///
+/// # Errors
+/// Каталог не создаётся либо файл не пишется.
+pub fn save_summary(report: &RedteamReport) -> Result<PathBuf> {
+    let dir = report.case.join(".arch-handoff");
+    std::fs::create_dir_all(&dir).map_err(|e| crate::error::HarnessError::io(&dir, e))?;
+    let path = dir.join("redteam.json");
+    let summary = RedteamSummary {
+        schema: "arch-be/redteam/v1".to_string(),
+        case: report.case.display().to_string(),
+        measured_at: chrono::Local::now().to_rfc3339(),
+        caught: report.scored_caught(),
+        total: report.scored_total(),
+        ratio: report.detection_ratio(),
+        min_detection: report.min_detection,
+        control_ok: report.control_ok,
+    };
+    let text = serde_json::to_string_pretty(&summary)
+        .map_err(|e| crate::error::HarnessError::Config(format!("redteam: {e}")))?;
+    std::fs::write(&path, text).map_err(|e| crate::error::HarnessError::io(&path, e))?;
+    Ok(path)
+}
+
+/// Читает сохранённый итог; нет файла или он не разбирается — `None`
+/// (метрика доверия не имеет права падать на чужом артефакте).
+#[must_use]
+pub fn load_summary(path: &Path) -> Option<RedteamSummary> {
+    let text = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
 impl RedteamReport {
     /// Дефекты, участвующие в доле обнаружения: входят в набор раздела 7 и
     /// не пропущены из-за отсутствия входа.

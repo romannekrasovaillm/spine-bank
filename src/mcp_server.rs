@@ -354,6 +354,7 @@ pub const MANUAL_TOOLS: &[&str] = &[
     "skill_load",
     "mermaid_render",
     "rules_suggest",
+    "trust_report",
     "verdict_explain",
 ];
 
@@ -1011,6 +1012,13 @@ impl McpServe {
             // Паспорт вердикта (W1): вердикт гейта + его границы.
             "verdict_explain" => self
                 .tool_verdict_explain(args)
+                .await
+                .map(DispatchOutcome::Structured),
+            // Метрика доверия к контуру (W4): место на шкале 1–5 с якорями
+            // и доказательствами. Поверх журнала вызовов — того самого,
+            // который пишет этот сервер.
+            "trust_report" => self
+                .tool_trust_report(args)
                 .await
                 .map(DispatchOutcome::Structured),
             // Мост в реестр инструментов харнесса (белые списки режима).
@@ -1842,6 +1850,33 @@ impl McpServe {
         }))
     }
 
+    /// Метрика доверия к контуру (W4): шкала 1–5 с якорями и доказательствами.
+    /// Ничего не блокирует и ничего не пишет.
+    async fn tool_trust_report(&self, args: Value) -> std::result::Result<Value, CallError> {
+        #[derive(Deserialize)]
+        struct Args {
+            /// Репозиторий или кейс (по умолчанию — каталог вызова).
+            path: Option<String>,
+            /// Рабочий каталог клиента: относительный `path` резолвится от него.
+            cwd: Option<String>,
+        }
+        let args: Args = parse_args(args, "trust_report")?;
+        let raw = args.path.map_or_else(|| PathBuf::from("."), PathBuf::from);
+        let repo = match &args.cwd {
+            Some(cwd) if !raw.is_absolute() => PathBuf::from(cwd).join(raw),
+            _ => raw,
+        };
+        let cfg = self.cfg.clone();
+        let repo_for_run = repo.clone();
+        let trust = blocking("trust_report", move || {
+            crate::trust::assess(&repo_for_run, &cfg)
+        })
+        .await?;
+        let mut out = crate::trust::to_json(&trust);
+        out["report_markdown"] = Value::String(crate::trust::render(&trust));
+        Ok(out)
+    }
+
     /// Паспорт вердикта (W1): прогон гейта + страница «что зелёный НЕ
     /// означает». Инструмент чтения: ничего не пишет и решения не принимает —
     /// возвращает тот же вердикт, что `arch-be gate`, и его границы.
@@ -2401,6 +2436,24 @@ fn tool_specs() -> Vec<Value> {
                     "cwd": {"type": "string", "description": "Рабочий каталог клиента: относительный path резолвится от него (по умолчанию — cwd процесса сервера)"},
                 },
                 "required": ["path"],
+            },
+            "annotations": read_only,
+        }),
+        json!({
+            "name": "trust_report",
+            "description": "Метрика доверия к контуру: положение на шкале 1–5 с ЯКОРЯМИ и \
+                            ДОКАЗАТЕЛЬСТВАМИ — контур подключён (журнал вызовов), гейт \
+                            останавливал работу (fail → починка), правила сопровождаются \
+                            (владелец, срок, проверка поведения), пакет защищён измеренно \
+                            (доля обнаружения redteam), вердикт полон и подписан. У каждого \
+                            якоря: чем подтверждён и почему не достигнут. Ничего не \
+                            блокирует: отвечает, насколько можно верить зелёному контура",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Репозиторий или кейс (по умолчанию — каталог вызова)"},
+                    "cwd": {"type": "string", "description": "Рабочий каталог клиента: относительный path резолвится от него (по умолчанию — cwd процесса сервера)"},
+                },
             },
             "annotations": read_only,
         }),

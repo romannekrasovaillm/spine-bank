@@ -224,7 +224,7 @@ project-scoped сервер из `.mcp.json` и доверие каталогу 
 ## 4. Режимы MCP-сервера
 
 ```bash
-arch-be mcp serve          # дефолт: строго read-only (35 инструментов:
+arch-be mcp serve          # дефолт: строго read-only (36 инструментов:
                            #   14 ручных + 20 моста в реестр)
 arch-be mcp serve --rw     # + записывающие: handoff_create, adr_new,
                            #   agentsmd_generate, skill_distill, archify_*,

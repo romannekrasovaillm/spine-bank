@@ -67,6 +67,18 @@ fn md_cell(text: &str) -> String {
 ///
 /// # Errors
 /// Каталог `evidence/` не создаётся, файл не пишется.
+/// Путь регистра ложных срабатываний проекта
+/// (`<repo>/evidence/fp-register.md`) — регистр читают `digest` и метрика
+/// доверия (`crate::trust`), и путь у них обязан совпадать.
+#[must_use]
+pub fn fp_register_path(repo: &Path) -> PathBuf {
+    repo.join(FP_REGISTER_REL)
+}
+
+/// Пометить срабатывание правила как ложное.
+///
+/// # Errors
+/// Каталог `evidence/` не создаётся либо строка не дописывается в регистр.
 pub fn fp_register_mark(
     repo: &Path,
     rule: &str,

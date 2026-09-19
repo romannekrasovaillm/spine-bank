@@ -1277,7 +1277,7 @@ pub struct FitnessRule {
     /// находка уровня warn (антипаттерн «правило без срока жизни» — теперь
     /// механически видно).
     #[serde(default)]
-    expiry: Option<String>,
+    pub(crate) expiry: Option<String>,
     /// Карточка правила: оценка стоимости сопровождения в человеко-часах
     /// (метаданные; движок не enforce'ит — суммируется в `rules_report`).
     #[serde(default)]
@@ -2056,6 +2056,15 @@ fn until_expired(y: i32, m: u32, d: u32) -> bool {
         (i64::from(y) * 12 + i64::from(m))
             < (i64::from(today.year()) * 12 + i64::from(today.month()))
     }
+}
+
+/// Срок правила `expiry` уже прошёл (та же логика дат, что у overrides:
+/// `YYYY-MM-DD` либо `YYYY-MM` — срок действует по указанный месяц
+/// включительно). Неразбираемая дата — «не просрочен»: за формат отвечает
+/// отдельная находка `check`.
+#[must_use]
+pub fn expiry_is_past(raw: &str) -> bool {
+    parse_until(raw.trim()).is_some_and(|(y, m, d)| until_expired(y, m, d))
 }
 
 /// Оценивает overrides против итогового набора правил: статусы для отчёта,
