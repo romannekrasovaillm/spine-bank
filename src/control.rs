@@ -2529,6 +2529,23 @@ pub fn default_anchor_base(repo: &Path) -> Option<String> {
     head_ok.then(|| "HEAD".to_string())
 }
 
+/// Корень git-репозитория для `repo` (`git rev-parse --show-toplevel`),
+/// канонизированный. `None` — git недоступен или каталог вне репозитория.
+fn git_toplevel(repo: &Path) -> Option<PathBuf> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["rev-parse", "--show-toplevel"])
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(out.stdout).ok()?;
+    PathBuf::from(text.trim()).canonicalize().ok()
+}
+
 /// Сверка состава правил с git-базой (П5, Д4): анти-ослабление доступно не
 /// только составному гейту. Никогда не падает: недоступность базы — честный
 /// `note`, а не молчаливый PASS.
@@ -2562,13 +2579,25 @@ pub fn rule_anchor(repo: &Path, constraints: &Path, base: Option<&str>) -> RuleA
             issues: Vec::new(),
         };
     };
-    let Ok(rel) = abs_constraints.strip_prefix(&abs_repo) else {
+    let Ok(rel_to_repo) = abs_constraints.strip_prefix(&abs_repo) else {
         return RuleAnchor {
             base: Some(rev),
             checked: false,
             note: Some("реестр вне репозитория — сравнение невозможно".into()),
             issues: Vec::new(),
         };
+    };
+    // `git show <rev>:<path>` считает путь от КОРНЯ git-репозитория, а не от
+    // переданного каталога. Для реестра в подкаталоге (`arch-be control check
+    // кейсы/x`) путь от каталога указывал бы на корневой CONSTRAINTS.yaml, и
+    // каждое правило корня выглядело бы «удалённым» — ложный `rule_weakened`
+    // на ровном месте. Поэтому путь достраивается до корня репозитория.
+    let rel = match git_toplevel(abs_repo.as_path()) {
+        Some(top) => match abs_constraints.strip_prefix(&top) {
+            Ok(r) => r.to_path_buf(),
+            Err(_) => rel_to_repo.to_path_buf(),
+        },
+        None => rel_to_repo.to_path_buf(),
     };
     let git_rel = rel.to_string_lossy().replace('\\', "/");
     let out = Command::new("git")
@@ -4978,6 +5007,68 @@ mod tests {
          type: file_exists\n  \
          path: \"ARCHITECTURE-SPINE.md\"\n  \
          severity: error\n";
+
+    /// Н12: реестр правил в ПОДКАТАЛОГЕ сверяется со своей базовой версией, а
+    /// не с корневым реестром репозитория. Иначе каждое правило корня
+    /// выглядело бы «удалённым» — ложный `rule_weakened` на реестре кейса,
+    /// который существует ровно в одном экземпляре.
+    #[test]
+    fn rule_anchor_reads_the_subdirectory_registry_from_the_git_root() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path();
+        let case = repo.join("кейсы/x");
+        std::fs::create_dir_all(&case).expect("mkdir");
+        std::fs::write(
+            repo.join("CONSTRAINTS.yaml"),
+            "rules:\n  - name: root_rule\n    type: file_exists\n    path: \"A\"\n    severity: error\n",
+        )
+        .expect("root registry");
+        let case_registry = case.join("CONSTRAINTS.yaml");
+        std::fs::write(
+            &case_registry,
+            "rules:\n  - name: case_rule\n    type: file_exists\n    path: \"B\"\n    severity: error\n",
+        )
+        .expect("case registry");
+        git(repo, &["init", "-q"]);
+        git(repo, &["add", "-A"]);
+        git(repo, &["commit", "-q", "-m", "init"]);
+
+        let anchor = rule_anchor(&case, &case_registry, None);
+        assert!(
+            anchor.issues.is_empty(),
+            "корневое правило не имеет отношения к реестру кейса: {:?}",
+            anchor.issues
+        );
+
+        // Ослабление СВОЕГО правила по-прежнему видно.
+        std::fs::write(&case_registry, "rules: []\n").expect("weakened");
+        let anchor = rule_anchor(&case, &case_registry, None);
+        assert!(
+            anchor.issues.iter().any(|i| i.rule == "rule_weakened"),
+            "ослабление реестра кейса обязано остаться видимым: {:?}",
+            anchor.issues
+        );
+    }
+
+    /// git в каталоге с тестовой идентичностью коммиттера.
+    fn git(dir: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .expect("git");
+        assert!(
+            out.status.success(),
+            "git {}: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
 
     /// Текущая версия, идентичная базовой (без ослаблений).
     #[test]
