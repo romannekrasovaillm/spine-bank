@@ -272,14 +272,66 @@ MCP-инструмента, а плейбуки работы (`spine-*`) при�
 
 <p align="center">
   <img src="docs/screenshots/harnesses/waves-qwen-tui-prompts.png" alt="Qwen Code 0.24: плейбуки spine-* как слэш-команды [Project] через MCP prompts" width="49%">
-  <img src="docs/screenshots/harnesses/waves-claude-tui-mcp.png" alt="Claude Code: /mcp — spine connected, 33 tools" width="49%">
+  <img src="docs/screenshots/harnesses/waves-claude-tui-mcp.png" alt="Claude Code: /mcp — spine connected, 33 tools (захват; актуально — 34)" width="49%">
 </p>
 
 ![Headless-прогоны architect_review: omp · OpenClaw · Qwen](docs/screenshots/harnesses/waves-headless-reviews.png)
 
-Полный гид по каналу MCP — карта всех 33 инструментов по задачам
+Полный гид по каналу MCP — карта всех 34 инструментов по задачам
 архитектора, плейбуки, живые сессии, журнал вызовов, устранение
 неполадок: **[docs/mcp_for_architects.md](docs/mcp_for_architects.md)**.
+
+## Что Spine даёт архитектору — измерено на живом кейсе
+
+Проверено экспериментом «Spine Core без своей LLM»: внешний агент (Claude
+Code) спроектировал сервис цифрового рубля маршрута Critical, а все
+проверки исполнял `arch-be` без единого API-ключа. Итог — пять ценностей,
+измеренных на кейсе [digital-ruble](кейсы/digital-ruble/) (полные отчёты и
+честные границы — [docs/experiments/](docs/experiments/)):
+
+1. **Проверяющий, который не я.** Гейты нашли дефекты в артефактах самого
+   автора, а evidence-гейт сказал работе «нет»: FAIL — выпуск заблокирован
+   (4 артефакта стадии реализации отсутствуют). Харнесс-генератор не может
+   произвести отказ от собственного результата — здесь отказ произвела
+   механика.
+2. **Схема, заставляющая полноту вместо дисциплины.** У инварианта обязано
+   быть fitness-правило или явное `unverifiable`, у интеграции — файл
+   контракта, у ADR — затронутый компонент, у NFR — способ проверки:
+   полнота — свойство графа (161 связь, 100% по шести звеньям), а не
+   утверждение автора.
+3. **Числа, которые проверяются, а не декларируются.** Доступность цепочки
+   99,4004% против SLA 98%, latency-бюджет 2150/3000 мс, TCO 46,86 млн
+   ₽/год — арифметика над моделью, которую пересчитывает машина, а не
+   автор.
+4. **Governance, ограничивающий автономию агента.** Цена сопровождения
+   правил (26 ч/год по 15 правилам, владелец, `expiry`), маршрут значимости
+   как гейт (10/15 → Critical), человеческий гейт A3, который нельзя
+   закрыть за человека.
+5. **Передача и сопоставимость.** Handoff-пакет в ~1500 токенов с машинным
+   контрактом результата и якорная рубрика 3,85/5 — измерение,
+   воспроизводимое в другой сессии и на другом кейсе, а не мнение.
+
+В 0.3.0 контур усилен: **split-judge** — Spine не судит, а механически
+проверяет доказательность оценок внешнего судьи (подделанная цитата
+поймана, взвешенный итог отреагировал); **Stop-хук с exit 2** останавливает
+агента на красном гейте. Формула из отчёта: «не текст, а измерение текста…
+не могу получить „нет" на свою работу — здесь могу».
+
+> **🇬🇧 English:** Measured on a live Critical-route case
+> ([digital-ruble](кейсы/digital-ruble/), external Claude Code agent, zero
+> LLM keys in Spine): **(1)** a checker that is not the author — the
+> evidence gate said «no» and blocked the release; **(2)** a schema that
+> enforces completeness instead of discipline — 161 links, 100%
+> traceability over six links; **(3)** numbers that are recomputed, not
+> declared — 99.4004% chain availability vs SLA, latency budgets, TCO;
+> **(4)** governance that limits the agent's autonomy — rule maintenance
+> cost with owner/expiry, the significance route as a gate, a human A3
+> gate that cannot be closed on the human's behalf; **(5)** handoff and
+> comparability — a ~1500-token package with a machine result contract and
+> an anchored 3.85/5 rubric score. 0.3.0 strengthens this: split-judge
+> (Spine mechanically verifies the evidence of the external judge's
+> scores — a fabricated quote was caught) and a Stop hook with exit 2.
+> Full reports: [docs/experiments/](docs/experiments/).
 
 ## Хуки-гейты для архитекторов
 
@@ -364,7 +416,7 @@ fitness-правил, **сам** чинил его и перепроверял. 
 ## Что внутри MCP-сервера
 
 ```bash
-arch-be mcp serve         # read-only: 33 инструмента (контроль + знания + реестры)
+arch-be mcp serve         # read-only: 34 инструмента (контроль + знания + реестры)
                           # + 7 промптов-плейбуков spine-* (слэш-команды хоста)
 arch-be mcp serve --rw    # + handoff_create (теперь и в core), adr_new, …
 ```
@@ -374,7 +426,8 @@ arch-be mcp serve --rw    # + handoff_create (теперь и в core), adr_new,
   `model_validate`, `model_drift`, `contract_diff` (OpenAPI/proto/Avro/
   JSON Schema/DDL), `openapi_lint`, `asyncapi_lint`, `fleet_audit`,
   `archify_validate`, `agentsmd_lint`, `nfr_check`, `delta_guard`,
-  `evidence_verify`; составные `architect_review` и `change_impact`.
+  `evidence_verify`, `rules_suggest` (кандидатные fitness-правила из
+  чек-листов скиллов); составные `architect_review` и `change_impact`.
 - **Реестры**: `landscape_report`, `adr_registry`, `rules_report`,
   `openspec_coverage`, `model_graph`.
 - **Знания**: `kb_search`, `skill_search`, `skill_load`, `rubric_list`,
@@ -393,6 +446,7 @@ arch-be mcp serve --rw    # + handoff_create (теперь и в core), adr_new,
 | Кейс | Что показывает |
 |------|----------------|
 | [drift-control](кейсы/drift-control/) | Голая задача → FAIL 2/6; с handoff-пакетом → PASS 6/6 |
+| [digital-ruble](кейсы/digital-ruble/) | Маршрут Critical без LLM у Spine: полный комплект, evidence FAIL — выпуск заблокирован |
 | [fleet-spine-drift](кейсы/fleet-spine-drift/) | Аудит флота: дрейф `CONSTRAINTS.yaml` как exit-код — без LLM |
 | [parallel-epics](кейсы/parallel-epics/) · [fleet-of-ten](кейсы/fleet-of-ten/) | Спайн как клей флота Claude Code |
 | [legacy-survey](кейсы/legacy-survey/) · [jvm-archunit-gate](кейсы/jvm-archunit-gate/) | Reverse discovery, гейт по байткоду |

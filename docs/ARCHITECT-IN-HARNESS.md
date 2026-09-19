@@ -10,7 +10,7 @@
 
 | Канал | Что это | Куда попадает |
 |---|---|---|
-| **MCP** | 33 read-only инструмента (+10 под `--rw`): гейты, трасса, модель, контракты, NFR, evidence, реестры, знания, судья-механика | `.mcp.json` / `.qwen/settings.json` / `.kimi-code/mcp.json` |
+| **MCP** | 34 read-only инструмента (+10 под `--rw`): гейты, трасса, модель, контракты, NFR, evidence, реестры, знания, судья-механика | `.mcp.json` / `.qwen/settings.json` / `.kimi-code/mcp.json` |
 | **Скиллы** | 62 SKILL.md: методы (ADR, saga, fitness…) + **плейбуки работы со Spine** (`spine-*`) | `.claude/skills`, `.qwen/skills`, `.kimi-code/skills`, workspace OpenClaw |
 | **Хуки** | Гейт на событиях харнесса: Stop (Claude/Kimi), TS-хук (omp), плагин (OpenClaw) | `settings.json` / `--hook` / плагин |
 

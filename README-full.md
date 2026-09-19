@@ -61,6 +61,7 @@ spine-инвариантов до пакета передачи кодовому
 | [fleet-spine-drift](кейсы/fleet-spine-drift/) | — (механический) | Аудит флота: дубли 66.7% и дрейф `CONSTRAINTS.yaml` как exit-код; delta guard запрещает правки спайна мимо дельты |
 | [legacy-survey](кейсы/legacy-survey/) | — (механический) | Reverse discovery legacy-монолита: скрытые связи с `[confirmed]` и честные `[gap]` |
 | [jvm-archunit-gate](кейсы/jvm-archunit-gate/) | — (механический) | Один `CONSTRAINTS.yaml` — два исполнителя: нативный гейт и настоящий ArchUnit по байткоду |
+| [digital-ruble](кейсы/digital-ruble/) | Claude Code (без LLM у Spine) | Маршрут Critical в режиме «Spine Core без своей LLM»: 65 сущностей, 10 инвариантов, 15 правил, NFR-математика — и evidence FAIL с блокировкой выпуска |
 
 <p align="center">
   <a href="docs/handoff_walkthrough.md"><img src="docs/screenshots/05-handoff.png" alt="Handoff кодовому харнессу: handoff_create собирает пакет .arch-handoff/, harness_run прогоняет Claude Code с умными таймаутами, контракт результата в сводке, control_check подтверждает целостность · handoff walkthrough" width="92%"></a><br>
@@ -500,10 +501,10 @@ CI-джобой `dogfood` (`arch-be control spine` + `arch-be control check .` +
   > CI и кейсах `кейсы/`.
 - **MCP-клиент** (`docs/mcp.md`), **веб-доступ** (11 кураторских сайтов
   архитектора) и **локальная база знаний** (`docs/web_kb.md`).
-- **MCP-сервер** `arch-be mcp serve` (ADR-008): 33 read-only инструмента
+- **MCP-сервер** `arch-be mcp serve` (ADR-008): 34 read-only инструмента
   (контроль: `spine_lint`, `fitness_check`, `significance_score`/`significance_from_diff`,
   `trace_check`, `model_query`, `nfr_check`, `delta_guard`, `evidence_verify`,
-  `contract_diff`; реестры: `landscape_report`, `adr_registry`, `rules_report`,
+  `contract_diff`, `rules_suggest`; реестры: `landscape_report`, `adr_registry`, `rules_report`,
   `openspec_coverage`, `model_graph`; составные `architect_review`/`change_impact`;
   знания и судья-механика) наружу кодовым агентам
   (Claude Code и др.) — структурированный verdict (`passed` + находки) в момент написания
@@ -560,6 +561,17 @@ CI-джобой `dogfood` (`arch-be control spine` + `arch-be control check .` +
   остановил коммит с мусором сборки), clippy `-D warnings` с явной
   политикой исключений, миграция на поддерживаемый YAML-крейт, блок
   безопасности исполнения кодовых харнессов.
+- **Ценность контура — измерена внешним агентом** ([кейс
+  010](кейсы/digital-ruble/), отчёты — `docs/experiments/`): Claude Code без
+  единого API-ключа у Spine спроектировал сервис цифрового рубля маршрута
+  Critical и получил то, чего собственный харнесс дать не может, —
+  «проверяющего, который не я» (гейты нашли дефекты в его же артефактах;
+  evidence-гейт сказал «нет» и заблокировал выпуск), схему, требующую
+  полноты (161 связь, 100% трассировки), числа, которые пересчитывает
+  машина (99,4004% против SLA, TCO 46,86 млн ₽/год), governance с
+  человеческим гейтом A3 и пакет передачи в ~1500 токенов с рубрикой
+  3,85/5. Split-judge 0.3.0 поймал подделанную цитату судьи; честные
+  границы (что остаётся методикам и человеку) зафиксированы в отчётах.
 
 ### Быстрый старт
 
@@ -658,7 +670,7 @@ arch-be [--config <path>] <command>   # без команды — TUI
 | `kb <query> [--limit]` | Поиск по локальной базе знаний |
 | `web search <query> [--arch]` / `web fetch <url>` / `web sites` | Веб: поиск, фетч, кураторские сайты |
 | `mcp list` / `mcp call <server__tool>` | MCP-серверы и вызовы инструментов |
-| `mcp serve` | MCP-сервер (stdio): архитектурный контроль кодовым агентам — verdict в момент написания кода (ADR-008, `docs/mcp.md`); 33 read-only инструмента + 7 промптов-плейбуков `spine-*`; `--rw` — белый список записей (`handoff_create`, `adr_new`, …); каждый вызов журналируется в `.arch-handoff/mcp-calls.jsonl` |
+| `mcp serve` | MCP-сервер (stdio): архитектурный контроль кодовым агентам — verdict в момент написания кода (ADR-008, `docs/mcp.md`); 34 read-only инструмента + 7 промптов-плейбуков `spine-*`; `--rw` — белый список записей (`handoff_create`, `adr_new`, …); каждый вызов журналируется в `.arch-handoff/mcp-calls.jsonl` |
 | `connect <claude\|qwen\|gigacode\|codex\|kimi\|omp\|generic> [--dir] [--rw] [--no-skills] [--no-hooks] [--no-agents-md] [--strict-hooks] [--apply-global] [--dry-run]` | Подключение Spine к внешнему CLI-агенту: MCP-конфиг (мердж, чужое сохраняется), скиллы, хуки (`arch-be gate --route auto`); `--dry-run` — только план (`docs/CONNECT.md`, `docs/mcp.md`) |
 | `connect ci --provider gitlab\|github\|jenkins` / `connect git-hooks` | Хосто-независимые гейты: джоба `arch-be gate` под площадку CI (нативный формат отчёта: codequality/sarif/junit) / локальные pre-commit + pre-push (`docs/CONNECT.md`) |
 | `handoff <harness> --repo <path> --task <text>` | Handoff-пакет `.arch-handoff/` |
@@ -930,10 +942,10 @@ Live mini-case: [`кейсы/fleet-spine-drift`](кейсы/fleet-spine-drift/) 
   attribute scenarios** (`QAS-*` entities: source/stimulus/artifact/response/
   measure) unfold automatically into the acceptance-criteria section of the
   handoff `TASK.md`.
-- **MCP server** `arch-be mcp serve` (ADR-008): 33 read-only tools (control:
+- **MCP server** `arch-be mcp serve` (ADR-008): 34 read-only tools (control:
   `spine_lint`, `fitness_check`, `significance_score`/`significance_from_diff`,
   `trace_check`, `model_query`, `nfr_check`, `delta_guard`, `evidence_verify`,
-  `contract_diff`; registries: `landscape_report`, `adr_registry`, `rules_report`,
+  `contract_diff`, `rules_suggest`; registries: `landscape_report`, `adr_registry`, `rules_report`,
   `openspec_coverage`, `model_graph`; composite `architect_review`/`change_impact`;
   knowledge and judge mechanics) exposed to coding agents
   (Claude Code etc.) — structured verdict (`passed` + findings) at code-writing
@@ -1142,6 +1154,18 @@ paid off:
   junk), clippy `-D warnings` with an explicit allow policy, a migration
   to the maintained YAML crate, and the code-harness execution-safety
   block.
+- **The contour's value — measured by an external agent** ([case
+  010](кейсы/digital-ruble/), reports in `docs/experiments/`): Claude Code,
+  with zero LLM keys inside Spine, designed a Critical-route digital-ruble
+  service and got what its own harness cannot provide — "a checker that is
+  not me" (the gates found defects in the agent's own artifacts; the
+  evidence gate said «no» and blocked the release), a schema that enforces
+  completeness (161 links, 100% traceability), numbers recomputed by the
+  machine (99.4004% vs SLA, TCO ₽46.86M/yr), governance with a human A3
+  gate, and a ~1500-token handoff package with an anchored 3.85/5 rubric
+  score. The 0.3.0 split-judge caught a fabricated judge quote; the honest
+  boundaries (what remains for skill methodologies and humans) are recorded
+  in the reports.
 
 ### Quick start
 
