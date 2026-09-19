@@ -350,16 +350,12 @@ fn load_cover_rules(constraints: &Path) -> Result<Vec<CoverRule>> {
     Ok(parsed.rules.into_iter().chain(parsed.constraints).collect())
 }
 
-/// Файл ограничений по умолчанию для репозитория: `.arch-handoff/CONSTRAINTS.yaml`,
+/// Файл ограничений по умолчанию для репозитория: единый резолвер (E2,
+/// [`crate::control::resolve_constraints_path`]) — `.arch-handoff/CONSTRAINTS.yaml`,
 /// иначе `CONSTRAINTS.yaml` в корне; `None` — ни одного нет.
 #[must_use]
 pub fn default_constraints(root: &Path) -> Option<PathBuf> {
-    let handoff = root.join(".arch-handoff/CONSTRAINTS.yaml");
-    if handoff.is_file() {
-        return Some(handoff);
-    }
-    let plain = root.join("CONSTRAINTS.yaml");
-    plain.is_file().then_some(plain)
+    crate::control::resolve_constraints_path(root, None)
 }
 
 /// Статус покрытия требования решением.
@@ -396,6 +392,11 @@ pub struct CoverageReport {
     /// Файл ограничений, из которого прочитаны `covers:` (`None` — не найден,
     /// все требования «без решения»).
     pub constraints: Option<PathBuf>,
+    /// Вторая копия реестра, отличающаяся от использованной (drift, E2):
+    /// существуют обе копии (пакетная и корневая) и они различаются.
+    /// Аддитивное поле (не сериализуется, когда `None`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub constraints_drift: Option<PathBuf>,
     /// Уникальных требований SHALL/MUST (дубли по id слиты).
     pub total: usize,
     /// Покрыто детектором.
@@ -422,6 +423,9 @@ impl CoverageReport {
         match &self.constraints {
             Some(c) => {
                 let _ = writeln!(out, "Файл ограничений: {}", c.display());
+                if let Some(d) = &self.constraints_drift {
+                    let _ = writeln!(out, "{}", crate::control::constraints_drift_note(c, d));
+                }
             }
             None => {
                 let _ = writeln!(
@@ -530,9 +534,15 @@ fn unique_by_id(requirements: Vec<Requirement>) -> Vec<Requirement> {
 /// читается/невалиден, файл спеки не читается.
 pub fn coverage(root: &Path, constraints: Option<&Path>) -> Result<CoverageReport> {
     let requirements = unique_by_id(scan_requirements(root)?);
-    let path = match constraints {
-        Some(p) => Some(p.to_path_buf()),
-        None => default_constraints(root),
+    // Единый резолвер (E2): явный путь → пакетная копия → корневая; дрейф
+    // двух копий (корневая новее пакетной — частый случай) — пометкой,
+    // а не молчаливым покрытием по устаревшей копии.
+    let (path, drift) = match constraints {
+        Some(p) => (Some(p.to_path_buf()), None),
+        None => match crate::control::resolve_constraints_path_detailed(root, None) {
+            Some(resolution) => (Some(resolution.path), resolution.drift),
+            None => (None, None),
+        },
     };
     let rules = match &path {
         Some(p) => load_cover_rules(p)?,
@@ -543,6 +553,7 @@ pub fn coverage(root: &Path, constraints: Option<&Path>) -> Result<CoverageRepor
     Ok(CoverageReport {
         root: root.to_path_buf(),
         constraints: path,
+        constraints_drift: drift,
         total: items.len(),
         covered: count(CoverageStatus::Covered),
         unverifiable: count(CoverageStatus::Unverifiable),
@@ -999,10 +1010,16 @@ impl Tool for OpenspecCoverageTool {
             report.unresolved,
             if strict { " (strict)" } else { "" }
         );
+        let drift_note = match (&report.constraints, &report.constraints_drift) {
+            (Some(c), Some(d)) => Some(crate::control::constraints_drift_note(c, d)),
+            _ => None,
+        };
         let verdict = json!({
             "tool": "openspec_coverage",
             "passed": !(strict && report.unresolved > 0),
             "strict": strict,
+            "constraints": report.constraints.as_ref().map(|p| p.display().to_string()),
+            "drift_note": drift_note,
             "total": report.total,
             "covered": report.covered,
             "unverifiable": report.unverifiable,
@@ -1206,6 +1223,48 @@ mod tests {
         assert_eq!(report.constraints, None);
         assert_eq!(report.unresolved, report.total);
         assert_eq!(report.covered, 0);
+    }
+
+    /// E2: обе копии реестра различаются — покрытие по пакетной + пометка
+    /// дрейфа (а не молчаливый расчёт по устаревшей копии).
+    #[test]
+    fn coverage_notes_drift_of_two_copies() {
+        let dir = fixture_repo();
+        let root = dir.path();
+        let covered_id = fixture_money_id();
+        // Корневая копия «новее»: в ней есть covers, в пакетной — нет.
+        write(
+            &root.join("CONSTRAINTS.yaml"),
+            &format!(
+                "rules:\n  - name: detector_rule\n    type: must_contain\n    covers: [\"{covered_id}\"]\n"
+            ),
+        );
+        write(
+            &root.join(".arch-handoff/CONSTRAINTS.yaml"),
+            "rules:\n  - name: detector_rule\n    type: must_contain\n",
+        );
+        let report = coverage(root, None).expect("coverage");
+        assert_eq!(
+            report.constraints,
+            Some(root.join(".arch-handoff/CONSTRAINTS.yaml")),
+            "используется пакетная копия"
+        );
+        assert_eq!(
+            report.constraints_drift,
+            Some(root.join("CONSTRAINTS.yaml"))
+        );
+        let md = report.to_markdown();
+        assert!(md.contains("Файл ограничений: "), "{md}");
+        assert!(md.contains("копии реестра различаются"), "{md}");
+        assert!(md.contains("отличается (drift)"), "{md}");
+        // Копии одинаковы — пометки нет.
+        write(
+            &root.join("CONSTRAINTS.yaml"),
+            "rules:\n  - name: detector_rule\n    type: must_contain\n",
+        );
+        let report = coverage(root, None).expect("coverage");
+        assert_eq!(report.constraints_drift, None);
+        assert!(!report.to_markdown().contains("drift"));
     }
 
     #[test]
