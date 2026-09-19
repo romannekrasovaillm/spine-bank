@@ -33,7 +33,7 @@ function calling), ошибки инструментов — данные для
 | `agent/slash.rs` | Слэш-команды TUI (`docs/slash_commands.md`). |
 | `agent/prompts.rs` | Библиотека промптов `assets/prompts/*.md`; плейсхолдеры `{{var}}`. |
 | `memory.rs` | Глобальная md-память (`paths.memory_file`, дефолт `~/.arch-harness/MEMORY.md`): загрузка, дописка заметок, секция в системном промпте. |
-| `mermaid.rs`, `mermaid/{parse,model,layout,draw}.rs` | Подмножество mermaid (flowchart, sequenceDiagram, erDiagram, C4Context/C4Container/C4Component) → символьная сетка; ER/C4 понижаются к flowchart-AST (многострочные метки узлов); layered layout (Sugiyama-lite). |
+| `mermaid.rs`, `mermaid/{parse,model,layout,draw}.rs` | Подмножество mermaid (flowchart, sequenceDiagram, erDiagram, C4Context/C4Container/C4Component) → символьная сетка; `;` вне двойных кавычек — разделитель операторов flowchart (однострочная форма `graph TD; A-->B;`); ER/C4 понижаются к flowchart-AST (многострочные метки узлов); layered layout (Sugiyama-lite). |
 | `rubric.rs` | Движок рубрик: якорные/динамические, LLM-судья (k сэмплов → медиана, метки `unstable`/`evidence_not_found`, механическая проверка цитат, лимит длины — явная ошибка, изоляция текста — ADR-004), `RubricReport`. |
 | `bench.rs` | Бенчмарки: YAML-сценарий → ответ модели → оценка рубрикой → отчёты md+json; golden-set судьи (`assets/benchmarks/golden/`, `run_golden`, метрика MAE, гейт по `judge.golden_max_mae`). |
 | `web.rs` | DuckDuckGo-поиск, site:-ограничение по кураторским сайтам, fetch html→text. |

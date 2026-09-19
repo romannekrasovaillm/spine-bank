@@ -105,11 +105,11 @@ exit 2, stderr уходит агенту; строки вывода хук не 
 | Инструмент | Аргументы | Verdict |
 |---|---|---|
 | `spine_lint` | `path` | линтер ARCHITECTURE-SPINE.md: `passed=false` при находках error (дубли AD-id, пустые Binds/Prevents/Rule, заглушки, непиннутые версии, битые ссылки AD) |
-| `fitness_check` | `repo`, `constraints?` | прогон CONSTRAINTS.yaml (дефолт `<repo>/.arch-handoff/CONSTRAINTS.yaml`): must_contain / must_not_contain / each_file_must_contain / file_exists / dir_must_have_file / max_age / command_succeeds; `passed=false` — правила нарушены |
+| `fitness_check` | `repo`, `constraints?` | прогон CONSTRAINTS.yaml (единый резолвер: явный `constraints` → `<repo>/.arch-handoff/CONSTRAINTS.yaml` → `<repo>/CONSTRAINTS.yaml`): must_contain / must_not_contain / each_file_must_contain / file_exists / dir_must_have_file / max_age / command_succeeds; `passed=false` — правила нарушены. В вердикте также `constraints` (использованный путь) и `drift_note` (пометка «копии реестра различаются…», если обе копии есть и расходятся); правила с неизвестными типами — warn-находки `unknown_rule_type` в `issues` + суффикс сводки (аддитивное поле `skipped_unknown` — в CLI `--json` и у `rules_report`) |
 | `significance_score` | `triggers` | маршрут значимости Fast/Standard/Critical по 15 триггерам (информационный, без `passed`); `triggers` — карта «триггер → bool» ЛИБО массив строк `"name=true"` / `"name=false"` / голое `"name"` (= true) |
 | `significance_from_diff` | `path?`, `base_ref?`, `declared?` | anti-bypass floor (S-1, ADR-034): триггеры выводятся из git-диффа `path` (без `base_ref` — рабочее дерево против `HEAD`, включая untracked; с `base_ref` — `git diff BASE_REF...HEAD`) и **объединяются** с заявленными `declared` (детектор только добавляет). Ответ: `route`+`score`, `sources` каждого триггера (`declared`/`diff`/`declared+diff`), `undeclared` — найденные диффом, но не заявленные триггеры с файлами-основаниями (`evidence`). Информационный, без `passed`; пороги — из `[significance]` конфига сервера |
-| `trace_check` | `case` | позвенная трассируемость `REQ → NFR → AD/ADR → CMP → правило`: AD без правила и без `unverifiable` — error; verdict + `report_markdown` для evidence bundle |
-| `model_query` | `dir?`, `id?`, `type?` | список сущностей модели (фильтр по типу) или карточка сущности со связями и обратными ссылками |
+| `trace_check` | `case` | позвенная трассируемость `REQ → NFR → AD/ADR → CMP → правило`: AD без правила и без `unverifiable` — error; verdict + `report_markdown` для evidence bundle; толерантная загрузка модели (E3): битые сущности пропускаются, в ответе `load_issues` |
+| `model_query` | `dir?`, `id?`, `type?` | список сущностей модели (фильтр по типу) или карточка сущности со связями и обратными ссылками; толерантная загрузка (E3): работа по валидному подмножеству, в ответе `load_issues` (битые файлы с причинами) |
 | `rubric_run` | `rubric`, `target` \| `target_text`, `model?`, `cwd?` | оценка документа рубрикой LLM-судьёй (ADR-004; нужен API-ключ из конфига arch-be; для моделей `kind = "cli"` ключ не нужен — судья — внешний CLI-харнесс); относительный `target` резолвится от `cwd` (по умолчанию — cwd процесса сервера) |
 | `rubric_prompt` | `rubric`, `target` \| `target_text` | split-judge, фаза 1 (без ключа): system+user промпты судьи + JSON-схема ответа + `judge_config` (число сэмплов k). Промпт исполняет модель хоста, ответы идут в `rubric_verify` |
 | `rubric_verify` | `rubric`, `target` \| `target_text`, `answers`, `model?`, `judge_model?` | split-judge, фаза 2: отчёт рубрики из сырых ответов хоста (медиана, `unstable`, `evidence_not_found`) тем же кодом, что у `rubric_run`; битые ответы отбрасываются со счётчиком `answers.dropped`; `judge_model` — метка фактического судьи (перекрывает `model`, anti-bias «автор = судья»: эхо в поле `judge_model` и строке «Судья: …» markdown-отчёта) |
@@ -136,24 +136,27 @@ false`; `evidence_pack`/`delta_propose` политика R-уровней кла
 `evidence_verify`) и `model_drift` возвращают в `content[0].text` (и в
 `structuredContent.output` моста) JSON-вердикт `{passed, issues, summary}` —
 тот же контракт, что у ручных контрольных инструментов: `passed: false` —
-основание отказать изменению, перечислив находки.
+основание отказать изменению, перечислив находки. У модельных инструментов
+(`nfr_check`, `model_validate`, `model_drift`) вердикт несёт аддитивное поле
+`load_issues` (E3): сущности `model/`, пропущенные из-за ошибок разбора
+(у `model_validate` они же — error-находки `load-error`).
 
 Отчёты транша 2 (read-only; JSON со счётчиками в том же контуре моста):
 
 | Инструмент | Аргументы | Возвращает |
 |---|---|---|
-| `landscape_report` | `path`, `format?` (`markdown`\|`mermaid`) | ландшафт систем набора проектов (EA-3, ADR-037): счётчики `systems`/`edges`/`findings` + `report` (markdown-отчёт или mermaid `graph TD`). Отчёт, не гейт — `passed` не применим |
-| `adr_registry` | `path`, `strict?` | реестр ADR по набору проектов (ADR-036): `entries`, `findings` (коллизии номеров, дубли заголовков, пропуски полей), `report_markdown`; `passed=false` только при `strict: true` и наличии находок |
-| `rules_report` | `path` (репозиторий), `constraints?` | инвентарь правил CONSTRAINTS.yaml: `rules_total`, `by_kind`, `by_severity`, `report_markdown` (карточки owner/expiry/effort_hours, находки, git-прокси). Отчёт — `passed` всегда true |
-| `openspec_coverage` | `path`, `constraints?`, `strict?` | покрытие требований OpenSpec правилами (`covers:`): `total`/`covered`/`unverifiable`/`unresolved` + `unresolved_items` поимённо + `report_markdown`; `passed=false` только при `strict: true` и требованиях «без решения» |
-| `model_graph` | `dir?`, `format?` (`text`\|`mermaid`) | граф связей модели: `entities`/`edges` + `graph` (список или flowchart LR, совместим с `mermaid_render`). Отчёт, не гейт — `passed` не применим |
+| `landscape_report` | `path`, `format?` (`markdown`\|`mermaid`) | ландшафт систем набора проектов (EA-3, ADR-037): счётчики `systems`/`edges`/`findings` + `report` (markdown-отчёт или mermaid `graph TD`) + `load_issues` (битые сущности, E3). Отчёт, не гейт — `passed` не применим |
+| `adr_registry` | `path`, `strict?` | реестр ADR по набору проектов (ADR-036): `entries`, `findings` (коллизия номеров — в т.ч. **внутри одного проекта**: ≥2 файлов с одним ADR-NNN, с нюансом «разные заголовки — конфликт решений»/«тот же заголовок — вероятная копия»; дубли заголовков у разных номеров; пропуски полей), `report_markdown`; `passed=false` только при `strict: true` и наличии находок |
+| `rules_report` | `path` (репозиторий), `constraints?` | инвентарь правил CONSTRAINTS.yaml (единый резолвер пути, как у `fitness_check`): `rules_total`, `by_kind`, `by_severity`, `constraints` (использованный путь), `drift_note` (дрейф двух копий), `skipped_unknown` (неизвестные типы правил), `report_markdown` (карточки owner/expiry/effort_hours, находки, git-прокси). Отчёт — `passed` всегда true |
+| `openspec_coverage` | `path`, `constraints?`, `strict?` | покрытие требований OpenSpec правилами (`covers:`): `total`/`covered`/`unverifiable`/`unresolved` + `unresolved_items` поимённо + `constraints` (использованный путь реестра) + `drift_note` (пометка дрейфа второй копии, если расходится) + `report_markdown`; `passed=false` только при `strict: true` и требованиях «без решения» |
+| `model_graph` | `dir?`, `format?` (`text`\|`mermaid`) | граф связей модели: `entities`/`edges` + `graph` (список или flowchart LR, совместим с `mermaid_render`) + `load_issues` (битые сущности, E3). Отчёт, не гейт — `passed` не применим |
 
 Составные инструменты (транш 3, read-only):
 
 | Инструмент | Аргументы | Возвращает |
 |---|---|---|
 | `architect_review` | `path?`, `base?` | единое ревью репозитория одним вызовом: маршрут значимости из git-диффа + весь контур гейта (fitness, delta_guard, rule_weakened, spine_lint, trace_check; на Standard/Critical — nfr, evidence, sensors) + секции `model_validate` и `contracts` (линт OpenAPI/AsyncAPI из `INT.contract` и `contracts/`). JSON: `passed` + `route` + `components` (status/detail/findings) + `summary`; `passed=false` — основание отказать изменению |
-| `change_impact` | `path?`, `id` \| `paths` | радиус изменения по графу модели: `seeds`, `affected` (сущности по типам), `rules` (C-NNN с владельцами), `contracts`, `owners`, `gaps` (пути без CMP-покрытия), `summary`. Отчёт, не гейт — `passed` не применим; неизвестный `id` — `isError` |
+| `change_impact` | `path?`, `id` \| `paths` | радиус изменения по графу модели: `seeds`, `affected` (сущности по типам), `rules` (C-NNN с владельцами), `contracts`, `owners`, `gaps` (пути без CMP-покрытия), `summary` + `load_issues` (битые сущности, E3). Отчёт, не гейт — `passed` не применим; неизвестный `id` — `isError` |
 
 Чтение знаний (транш T4, ADR-015; все — read-only, без verdict `passed`):
 
