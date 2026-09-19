@@ -2010,3 +2010,126 @@ fn connect_git_hooks_writes_marked_hooks_idempotently() {
         .arg(plain.as_os_str());
     cmd.assert().code(1).stderr(contains("не git-репозиторий"));
 }
+
+/// git-команда в тестовом репозитории с детерминированной идентичностью
+/// коммиттера (иначе CI без `user.email` падает на `git commit`).
+fn git_in(dir: &Path, args: &[&str]) -> std::process::Output {
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("GIT_AUTHOR_NAME", "cli-test")
+        .env("GIT_AUTHOR_EMAIL", "cli-test@example.invalid")
+        .env("GIT_COMMITTER_NAME", "cli-test")
+        .env("GIT_COMMITTER_EMAIL", "cli-test@example.invalid")
+        .output()
+        .expect("git запустился")
+}
+
+/// Н5: ослабление правила, УЖЕ закоммиченное, обязано отклоняться pre-push.
+///
+/// Репродукция 0.3.3: pre-push запускал `arch-be gate --route auto` без базы,
+/// поэтому гейт сравнивал реестр с `HEAD` — правка уже в HEAD, различий нет,
+/// пуш проходит. CI-джоба базу передавала и краснела: вердикт зависел от
+/// способа вызова.
+#[test]
+fn pre_push_hook_rejects_committed_rule_weakening() {
+    const RULES_ERROR: &str = "rules:\n  - name: spine_present\n    type: file_exists\n    path: \"ARCHITECTURE-SPINE.md\"\n    severity: error\n";
+    const RULES_WEAKENED: &str = "rules:\n  - name: spine_present\n    type: file_exists\n    path: \"ARCHITECTURE-SPINE.md\"\n    severity: warn\n";
+
+    let tmp = tempfile::tempdir().expect("tmp");
+    let home = tmp.path();
+    let bare = home.join("remote.git");
+    let work = home.join("work");
+    std::fs::create_dir_all(&bare).expect("mkdir bare");
+    std::fs::create_dir_all(&work).expect("mkdir work");
+    git_in(
+        home,
+        &["init", "--bare", "-q", bare.to_str().expect("utf8")],
+    );
+    git_in(&work, &["init", "-q", "-b", "main"]);
+    git_in(
+        &work,
+        &["remote", "add", "origin", bare.to_str().expect("utf8")],
+    );
+
+    std::fs::create_dir_all(work.join(".arch-handoff")).expect("mkdir handoff");
+    std::fs::write(work.join(".arch-handoff/CONSTRAINTS.yaml"), RULES_ERROR).expect("rules");
+    std::fs::write(work.join("ARCHITECTURE-SPINE.md"), "# Spine\n").expect("spine");
+    git_in(&work, &["add", "-A"]);
+    git_in(&work, &["commit", "-q", "-m", "base"]);
+    let pushed = git_in(&work, &["push", "-q", "-u", "origin", "main"]);
+    assert!(pushed.status.success(), "{pushed:?}");
+
+    // Ослабляем правило и коммитим; активная дельта покрывает правку, чтобы
+    // красным стал именно `rule_weakened`, а не `delta_guard`.
+    std::fs::write(work.join(".arch-handoff/CONSTRAINTS.yaml"), RULES_WEAKENED).expect("weaken");
+    let delta_dir = work.join("changes/weaken-rule");
+    std::fs::create_dir_all(&delta_dir).expect("mkdir changes");
+    std::fs::write(
+        delta_dir.join("DELTA.md"),
+        "# Дельта: weaken-rule\n\n## Проблема\n\nПонижаем строгость правила.\n\n\
+         ## ADDED\n\n- правило CONSTRAINTS.yaml понижено до warn\n\n## MODIFIED\n\n- нет\n\n\
+         ## REMOVED\n\n- нет\n\n## План отката\n\ngit revert\n\n## Критерии приёмки\n\n- [ ] гейт зелёный\n",
+    )
+    .expect("delta");
+    git_in(&work, &["add", "-A"]);
+    git_in(&work, &["commit", "-q", "-m", "weaken rule"]);
+
+    // Хуки ставим ПОСЛЕ ослабления: `connect` — не часть проверяемого сценария.
+    let mut cmd = arch_cmd(home);
+    cmd.arg("connect")
+        .arg("git-hooks")
+        .arg("--dir")
+        .arg(work.as_os_str());
+    cmd.assert().success();
+
+    // База без хука: гейт против HEAD различий не видит — вот дефект 0.3.3.
+    let mut cmd = arch_cmd(home);
+    cmd.arg("gate")
+        .arg("--repo")
+        .arg(work.as_os_str())
+        .arg("--route")
+        .arg("auto");
+    cmd.assert().success();
+
+    // А теперь пуш через хук: он передаёт базу из stdin git'а.
+    let bindir = Path::new(env!("CARGO_BIN_EXE_arch-be"))
+        .parent()
+        .expect("родитель бинаря")
+        .to_path_buf();
+    let path = std::env::var("PATH").unwrap_or_default();
+    let push = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&work)
+        .args(["push", "origin", "main"])
+        .env("PATH", format!("{}:{path}", bindir.display()))
+        .env("HOME", home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("GIT_AUTHOR_NAME", "cli-test")
+        .env("GIT_AUTHOR_EMAIL", "cli-test@example.invalid")
+        .env("GIT_COMMITTER_NAME", "cli-test")
+        .env("GIT_COMMITTER_EMAIL", "cli-test@example.invalid")
+        .output()
+        .expect("git push");
+    let stderr = String::from_utf8_lossy(&push.stderr);
+    let stdout = String::from_utf8_lossy(&push.stdout);
+    // Отчёт гейта git отдаёт в stdout, сообщение хука — в stderr.
+    let all = format!("{stdout}{stderr}");
+    assert!(
+        !push.status.success(),
+        "пуш ослабленного правила обязан быть отклонён; вывод: {all}"
+    );
+    assert!(
+        stderr.contains("pre-push FAIL"),
+        "хук обязан назвать себя; stderr: {stderr}"
+    );
+    assert!(
+        all.contains("rule_weakened"),
+        "красным обязано стать анти-ослабление реестра; вывод: {all}"
+    );
+    assert!(
+        all.contains("severity понижен"),
+        "находка обязана назвать понижение severity; вывод: {all}"
+    );
+}

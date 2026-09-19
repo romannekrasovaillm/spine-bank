@@ -555,6 +555,20 @@ fn merge_mcp_servers_json(
     commit_file(path, old.as_deref(), &new, dry_run, report)
 }
 
+/// База для хуков сессии (Stop / PostToolUse): точка ответвления от основной
+/// ветки — тот же список веток и тот же `merge-base`, что у
+/// [`crate::control::default_anchor_base`]. Ветка не найдена — пусто, и хук
+/// работает без базы (как 0.3.3). После Н5 хуки обязаны видеть УЖЕ
+/// закоммиченное ослабление правила: без базы сравнение шло с `HEAD`.
+const ANCHOR_BASE_SNIPPET: &str = "\
+BASE=\"\"\n\
+for anchor in origin/main main origin/master master; do\n\
+\x20 if git rev-parse --verify --quiet \"$anchor\" >/dev/null 2>&1; then\n\
+\x20   BASE=$(git merge-base \"$anchor\" HEAD 2>/dev/null || true)\n\
+\x20   break\n\
+\x20 fi\n\
+done\n";
+
 /// Команда Stop-хука Claude Code: единый архитектурный гейт перед завершением
 /// сессии. Гард `command -v arch-be` + наличие `.arch-handoff/CONSTRAINTS.yaml`
 /// (fail-soft на инфраструктуру: нет бинаря/правил — молча exit 0); блок
@@ -563,7 +577,13 @@ fn merge_mcp_servers_json(
 fn stop_hook_command() -> String {
     format!(
         "if command -v arch-be >/dev/null 2>&1 && [ -f .arch-handoff/CONSTRAINTS.yaml ]; then \
-         if ! out=$(arch-be gate --route auto 2>&1); then \
+         {ANCHOR_BASE_SNIPPET}\
+         if [ -n \"$BASE\" ]; then \
+         if ! out=$(arch-be gate --route auto --base \"$BASE...HEAD\" 2>&1); then \
+         printf '%s\\n\\n%s\\n' \"$out\" \
+         \"{HOOK_MARKER}: архитектурный гейт FAIL — исправьте находки error перед завершением \
+         (подробности выше; гейт: arch-be gate)\" >&2; exit 2; fi; \
+         elif ! out=$(arch-be gate --route auto 2>&1); then \
          printf '%s\\n\\n%s\\n' \"$out\" \
          \"{HOOK_MARKER}: архитектурный гейт FAIL — исправьте находки error перед завершением \
          (подробности выше; гейт: arch-be gate)\" >&2; exit 2; fi; fi \
@@ -576,7 +596,13 @@ fn stop_hook_command() -> String {
 fn post_tool_use_hook_command() -> String {
     format!(
         "if command -v arch-be >/dev/null 2>&1 && [ -f .arch-handoff/CONSTRAINTS.yaml ]; then \
-         if ! out=$(arch-be gate --route auto 2>&1); then \
+         {ANCHOR_BASE_SNIPPET}\
+         if [ -n \"$BASE\" ]; then \
+         if ! out=$(arch-be gate --route auto --base \"$BASE...HEAD\" 2>&1); then \
+         printf '%s\\n\\n%s\\n' \"$out\" \
+         \"{HOOK_MARKER}: правка не проходит архитектурный гейт (arch-be gate FAIL) — \
+         исправьте находки error\" >&2; exit 2; fi; \
+         elif ! out=$(arch-be gate --route auto 2>&1); then \
          printf '%s\\n\\n%s\\n' \"$out\" \
          \"{HOOK_MARKER}: правка не проходит архитектурный гейт (arch-be gate FAIL) — \
          исправьте находки error\" >&2; exit 2; fi; fi \
@@ -2005,20 +2031,59 @@ fn pre_commit_hook_block() -> String {
         .to_string()
 }
 
+/// База диффа для хуков в виде shell-фрагмента: pre-push получает от git
+/// строки `<local ref> <local sha> <remote ref> <remote sha>` на stdin.
+///
+/// Без базы гейт сравнивал бы состав правил с `HEAD`, и **уже закоммиченное**
+/// ослабление правила хуком не ловилось бы (Н5): `--base HEAD~1` краснел, а
+/// pre-push — нет, то есть вердикт зависел от способа вызова, а не от
+/// изменения. Remote sha из нулей — новая ветка: база — точка ответвления от
+/// основной ветки (`merge-base`), тот же список веток, что у
+/// [`crate::control::default_anchor_base`].
+const PRE_PUSH_BASE_SNIPPET: &str = "\
+BASE=\"\"\n\
+while read -r local_ref local_sha remote_ref remote_sha; do\n\
+\x20 [ -z \"$remote_sha\" ] && continue\n\
+\x20 case \"$remote_sha\" in\n\
+\x20   0000000000000000000000000000000000000000)\n\
+\x20     for main in origin/main main origin/master master; do\n\
+\x20       if git rev-parse --verify --quiet \"$main\" >/dev/null 2>&1; then\n\
+\x20         BASE=$(git merge-base \"$main\" \"$local_sha\" 2>/dev/null || true)\n\
+\x20         break\n\
+\x20       fi\n\
+\x20     done\n\
+\x20     ;;\n\
+\x20   *)\n\
+\x20     BASE=\"$remote_sha\"\n\
+\x20     ;;\n\
+\x20 esac\n\
+\x20 [ -n \"$BASE\" ] && break\n\
+done\n";
+
 /// Блок pre-push: полный единый гейт (fitness + delta guard + анти-ослабление
-/// правил + линтер спайна + трассировка; маршрут — из диффа). Fail-soft при
-/// отсутствии `arch-be`; без входа гейт сам уходит в SKIP и пропускает пуш.
+/// правил + линтер спайна + трассировка + целостность модели; маршрут — из
+/// диффа). Fail-soft при отсутствии `arch-be`; без входа гейт сам уходит в SKIP
+/// и пропускает пуш.
 fn pre_push_hook_block() -> String {
-    "# spine-connect:begin — полный архитектурный гейт перед пушем (arch-be)\n\
-     # Fail-soft: нет arch-be в PATH — пропуск; нет входа у составляющих — SKIP внутри гейта.\n\
-     if command -v arch-be >/dev/null 2>&1; then\n\
-     \x20 if ! arch-be gate --route auto; then\n\
-     \x20   echo \"spine-connect: pre-push FAIL — arch-be gate не пройден (находки выше)\" >&2\n\
-     \x20   exit 1\n\
-     \x20 fi\n\
-     fi\n\
-     # spine-connect:end"
-        .to_string()
+    format!(
+        "# spine-connect:begin — полный архитектурный гейт перед пушем (arch-be)\n\
+         # Fail-soft: нет arch-be в PATH — пропуск; нет входа у составляющих — SKIP внутри гейта.\n\
+         # База диффа — из stdin git\'а (remote sha), иначе анти-ослабление правил\n\
+         # не увидело бы УЖЕ закоммиченного ослабления (Н5).\n\
+         if command -v arch-be >/dev/null 2>&1; then\n\
+         {PRE_PUSH_BASE_SNIPPET}\
+         \x20 if [ -n \"$BASE\" ]; then\n\
+         \x20   if ! arch-be gate --route auto --base \"$BASE...HEAD\"; then\n\
+         \x20     echo \"spine-connect: pre-push FAIL — arch-be gate не пройден (находки выше)\" >&2\n\
+         \x20     exit 1\n\
+         \x20   fi\n\
+         \x20 elif ! arch-be gate --route auto; then\n\
+         \x20   echo \"spine-connect: pre-push FAIL — arch-be gate не пройден (находки выше)\" >&2\n\
+         \x20   exit 1\n\
+         \x20 fi\n\
+         fi\n\
+         # spine-connect:end"
+    )
 }
 
 /// Право на исполнение для hook-файла (unix); вне unix — no-op.
