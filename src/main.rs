@@ -1478,6 +1478,9 @@ async fn main() -> Result<()> {
                 ),
                 None => println!("⚠ git недоступен — якоря отката нет"),
             }
+            for w in &packet.warnings {
+                println!("⚠ {w}");
+            }
             println!(
                 "маршрут {route} → рекомендованный timeout_secs={}",
                 packet.recommended_timeout_secs

@@ -211,8 +211,8 @@ evidence — см. `docs/control.md`), и при ненулевом коде в�
 ## 4. Режимы MCP-сервера
 
 ```bash
-arch-be mcp serve          # дефолт: строго read-only (33 инструмента:
-                           #   13 ручных + 20 моста в реестр)
+arch-be mcp serve          # дефолт: строго read-only (34 инструмента:
+                           #   14 ручных + 20 моста в реестр)
 arch-be mcp serve --rw     # + записывающие: handoff_create, adr_new,
                            #   agentsmd_generate, skill_distill, archify_*,
                            #   reverse_survey, evidence_pack, delta_propose
