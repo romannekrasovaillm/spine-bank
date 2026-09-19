@@ -277,6 +277,7 @@ pub struct ModelValidateTool;
 #[derive(Debug, Deserialize)]
 struct ModelValidateArgs {
     /// Каталог модели (дефолт `model`).
+    #[serde(alias = "path")]
     dir: Option<String>,
 }
 
@@ -294,7 +295,7 @@ impl Tool for ModelValidateTool {
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "dir": {"type": "string", "description": "Каталог модели (по умолчанию model)"}
+                    "path": {"type": "string", "description": "Каталог модели (по умолчанию model)"}
                 }
             }),
         }
@@ -347,6 +348,7 @@ pub struct ModelQueryTool;
 #[derive(Debug, Deserialize)]
 struct ModelQueryArgs {
     /// Каталог модели (дефолт `model`).
+    #[serde(alias = "path")]
     dir: Option<String>,
     /// ID сущности — карточка со связями (без `id` — список сущностей).
     id: Option<String>,
@@ -368,7 +370,7 @@ impl Tool for ModelQueryTool {
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "dir": {"type": "string", "description": "Каталог модели (по умолчанию model)"},
+                    "path": {"type": "string", "description": "Каталог модели (по умолчанию model)"},
                     "id": {"type": "string", "description": "ID сущности (ADR-001, CMP-002, …): карточка со связями"},
                     "type": {"type": "string", "description": "Фильтр списка по типу (cmp, adr, …)"}
                 }
@@ -454,6 +456,7 @@ pub struct ModelGraphTool;
 #[derive(Debug, Deserialize)]
 struct ModelGraphArgs {
     /// Каталог модели (дефолт `model`).
+    #[serde(alias = "path")]
     dir: Option<String>,
     /// Формат графа: text (дефолт) | mermaid.
     format: Option<String>,
@@ -474,7 +477,7 @@ impl Tool for ModelGraphTool {
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "dir": {"type": "string", "description": "Каталог модели (по умолчанию model)"},
+                    "path": {"type": "string", "description": "Каталог модели (по умолчанию model)"},
                     "format": {
                         "type": "string",
                         "description": "Формат графа: text (по умолчанию) | mermaid",

@@ -838,6 +838,7 @@ pub struct EvidenceVerifyTool;
 #[derive(Debug, Deserialize)]
 struct EvidenceDirArgs {
     /// Каталог изменения (с EVIDENCE.yaml для verify).
+    #[serde(alias = "path")]
     change_dir: String,
 }
 
@@ -855,9 +856,9 @@ impl Tool for EvidenceVerifyTool {
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "change_dir": {"type": "string", "description": "Каталог изменения с EVIDENCE.yaml"}
+                    "path": {"type": "string", "description": "Каталог изменения с EVIDENCE.yaml"}
                 },
-                "required": ["change_dir"]
+                "required": ["path"]
             }),
         }
     }
@@ -918,6 +919,7 @@ pub struct EvidencePackTool;
 #[derive(Debug, Deserialize)]
 struct EvidencePackArgs {
     /// Каталог изменения.
+    #[serde(alias = "path")]
     change_dir: String,
     /// Маршрут: fast|standard|critical (дефолт standard).
     route: Option<String>,
@@ -936,14 +938,14 @@ impl Tool for EvidencePackTool {
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "change_dir": {"type": "string", "description": "Каталог изменения"},
+                    "path": {"type": "string", "description": "Каталог изменения"},
                     "route": {
                         "type": "string",
                         "description": "Маршрут: fast | standard | critical (по умолчанию standard)",
                         "enum": ["fast", "standard", "critical"]
                     }
                 },
-                "required": ["change_dir"]
+                "required": ["path"]
             }),
         }
     }

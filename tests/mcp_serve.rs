@@ -1439,3 +1439,138 @@ fn handoff_create_over_stdio_creates_packet_on_drift_control_fixture() {
         "baseline-коммит в истории: {log_text}"
     );
 }
+
+/// Н8 волны C 0.3.4: у каждого инструмента, принимающего путь, каноничное имя
+/// аргумента — `path`. Проверяются ОБА направления: схема в `tools/list`
+/// объявляет `path` (а не исторические `dir`/`repo`/`case`/`change_dir`), и
+/// вызов с `path` действительно доходит до инструмента — ошибка разбора
+/// аргументов означала бы, что канонизации нет.
+#[test]
+fn every_path_argument_is_canonical_path() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let home = tmp.path();
+    let project = home.join("project");
+    std::fs::create_dir_all(project.join("model")).expect("mkdir model");
+    std::fs::write(project.join("ARCHITECTURE-SPINE.md"), "# Spine\n").expect("spine");
+    std::fs::write(
+        project.join("model/CMP-001-core.md"),
+        "---\nid: CMP-001\ntype: cmp\ntitle: \"Core\"\nstatus: \"designed\"\n---\n\nТело.\n",
+    )
+    .expect("entity");
+
+    let listed = mcp_serve(
+        home,
+        &format!(
+            "{}\n",
+            json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}
+            })
+        ),
+    );
+    let tools = listed[0]["result"]["tools"]
+        .as_array()
+        .expect("tools")
+        .clone();
+    assert!(tools.len() > 20, "ожидался полный список инструментов");
+
+    // Исторические имена пути не должны рекламироваться ни у одного инструмента.
+    for tool in &tools {
+        let name = tool["name"].as_str().expect("имя");
+        let props = tool["inputSchema"]["properties"].as_object();
+        let Some(props) = props else { continue };
+        for legacy in ["dir", "repo", "case", "change_dir"] {
+            assert!(
+                !props.contains_key(legacy),
+                "{name}: схема обязана объявлять `path`, а не `{legacy}`: {props:?}"
+            );
+        }
+    }
+
+    // Инструменты, принимающие путь: вызов с `path` не должен падать на
+    // разборе аргументов (доменная ошибка «нет файла» — это уже успех, значит
+    // аргумент принят и дошёл до инструмента).
+    let with_path: Vec<String> = tools
+        .iter()
+        .filter(|t| {
+            t["inputSchema"]["properties"]
+                .as_object()
+                .is_some_and(|p| p.contains_key("path"))
+        })
+        .map(|t| t["name"].as_str().expect("имя").to_string())
+        .collect();
+    assert!(
+        with_path.len() >= 20,
+        "канонизация обязана покрыть всю поверхность с путём: {with_path:?}"
+    );
+
+    let mut requests = String::new();
+    for (i, name) in with_path.iter().enumerate() {
+        let mut args = json!({"path": project.display().to_string()});
+        if name == "contract_diff" {
+            args = json!({"path": project.display().to_string()});
+        }
+        requests.push_str(&call(10 + i as u64, name, &args));
+        requests.push('\n');
+    }
+    let responses = mcp_serve(home, &requests);
+    for (i, name) in with_path.iter().enumerate() {
+        let resp = &responses[i];
+        let text = resp.to_string();
+        assert!(
+            !text.contains("невалидные аргументы"),
+            "{name}: вызов с `path` не должен падать на разборе: {text}"
+        );
+        assert!(
+            !text.contains("missing field"),
+            "{name}: `path` обязан приниматься: {text}"
+        );
+    }
+}
+
+/// Н8: старые имена аргументов остаются синонимами, а неизвестный аргумент
+/// отвергается с перечнем допустимых — опечатка не выглядит «инструмент не
+/// сработал».
+#[test]
+fn legacy_path_argument_names_still_work() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let home = tmp.path();
+    let project = home.join("project");
+    std::fs::create_dir_all(project.join("model")).expect("mkdir model");
+    std::fs::write(project.join("ARCHITECTURE-SPINE.md"), "# Spine\n").expect("spine");
+    std::fs::write(
+        project.join("model/CMP-001-core.md"),
+        "---\nid: CMP-001\ntype: cmp\ntitle: \"Core\"\nstatus: \"designed\"\n---\n\nТело.\n",
+    )
+    .expect("entity");
+
+    // Историческое имя `dir` доходит до инструмента (не «missing field»).
+    let resp = mcp_serve(
+        home,
+        &format!(
+            "{}\n",
+            call(
+                1,
+                "model_query",
+                &json!({"dir": project.display().to_string()})
+            )
+        ),
+    );
+    let text = resp[0].to_string();
+    assert!(
+        !text.contains("missing field") && !text.contains("невалидные аргументы"),
+        "старое имя `dir` обязано приниматься: {text}"
+    );
+
+    // Незнакомый аргумент — ошибка с перечнем допустимых.
+    let resp = mcp_serve(
+        home,
+        &format!(
+            "{}\n",
+            call(2, "spine_lint", &json!({"directory": "/tmp", "path": "x"}))
+        ),
+    );
+    let text = resp[0].to_string();
+    assert!(text.contains("неизвестный аргумент"), "{text}");
+    assert!(text.contains("'directory'"), "{text}");
+    assert!(text.contains("допустимые: path"), "{text}");
+}

@@ -1084,7 +1084,7 @@ impl Tool for ReverseSurveyTool {
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "repo": {
+                    "path": {
                         "type": "string",
                         "description": "Каталог репозитория для обследования (относительно cwd или абсолютный)"
                     },
@@ -1093,7 +1093,7 @@ impl Tool for ReverseSurveyTool {
                         "description": "Каталог вывода относительно репозитория (по умолчанию docs/reverse)"
                     }
                 },
-                "required": ["repo"]
+                "required": ["path"]
             }),
         }
     }

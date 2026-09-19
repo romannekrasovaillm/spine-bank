@@ -502,7 +502,7 @@ impl crate::tool::Tool for WorktreeNewTool {
                         "type": "string",
                         "description": "имя worktree kebab-case [a-z0-9-], напр. saga-pilot"
                     },
-                    "repo": {
+                    "path": {
                         "type": "string",
                         "description": "путь к git-репозиторию; пусто — текущий каталог"
                     },

@@ -539,7 +539,7 @@ impl Tool for FleetAuditTool {
                         "items": {"type": "string"},
                         "description": "Каталоги-worktree (относительно cwd или абсолютные)"
                     },
-                    "repo": {
+                    "path": {
                         "type": "string",
                         "description": "Git-репозиторий: worktree перечисляются из `git worktree list` (добавляются к paths)"
                     },

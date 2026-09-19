@@ -384,6 +384,7 @@ pub struct ModelDriftTool;
 #[derive(Debug, Deserialize)]
 struct ModelDriftArgs {
     /// Корень кейса (каталог с `model/` внутри; дефолт — текущий каталог).
+    #[serde(alias = "path")]
     dir: Option<String>,
 }
 
@@ -402,7 +403,7 @@ impl Tool for ModelDriftTool {
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "dir": {"type": "string", "description": "Корень кейса — каталог с model/ (по умолчанию текущий)"}
+                    "path": {"type": "string", "description": "Корень кейса — каталог с model/ (по умолчанию текущий)"}
                 }
             }),
         }

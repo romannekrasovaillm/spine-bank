@@ -649,8 +649,8 @@ impl Tool for AgentsMdGenerateTool {
                     .into(),
             parameters: serde_json::json!({
                 "type": "object",
-                "properties": {"repo": {"type": "string", "description": "путь к репозиторию"}},
-                "required": ["repo"]
+                "properties": {"path": {"type": "string", "description": "путь к репозиторию"}},
+                "required": ["path"]
             }),
         }
     }
@@ -689,8 +689,8 @@ impl Tool for AgentsMdLintTool {
                     .into(),
             parameters: serde_json::json!({
                 "type": "object",
-                "properties": {"repo": {"type": "string", "description": "путь к репозиторию"}},
-                "required": ["repo"]
+                "properties": {"path": {"type": "string", "description": "путь к репозиторию"}},
+                "required": ["path"]
             }),
         }
     }

@@ -850,7 +850,7 @@ impl Tool for HarnessRunTool {
                         "type": "string",
                         "description": "Имя харнесса: claude-code, qwen-code, openclaw, hermes, theseus, codewhale, kimi-code"
                     },
-                    "repo": {
+                    "path": {
                         "type": "string",
                         "description": "Корень репозитория (относительно cwd или абсолютный)"
                     },

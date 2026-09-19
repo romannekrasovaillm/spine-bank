@@ -243,6 +243,11 @@ pub const BRIDGE_READ_ONLY: &[&str] = &[
     "rules_report",
 ];
 
+/// Исторические имена аргумента-пути: синонимы каноничного `path` (Н8 волны C
+/// 0.3.4). Держатся рядом со [`MANUAL_TOOLS`], потому что это поверхность
+/// протокола, а не деталь одной функции.
+pub const PATH_ARG_ALIASES: [&str; 4] = ["dir", "repo", "case", "change_dir"];
+
 /// Дополнительный белый список режима `--rw` ([`ServeMode::ReadWrite`]):
 /// аддитивные записи в рабочий каталог клиента (handoff-пакет, новый ADR,
 /// AGENTS.md, HTML-артефакты Archify, карта обследования, дистиллированный
@@ -858,6 +863,57 @@ impl McpServe {
         }
     }
 
+    /// Отвергает незнакомые аргументы вызова, перечисляя допустимые (Н8).
+    ///
+    /// Проверяются инструменты с объявленной схемой; у мостовых инструментов
+    /// схема живёт в модуле и проверку делает `serde` при разборе — там
+    /// перечень печатает сама ошибка десериализации.
+    fn reject_unknown_args(name: &str, args: &Value) -> std::result::Result<(), CallError> {
+        let Some(map) = args.as_object() else {
+            return Ok(());
+        };
+        if map.is_empty() {
+            return Ok(());
+        }
+        let Some(schema) = tool_specs()
+            .into_iter()
+            .find(|t| t.get("name").and_then(Value::as_str) == Some(name))
+            .and_then(|t| t.get("inputSchema").cloned())
+        else {
+            return Ok(());
+        };
+        let Some(props) = schema.get("properties").and_then(Value::as_object) else {
+            return Ok(());
+        };
+        // Исторические имена пути — синонимы каноничного `path` (Н8), а не
+        // незнакомые аргументы: старые клиенты и скрипты обязаны работать.
+        let path_accepted = props.contains_key("path");
+        let known = |k: &String| {
+            props.contains_key(k) || (path_accepted && PATH_ARG_ALIASES.contains(&k.as_str()))
+        };
+        let unknown: Vec<&String> = map.keys().filter(|k| !known(k)).collect();
+        if unknown.is_empty() {
+            return Ok(());
+        }
+        let mut allowed: Vec<&str> = props.keys().map(String::as_str).collect();
+        allowed.sort_unstable();
+        let mut hint = String::new();
+        if allowed.contains(&"path") {
+            hint.push_str(
+                " (путь во всех инструментах называется `path`; исторические `dir`,                  `repo`, `case`, `change_dir` принимаются как синонимы)",
+            );
+        }
+        Err(CallError::invalid_params(format!(
+            "{name}: неизвестный аргумент {}; допустимые: {}{hint}",
+            unknown
+                .iter()
+                .map(|k| format!("'{k}'"))
+                .collect::<Vec<_>>()
+                .join(", "),
+            allowed.join(", ")
+        )))
+    }
+
     /// Маршрутизация вызова по имени инструмента: сначала ручные
     /// реализации (оттестированная поверхность ADR-008), затем мост в
     /// реестр по белым спискам режима, иначе — `-32602`.
@@ -866,6 +922,10 @@ impl McpServe {
         name: &str,
         args: Value,
     ) -> std::result::Result<DispatchOutcome, CallError> {
+        // Н8: неизвестный аргумент — ошибка вызова с ПЕРЕЧНЕМ допустимых, а не
+        // молчаливый игнор (serde пропускает незнакомые поля, и опечатка в
+        // имени выглядела как «инструмент не сработал»).
+        Self::reject_unknown_args(name, &args)?;
         match name {
             "spine_lint" => self
                 .tool_spine_lint(args)
@@ -1007,6 +1067,7 @@ impl McpServe {
         #[derive(Deserialize)]
         struct Args {
             /// Корень репозитория клиента.
+            #[serde(alias = "path")]
             repo: String,
             /// Файл ограничений (дефолт `<repo>/.arch-handoff/CONSTRAINTS.yaml`,
             /// иначе `<repo>/CONSTRAINTS.yaml`).
@@ -1203,6 +1264,7 @@ impl McpServe {
         #[derive(Deserialize)]
         struct Args {
             /// Корень кейса (каталог с `model/`).
+            #[serde(alias = "path")]
             case: String,
         }
         let args: Args = parse_args(args, "trace_check")?;
@@ -1264,6 +1326,7 @@ impl McpServe {
         #[derive(Deserialize)]
         struct Args {
             /// Каталог модели (дефолт `model` от cwd процесса сервера).
+            #[serde(alias = "path")]
             dir: Option<String>,
             /// ID сущности — карточка (без `id` — список).
             id: Option<String>,
@@ -1999,7 +2062,7 @@ fn tool_specs() -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "repo": {"type": "string", "description": "Корень репозитория"},
+                    "path": {"type": "string", "description": "Корень репозитория"},
                     "constraints": {
                         "type": "string",
                         "description": "Путь к CONSTRAINTS.yaml (по умолчанию <repo>/.arch-handoff/CONSTRAINTS.yaml)",
@@ -2009,7 +2072,7 @@ fn tool_specs() -> Vec<Value> {
                         "description": "База git для сверки состава правил (анти-ослабление, П5): по умолчанию merge-base с основной веткой, иначе HEAD",
                     },
                 },
-                "required": ["repo"],
+                "required": ["path"],
             },
             "annotations": read_only,
         }),
@@ -2044,9 +2107,9 @@ fn tool_specs() -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "case": {"type": "string", "description": "Корень кейса (каталог с model/)"}
+                    "path": {"type": "string", "description": "Корень кейса (каталог с model/)"}
                 },
-                "required": ["case"],
+                "required": ["path"],
             },
             "annotations": read_only,
         }),
@@ -2059,7 +2122,7 @@ fn tool_specs() -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "dir": {"type": "string", "description": "Каталог модели (по умолчанию model от cwd сервера)"},
+                    "path": {"type": "string", "description": "Каталог модели (по умолчанию model от cwd сервера)"},
                     "id": {"type": "string", "description": "ID сущности (ADR-001, CMP-002, …): карточка со связями"},
                     "type": {"type": "string", "description": "Фильтр списка по типу (cmp, adr, …)"},
                 },

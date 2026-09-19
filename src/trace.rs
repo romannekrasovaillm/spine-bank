@@ -593,6 +593,7 @@ pub struct TraceCheckTool;
 #[derive(Debug, Deserialize)]
 struct TraceCheckArgs {
     /// Корень кейса (каталог с model/, дефолт — текущий).
+    #[serde(alias = "path")]
     dir: Option<String>,
 }
 
@@ -611,7 +612,7 @@ impl Tool for TraceCheckTool {
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "dir": {"type": "string", "description": "Корень кейса (по умолчанию текущий каталог)"}
+                    "path": {"type": "string", "description": "Корень кейса (по умолчанию текущий каталог)"}
                 }
             }),
         }

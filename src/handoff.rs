@@ -258,6 +258,7 @@ fn validate_constraints_text(text: &str) -> Result<()> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HandoffPacket {
     /// Каталог `.arch-handoff/`.
+    #[serde(alias = "path")]
     pub dir: PathBuf,
     /// Файлы пакета (включая сохранённые пользовательские CONSTRAINTS.yaml/SPEC.md/RUBRIC.yaml).
     pub files: Vec<PathBuf>,
@@ -1308,7 +1309,7 @@ impl Tool for HandoffCreateTool {
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "repo": {"type": "string", "description": "Корень репозитория (относительно cwd или абсолютный)"},
+                    "path": {"type": "string", "description": "Корень репозитория (относительно cwd или абсолютный)"},
                     "task": {"type": "string", "description": "Формулировка задачи для кодового харнесса"},
                     "spec": {"type": "array", "items": {"type": "string"}, "description": "Пути к спецификациям/ADR (md), опционально"},
                     "rollback": {"type": "string", "description": "Явный план отката (шаги, сигналы, владелец решения); по умолчанию — откат на baseline-коммит"},

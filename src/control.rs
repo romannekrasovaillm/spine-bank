@@ -1046,6 +1046,7 @@ pub struct RulesFingerprint {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FitnessReport {
     /// Репозиторий.
+    #[serde(alias = "path")]
     pub repo: PathBuf,
     /// Все правила пройдены.
     pub passed: bool,
@@ -4548,6 +4549,7 @@ pub struct RulesReportTool;
 #[derive(Debug, Deserialize)]
 struct RulesReportArgs {
     /// Корень репозитория.
+    #[serde(alias = "path")]
     repo: String,
     /// Путь к `CONSTRAINTS.yaml` (дефолт `<repo>/.arch-handoff/CONSTRAINTS.yaml`,
     /// иначе `<repo>/CONSTRAINTS.yaml`).
@@ -4569,13 +4571,13 @@ impl Tool for RulesReportTool {
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "repo": {"type": "string", "description": "Корень репозитория"},
+                    "path": {"type": "string", "description": "Корень репозитория"},
                     "constraints": {
                         "type": "string",
                         "description": "Путь к CONSTRAINTS.yaml (по умолчанию <repo>/.arch-handoff/CONSTRAINTS.yaml, иначе <repo>/CONSTRAINTS.yaml)"
                     }
                 },
-                "required": ["repo"]
+                "required": ["path"]
             }),
         }
     }
@@ -4657,6 +4659,7 @@ struct AdrNewArgs {
     /// Заголовок решения.
     title: String,
     /// Каталог ADR (дефолт `docs/adr`).
+    #[serde(alias = "path")]
     dir: Option<String>,
 }
 
@@ -4673,7 +4676,7 @@ impl Tool for AdrNewTool {
                 "type": "object",
                 "properties": {
                     "title": {"type": "string", "description": "Заголовок решения"},
-                    "dir": {"type": "string", "description": "Каталог ADR (по умолчанию docs/adr)"}
+                    "path": {"type": "string", "description": "Каталог ADR (по умолчанию docs/adr)"}
                 },
                 "required": ["title"]
             }),
@@ -4763,6 +4766,7 @@ pub struct FitnessCheckTool;
 #[derive(Debug, Deserialize)]
 struct FitnessCheckArgs {
     /// Корень репозитория.
+    #[serde(alias = "path")]
     repo: String,
     /// Путь к `CONSTRAINTS.yaml` (дефолт `<repo>/.arch-handoff/CONSTRAINTS.yaml`,
     /// иначе `<repo>/CONSTRAINTS.yaml`).
@@ -4787,13 +4791,13 @@ impl Tool for FitnessCheckTool {
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "repo": {"type": "string", "description": "Корень репозитория"},
+                    "path": {"type": "string", "description": "Корень репозитория"},
                     "constraints": {
                         "type": "string",
                         "description": "Путь к CONSTRAINTS.yaml (по умолчанию <repo>/.arch-handoff/CONSTRAINTS.yaml, иначе <repo>/CONSTRAINTS.yaml)"
                     }
                 },
-                "required": ["repo"]
+                "required": ["path"]
             }),
         }
     }
