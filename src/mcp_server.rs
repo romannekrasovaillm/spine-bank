@@ -1464,6 +1464,10 @@ impl McpServe {
             /// ответы судила не дефолтная модель хоста — фиксируйте фактическую;
             /// эхо — строка «Судья: <модель>» в markdown-отчёте).
             judge_model: Option<String>,
+            /// Модель-АВТОР документа (Н7, ADR-042): `judge_model == author_model`
+            /// — судья судил свою же работу; попадает в отчёт и в находку
+            /// `judge_is_author` составляющей гейта `decision_quality`.
+            author_model: Option<String>,
         }
         let args: Args = parse_args(args, "rubric_verify")?;
         if args.answers.is_empty() {
@@ -1478,6 +1482,7 @@ impl McpServe {
                 args.answers.len()
             )));
         }
+        let target_path = args.target.clone();
         let text = rubric_target_text("rubric_verify", args.target, args.target_text).await?;
         rubric::check_target_len(&text).map_err(|e| CallError::execution("rubric_verify", e))?;
         let rubric_path = resolve_rubric(&self.cfg.paths.rubrics_dir(), &args.rubric);
@@ -1505,9 +1510,38 @@ impl McpServe {
             .unwrap_or_else(|| "external (split-judge)".into());
         let report = rubric::build_report(&rub, &judge_model, &runs, &text, &self.cfg.judge)
             .map_err(|e| CallError::execution("rubric_verify", e))?;
+        // Машиночитаемый отчёт (Н7, ADR-042) — то, что читает составляющая
+        // гейта `decision_quality`. Пишется только под `--rw`: read-only
+        // контур MCP не имеет права оставлять след в рабочем каталоге.
+        let mut artifact_note = None;
+        if let Some(target) = target_path.as_deref() {
+            let path = PathBuf::from(target);
+            let abs = path.canonicalize().unwrap_or(path);
+            if abs.is_file() {
+                if self.mode.allows_write() {
+                    let repo = crate::rubric::repo_root_of(&abs);
+                    match crate::rubric::write_artifact(
+                        &repo,
+                        &report,
+                        Some(&abs),
+                        args.author_model.as_deref(),
+                    ) {
+                        Ok(p) => artifact_note = Some(p.display().to_string()),
+                        Err(e) => {
+                            artifact_note = Some(format!("не записан: {e}"));
+                        }
+                    }
+                } else {
+                    artifact_note =
+                        Some("не записан: контур MCP только для чтения (нужен `--rw`)".to_string());
+                }
+            }
+        }
         let mut out = json!({
             "rubric": report.rubric_name,
             "judge_model": report.judge_model,
+            "author_model": args.author_model,
+            "artifact": artifact_note,
             "judge_samples": report.judge_samples,
             "weighted_total": report.weighted_total,
             "verdict": report.verdict,

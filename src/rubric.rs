@@ -156,6 +156,174 @@ impl CriterionScore {
     }
 }
 
+/// Корень репозитория для целевого документа: ближайший вверх каталог с
+/// `.git` или `.arch-handoff`; не найден — каталог самого документа.
+///
+/// Отчёт обязан лечь туда, откуда его найдёт гейт (`<repo>/reports/rubric/`),
+/// а не рядом с документом: `docs/adr/reports/...` гейт не читает.
+#[must_use]
+pub fn repo_root_of(target: &Path) -> PathBuf {
+    let start = if target.is_dir() {
+        target.to_path_buf()
+    } else {
+        target
+            .parent()
+            .map_or_else(|| PathBuf::from("."), Path::to_path_buf)
+    };
+    let mut cur: Option<&Path> = Some(&start);
+    while let Some(dir) = cur {
+        if dir.join(".git").exists() || dir.join(".arch-handoff").is_dir() {
+            return dir.to_path_buf();
+        }
+        cur = dir.parent();
+    }
+    start
+}
+
+/// Каталог машиночитаемых отчётов рубрики внутри репозитория (Н7, ADR-042).
+pub const RUBRIC_REPORTS_DIR: &str = "reports/rubric";
+
+/// Схема файла отчёта рубрики.
+pub const RUBRIC_REPORT_SCHEMA: &str = "arch-be/rubric-report/v1";
+
+/// Машиночитаемый отчёт рубрики (`reports/rubric/<slug>.json`).
+///
+/// Зачем файл, а не только вывод команды: оценка качества решения должна
+/// переживать сессию и попадать в гейт (составляющая `decision_quality`), не
+/// добавляя LLM в ядро. Отчёт привязывает балл к СОДЕРЖИМОМУ документа
+/// (`target_sha256`) — правка ADR после оценки обесценивает отчёт
+/// (`rubric_report_stale`), а не «переносится» на новую редакцию.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RubricArtifact {
+    /// Схема файла.
+    pub schema: String,
+    /// Имя рубрики.
+    pub rubric: String,
+    /// Путь оценённого документа относительно репозитория (`None` — текст
+    /// без файла: документ не адресуем, гейт его не найдёт).
+    #[serde(default)]
+    pub target: Option<String>,
+    /// SHA-256 содержимого на момент оценки.
+    #[serde(default)]
+    pub target_sha256: Option<String>,
+    /// Модель-судья.
+    pub judge_model: String,
+    /// Модель-автор документа: `judge_model == author_model` — судья судил
+    /// свою же работу (метка `judge_is_author`).
+    #[serde(default)]
+    pub author_model: Option<String>,
+    /// Взвешенный итог `0..=5`.
+    pub weighted_total: f64,
+    /// Вердикт судьи.
+    pub verdict: String,
+    /// Разброс сэмплов выше порога (`unstable`).
+    #[serde(default)]
+    pub unstable: bool,
+    /// Число критериев с `evidence_not_found`.
+    #[serde(default)]
+    pub evidence_not_found: usize,
+    /// Метка времени оценки (RFC 3339).
+    pub judged_at: String,
+}
+
+/// Slug имени файла отчёта: путь документа, обезвреженный до имени файла
+/// (`docs/adr/ADR-041-….md` → `ADR-041-…`); пусто — `rubric`.
+#[must_use]
+pub fn artifact_slug(target: Option<&Path>) -> String {
+    let raw = target
+        .and_then(|p| p.file_stem())
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let slug: String = raw
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    if slug.trim_matches('-').is_empty() {
+        "rubric".to_string()
+    } else {
+        slug
+    }
+}
+
+/// Записывает отчёт рубрики в `<repo>/reports/rubric/<slug>.json`.
+///
+/// # Errors
+/// Каталог отчётов не создаётся или файл не пишется.
+pub fn write_artifact(
+    repo: &Path,
+    report: &RubricReport,
+    target: Option<&Path>,
+    author_model: Option<&str>,
+) -> Result<PathBuf> {
+    // Путь документа — относительный: аттестация не должна зависеть от того,
+    // где склонирован репозиторий.
+    let rel = target.map(|p| {
+        p.strip_prefix(repo).map_or_else(
+            |_| p.display().to_string().replace('\\', "/"),
+            |r| r.display().to_string().replace('\\', "/"),
+        )
+    });
+    let sha = match target {
+        Some(p) if p.is_file() => crate::hash::sha256_file(p),
+        _ => None,
+    };
+    let artifact = RubricArtifact {
+        schema: RUBRIC_REPORT_SCHEMA.to_string(),
+        rubric: report.rubric_name.clone(),
+        target: rel.clone(),
+        target_sha256: sha,
+        judge_model: report.judge_model.clone(),
+        author_model: author_model.map(str::to_string),
+        weighted_total: report.weighted_total,
+        verdict: report.verdict.clone(),
+        unstable: report
+            .scores
+            .iter()
+            .any(|s| s.has_flag(CriterionFlag::Unstable)),
+        evidence_not_found: report
+            .scores
+            .iter()
+            .filter(|s| s.has_flag(CriterionFlag::EvidenceNotFound))
+            .count(),
+        judged_at: chrono::Local::now().to_rfc3339(),
+    };
+    let dir = repo.join(RUBRIC_REPORTS_DIR);
+    std::fs::create_dir_all(&dir).map_err(|e| HarnessError::io(&dir, e))?;
+    let path = dir.join(format!("{}.json", artifact_slug(target)));
+    let text = serde_json::to_string_pretty(&artifact)
+        .map_err(|e| HarnessError::Config(format!("сериализация отчёта рубрики: {e}")))?;
+    std::fs::write(&path, text).map_err(|e| HarnessError::io(&path, e))?;
+    Ok(path)
+}
+
+/// Все машиночитаемые отчёты рубрик репозитория (`reports/rubric/*.json`);
+/// нечитаемый или чужой JSON пропускается — отчёт, а не гейт.
+#[must_use]
+pub fn load_artifacts(repo: &Path) -> Vec<RubricArtifact> {
+    let dir = repo.join(RUBRIC_REPORTS_DIR);
+    let Ok(rd) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<RubricArtifact> = rd
+        .flatten()
+        .filter(|e| {
+            e.path()
+                .extension()
+                .is_some_and(|x| x.eq_ignore_ascii_case("json"))
+        })
+        .filter_map(|e| std::fs::read_to_string(e.path()).ok())
+        .filter_map(|t| serde_json::from_str::<RubricArtifact>(&t).ok())
+        .collect();
+    out.sort_by(|a, b| a.judged_at.cmp(&b.judged_at));
+    out
+}
+
 /// Отчёт по рубрике.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RubricReport {

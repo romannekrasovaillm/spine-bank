@@ -795,6 +795,7 @@ job summary — `markdown`. Текстовый вывод не меняется;
 | `spine_lint` | `control spine ARCHITECTURE-SPINE.md` | error-находки линтера |
 | `trace_check` | `trace check` (нужны `model/` и `CONSTRAINTS.yaml` в корне; crosscheck сверяет все ссылки спайна на сущности модели) | error-находки трассировки |
 | `model_validate` | ссылочная целостность `model/` (`model validate`); SKIP, если каталога нет | error-находки валидации (битая ссылка/дубль ID/цикл); на маршруте **Critical** сюда же повышается `nfr-without-verification` — NFR без способа проверки там не цель, а пожелание |
+| `decision_quality` | качество принятых ADR по отчётам рубрики (`reports/rubric/*.json`, пишут `arch-be rubric run` и MCP `rubric_verify`); **по умолчанию SKIP** — включается только через `[gate.required]`; SKIP, если нет `docs/adr` или принятых ADR | `rubric_report_missing`, `rubric_report_stale` (документ изменён после оценки), `decision_quality_low` (ниже `[gate.decision_quality] min_score`); warn `judge_is_author` |
 
 На маршрутах **Standard/Critical** добавляются:
 

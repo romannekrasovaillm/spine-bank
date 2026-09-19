@@ -181,6 +181,18 @@ impl GateComponent {
         }
     }
 
+    /// Составляющая пройдена, но с неблокирующими находками (warn):
+    /// предупреждения обязаны доезжать до читателя, а не пропадать вместе
+    /// со статусом PASS (Н7: `judge_is_author`).
+    fn pass_with_findings(name: &'static str, detail: String, findings: Vec<GateFinding>) -> Self {
+        Self {
+            name,
+            status: GateStatus::Pass,
+            detail,
+            findings,
+        }
+    }
+
     /// Составляющая провалена (находки/сбой) — гейт падает.
     fn fail(name: &'static str, detail: String, findings: Vec<GateFinding>) -> Self {
         Self {
@@ -1265,6 +1277,166 @@ fn component_model_validate(repo: &Path, route: Route) -> GateComponent {
     }
 }
 
+/// Статус ADR в прозе: `- Status: Accepted` в любой из принятых форм
+/// (`**Статус**:`, `## Статус`). Толерантность намеренная: ошибка разбора
+/// формата не должна выглядеть как решение архитектора (Н9).
+fn adr_is_accepted(text: &str) -> bool {
+    text.lines().take(40).any(|l| {
+        let t = l.trim().trim_start_matches(['-', '*', '#', ' ']).trim();
+        let lowered = t.to_lowercase();
+        (lowered.starts_with("status") || lowered.starts_with("статус"))
+            && lowered.contains("accepted")
+    })
+}
+
+/// Составляющая `decision_quality` (Н7 волны B 0.3.4, ADR-042): качество
+/// архитектурных решений по ОТЧЁТАМ рубрики-судьи.
+///
+/// LLM в ядро не добавляется: составляющая читает уже собранный отчёт
+/// (`reports/rubric/<slug>.json`, пишут `rubric run` и MCP `rubric_verify`)
+/// и сверяет записанный балл с порогом. Отчёт привязан к содержимому
+/// документа своим `target_sha256` — правка ADR после оценки даёт
+/// `rubric_report_stale`, а не «перенос» балла на новую редакцию.
+///
+/// Составляющая включается только через `[gate.required]`: по умолчанию она
+/// SKIP, иначе ужесточение покраснило бы чужие пайплайны без предупреждения.
+fn component_decision_quality(
+    repo: &Path,
+    cfg: &crate::config::DecisionQualityConfig,
+    enabled: bool,
+) -> GateComponent {
+    if !enabled {
+        return GateComponent::skip(
+            "decision_quality",
+            "не включена: добавьте 'decision_quality' в [gate.required] нужного маршрута"
+                .to_string(),
+        );
+    }
+    let adr_dir = repo.join("docs/adr");
+    if !adr_dir.is_dir() {
+        return GateComponent::skip("decision_quality", "нет каталога docs/adr".to_string());
+    }
+    let mut adrs: Vec<PathBuf> = std::fs::read_dir(&adr_dir)
+        .map(|rd| {
+            rd.flatten()
+                .map(|e| e.path())
+                .filter(|p| {
+                    p.extension().is_some_and(|x| x.eq_ignore_ascii_case("md"))
+                        && p.file_name()
+                            .is_some_and(|n| n.to_string_lossy().starts_with("ADR-"))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    adrs.sort();
+    let artifacts = crate::rubric::load_artifacts(repo);
+    let mut findings = Vec::new();
+    let mut judged = 0usize;
+    for adr in &adrs {
+        let Ok(text) = std::fs::read_to_string(adr) else {
+            continue;
+        };
+        if !adr_is_accepted(&text) {
+            continue;
+        }
+        judged += 1;
+        let rel = adr.strip_prefix(repo).map_or_else(
+            |_| adr.display().to_string(),
+            |p| p.display().to_string().replace('\\', "/"),
+        );
+        let sha = crate::hash::sha256_file(adr);
+        let same_target = |a: &crate::rubric::RubricArtifact| {
+            a.target
+                .as_deref()
+                .is_some_and(|t| t == rel || t.ends_with(&rel) || rel.ends_with(t))
+        };
+        let by_sha = artifacts
+            .iter()
+            .find(|a| sha.is_some() && a.target_sha256.is_some() && a.target_sha256 == sha);
+        let by_path = artifacts.iter().find(|a| same_target(a));
+        let Some(artifact) = by_sha.or(by_path) else {
+            findings.push(GateFinding::ruled(
+                "error".to_string(),
+                "rubric_report_missing".to_string(),
+                format!(
+                    "{rel}: нет отчёта рубрики — решение не оценено; \
+                     прогоните rubric_prompt → rubric_verify (или `arch-be rubric run`)"
+                ),
+            ));
+            continue;
+        };
+        // Привязка к содержанию: отчёт обязан относиться к ЭТОЙ редакции.
+        if let (Some(want), Some(got)) = (&sha, &artifact.target_sha256) {
+            if want != got && same_target(artifact) {
+                findings.push(GateFinding::ruled(
+                    "error".to_string(),
+                    "rubric_report_stale".to_string(),
+                    format!(
+                        "{rel}: отчёт устарел — документ изменён после оценки \
+                         (было sha256:{}, стало sha256:{want})",
+                        &got[..12.min(got.len())]
+                    ),
+                ));
+                continue;
+            }
+        }
+        if artifact.weighted_total < cfg.min_score {
+            findings.push(GateFinding::ruled(
+                "error".to_string(),
+                "decision_quality_low".to_string(),
+                format!(
+                    "{rel}: {:.2}/5 ниже порога {:.2} (судья {})",
+                    artifact.weighted_total, cfg.min_score, artifact.judge_model
+                ),
+            ));
+        }
+        // «Автор = судья»: вердикт судьи о своей же работе не независим.
+        let author_missing = artifact
+            .author_model
+            .as_deref()
+            .is_none_or(|a| a.trim().is_empty());
+        if author_missing || artifact.author_model.as_deref() == Some(&artifact.judge_model) {
+            findings.push(GateFinding::ruled(
+                if cfg.require_distinct_judge && !author_missing {
+                    "error".to_string()
+                } else {
+                    "warn".to_string()
+                },
+                "judge_is_author".to_string(),
+                if author_missing {
+                    format!(
+                        "{rel}: author_model в отчёте не указан — независимость судьи не подтверждена \
+                         (судья {})",
+                        artifact.judge_model
+                    )
+                } else {
+                    format!(
+                        "{rel}: судья и автор — одна модель ({}) — оценка не независима",
+                        artifact.judge_model
+                    )
+                },
+            ));
+        }
+    }
+    if judged == 0 {
+        return GateComponent::skip(
+            "decision_quality",
+            "принятых ADR (Status: Accepted) не найдено".to_string(),
+        );
+    }
+    let errors = findings.iter().filter(|f| f.severity == "error").count();
+    let detail = format!(
+        "принятых ADR: {judged}, находок: {} (error: {errors}); порог {:.2}",
+        findings.len(),
+        cfg.min_score
+    );
+    if errors == 0 {
+        GateComponent::pass_with_findings("decision_quality", detail, findings)
+    } else {
+        GateComponent::fail("decision_quality", detail, findings)
+    }
+}
+
 /// Вычисляет маршрут из git-диффа (`--route auto`): [`control::detect_diff_triggers`]
 /// и [`control::score_with_sources`] с пустым declared (механический минимум
 /// S-1, ADR-034). Дифф недоступен (не git-репозиторий, нет HEAD) — fail-safe
@@ -1577,6 +1749,15 @@ fn run_inner(
     if let Some(lock) = &route_lock {
         components.push(component_route_lock(repo, base, &git, lock));
     }
+    // Н7: качество решений — необязательная составляющая; включается только
+    // через `[gate.required]` (по умолчанию SKIP, чтобы не краснить чужие
+    // пайплайны без предупреждения).
+    let required_names = requirements.for_route(route);
+    components.push(component_decision_quality(
+        repo,
+        &options.decision_quality,
+        required_names.iter().any(|r| r == "decision_quality"),
+    ));
     let mut report = GateReport {
         repo: repo.to_path_buf(),
         route,
@@ -1898,6 +2079,229 @@ mod tests {
             .find(|c| c.name == name)
             .unwrap_or_else(|| panic!("нет составляющей {name}"))
             .status
+    }
+
+    // --- Н7: качество решений как составляющая гейта (ADR-042) -------------
+
+    /// Репозиторий с одним Accepted-ADR и (опционально) отчётом рубрики.
+    fn make_quality_repo(dir: &Path, score: Option<f64>, author: Option<&str>) {
+        make_gate_repo(dir);
+        std::fs::create_dir_all(dir.join("docs/adr")).expect("mkdir adr");
+        let adr = dir.join("docs/adr/ADR-001-reshenie.md");
+        std::fs::write(
+            &adr,
+            "# ADR-001. Решение\n\n- Date: 2026-09-19\n- Status: Accepted\n\n## Context\n\nПричина.\n\n## Alternatives\n\nВариант Б.\n\n## Consequences\n\nЦена.\n",
+        )
+        .expect("adr");
+        git(dir, &["add", "."]);
+        // `--allow-empty`: тест может пересобрать фикстуру в том же каталоге.
+        git(dir, &["commit", "-q", "--allow-empty", "-m", "adr"]);
+        if let Some(total) = score {
+            let sha = crate::hash::sha256_file(&adr).expect("sha");
+            let artifact = serde_json::json!({
+                "schema": crate::rubric::RUBRIC_REPORT_SCHEMA,
+                "rubric": "adr_quality",
+                "target": "docs/adr/ADR-001-reshenie.md",
+                "target_sha256": sha,
+                "judge_model": "judge-x",
+                "author_model": author,
+                "weighted_total": total,
+                "verdict": "OK",
+                "unstable": false,
+                "evidence_not_found": 0,
+                "judged_at": "2026-09-19T10:00:00+00:00",
+            });
+            let reports = dir.join(crate::rubric::RUBRIC_REPORTS_DIR);
+            std::fs::create_dir_all(&reports).expect("mkdir reports");
+            std::fs::write(
+                reports.join("ADR-001-reshenie.json"),
+                serde_json::to_string_pretty(&artifact).expect("json"),
+            )
+            .expect("write report");
+        }
+    }
+
+    /// С включённой составляющей требования передаются явно.
+    fn with_quality(route: Route) -> GateRequirements {
+        let mut req = GateRequirements::default();
+        let list = match route {
+            Route::Fast => &mut req.fast,
+            Route::Standard => &mut req.standard,
+            Route::Critical => &mut req.critical,
+        };
+        list.push("decision_quality".to_string());
+        req
+    }
+
+    /// По умолчанию составляющая — SKIP: включение только через `[gate.required]`.
+    #[test]
+    fn decision_quality_is_skip_by_default() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        make_quality_repo(dir, Some(1.0), Some("judge-x"));
+        let report = run_with(
+            dir,
+            Some(Route::Fast),
+            None,
+            None,
+            (1, 4),
+            &GateRequirements::default(),
+        )
+        .expect("gate");
+        assert_eq!(
+            status_of(&report, "decision_quality"),
+            GateStatus::Skip,
+            "ADR с низким баллом не краснит гейт без явного включения"
+        );
+        assert_eq!(report.outcome, GateOutcome::Pass);
+    }
+
+    /// Слабый ADR (картонный: секции есть, содержания нет) — ниже порога.
+    #[test]
+    fn decision_quality_fails_below_threshold() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        make_quality_repo(dir, Some(1.30), Some("judge-x"));
+        let report = run_with(
+            dir,
+            Some(Route::Fast),
+            None,
+            None,
+            (1, 4),
+            &with_quality(Route::Fast),
+        )
+        .expect("gate");
+        assert_eq!(status_of(&report, "decision_quality"), GateStatus::Fail);
+        let findings = &report
+            .components
+            .iter()
+            .find(|c| c.name == "decision_quality")
+            .expect("comp")
+            .findings;
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule.as_deref() == Some("decision_quality_low")),
+            "{findings:?}"
+        );
+        // Сильный ADR (3.90) — тот же порог пройден.
+        make_quality_repo(dir, Some(3.90), Some("judge-x"));
+        let ok = run_with(
+            dir,
+            Some(Route::Fast),
+            None,
+            None,
+            (1, 4),
+            &with_quality(Route::Fast),
+        )
+        .expect("gate");
+        assert_eq!(status_of(&ok, "decision_quality"), GateStatus::Pass);
+    }
+
+    /// Отчёт, снятый с прежней редакции ADR, обесценивается.
+    #[test]
+    fn decision_quality_flags_stale_report() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        make_quality_repo(dir, Some(4.5), Some("judge-x"));
+        // Правка документа после оценки — при том же пути.
+        let adr = dir.join("docs/adr/ADR-001-reshenie.md");
+        let mut text = std::fs::read_to_string(&adr).expect("read");
+        text.push_str("\nДописано после оценки.\n");
+        std::fs::write(&adr, text).expect("write");
+        let report = run_with(
+            dir,
+            Some(Route::Fast),
+            None,
+            None,
+            (1, 4),
+            &with_quality(Route::Fast),
+        )
+        .expect("gate");
+        assert_eq!(status_of(&report, "decision_quality"), GateStatus::Fail);
+        let findings = &report
+            .components
+            .iter()
+            .find(|c| c.name == "decision_quality")
+            .expect("comp")
+            .findings;
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule.as_deref() == Some("rubric_report_stale")),
+            "{findings:?}"
+        );
+    }
+
+    /// Судья = автор (или автор не указан) — отдельная находка.
+    #[test]
+    fn decision_quality_warns_when_judge_is_author() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        for author in [Some("judge-x"), None] {
+            make_quality_repo(dir, Some(4.5), author);
+            let report = run_with(
+                dir,
+                Some(Route::Fast),
+                None,
+                None,
+                (1, 4),
+                &with_quality(Route::Fast),
+            )
+            .expect("gate");
+            let findings = &report
+                .components
+                .iter()
+                .find(|c| c.name == "decision_quality")
+                .expect("comp")
+                .findings;
+            let comp = report
+                .components
+                .iter()
+                .find(|c| c.name == "decision_quality")
+                .expect("comp");
+            let hit = findings
+                .iter()
+                .find(|f| f.rule.as_deref() == Some("judge_is_author"))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "нет judge_is_author для {author:?}: {:?} / {}",
+                        findings, comp.detail
+                    )
+                });
+            assert_eq!(hit.severity, "warn", "{findings:?}");
+            // warn не краснит составляющую: балл выше порога.
+            assert_eq!(status_of(&report, "decision_quality"), GateStatus::Pass);
+        }
+    }
+
+    /// Нет отчёта вовсе — решение не оценено (дефект D9: «картонный» ADR).
+    #[test]
+    fn decision_quality_requires_report_when_enabled() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        make_quality_repo(dir, None, None);
+        let report = run_with(
+            dir,
+            Some(Route::Fast),
+            None,
+            None,
+            (1, 4),
+            &with_quality(Route::Fast),
+        )
+        .expect("gate");
+        assert_eq!(status_of(&report, "decision_quality"), GateStatus::Fail);
+        assert!(
+            report
+                .components
+                .iter()
+                .find(|c| c.name == "decision_quality")
+                .expect("comp")
+                .findings
+                .iter()
+                .any(|f| f.rule.as_deref() == Some("rubric_report_missing")),
+            "ожидалась rubric_report_missing"
+        );
     }
 
     // --- Н3: аттестация различает состояния репозитория (ADR-043) ----------

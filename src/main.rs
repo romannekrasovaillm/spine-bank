@@ -720,6 +720,10 @@ enum RubricCmd {
         /// Сначала сгенерировать динамическую рубрику под предмет.
         #[arg(long)]
         dynamic_subject: Option<String>,
+        /// Модель-автор документа: `judge == author` — судья судил свою же
+        /// работу (метка `judge_is_author` в составляющей `decision_quality`).
+        #[arg(long)]
+        author_model: Option<String>,
     },
 }
 
@@ -2646,6 +2650,7 @@ async fn cmd_rubric(cfg: &Arc<Config>, cmd: RubricCmd) -> Result<()> {
             target,
             model,
             dynamic_subject,
+            author_model,
         } => {
             let registry = Arc::new(LlmRegistry::from_config(cfg)?);
             let judge = match &model {
@@ -2674,6 +2679,20 @@ async fn cmd_rubric(cfg: &Arc<Config>, cmd: RubricCmd) -> Result<()> {
             }
             std::fs::write(&out, report.to_markdown())?;
             eprintln!("Отчёт: {}", out.display());
+            // Машиночитаемый отчёт (Н7, ADR-042): его читает составляющая
+            // гейта `decision_quality`. Пишем в репозиторий, к которому
+            // относится документ, — иначе гейт его не найдёт.
+            let abs_target = target.canonicalize().unwrap_or_else(|_| target.clone());
+            let repo = arch_harness::rubric::repo_root_of(&abs_target);
+            match arch_harness::rubric::write_artifact(
+                &repo,
+                &report,
+                Some(&abs_target),
+                author_model.as_deref(),
+            ) {
+                Ok(path) => eprintln!("Отчёт для гейта: {}", path.display()),
+                Err(e) => eprintln!("⚠ машиночитаемый отчёт не записан: {e}"),
+            }
         }
     }
     Ok(())
