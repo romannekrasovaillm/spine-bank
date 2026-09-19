@@ -50,6 +50,9 @@ pub struct Config {
     /// Матрица обязательных составляющих гейта по маршруту (П1 ДКА, ADR-039):
     /// SKIP обязательной составляющей даёт INCOMPLETE и exit 3, а не PASS.
     pub gate: GateConfig,
+    /// Семантика артефактов Evidence Bundle (Н1 волны A 0.3.4, ADR-041):
+    /// «артефакт есть» ≠ «артефакт написан».
+    pub evidence: EvidenceConfig,
     /// Пути к ассетам, отчётам и сессиям.
     pub paths: PathsConfig,
     /// Откуда конфиг загружен (нужно `harness_run` для горячего
@@ -805,6 +808,90 @@ impl SignificanceConfig {
 pub struct GateConfig {
     /// Обязательные составляющие по маршрутам.
     pub required: RequiredRules,
+    /// Составляющая `decision_quality` (Н7 волны B 0.3.4, ADR-042): качество
+    /// архитектурных решений по отчёту рубрики-судьи.
+    pub decision_quality: DecisionQualityConfig,
+}
+
+/// Настройки составляющей гейта `decision_quality` (Н7, ADR-042).
+///
+/// Составляющая по умолчанию **не обязательна** ни на одном маршруте: SKIP
+/// обязательной составляющей даёт INCOMPLETE, и включение порога качества
+/// должно быть осознанным решением проекта, а не сюрпризом после обновления.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DecisionQualityConfig {
+    /// Минимальный взвешенный итог рубрики `adr_quality` для Accepted-ADR.
+    /// Порог `3.5` — как в чек-листе скилла `adr-authoring`.
+    pub min_score: f64,
+    /// Требовать от судьи модель, отличную от автора документа: `true` —
+    /// `judge_is_author` становится error, `false` — warn.
+    pub require_distinct_judge: bool,
+}
+
+impl Default for DecisionQualityConfig {
+    fn default() -> Self {
+        Self {
+            min_score: 3.5,
+            require_distinct_judge: false,
+        }
+    }
+}
+
+/// Семантика артефактов Evidence Bundle (Н1 волны A 0.3.4, ADR-041).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EvidenceSemantics {
+    /// По маршруту: Critical — `error`, Standard/Fast — `warn` (дефолт).
+    #[default]
+    Auto,
+    /// Проверки содержания выключены (поведение 0.3.3).
+    Off,
+    /// Все находки о содержании — предупреждения, выпуск не блокируют.
+    Warn,
+    /// Все находки о содержании блокируют выпуск на любом маршруте.
+    Error,
+}
+
+/// Секция `[evidence]`: семантика артефактов бандла (Н1, ADR-041).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EvidenceConfig {
+    /// Минимальный размер артефакта в байтах: меньше — «пустышка».
+    pub min_bytes: u64,
+    /// Строгость находок о содержании артефактов.
+    pub semantics: EvidenceSemantics,
+}
+
+/// Дефолтный порог «пустышки»: 200 байт (стартовое предложение ТЗ 0.3.4,
+/// обоснование — ADR-041).
+pub const DEFAULT_EVIDENCE_MIN_BYTES: u64 = 200;
+
+impl Default for EvidenceConfig {
+    fn default() -> Self {
+        Self {
+            min_bytes: DEFAULT_EVIDENCE_MIN_BYTES,
+            semantics: EvidenceSemantics::Auto,
+        }
+    }
+}
+
+impl EvidenceConfig {
+    /// Строгость находок о содержании для маршрута (`Auto` разворачивается
+    /// по маршруту: Critical — блокирует выпуск).
+    #[must_use]
+    pub fn severity_for(&self, route: crate::control::Route) -> Option<&'static str> {
+        match self.semantics {
+            EvidenceSemantics::Off => None,
+            EvidenceSemantics::Warn => Some("warn"),
+            EvidenceSemantics::Error => Some("error"),
+            EvidenceSemantics::Auto => Some(if route == crate::control::Route::Critical {
+                "error"
+            } else {
+                "warn"
+            }),
+        }
+    }
 }
 
 /// Списки обязательных составляющих для Fast / Standard / Critical.
@@ -1113,6 +1200,7 @@ impl Default for Config {
             fleet: FleetConfig::default(),
             significance: SignificanceConfig::default(),
             gate: GateConfig::default(),
+            evidence: EvidenceConfig::default(),
             paths: PathsConfig::default(),
             loaded_from: None,
         }

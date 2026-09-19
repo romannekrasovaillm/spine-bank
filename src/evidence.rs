@@ -55,10 +55,27 @@ pub struct EvidenceBundle {
     pub items: Vec<EvidenceItem>,
 }
 
+/// Находка о СОДЕРЖАНИИ артефакта бандла — третий класс исхода наряду с
+/// «отсутствует» и «изменён» (Н1 волны A 0.3.4, ADR-041): файл на месте и
+/// хэш сходится, но артефакт не написан.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SemanticFinding {
+    /// Ключ артефакта (`decision_a3`, `adversarial_review`, …).
+    pub key: String,
+    /// Код правила: `evidence_stub`, `review_not_ready`, `a3_not_signed`, …
+    pub rule: String,
+    /// Критичность (`error` блокирует выпуск, `warn` — нет).
+    pub severity: String,
+    /// Что именно не так.
+    pub message: String,
+    /// Что сделать.
+    pub fix_hint: String,
+}
+
 /// Результат проверки.
 #[derive(Debug, Clone)]
 pub struct EvidenceVerdict {
-    /// Полнота и целостность подтверждены.
+    /// Полнота, целостность и содержание подтверждены.
     pub passed: bool,
     /// Отсутствующие обязательные артефакты.
     pub missing: Vec<String>,
@@ -66,8 +83,24 @@ pub struct EvidenceVerdict {
     pub tampered: Vec<String>,
     /// Предупреждения, не блокирующие выпуск (бандл старого формата и т.п.).
     pub warnings: Vec<String>,
+    /// Находки о содержании артефактов (пустышка/не готов/не подписано).
+    pub semantics: Vec<SemanticFinding>,
+    /// Заявленное, но механикой НЕ проверяемое: Spine не притворяется, что
+    /// удостоверил подпись или смысл — он печатает это архитектору.
+    pub not_verified: Vec<String>,
     /// Сводка для отчёта.
     pub summary: String,
+}
+
+impl EvidenceVerdict {
+    /// Блокирующие находки о содержании (severity `error`).
+    #[must_use]
+    pub fn blocking_semantics(&self) -> Vec<&SemanticFinding> {
+        self.semantics
+            .iter()
+            .filter(|f| f.severity == "error")
+            .collect()
+    }
 }
 
 /// Обязательные артефакты по маршруту (из обзора AI-Disrupt: объектный минимум
@@ -322,8 +355,355 @@ pub fn pack(change_dir: &Path, route: Route) -> Result<(EvidenceBundle, Evidence
         missing,
         tampered: Vec::new(),
         warnings: Vec::new(),
+        semantics: Vec::new(),
+        not_verified: Vec::new(),
     };
     Ok((bundle, verdict))
+}
+
+// ---------------------------------------------------------------------------
+// Семантика артефакта: «есть» ≠ «написан» (Н1 волны A 0.3.4, ADR-041)
+// ---------------------------------------------------------------------------
+
+/// Собирает находку о содержании.
+fn finding(
+    key: &str,
+    rule: &str,
+    severity: &str,
+    message: String,
+    fix_hint: &str,
+) -> SemanticFinding {
+    SemanticFinding {
+        key: key.to_string(),
+        rule: rule.to_string(),
+        severity: severity.to_string(),
+        message,
+        fix_hint: fix_hint.to_string(),
+    }
+}
+
+/// Текст артефакта для проверки содержания: файл целиком либо конкатенация
+/// его `md`-файлов (для каталогов вроде `docs/adr/`).
+fn artifact_text(path: &Path) -> Option<String> {
+    if path.is_file() {
+        return std::fs::read_to_string(path).ok();
+    }
+    let mut out = String::new();
+    for f in dir_files(path) {
+        if let Ok(text) = std::fs::read_to_string(&f) {
+            out.push_str(&text);
+            out.push('\n');
+        }
+    }
+    Some(out)
+}
+
+/// Имя самого проблемного файла каталога-артефакта (для адресного сообщения).
+fn stub_file_of(path: &Path, min_bytes: u64) -> Option<String> {
+    if path.is_file() {
+        return None;
+    }
+    dir_files(path).into_iter().find_map(|f| {
+        let text = std::fs::read_to_string(&f).ok()?;
+        let too_small = std::fs::metadata(&f).map_or(0, |m| m.len()) < min_bytes;
+        if too_small || crate::stubs::find_stub(&text, true).is_some() {
+            Some(f.display().to_string())
+        } else {
+            None
+        }
+    })
+}
+
+/// Значение поля записи решения A3: понимает `- **choice**: X`, `**choice**: X`
+/// и `choice: X` (плюс кириллические имена вроде `выбор`).
+fn decision_field(text: &str, name: &str) -> Option<String> {
+    for line in text.lines() {
+        let t = line.trim().trim_start_matches(['-', '*', ' ']).trim();
+        let Some(head) = t.get(..name.len()) else {
+            continue;
+        };
+        if !head.eq_ignore_ascii_case(name) {
+            continue;
+        }
+        // Шаблон записи — `- **choice**: …`: закрывающие `**` стоят до двоеточия.
+        let rest = t[name.len()..]
+            .strip_prefix("**")
+            .unwrap_or(&t[name.len()..]);
+        let Some(value) = rest.strip_prefix(':') else {
+            continue;
+        };
+        return Some(
+            value
+                .trim()
+                .trim_start_matches('*')
+                .trim()
+                .trim_end_matches('*')
+                .trim()
+                .to_string(),
+        );
+    }
+    None
+}
+
+/// Значение поля пустое или является маркером-заглушкой.
+fn field_is_empty(value: &str) -> bool {
+    let v = value.trim();
+    v.is_empty()
+        || matches!(v, "—" | "–" | "-" | "?" | "TBD" | "TODO" | "нет" | "n/a")
+        || crate::stubs::has_angle_placeholder(v)
+        || crate::stubs::is_template_stub(v)
+}
+
+/// Строка итога отчёта: `Итог: PASS` либо `PASS (N из M)`.
+fn has_result_line(text: &str) -> bool {
+    text.lines().any(|l| {
+        let t = l.trim();
+        t.contains("Итог: PASS") || (t.contains("PASS (") && t.contains(" из "))
+    })
+}
+
+/// Строка итога отчёта с провалом.
+fn has_fail_line(text: &str) -> bool {
+    text.lines().any(|l| {
+        let t = l.trim();
+        t.contains("Итог: FAIL") || t.eq_ignore_ascii_case("fail") || t.starts_with("FAIL —")
+    })
+}
+
+/// Вердикт состязательного ревью: `READY` / `NOT-READY` (регистр и кириллица
+/// `ВЕРДИКТ` допустимы).
+///
+/// Возвращает `None`, если строки вердикта нет.
+fn review_verdict(text: &str) -> Option<bool> {
+    for line in text.lines() {
+        let t = line.trim().trim_start_matches(['-', '*', '#', ' ']).trim();
+        let t = t.trim_start_matches("**").trim();
+        let upper = t.to_uppercase();
+        let Some(rest) = upper
+            .strip_prefix("VERDICT")
+            .or_else(|| upper.strip_prefix("ВЕРДИКТ"))
+        else {
+            continue;
+        };
+        // Голое «VERDICT» без «:» — упоминание слова, а не вердикт.
+        let Some(rest) = rest.trim().strip_prefix(':') else {
+            continue;
+        };
+        let rest = rest.trim();
+        if rest.starts_with("NOT-READY") || rest.starts_with("NOT READY") {
+            return Some(false);
+        }
+        if rest.starts_with("READY") {
+            return Some(true);
+        }
+    }
+    None
+}
+
+/// Разбирает `expiry` как дату `ГГГГ-ММ-ДД`.
+fn expiry_date(value: &str) -> Option<chrono::NaiveDate> {
+    let head = value.trim().trim_matches('*').trim();
+    let head: String = head.chars().take(10).collect();
+    chrono::NaiveDate::parse_from_str(&head, "%Y-%m-%d").ok()
+}
+
+/// Проверки содержания одного артефакта: находки + строки «не проверяется».
+fn semantic_check(
+    change_dir: &Path,
+    key: &str,
+    path: &Path,
+    cfg: &crate::config::EvidenceConfig,
+    severity: &str,
+) -> (Vec<SemanticFinding>, Vec<String>) {
+    let mut out = Vec::new();
+    let mut notes = Vec::new();
+    let Some(text) = artifact_text(path) else {
+        // Нечитаемый артефакт уже виден как «изменён»; дублировать нечем.
+        return (out, notes);
+    };
+    let size = if path.is_file() {
+        std::fs::metadata(path).map_or(0, |m| m.len())
+    } else {
+        text.len() as u64
+    };
+    // Общие для всех ключей: размер-пустышка и маркеры-заглушки.
+    let mut stub_flagged = false;
+    if size < cfg.min_bytes {
+        let where_ = stub_file_of(path, cfg.min_bytes)
+            .map_or_else(|| path.display().to_string(), |f| f.clone());
+        out.push(finding(
+            key,
+            "evidence_stub",
+            severity,
+            format!(
+                "артефакт не написан: {size} б < порога {} б ({where_})",
+                cfg.min_bytes
+            ),
+            "заполните артефакт: заглушка в бандле не удостоверяет ничего",
+        ));
+        stub_flagged = true;
+    } else if let Some(file) = stub_file_of(path, cfg.min_bytes) {
+        out.push(finding(
+            key,
+            "evidence_stub",
+            severity,
+            format!("артефакт содержит незаполненное место: {file}"),
+            "уберите маркеры-заглушки (TODO/TBD/<…>) — они попадут в аудиторский след",
+        ));
+        stub_flagged = true;
+    } else if let Some((line, frag)) = crate::stubs::find_stub(&text, true) {
+        out.push(finding(
+            key,
+            "evidence_stub",
+            severity,
+            format!("строка {line}: незаполненное место «{frag}»"),
+            "замените заглушку содержанием: артефакт обязан быть написан",
+        ));
+        stub_flagged = true;
+    }
+    match key {
+        "adversarial_review" => match review_verdict(&text) {
+            None => out.push(finding(
+                key,
+                "review_verdict_missing",
+                severity,
+                "в ревью нет строки вердикта".to_string(),
+                "добавьте строку «VERDICT: READY» или «VERDICT: NOT-READY»",
+            )),
+            Some(false) => out.push(finding(
+                key,
+                "review_not_ready",
+                severity,
+                "ревью поставило NOT-READY — выпуск не подтверждён ревьюером".to_string(),
+                "устраните замечания ревью и получите вердикт READY",
+            )),
+            Some(true) => {}
+        },
+        "decision_a3" if stub_flagged => {
+            notes.push(
+                "семантика решения A3 (адекватность выбора) механикой не проверяется — это работа ревьюера"
+                    .to_string(),
+            );
+        }
+        "decision_a3" => {
+            for (field, why) in [
+                ("choice", "не выбран вариант"),
+                ("rationale", "нет обоснования выбора"),
+                ("rejected", "не перечислены отвергнутые варианты"),
+                ("expiry", "нет срока пересмотра решения"),
+                ("decided_by", "нет подписанта"),
+            ] {
+                let value = decision_field(&text, field);
+                let empty = value.as_deref().is_none_or(field_is_empty);
+                if empty {
+                    out.push(finding(
+                        key,
+                        "a3_not_signed",
+                        severity,
+                        format!("поле «{field}» записи A3 не заполнено: {why}"),
+                        "заполните запись человеческого решения A3 (choice/rationale/rejected/expiry/decided_by)",
+                    ));
+                } else if field == "decided_by" {
+                    if let Some(v) = value {
+                        notes.push(format!(
+                            "подпись A3: заявлена ({v}), подлинность механикой не проверяется"
+                        ));
+                    }
+                }
+            }
+            if let Some(v) = decision_field(&text, "expiry") {
+                match expiry_date(&v) {
+                    Some(d) if d < chrono::Local::now().date_naive() => out.push(finding(
+                        key,
+                        "a3_expired",
+                        severity,
+                        format!(
+                            "решение A3 просрочено: срок пересмотра {d}, сегодня {}",
+                            chrono::Local::now().date_naive()
+                        ),
+                        "продлите срок пересмотра или примите решение заново",
+                    )),
+                    Some(_) => {}
+                    None => out.push(finding(
+                        key,
+                        "a3_expiry_invalid",
+                        severity,
+                        format!("поле «expiry» не дата: «{v}»"),
+                        "укажите срок в формате ГГГГ-ММ-ДД",
+                    )),
+                }
+            }
+            notes.push(
+                "семантика решения A3 (адекватность выбора) механикой не проверяется — это работа ревьюера"
+                    .to_string(),
+            );
+        }
+        "rollback_rehearsal" if stub_flagged => {}
+        "rollback_rehearsal" => {
+            let packet = path.parent().unwrap_or(change_dir);
+            match crate::rehearsal::load_report(packet) {
+                Ok(Some(report)) if report.passed => {
+                    if let Ok(plan) = crate::rehearsal::load_plan(packet) {
+                        if !plan.baseline_commit.trim().is_empty()
+                            && plan.baseline_commit.trim() != report.baseline_commit.trim()
+                        {
+                            out.push(finding(
+                                key,
+                                "rehearsal_stale_baseline",
+                                severity,
+                                format!(
+                                    "baseline репетиции ({}) ≠ baseline плана ({})",
+                                    report.baseline_commit, plan.baseline_commit
+                                ),
+                                "прогоните репетицию заново после правки ROLLBACK.yaml",
+                            ));
+                        }
+                    }
+                }
+                Ok(Some(_)) => out.push(finding(
+                    key,
+                    "rehearsal_not_passed",
+                    severity,
+                    "репетиция отката не PASS".to_string(),
+                    "прогоните `arch-be control gate A4` и добейтесь PASS",
+                )),
+                Ok(None) => {}
+                Err(e) => out.push(finding(
+                    key,
+                    "rehearsal_invalid",
+                    severity,
+                    format!("REHEARSAL.json не разбирается: {e}"),
+                    "пересоберите evidence репетиции командой `arch-be rehearsal run`",
+                )),
+            }
+        }
+        "validation" | "fitness_report" | "walking_skeleton" => {
+            if has_fail_line(&text) {
+                out.push(finding(
+                    key,
+                    "evidence_reports_fail",
+                    severity,
+                    "отчёт содержит итог FAIL".to_string(),
+                    "добейтесь зелёного прогона и переупакуйте бандл",
+                ));
+            } else if !stub_flagged && !has_result_line(&text) {
+                out.push(finding(
+                    key,
+                    "evidence_stub",
+                    severity,
+                    "в отчёте нет строки итога («Итог: PASS» или «PASS (N из M)»)".to_string(),
+                    "добавьте итоговую строку прогона — без неё отчёт не читается машиной",
+                ));
+            }
+        }
+        _ => {}
+    }
+    (out, notes)
+}
+
+/// Есть ли у бандла вход для проверки содержания артефакта (файл на месте).
+fn existing_artifact(change_dir: &Path, key: &str) -> Option<PathBuf> {
+    find_artifact(change_dir, key)
 }
 
 /// Проверяет bundle: обязательные артефакты на месте, хэши совпадают.
@@ -335,6 +715,23 @@ pub fn pack(change_dir: &Path, route: Route) -> Result<(EvidenceBundle, Evidence
 /// # Errors
 /// Манифест отсутствует/не валиден.
 pub fn verify(change_dir: &Path) -> Result<EvidenceVerdict> {
+    verify_with(change_dir, &crate::config::EvidenceConfig::default())
+}
+
+/// Проверяет bundle с настройками семантики из `[evidence]` конфига
+/// (Н1 волны A 0.3.4, ADR-041).
+///
+/// Полнота и целостность проверяются всегда; проверки СОДЕРЖАНИЯ включаются
+/// `[evidence] semantics` (дефолт `auto`: Critical — `error`, Standard/Fast —
+/// `warn`). `passed` требует, чтобы среди находок о содержании не было
+/// блокирующих.
+///
+/// # Errors
+/// Манифест отсутствует/не валиден.
+pub fn verify_with(
+    change_dir: &Path,
+    cfg: &crate::config::EvidenceConfig,
+) -> Result<EvidenceVerdict> {
     let manifest = change_dir.join("EVIDENCE.yaml");
     let text = std::fs::read_to_string(&manifest).map_err(|e| HarnessError::io(&manifest, e))?;
     let bundle: EvidenceBundle = serde_yaml_ng::from_str(&text)?;
@@ -377,19 +774,48 @@ pub fn verify(change_dir: &Path) -> Result<EvidenceVerdict> {
             ));
         }
     }
-    let passed = missing.is_empty() && tampered.is_empty();
+    // Содержание артефактов: третий класс исхода (Н1, ADR-041).
+    let mut semantics = Vec::new();
+    let mut not_verified = Vec::new();
+    if let Some(severity) = cfg.severity_for(route) {
+        for (key, _desc) in required_artifacts(route) {
+            let Some(path) = existing_artifact(change_dir, key) else {
+                continue;
+            };
+            let (found, notes) = semantic_check(change_dir, key, &path, cfg, severity);
+            semantics.extend(found);
+            for n in notes {
+                if !not_verified.contains(&n) {
+                    not_verified.push(n);
+                }
+            }
+        }
+    } else if crate::config::EvidenceSemantics::Off == cfg.semantics {
+        not_verified.push(
+            "проверки содержания артефактов выключены ([evidence] semantics = off) — \
+             зелёный вердикт удостоверяет только наличие и целостность файлов"
+                .to_string(),
+        );
+    }
+    let blocking = semantics.iter().filter(|f| f.severity == "error").count();
+    let passed = missing.is_empty() && tampered.is_empty() && blocking == 0;
+    let summary = format!(
+        "Проверка bundle ({}): артефактов {}, отсутствует {}, изменено {}, \
+         содержание — находок {} (блокирующих {blocking})",
+        bundle.route,
+        bundle.items.len(),
+        missing.len(),
+        tampered.len(),
+        semantics.len()
+    );
     Ok(EvidenceVerdict {
         passed,
-        summary: format!(
-            "Проверка bundle ({}): артефактов {}, отсутствует {}, изменено {}",
-            bundle.route,
-            bundle.items.len(),
-            missing.len(),
-            tampered.len()
-        ),
         missing,
         tampered,
         warnings,
+        semantics,
+        not_verified,
+        summary,
     })
 }
 
@@ -446,7 +872,7 @@ impl Tool for EvidenceVerifyTool {
             }
         };
         let dir = ctx.resolve(&args.change_dir);
-        let verdict = match verify(&dir) {
+        let verdict = match verify_with(&dir, &ctx.config.evidence) {
             Ok(v) => v,
             Err(e) => return Ok(ToolOutput::err(format!("evidence_verify: {e}"))),
         };
@@ -460,12 +886,23 @@ impl Tool for EvidenceVerifyTool {
                     .iter()
                     .map(|t| json!({"kind": "tampered", "artifact": t})),
             )
+            .chain(verdict.semantics.iter().map(|s| {
+                json!({
+                    "kind": "semantic",
+                    "artifact": s.key,
+                    "rule": s.rule,
+                    "severity": s.severity,
+                    "message": s.message,
+                    "fix_hint": s.fix_hint,
+                })
+            }))
             .collect();
         let out = json!({
             "tool": "evidence_verify",
             "passed": verdict.passed,
             "issues": issues,
             "warnings": verdict.warnings,
+            "not_verified": verdict.not_verified,
             "summary": verdict.summary,
         });
         // Сериализация собранного объекта не падает; запасной вариант — компактная форма.
@@ -724,14 +1161,12 @@ mod tests {
     async fn evidence_pack_then_verify_tools_roundtrip_passes() {
         let tmp = tempfile::tempdir().expect("tmp");
         let dir = tmp.path();
-        put(dir, "PROBLEM.md", "# Проблема\n");
-        put(
-            dir,
-            "SPEC.md",
-            "## Проблема\n## Критерии приёмки\n## Риски\n",
-        );
-        put(dir, "RISK.md", "Fast: 0\n");
-        put(dir, "ROLLBACK.md", "git revert\n");
+        // Содержательные артефакты: с 0.3.4 пустышка — находка (Н1, ADR-041),
+        // и «чисто сразу после упаковки» проверяется на написанном бандле.
+        put(dir, "PROBLEM.md", &body("Проблема"));
+        put(dir, "SPEC.md", &body("Спецификация"));
+        put(dir, "RISK.md", &body("Риск"));
+        put(dir, "ROLLBACK.md", &body("Откат"));
         let ctx = tool_ctx(dir);
         // pack (fast) → manifest записан, полнота ок.
         let out = EvidencePackTool
@@ -766,6 +1201,302 @@ mod tests {
                 .iter()
                 .any(|i| i["kind"] == "tampered"),
             "{v}"
+        );
+    }
+
+    // --- Н1: семантика артефакта («есть» ≠ «написан», ADR-041) -------------
+
+    /// Содержательное наполнение: длиннее порога 200 б и без маркеров-заглушек.
+    fn body(title: &str) -> String {
+        format!(
+            "# {title}\n\n{}\n",
+            "Содержательный раздел решения с обоснованием, альтернативами и \
+             последствиями. "
+                .repeat(4)
+        )
+    }
+
+    /// Полный и СОДЕРЖАТЕЛЬНЫЙ бандл маршрута Critical.
+    fn put_complete_critical(dir: &Path) {
+        put(dir, "PROBLEM.md", &body("Проблема"));
+        put(dir, "SPEC.md", &body("Спецификация"));
+        put(dir, "RISK.md", &body("Риск"));
+        put(dir, "ROLLBACK.md", &body("Откат"));
+        put(dir, "docs/adr/ADR-001.md", &body("Решение"));
+        put(dir, "ARCHITECTURE-SPINE.md", &body("Инварианты"));
+        put(
+            dir,
+            "DECISION.md",
+            &format!(
+                "# Решение A3\n\n- **choice**: {}\n- **rationale**: {}\n- \
+                 **rejected**: {}\n- **expiry**: 2099-12-31\n- **decided_by**: Архитектор ДКА\n",
+                body("вариант"),
+                body("обоснование"),
+                body("отвергнутое")
+            ),
+        );
+        put(
+            dir,
+            "WALKING-SKELETON.md",
+            &format!(
+                "# Walking skeleton\n\n{}\n\nИтог: PASS (8 из 8)\n",
+                body("Сквозной прогон")
+            ),
+        );
+        put(
+            dir,
+            "docs/REVIEW.md",
+            &format!(
+                "# Ревью\n\nВердикт.\n\nVERDICT: READY\n\nВопросы разобраны: {}",
+                body("итог")
+            ),
+        );
+        put(
+            dir,
+            ".arch-handoff/REHEARSAL.json",
+            r#"{"kind":"rollback_rehearsal","gate":"A4","passed":true,
+                    "baseline_commit":"abc123","rehearsed_at":"2026-09-19T10:00:00Z",
+                    "duration_secs":1.5,"steps":[],"verify":null,
+                    "log":["репетиция отката прошла"]}"#,
+        );
+        put(
+            dir,
+            ".arch-handoff/ROLLBACK.yaml",
+            "baseline_commit: abc123\nsteps:\n  - name: revert\n    run: git revert --no-edit HEAD\n",
+        );
+        put(
+            dir,
+            "VALIDATION.md",
+            &format!("# Валидация\n\n{}\n\nИтог: PASS\n", body("Тесты")),
+        );
+        put(
+            dir,
+            "reports/fitness.md",
+            &format!("# Fitness\n\n{}\n\nИтог: PASS\n", body("Правила")),
+        );
+    }
+
+    /// Абсолютный регресс 0.3.3: бандл из заглушек проходил как «выпуск разрешён».
+    #[test]
+    fn verify_passes_on_complete_bundle() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        put_complete_critical(dir);
+        let (_b, v) = pack(dir, Route::Critical).expect("pack");
+        assert!(v.passed, "missing: {:?}", v.missing);
+        let v = verify(dir).expect("verify");
+        assert!(
+            v.passed,
+            "содержательный бандл обязан быть зелёным; находки: {:?}",
+            v.semantics
+        );
+        assert!(v.semantics.is_empty(), "{:?}", v.semantics);
+        // Подлинность подписи A3 — заявленное, но механикой не проверяется.
+        assert!(
+            v.not_verified
+                .iter()
+                .any(|n| n.contains("подпись A3: заявлена")),
+            "{:?}",
+            v.not_verified
+        );
+    }
+
+    /// Заглушка вместо артефакта: файл есть, содержания нет.
+    #[test]
+    fn verify_flags_stub_artifact() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        put_complete_critical(dir);
+        put(dir, "DECISION.md", "TODO");
+        let (_b, _v) = pack(dir, Route::Critical).expect("pack");
+        let v = verify(dir).expect("verify");
+        assert!(!v.passed, "заглушка на Critical обязана блокировать выпуск");
+        assert!(
+            v.semantics.iter().any(|f| f.rule == "evidence_stub"
+                && f.key == "decision_a3"
+                && f.severity == "error"),
+            "{:?}",
+            v.semantics
+        );
+        assert!(!v.blocking_semantics().is_empty());
+    }
+
+    /// Ревью с вердиктом NOT-READY больше не даёт «выпуск разрешён».
+    #[test]
+    fn verify_blocks_not_ready_review() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        put_complete_critical(dir);
+        put(
+            dir,
+            "docs/REVIEW.md",
+            &format!("# R\n\nVERDICT: NOT-READY\n\n{}", body("замечания")),
+        );
+        let (_b, _v) = pack(dir, Route::Critical).expect("pack");
+        let v = verify(dir).expect("verify");
+        assert!(!v.passed);
+        assert!(
+            v.semantics.iter().any(|f| f.rule == "review_not_ready"),
+            "{:?}",
+            v.semantics
+        );
+        // Отсутствие строки вердикта — отдельная находка.
+        put(dir, "docs/REVIEW.md", &body("ревью без вердикта"));
+        pack(dir, Route::Critical).expect("repack");
+        let v = verify(dir).expect("verify");
+        assert!(
+            v.semantics
+                .iter()
+                .any(|f| f.rule == "review_verdict_missing"),
+            "{:?}",
+            v.semantics
+        );
+    }
+
+    /// Неподписанная запись A3 (пустой `decided_by`) — находка `a3_not_signed`.
+    #[test]
+    fn verify_flags_unsigned_a3() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        put_complete_critical(dir);
+        put(
+            dir,
+            "DECISION.md",
+            "# Решение A3\n\n- **choice**: вариант А — централизованный клиринг\n- **rationale**: снижает операционный риск расчётов и снимает зависимость от ручных сверок\n- **rejected**: вариант Б — распределённый клиринг, отклонён из-за сложности сопровождения\n- **expiry**: 2099-12-31\n- **decided_by**: \n",
+        );
+        pack(dir, Route::Critical).expect("pack");
+        let v = verify(dir).expect("verify");
+        assert!(!v.passed);
+        assert!(
+            v.semantics
+                .iter()
+                .any(|f| f.rule == "a3_not_signed" && f.message.contains("decided_by")),
+            "{:?}",
+            v.semantics
+        );
+        // Прочерк — тот же случай, что пустое поле.
+        put(
+            dir,
+            "DECISION.md",
+            "# Решение A3\n\n- **choice**: вариант А — централизованный клиринг\n- **rationale**: снижает операционный риск расчётов и снимает зависимость от ручных сверок\n- **rejected**: вариант Б — распределённый клиринг, отклонён из-за сложности сопровождения\n- **expiry**: 2099-12-31\n- **decided_by**: —\n",
+        );
+        pack(dir, Route::Critical).expect("pack");
+        let v = verify(dir).expect("verify");
+        assert!(v.semantics.iter().any(|f| f.rule == "a3_not_signed"));
+        assert!(!v.passed);
+    }
+
+    /// Просроченный срок пересмотра решения — находка `a3_expired`.
+    #[test]
+    fn verify_flags_expired_a3() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        put_complete_critical(dir);
+        put(
+            dir,
+            "DECISION.md",
+            "# Решение A3\n\n- **choice**: вариант А — централизованный клиринг\n- **rationale**: снижает операционный риск расчётов и снимает зависимость от ручных сверок\n- **rejected**: вариант Б — распределённый клиринг, отклонён из-за сложности сопровождения\n- **expiry**: 2020-01-01\n- **decided_by**: Архитектор\n",
+        );
+        pack(dir, Route::Critical).expect("pack");
+        let v = verify(dir).expect("verify");
+        assert!(!v.passed);
+        assert!(
+            v.semantics.iter().any(|f| f.rule == "a3_expired"),
+            "{:?}",
+            v.semantics
+        );
+    }
+
+    /// `semantics = off` возвращает поведение 0.3.3: проверяется только
+    /// наличие и целостность, о выключенных проверках сказано честно.
+    #[test]
+    fn semantics_off_restores_033_behaviour() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        put_complete_critical(dir);
+        put(dir, "DECISION.md", "TODO");
+        pack(dir, Route::Critical).expect("pack");
+        let cfg = crate::config::EvidenceConfig {
+            semantics: crate::config::EvidenceSemantics::Off,
+            ..crate::config::EvidenceConfig::default()
+        };
+        let v = verify_with(dir, &cfg).expect("verify");
+        assert!(
+            v.passed,
+            "0.3.3 не смотрела на содержание: {:?}",
+            v.semantics
+        );
+        assert!(v.semantics.is_empty());
+        assert!(
+            v.not_verified.iter().any(|n| n.contains("выключены")),
+            "{:?}",
+            v.not_verified
+        );
+        // На маршруте Standard та же заглушка — warn, выпуск не блокируется.
+        let std_dir = tmp.path().join("standard");
+        std::fs::create_dir_all(&std_dir).expect("mkdir");
+        put(&std_dir, "PROBLEM.md", &body("Проблема"));
+        put(&std_dir, "SPEC.md", &body("Спека"));
+        put(&std_dir, "RISK.md", &body("Риск"));
+        put(&std_dir, "ROLLBACK.md", &body("Откат"));
+        put(&std_dir, "VALIDATION.md", "TODO TODO TODO");
+        put(&std_dir, "reports/fitness.md", &body("Fitness"));
+        put(&std_dir, "docs/adr/ADR-001.md", &body("ADR"));
+        pack(&std_dir, Route::Standard).expect("pack");
+        let v = verify(&std_dir).expect("verify");
+        assert!(v.passed, "Standard — warn, не блокирует: {:?}", v.semantics);
+        assert!(
+            v.semantics
+                .iter()
+                .any(|f| f.rule == "evidence_stub" && f.severity == "warn"),
+            "{:?}",
+            v.semantics
+        );
+    }
+
+    /// Отчёт с провалом внутри — `evidence_reports_fail`.
+    #[test]
+    fn verify_flags_failing_report() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        put_complete_critical(dir);
+        put(
+            dir,
+            "VALIDATION.md",
+            &format!("{}\n\nИтог: FAIL\n", body("Прогон")),
+        );
+        pack(dir, Route::Critical).expect("pack");
+        let v = verify(dir).expect("verify");
+        assert!(!v.passed);
+        assert!(
+            v.semantics
+                .iter()
+                .any(|f| f.rule == "evidence_reports_fail"),
+            "{:?}",
+            v.semantics
+        );
+    }
+
+    /// Baseline репетиции разошёлся с планом отката — evidence обесценено.
+    #[test]
+    fn verify_flags_stale_rehearsal_baseline() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        put_complete_critical(dir);
+        put(
+            dir,
+            ".arch-handoff/ROLLBACK.yaml",
+            "baseline_commit: deadbeef\nsteps: []\n",
+        );
+        pack(dir, Route::Critical).expect("pack");
+        let v = verify(dir).expect("verify");
+        assert!(!v.passed);
+        assert!(
+            v.semantics
+                .iter()
+                .any(|f| f.rule == "rehearsal_stale_baseline"),
+            "{:?}",
+            v.semantics
         );
     }
 

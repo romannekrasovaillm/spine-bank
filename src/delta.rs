@@ -150,17 +150,18 @@ pub fn validate(repo: &Path, name: &str) -> Result<Vec<LintIssue>> {
             });
         }
     }
-    // Пустые секции-заглушки из шаблона.
+    // Пустые секции-заглушки из шаблона. Правило вынесено в [`crate::stubs`]
+    // (общий знаменатель с семантикой бандла), уровень строгости — тот же,
+    // что в 0.3.3: вердикт `delta validate` не меняется.
     for (n, line) in text.lines().enumerate() {
-        let t = line.trim();
-        if t.starts_with('<') && t.ends_with('>') || t.contains("TODO") || t.contains("TBD") {
+        if crate::stubs::is_template_stub(line) {
             issues.push(LintIssue {
                 file: path.clone(),
                 line: n + 1,
                 rule: "stub_marker".into(),
                 message: format!(
                     "незаполненное место: {}",
-                    t.chars().take(60).collect::<String>()
+                    line.trim().chars().take(60).collect::<String>()
                 ),
                 severity: "warn".into(),
                 ..LintIssue::default()

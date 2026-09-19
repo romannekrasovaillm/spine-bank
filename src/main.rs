@@ -1657,13 +1657,14 @@ async fn main() -> Result<()> {
                 .significance
                 .limits()
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
-            let report = arch_harness::gate::run_with(
+            let report = arch_harness::gate::run_opts(
                 &repo,
                 route,
                 base.as_deref(),
                 constraints.as_deref(),
                 limits,
                 &arch_harness::gate::GateRequirements::from_config(&cfg.gate),
+                &arch_harness::gate::GateOptions::from_config(&cfg),
             )?;
             if json_envelope {
                 let envelope = report.envelope_json();
@@ -1813,7 +1814,7 @@ async fn main() -> Result<()> {
         Some(Cmd::Skills { cmd }) => cmd_skills(&cfg, cmd)?,
         Some(Cmd::Plugins { cmd }) => cmd_plugins(&cfg, cmd)?,
         Some(Cmd::Policy { check }) => cmd_policy(&cfg, check)?,
-        Some(Cmd::Evidence { cmd }) => cmd_evidence(cmd)?,
+        Some(Cmd::Evidence { cmd }) => cmd_evidence(&cfg, cmd)?,
         Some(Cmd::Metrics { cost_report }) => {
             if cost_report {
                 // Смета по реальным записям usage журналов (тарифы — из конфига).
@@ -3654,7 +3655,7 @@ fn cmd_policy(cfg: &Config, check: Option<String>) -> Result<()> {
 }
 
 /// `arch-be evidence`: Evidence Bundle.
-fn cmd_evidence(cmd: EvidenceCmd) -> Result<()> {
+fn cmd_evidence(cfg: &arch_harness::config::Config, cmd: EvidenceCmd) -> Result<()> {
     match cmd {
         EvidenceCmd::Pack { dir, route } => {
             let route = match route.to_lowercase().as_str() {
@@ -3676,7 +3677,7 @@ fn cmd_evidence(cmd: EvidenceCmd) -> Result<()> {
             }
         }
         EvidenceCmd::Verify { dir } => {
-            let v = arch_harness::evidence::verify(&dir)?;
+            let v = arch_harness::evidence::verify_with(&dir, &cfg.evidence)?;
             println!("{}", v.summary);
             for w in &v.warnings {
                 println!("  ⚠ {w}");
@@ -3686,6 +3687,17 @@ fn cmd_evidence(cmd: EvidenceCmd) -> Result<()> {
             }
             for t in &v.tampered {
                 println!("  ✗ ИЗМЕНЁН: {t}");
+            }
+            // Содержание артефактов (Н1, ADR-041): «есть» ≠ «написан».
+            for f in &v.semantics {
+                let mark = if f.severity == "error" { "✗" } else { "⚠" };
+                println!("  {mark} [{}] {}: {}", f.rule, f.key, f.message);
+                println!("      → {}", f.fix_hint);
+            }
+            // Заявленное, но механикой не проверяемое — печатается всегда:
+            // Spine не притворяется, что удостоверил подпись или смысл.
+            for n in &v.not_verified {
+                println!("  · не проверяется механикой: {n}");
             }
             println!(
                 "Итог: {}",

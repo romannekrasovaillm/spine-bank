@@ -276,6 +276,31 @@ impl GateRequirements {
     }
 }
 
+/// Настройки гейта, не выражаемые маршрутом (0.3.4): семантика артефактов
+/// бандла (Н1, ADR-041) и порог качества решений (Н7, ADR-042).
+///
+/// Тесты и встраивающие вызовы без конфига получают [`GateOptions::default`] —
+/// ровно те же значения, что в `Config::default()`, поэтому вердикт не
+/// зависит от того, читал ли вызывающий `config.toml` (AD-7).
+#[derive(Debug, Clone, Default)]
+pub struct GateOptions {
+    /// Семантика артефактов Evidence Bundle.
+    pub evidence: crate::config::EvidenceConfig,
+    /// Порог качества архитектурных решений (составляющая `decision_quality`).
+    pub decision_quality: crate::config::DecisionQualityConfig,
+}
+
+impl GateOptions {
+    /// Настройки из секций `[evidence]` и `[gate.decision_quality]` конфига.
+    #[must_use]
+    pub fn from_config(cfg: &crate::config::Config) -> Self {
+        Self {
+            evidence: cfg.evidence.clone(),
+            decision_quality: cfg.gate.decision_quality.clone(),
+        }
+    }
+}
+
 /// Отчёт гейта `arch-be gate`.
 #[derive(Debug)]
 pub struct GateReport {
@@ -1054,7 +1079,7 @@ fn evidence_bundle_dirs(repo: &Path) -> Vec<PathBuf> {
 
 /// Составляющая `evidence_verify` (маршруты Standard/Critical): полнота и
 /// целостность хэшей evidence-бандлов активных дельт и корня репозитория.
-fn component_evidence(repo: &Path) -> GateComponent {
+fn component_evidence(repo: &Path, cfg: &crate::config::EvidenceConfig) -> GateComponent {
     let bundles = evidence_bundle_dirs(repo);
     if bundles.is_empty() {
         return GateComponent::skip(
@@ -1064,7 +1089,7 @@ fn component_evidence(repo: &Path) -> GateComponent {
     }
     let mut failed = Vec::new();
     for dir in &bundles {
-        match evidence::verify(dir) {
+        match evidence::verify_with(dir, cfg) {
             Ok(verdict) if verdict.passed => {}
             Ok(verdict) => {
                 let label = dir.strip_prefix(repo).map_or_else(
@@ -1093,6 +1118,14 @@ fn component_evidence(repo: &Path) -> GateComponent {
                         .iter()
                         .map(|t| GateFinding::text("error", format!("  изменён: {t}"))),
                 );
+                // Н1 (ADR-041): содержание артефакта — третий класс исхода.
+                failed.extend(verdict.semantics.iter().map(|f| {
+                    GateFinding::ruled(
+                        f.severity.clone(),
+                        f.rule.clone(),
+                        format!("{}: {} → {}", f.key, f.message, f.fix_hint),
+                    )
+                }));
             }
             Err(e) => {
                 return GateComponent::fail(
@@ -1301,6 +1334,30 @@ pub fn run(
     )
 }
 
+/// Полная форма: матрица обязательности + настройки семантики (0.3.4).
+///
+/// # Errors
+/// Репозиторий недоступен. Провалы составляющих — НЕ ошибка.
+pub fn run_opts(
+    repo: &Path,
+    route_override: Option<Route>,
+    base: Option<&str>,
+    constraints: Option<&Path>,
+    limits: (usize, usize),
+    requirements: &GateRequirements,
+    options: &GateOptions,
+) -> Result<GateReport> {
+    run_inner(
+        repo,
+        route_override,
+        base,
+        constraints,
+        limits,
+        requirements,
+        options,
+    )
+}
+
 /// Прогоняет единый гейт по репозиторию с заданной матрицей обязательных
 /// составляющих (`[gate.required]` конфига, П1 ДКА).
 ///
@@ -1314,6 +1371,27 @@ pub fn run_with(
     constraints: Option<&Path>,
     limits: (usize, usize),
     requirements: &GateRequirements,
+) -> Result<GateReport> {
+    run_inner(
+        repo,
+        route_override,
+        base,
+        constraints,
+        limits,
+        requirements,
+        &GateOptions::default(),
+    )
+}
+
+/// Тело гейта: единая точка сборки состава и настроек.
+fn run_inner(
+    repo: &Path,
+    route_override: Option<Route>,
+    base: Option<&str>,
+    constraints: Option<&Path>,
+    limits: (usize, usize),
+    requirements: &GateRequirements,
+    options: &GateOptions,
 ) -> Result<GateReport> {
     if !repo.is_dir() {
         return Err(HarnessError::Control(format!(
@@ -1376,7 +1454,7 @@ pub fn run_with(
     if matches!(route, Route::Standard | Route::Critical) {
         components.push(component_sensors(repo));
         components.push(component_nfr(repo));
-        components.push(component_evidence(repo));
+        components.push(component_evidence(repo, &options.evidence));
     }
     if let Some(lock) = &route_lock {
         components.push(component_route_lock(repo, base, &git, lock));

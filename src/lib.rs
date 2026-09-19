@@ -89,6 +89,7 @@ pub mod rubric;
 pub mod rules_suggest;
 pub mod secrets;
 pub mod selftest;
+pub mod stubs;
 #[cfg(feature = "harness")]
 pub mod subagent;
 pub mod survey;
