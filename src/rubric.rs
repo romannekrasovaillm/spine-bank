@@ -857,7 +857,7 @@ fn find_quoted_span(text: &str) -> Option<String> {
 /// Цитата подтверждена: точный substring после нормализации, иначе fuzzy
 /// (лучшее скользящее окно по словам) с порогом `min_similarity`.
 fn verify_quote(quote: &str, target: &str, min_similarity: f64) -> bool {
-    let q = normalize_for_match(quote);
+    let q = normalize_for_match(&unescape_quote_ws(quote));
     let t = normalize_for_match(target);
     if q.is_empty() || t.is_empty() {
         return false;
@@ -875,6 +875,20 @@ fn normalize_for_match(text: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ")
         .to_lowercase()
+}
+
+/// Приводит литеральные escape-последовательности (`\n`, `\r`, `\t` — два
+/// символа) в цитате судьи к обычному пробелу. Судья нередко передаёт
+/// перевод строки документа в escape-форме (`"- Date: …\n- Status: …"`),
+/// и без этого шага кросс-строчная цитата не находится даже после
+/// нормализации пробелов — ложный `evidence_not_found` на реальных строках.
+/// Применяется только к цитате: в документе (target) `\n` может быть
+/// содержимым (примеры кода), там подмена создала бы ложные подтверждения.
+fn unescape_quote_ws(quote: &str) -> String {
+    quote
+        .replace("\\n", " ")
+        .replace("\\r", " ")
+        .replace("\\t", " ")
 }
 
 /// Максимум `similar::TextDiff::ratio` по скользящему окну слов размером в
@@ -1418,6 +1432,45 @@ mod tests {
         // Пустые входы не паникуют и не подтверждаются.
         assert!(!verify_quote("", target, 0.8));
         assert!(!verify_quote("что-то длинное", "", 0.8));
+    }
+
+    #[test]
+    fn cross_line_quote_confirmed() {
+        // Шапка ADR из отчёта полигона (E5): цитата судьи пересекает
+        // перевод строки документа, строки реальны.
+        let target = "# ADR-001. Решение\n\n- Date: 2026-09-19\n- Status: Accepted\n\n## Context\n\nТекст.\n";
+        // Реальный перевод строки в цитате — подтверждается.
+        assert!(verify_quote(
+            "- Date: 2026-09-19\n- Status: Accepted",
+            target,
+            0.8
+        ));
+        // Литеральная escape-форма (backslash + n двумя символами) — тоже.
+        assert!(verify_quote(
+            "- Date: 2026-09-19\\n- Status: Accepted",
+            target,
+            0.8
+        ));
+        // Полный путь через rationale: маркер + кавычки + escape-форма.
+        let rationale =
+            "Балл 4. Цитата: \"- Date: 2026-09-19\\n- Status: Accepted\" — шапка на месте.";
+        assert!(evidence_confirmed(rationale, target, 0.8));
+        // Выдуманная кросс-строчная цитата (правдоподобная структура,
+        // выдуманное содержимое) — метка остаётся.
+        assert!(!verify_quote(
+            "- Owner: команда-платформа\\n- Review: ежеквартально",
+            target,
+            0.8
+        ));
+        assert!(!evidence_confirmed(
+            "Цитата: \"- Owner: команда-платформа\\n- Review: ежеквартально\".",
+            target,
+            0.8
+        ));
+        // Escape-подмена не создаёт ложных подтверждений из кода в target:
+        // литеральный `\n` в документе остаётся содержимым, а не пробелом.
+        let code_target = "пример: print(\"a\\nb\") в коде";
+        assert!(!verify_quote("a b", code_target, 0.8));
     }
 
     #[test]
