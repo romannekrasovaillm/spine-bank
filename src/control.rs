@@ -2849,6 +2849,16 @@ fn constraint_churn_90d(repo: &Path, constraints: &Path) -> Option<usize> {
     )
 }
 
+/// Типы правил, проверяющие ПОВЕДЕНИЕ (а не наличие текста): исполнение
+/// команды, направление зависимостей, границы контекста, ArchUnit-гейт.
+/// Используется метрикой «доля правил, проверяющих поведение» (Н10).
+pub const BEHAVIOUR_RULE_KINDS: [&str; 4] = [
+    "command_succeeds",
+    "dependency_direction",
+    "context_boundary",
+    "archunit",
+];
+
 /// Отчёт по реестру правил `CONSTRAINTS.yaml` (markdown в stdout).
 ///
 /// Секции: сводка (всего / по типам / по severity), таблица карточек
@@ -2913,6 +2923,26 @@ pub fn rules_report(repo: &Path, constraints: &Path) -> Result<String> {
     };
     let _ = writeln!(out, "По типам: {}", join_counts(&by_kind));
     let _ = writeln!(out, "По severity: {}", join_counts(&by_severity));
+
+    // Доля правил, проверяющих ПОВЕДЕНИЕ (Н10 волны C 0.3.4): правило на
+    // упоминание — звено трассировки, а не проверка смысла. Метрика отвечает
+    // на вопрос «сколько в реестре настоящих проверок», который иначе
+    // приходится считать глазами по таблице типов.
+    let behaviour = rules
+        .iter()
+        .filter(|r| BEHAVIOUR_RULE_KINDS.contains(&r.kind.as_str()))
+        .count();
+    let total = rules.len();
+    let share = if total == 0 {
+        0.0
+    } else {
+        behaviour as f64 / total as f64 * 100.0
+    };
+    let _ = writeln!(
+        out,
+        "Проверяют поведение: {behaviour} из {total} ({share:.0}%) — типы {};          остальные проверяют наличие текста (звено трассировки, а не смысл)",
+        BEHAVIOUR_RULE_KINDS.join(", ")
+    );
 
     let _ = writeln!(
         out,

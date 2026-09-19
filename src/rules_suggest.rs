@@ -363,6 +363,53 @@ fn detect_operator_audit(case: &Path) -> Result<Option<Candidate>> {
     }))
 }
 
+/// Кандидат `executable-invariants` (Н10 волны C 0.3.4): в репозитории есть
+/// исполняемые тесты, но ни одно правило реестра не запускает поведение —
+/// весь контроль сводится к «документ содержит слово».
+///
+/// Правило на упоминание — звено ТРАССИРОВКИ, а не проверка смысла: оно
+/// доказывает, что текст написан, и ничего не говорит о том, что код делает.
+/// Пока в реестре нет ни одного `command_succeeds`, инварианты,
+/// сформулированные в спайне, не проверяются исполнением.
+fn detect_executable_invariants(case_dir: &Path) -> Option<Candidate> {
+    // Исполняемые тесты: каталог с тестами или скелет с прогоном.
+    let has_tests = ["tests", "test", "skeleton", "src/test"]
+        .iter()
+        .any(|rel| case_dir.join(rel).is_dir());
+    if !has_tests {
+        return None;
+    }
+    // Правила реестра: есть ли хоть одно, запускающее команду.
+    let constraints = crate::control::resolve_constraints_path_detailed(case_dir, None);
+    let resolved = constraints?;
+    let text = std::fs::read_to_string(&resolved.path).ok()?;
+    if text.contains("command_succeeds") {
+        return None;
+    }
+    Some(Candidate {
+        id: "executable-invariants".into(),
+        rationale: "в репозитории есть исполняемые тесты, но в CONSTRAINTS.yaml нет ни одного \
+             правила `command_succeeds`: реестр проверяет только наличие слов в документах, \
+             а инварианты спайна — не исполнением. Правило на упоминание — звено \
+             трассировки, а не проверка смысла; добавьте хотя бы одно исполняемое правило"
+            .into(),
+        source_skill: "fitness-functions".into(),
+        yaml: Some(
+            "# Требуется решение архитектора: какую команду считать исполняемой проверкой.\n\
+             # Пример формы (замените command на реальную команду проекта):\n\
+             #   - id: C-100\n\
+             #     name: invariants_executable\n\
+             #     type: command_succeeds\n\
+             #     command: \"cargo test --quiet\"\n\
+             #     timeout_secs: 600\n\
+             #     severity: error\n\
+             #     owner: OWNER-001\n\
+             #     fix_hint: \"сформулируйте инвариант спайна как тест, который падает при нарушении\"\n"
+                .to_string(),
+        ),
+    })
+}
+
 /// Прогоняет все детекторы по кейсу (корень — каталог с `docs/`, `model/`,
 /// `.arch-handoff/`; читается read-only).
 ///
@@ -382,6 +429,7 @@ pub fn suggest(case_dir: &Path) -> Result<SuggestReport> {
         detect_req_task(case_dir)?,
         detect_rto_rpo_adr(case_dir)?,
         detect_operator_audit(case_dir)?,
+        detect_executable_invariants(case_dir),
     ]
     .into_iter()
     .flatten()
@@ -390,7 +438,7 @@ pub fn suggest(case_dir: &Path) -> Result<SuggestReport> {
     }
     let mechanizable = candidates.iter().filter(|c| c.yaml.is_some()).count();
     let summary = if candidates.is_empty() {
-        "Кандидатов нет: пробелов по 5 детекторам не найдено.".to_string()
+        "Кандидатов нет: пробелов по 6 детекторам не найдено.".to_string()
     } else {
         format!(
             "Кандидатов: {} (с готовым YAML: {mechanizable}, advisory: {}). \
@@ -810,6 +858,93 @@ mod tests {
         assert!(
             !audit.is_match("следует выполнять сверку"),
             "«следует» — шум"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests_executable_invariants {
+    //! Н10 волны C 0.3.4: кандидат `executable-invariants`.
+
+    use super::*;
+
+    /// Кейс с тестами и реестром из одного правила на упоминание.
+    fn case_with(root: &Path, constraints: &str, with_tests: bool) -> PathBuf {
+        let case = root.join(if with_tests { "with-tests" } else { "no-tests" });
+        let _ = std::fs::remove_dir_all(&case);
+        std::fs::create_dir_all(case.join(".arch-handoff")).expect("handoff");
+        if with_tests {
+            std::fs::create_dir_all(case.join("tests")).expect("tests");
+            std::fs::write(
+                case.join("tests/a_test.py"),
+                "def test_x():\n    assert 1\n",
+            )
+            .expect("test");
+        }
+        std::fs::write(case.join(".arch-handoff/CONSTRAINTS.yaml"), constraints)
+            .expect("constraints");
+        case
+    }
+
+    /// Тесты есть, `command_succeeds` нет — кандидат предлагается с YAML-заготовкой.
+    #[test]
+    fn suggests_when_tests_exist_and_no_command_rule() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let case = case_with(
+            tmp.path(),
+            "rules:\n  - id: C-001\n    name: doc_word\n    type: must_contain\n    \
+             glob: \"docs/**/*.md\"\n    pattern: 'журнал'\n    severity: error\n",
+            true,
+        );
+        let report = suggest(&case).expect("suggest");
+        let hit = report
+            .candidates
+            .iter()
+            .find(|c| c.id == "executable-invariants")
+            .unwrap_or_else(|| panic!("нет кандидата: {:?}", report.candidates));
+        assert!(hit.yaml.is_some(), "кандидат обязан нести YAML-заготовку");
+        assert!(hit.rationale.contains("трассировки"));
+    }
+
+    /// Есть исполняемое правило — кандидат не предлагается.
+    #[test]
+    fn silent_when_command_rule_present() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let case = case_with(
+            tmp.path(),
+            "rules:\n  - id: C-001\n    name: tests\n    type: command_succeeds\n    \
+             command: \"cargo test\"\n    severity: error\n",
+            true,
+        );
+        let report = suggest(&case).expect("suggest");
+        assert!(
+            !report
+                .candidates
+                .iter()
+                .any(|c| c.id == "executable-invariants"),
+            "{:?}",
+            report.candidates
+        );
+    }
+
+    /// Тестов нет — предлагать исполняемое правило нечего.
+    #[test]
+    fn silent_without_executable_tests() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let case = case_with(
+            tmp.path(),
+            "rules:\n  - id: C-001\n    name: doc_word\n    type: must_contain\n    \
+             glob: \"docs/**/*.md\"\n    pattern: 'журнал'\n    severity: error\n",
+            false,
+        );
+        let report = suggest(&case).expect("suggest");
+        assert!(
+            !report
+                .candidates
+                .iter()
+                .any(|c| c.id == "executable-invariants"),
+            "{:?}",
+            report.candidates
         );
     }
 }
