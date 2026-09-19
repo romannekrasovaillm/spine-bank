@@ -14,8 +14,10 @@
 //!   каталогов (`.git`, `target`, `node_modules`, `.arch-handoff`);
 //! - метрики: всего файлов, точные дубли (есть идентичная копия того же пути
 //!   в другом worktree), доля дублей, файлы-«ядро» (во ВСЕХ worktree), дрейф —
-//!   пути с разными хэшами содержимого (канон = majority-хэш, при равенстве —
-//!   численно меньший); сводка per-worktree «N/M файлов отличаются от канона»;
+//!   пути с разными хэшами содержимого (канон = majority-хэш; при равенстве
+//!   голосов — версия ОСНОВНОГО (первого) дерева флота; ничья без участия
+//!   основного дерева — канон не назначается, отступников нет); сводка
+//!   per-worktree «N/M файлов отличаются от канона»;
 //! - семантика гейта: дрейф (хотя бы один путь с разными хэшами среди
 //!   владельцев) — `has_drift`, CLI выходит кодом 1; опциональный порог
 //!   доли дублей — второй независимый триггер exit 1.
@@ -53,12 +55,16 @@ const PRUNE_AGE_DAYS: u64 = 30;
 pub struct DriftEntry {
     /// Относительный путь файла.
     pub path: String,
-    /// Метки worktree, чьё содержимое отличается от канона (majority).
+    /// Метки worktree, чьё содержимое отличается от канона (majority);
+    /// пуст при `tie` — отступник не назначается произвольно.
     pub deviants: Vec<String>,
     /// Сколько worktree владеют этим файлом.
     pub owners: usize,
     /// Сколько различных версий содержимого.
     pub versions: usize,
+    /// Ничья голосов без участия основного дерева: канон не назначен
+    /// (явная пометка вместо выбора отступника по численному хэшу).
+    pub tie: bool,
 }
 
 /// Сводка по одному worktree: сколько его файлов отличаются от канона.
@@ -247,6 +253,49 @@ fn last_commit_age(root: &Path) -> Option<(u64, String)> {
     Some((days, rel.trim().to_string()))
 }
 
+/// Исход выбора канона версии файла по голосам worktree-владельцев.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Canon {
+    /// Канон выбран: чистое большинство либо тай-брейк в пользу основного
+    /// (первого) дерева флота.
+    Decided(u64),
+    /// Ничья при равенстве голосов без участия основного дерева: канон не
+    /// назначается, отступники не называются.
+    Tie,
+}
+
+/// Выбирает канон версии пути по голосам владельцев `(индекс worktree, хэш)`.
+///
+/// Правила (детерминированные): большинство голосов; при равенстве — версия
+/// ОСНОВНОГО дерева (индекс 0: для `--repo` git всегда перечисляет основное
+/// дерево первым в `git worktree list --porcelain`, при позиционных путях
+/// основной корень указывают первым); ничья без участия основного дерева —
+/// [`Canon::Tie`]: отступник не назначается произвольно (ни по численно
+/// меньшему хэшу, ни по порядку входа).
+fn canonical_of(owners: &[(usize, u64)]) -> Canon {
+    let mut by_hash: BTreeMap<u64, (usize, bool)> = BTreeMap::new();
+    for (idx, h) in owners {
+        let entry = by_hash.entry(*h).or_default();
+        entry.0 += 1;
+        entry.1 |= *idx == 0; // голос основного (первого) дерева
+    }
+    let top = by_hash.values().map(|v| v.0).max().unwrap_or(0);
+    let leaders: Vec<(u64, bool)> = by_hash
+        .iter()
+        .filter(|&(_, v)| v.0 == top)
+        .map(|(h, v)| (*h, v.1))
+        .collect();
+    // Основное дерево среди лидеров — его версия канонична (тай-брейк);
+    // версия пути у дерева одна, такой лидер единственный.
+    if let Some(&(h, _)) = leaders.iter().find(|(_, main)| *main) {
+        return Canon::Decided(h);
+    }
+    if let &[(h, _)] = leaders.as_slice() {
+        return Canon::Decided(h);
+    }
+    Canon::Tie
+}
+
 /// Аудит флота worktree: дубли, ядро, дрейф копий спайна.
 ///
 /// # Errors
@@ -305,19 +354,8 @@ pub fn audit(roots: &[PathBuf], include: &[String]) -> Result<FleetReport> {
         .filter(|owners| owners.len() == roots.len())
         .count();
 
-    // Канон пути: majority-хэш; при равенстве голосов — численно меньший
-    // (детерминированный выбор без привязки к порядку входа).
-    let canonical_of = |owners: &[(usize, u64)]| -> u64 {
-        let mut by_hash: BTreeMap<u64, usize> = BTreeMap::new();
-        for (_, h) in owners {
-            *by_hash.entry(*h).or_default() += 1;
-        }
-        by_hash
-            .into_iter()
-            .max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0)))
-            .map_or(0, |(h, _)| h)
-    };
-
+    // Канон пути: majority-хэш; тай-брейк — в пользу основного дерева;
+    // ничья без основного дерева — без канона и отступников (`canonical_of`).
     let mut drift = Vec::new();
     let mut per_worktree: Vec<WorktreeSummary> = labels
         .iter()
@@ -341,12 +379,14 @@ pub fn audit(roots: &[PathBuf], include: &[String]) -> Result<FleetReport> {
         if owners.len() < 2 {
             continue; // единоличный файл: канона нет, дрейфа нет
         }
-        let canonical = canonical_of(owners);
+        let canon = canonical_of(owners);
         let versions: std::collections::BTreeSet<u64> = owners.iter().map(|(_, h)| *h).collect();
         let mut deviants = Vec::new();
         for (idx, h) in owners {
             per_worktree[*idx].comparable += 1;
-            if *h != canonical {
+            // При ничьей (Canon::Tie) канона нет: отступник не назначается,
+            // счётчик drifted не растёт ни у одного дерева.
+            if matches!(canon, Canon::Decided(c) if *h != c) {
                 per_worktree[*idx].drifted += 1;
                 deviants.push(labels[*idx].clone());
             }
@@ -357,6 +397,7 @@ pub fn audit(roots: &[PathBuf], include: &[String]) -> Result<FleetReport> {
                 deviants,
                 owners: owners.len(),
                 versions: versions.len(),
+                tie: matches!(canon, Canon::Tie),
             });
         }
     }
@@ -439,14 +480,23 @@ pub fn render_text(report: &FleetReport) -> String {
     if !report.drift.is_empty() {
         let _ = writeln!(out, "\nТоп расходящихся файлов (до {TOP_DRIFT}):");
         for d in report.drift.iter().take(TOP_DRIFT) {
-            let _ = writeln!(
-                out,
-                "  {} — версий: {}, владельцев: {}; отступники: {}",
-                d.path,
-                d.versions,
-                d.owners,
-                d.deviants.join(", ")
-            );
+            if d.tie {
+                let _ = writeln!(
+                    out,
+                    "  {} — версий: {}, владельцев: {}; НИЧЬЯ голосов (основное \
+                     дерево не участвует) — канон не назначен, отступников нет",
+                    d.path, d.versions, d.owners
+                );
+            } else {
+                let _ = writeln!(
+                    out,
+                    "  {} — версий: {}, владельцев: {}; отступники: {}",
+                    d.path,
+                    d.versions,
+                    d.owners,
+                    d.deviants.join(", ")
+                );
+            }
         }
         if report.drift.len() > TOP_DRIFT {
             let _ = writeln!(out, "  … и ещё {}", report.drift.len() - TOP_DRIFT);
@@ -474,8 +524,10 @@ impl Tool for FleetAuditTool {
             name: "fleet_audit".into(),
             description: "Аудит флота worktree (модель «5.2 + дельта-протокол»): находит точные \
                 дубли документации и дрейф копий архитектурного спайна по набору worktree. \
-                Для каждого расходящегося файла канон — majority-версия, отступники называются \
-                поимённо. Сканируются **/*.md|yaml|yml|json (без .git/target/node_modules/.arch-handoff). \
+                Для каждого расходящегося файла канон — majority-версия (при равенстве голосов — \
+                версия основного, первого, дерева; ничья без основного дерева помечается явно, \
+                отступник не назначается), отступники называются поимённо. \
+                Сканируются **/*.md|yaml|yml|json (без .git/target/node_modules/.arch-handoff). \
                 Дрейф хотя бы одного файла — сигнал нарушения SSOT: спайн обязан жить в одной \
                 копии, изменения — только дельтами changes/<id> (arch-be delta …)."
                 .into(),
@@ -632,6 +684,81 @@ mod tests {
         assert!(text.contains("CONSTRAINTS.yaml"), "{text}");
         assert!(text.contains("wt-c"), "{text}");
         assert!(text.contains("DRIFT"), "{text}");
+    }
+
+    #[test]
+    fn tie_break_prefers_main_worktree() {
+        // Ничья 1:1: канон — версия основного (первого) дерева, отступник —
+        // свежий worktree (до фикса каноном мог стать численно меньший хэш
+        // свежего worktree, а отступником называлось основное дерево).
+        let tmp = tempfile::tempdir().expect("tmp");
+        let main = tmp.path().join("main");
+        let wt = tmp.path().join("wt-new");
+        write_file(&main.join("ARCHITECTURE-SPINE.md"), "# Spine v1\n");
+        write_file(&wt.join("ARCHITECTURE-SPINE.md"), "# Spine v2\n");
+        let report = audit(&[main.clone(), wt.clone()], &[]).expect("audit");
+        assert!(report.has_drift);
+        assert_eq!(report.drift.len(), 1, "{:?}", report.drift);
+        let d = &report.drift[0];
+        assert!(!d.tie, "{d:?}");
+        assert_eq!(d.deviants, vec!["wt-new".to_string()], "{d:?}");
+        assert_eq!(report.per_worktree[0].drifted, 0, "основное дерево — канон");
+        assert_eq!(report.per_worktree[1].drifted, 1);
+        let text = render_text(&report);
+        assert!(text.contains("отступники: wt-new"), "{text}");
+
+        // Ничья 1:1:1 — тоже за основным деревом.
+        let wt2 = tmp.path().join("wt-other");
+        write_file(&wt2.join("ARCHITECTURE-SPINE.md"), "# Spine v3\n");
+        let report = audit(&[main, wt, wt2], &[]).expect("audit");
+        assert_eq!(report.drift.len(), 1, "{:?}", report.drift);
+        let d = &report.drift[0];
+        assert!(!d.tie, "{d:?}");
+        assert_eq!(d.deviants.len(), 2, "{d:?}");
+        assert!(
+            !d.deviants.contains(&"main".to_string()),
+            "основное дерево не отступник даже при трёхсторонней ничьей: {d:?}"
+        );
+        assert_eq!(report.per_worktree[0].drifted, 0);
+    }
+
+    #[test]
+    fn tie_without_main_worktree_is_marked_not_assigned() {
+        // Ничья без основного дерева: файл есть только у wt-b/wt-c, версии
+        // разные, голоса 1:1 — канон не назначается, отступников нет.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let main = tmp.path().join("main");
+        let b = tmp.path().join("wt-b");
+        let c = tmp.path().join("wt-c");
+        for root in [&main, &b, &c] {
+            write_file(&root.join("README.md"), "общий\n");
+        }
+        write_file(&b.join("docs/guide.md"), "версия B\n");
+        write_file(&c.join("docs/guide.md"), "версия C\n");
+        let report = audit(&[main, b, c], &[]).expect("audit");
+        assert!(report.has_drift);
+        let d = report
+            .drift
+            .iter()
+            .find(|d| d.path == "docs/guide.md")
+            .expect("дрейф guide.md");
+        assert!(d.tie, "{d:?}");
+        assert!(d.deviants.is_empty(), "отступник не назначается: {d:?}");
+        assert!(
+            report.per_worktree.iter().all(|w| w.drifted == 0),
+            "ничья не считается отступничеством: {report:?}"
+        );
+        let text = render_text(&report);
+        assert!(text.contains("НИЧЬЯ"), "{text}");
+        assert!(!text.contains("отступники:"), "{text}");
+        // JSON несёт явную пометку ничьей.
+        let v = serde_json::to_value(&report).expect("json");
+        let tie_json = v["drift"]
+            .as_array()
+            .and_then(|a| a.iter().find(|d| d["path"] == "docs/guide.md"))
+            .cloned()
+            .expect("drift json");
+        assert_eq!(tie_json["tie"], true, "{tie_json}");
     }
 
     #[test]
