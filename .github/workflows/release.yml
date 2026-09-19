@@ -86,6 +86,11 @@ jobs:
 
       - uses: softprops/action-gh-release@v2
         with:
+          # Тело релиза — CHANGELOG: раздел «Что может покраснеть после
+          # обновления» обязан быть в release notes, а не только в репозитории.
+          # GitHub при `generate_release_notes` дописывает список коммитов
+          # к переданному body, а не заменяет его.
+          body_path: CHANGELOG.md
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: |
