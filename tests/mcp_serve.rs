@@ -1678,3 +1678,74 @@ fn trust_report_returns_anchors_with_evidence() {
         "{trust}"
     );
 }
+
+/// Н13: поле, которое реализация разбирает, обязано быть в объявленной схеме.
+/// `rubric_verify` принимал `author_model`, но не рекламировал его — клиент,
+/// читающий `tools/list`, не мог пометить «судья судил свою работу», и
+/// защитный отсев незнакомых аргументов (Н8) честно отвергал вызов.
+#[test]
+fn every_accepted_rubric_argument_is_advertised() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let home = tmp.path();
+    let target = home.join("ADR-001.md");
+    std::fs::write(&target, "# ADR-001\n\n## Alternatives\n\nБ.\n").expect("adr");
+
+    // Схема обязана объявлять все поля, которые разбирает реализация.
+    let listed = mcp_serve(
+        home,
+        &format!(
+            "{}\n",
+            json!({"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}})
+        ),
+    );
+    let spec = listed[0]["result"]["tools"]
+        .as_array()
+        .expect("tools")
+        .iter()
+        .find(|t| t["name"] == "rubric_verify")
+        .cloned()
+        .expect("rubric_verify");
+    for arg in [
+        "rubric",
+        "target",
+        "target_text",
+        "answers",
+        "model",
+        "judge_model",
+        "author_model",
+    ] {
+        assert!(
+            spec["inputSchema"]["properties"].get(arg).is_some(),
+            "аргумент '{arg}' разбирается, но не объявлен: {spec}"
+        );
+    }
+
+    // И вызов с ним доходит до инструмента, а не падает на разборе.
+    let judge = json!({
+        "scores": [{"criterion_id": "context", "score": 3, "rationale": "Кратко."}],
+        "verdict": "accept"
+    })
+    .to_string();
+    let resp = mcp_serve(
+        home,
+        &format!(
+            "{}\n",
+            call(
+                2,
+                "rubric_verify",
+                &json!({
+                    "rubric": "adr_quality",
+                    "target": target.display().to_string(),
+                    "answers": [judge],
+                    "judge_model": "judge-x",
+                    "author_model": "judge-x",
+                })
+            )
+        ),
+    );
+    let text = resp[0].to_string();
+    assert!(
+        !text.contains("неизвестный аргумент"),
+        "author_model обязан приниматься: {text}"
+    );
+}
