@@ -22,9 +22,17 @@ CodeWhale) — без потери архитектурного контекст
      финального git-коммита;
    - `ARCHITECTURE.md` — **epic-context** (~800–1500 токенов, окно якорной
      рубрики `handoff_quality`): спайн, затронутые ADR, границы «что нельзя
-     трогать»;
+     трогать». При переполнении лимита (6000 символов) работает лесенка
+     деградации: прозаические секции с хвоста сокращаются до заголовков,
+     затем выкидываются, а **ADR-блоки spine не режутся никогда**; сноска
+     об усечении перечисляет сокращённые и выкинутые секции;
    - `CONSTRAINTS.yaml` — fitness-правила под стек репозитория (заготовка,
-     переписывается под spine AD-n перед передачей);
+     переписывается под spine AD-n перед передачей); генератор валидирует
+     текст как YAML до записи — битый файл исполнителю не уезжает;
+   - `SPEC.md` — шаблон верифицируемых контрактов (при `--spec` — компиляция
+     из переданных спек); первая строка сгенерированного файла — баннер
+     «СКОМПИЛИРОВАНО МАШИНОЙ …», чтобы исполнитель не принимал компиляцию
+     за авторскую спеку архитектора;
    - `ROLLBACK.yaml` — машиночитаемый план отката (baseline-якорь + шаги):
      репетируется на гейте A4 (`arch-be control gate A4 <repo> --rehearse`,
      см. `docs/control.md`); для маршрута Critical пакет без якоря и плана
@@ -35,7 +43,10 @@ CodeWhale) — без потери архитектурного контекст
      `adr/` — копии ADR.
    Предгейт: каталог без git инициализируется (`git init` + пустой
    baseline-коммит — якорь отката и точка интеграции); у git-репозитория
-   якорь — текущий HEAD.
+   якорь — текущий HEAD. Детерминированные предупреждения готовности пакета
+   (поле `warnings` ответа): например, если REQ-сущностей модели существенно
+   больше, чем пунктов задач в TASK.md (REQ > 2× и REQ ≥ 3), генерация
+   сообщает о подозрительно тонкой декомпозиции REQ → задачи.
 
    > **Core-сборка**: создание пакета — чисто файловая работа (модуль
    > `src/handoff.rs`, без сети/TUI), поэтому `handoff_create` доступен и в
@@ -137,7 +148,15 @@ CLI-эквивалент вне диалога: `arch-be handoff --repo <path> -
    significance route and the recommended run timeout: Fast/Standard/Critical
    → 1800/3600/7200 s) + `adr/` copies. Pre-gate: a directory without git is
    initialized (`git init` + an empty baseline commit — the rollback anchor);
-   for a git repo the anchor is the current HEAD.
+   for a git repo the anchor is the current HEAD. Overflowing epic context is
+   degraded by a ladder (tail prose sections shrink to headings, then are
+   dropped) — spine ADR blocks are never cut, and the truncation notice lists
+   every shortened/dropped section; generated `CONSTRAINTS.yaml` is validated
+   as YAML before writing, and a generated `SPEC.md` opens with a
+   "machine-compiled" banner so the executor does not mistake it for the
+   architect's authored spec. Deterministic readiness warnings (the
+   `warnings` field) flag, e.g., a suspiciously thin REQ → task decomposition
+   (REQ > 2× task items and REQ ≥ 3).
 3. **`harness_run`** executes the package through the configured adapter
    (e.g. `claude -p --dangerously-skip-permissions`, task via stdin).
    **Smart timeouts**: a 30-min absolute ceiling plus a 10-min silence
