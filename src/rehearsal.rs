@@ -236,6 +236,52 @@ pub fn locate_packet(path: &Path) -> Result<(PathBuf, PathBuf)> {
     )))
 }
 
+/// Находка о неполном handoff-пакете: чего не хватает и что сделать.
+#[derive(Debug, Clone)]
+pub struct PacketFinding {
+    /// Код находки (`handoff_missing`).
+    pub rule: &'static str,
+    /// Что именно не так.
+    pub message: String,
+    /// Что сделать.
+    pub fix_hint: String,
+}
+
+/// Проверяет, что handoff-пакет собран: на месте `MANIFEST.json`.
+///
+/// Зачем отдельная проверка (Н6 волны B 0.3.4): гейт A4 на каталоге с пустым
+/// `.arch-handoff/` падал io-ошибкой «нет MANIFEST.json» — пользователь видел
+/// отказ файловой системы вместо того, что ему делать. Отсутствие пакета —
+/// состояние архитектурного процесса, и звучать оно должно как находка.
+///
+/// # Errors
+/// Каталог не читается.
+pub fn check_packet(packet_dir: &Path) -> Result<Option<PacketFinding>> {
+    let manifest = packet_dir.join("MANIFEST.json");
+    if manifest.is_file() {
+        return Ok(None);
+    }
+    let rollback = packet_dir.join(ROLLBACK_FILE).is_file();
+    let message = if rollback {
+        format!(
+            "handoff-пакет неполон: {} отсутствует (план отката на месте)",
+            manifest.display()
+        )
+    } else {
+        format!(
+            "handoff-пакет не собран: {} отсутствует",
+            manifest.display()
+        )
+    };
+    Ok(Some(PacketFinding {
+        rule: "handoff_missing",
+        message,
+        fix_hint: "сначала соберите пакет: arch-be handoff <harness> --repo . \
+                   --task \"...\" --route critical"
+            .to_string(),
+    }))
+}
+
 /// Читает план отката `ROLLBACK.yaml` из пакета.
 ///
 /// # Errors

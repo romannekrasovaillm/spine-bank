@@ -3218,6 +3218,14 @@ fn cmd_control(cfg: &arch_harness::config::Config, cmd: ControlCmd) -> Result<()
                 .parse()
                 .map_err(|e: String| anyhow::anyhow!("--require-rehearsal: {e}"))?;
             let (repo, packet_dir) = rh::locate_packet(&packet)?;
+            // Н6: неполный пакет — находка архитектурного процесса с тем, что
+            // сделать, а не io-ошибка «нет MANIFEST.json».
+            if let Some(f) = rh::check_packet(&packet_dir)? {
+                println!("[error] {} — {}", f.rule, f.message);
+                println!("  → {}", f.fix_hint);
+                println!("Итог: FAIL");
+                std::process::exit(1);
+            }
             let route = rh::packet_route(&packet_dir)?;
             let report = if rehearse {
                 let report = rh::rehearse(&repo, &packet_dir)?;

@@ -2133,3 +2133,64 @@ fn pre_push_hook_rejects_committed_rule_weakening() {
         "находка обязана назвать понижение severity; вывод: {all}"
     );
 }
+
+/// Н6: гейт A4 на несобранном handoff-пакете — находка `handoff_missing` с
+/// `fix_hint`, а не io-ошибка про отсутствующий файл; без стектрейса.
+///
+/// Репродукция 0.3.3: каталог с пустым `.arch-handoff/` давал
+/// `Error: io: ./.arch-handoff/MANIFEST.json: No such file or directory`.
+#[test]
+fn a4_without_manifest_is_a_finding_not_io_error() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir_all(repo.join(".arch-handoff")).expect("mkdir handoff");
+    let mut cmd = arch_cmd(tmp.path());
+    // Явно без RUST_BACKTRACE: пользовательский вывод не должен зависеть от
+    // того, включён ли он.
+    cmd.env_remove("RUST_BACKTRACE");
+    let out = cmd
+        .arg("control")
+        .arg("gate")
+        .arg("A4")
+        .arg(repo.as_os_str())
+        .output()
+        .expect("прогон arch-be");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let all = format!("{stdout}{stderr}");
+    assert_eq!(out.status.code(), Some(1), "вывод: {all}");
+    assert!(all.contains("handoff_missing"), "вывод: {all}");
+    assert!(
+        all.contains("arch-be handoff"),
+        "fix_hint обязан назвать команду сборки пакета: {all}"
+    );
+    assert!(
+        !all.contains("Stack backtrace"),
+        "пользовательская ошибка не печатает стектрейс: {all}"
+    );
+    assert!(
+        !all.contains("io:"),
+        "это находка процесса, а не io-ошибка: {all}"
+    );
+
+    // Пустой каталог (ни пакета, ни .arch-handoff/) — тоже внятный отказ
+    // без стектрейса и без `io:`.
+    let empty = tmp.path().join("empty");
+    std::fs::create_dir_all(&empty).expect("mkdir empty");
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.env_remove("RUST_BACKTRACE");
+    let out = cmd
+        .arg("control")
+        .arg("gate")
+        .arg("A4")
+        .arg(empty.as_os_str())
+        .output()
+        .expect("прогон arch-be");
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(out.status.code(), Some(1), "вывод: {all}");
+    assert!(!all.contains("Stack backtrace"), "вывод: {all}");
+}
