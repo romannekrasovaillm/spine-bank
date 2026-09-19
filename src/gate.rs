@@ -310,6 +310,34 @@ fn git_stderr_reason(stderr: &[u8]) -> String {
     reason.chars().take(160).collect()
 }
 
+/// Корень git-репозитория для `repo` (`git rev-parse --show-toplevel`),
+/// канонизированный. `None` — git недоступен или каталог вне репозитория.
+fn git_toplevel(repo: &Path) -> Option<PathBuf> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["rev-parse", "--show-toplevel"])
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(out.stdout).ok()?;
+    PathBuf::from(text.trim()).canonicalize().ok()
+}
+
+/// Путь `file` относительно корня git-репозитория (для `<rev>:<path>`).
+/// Git резолвит такие пути от toplevel, а не от `-C <dir>`: на кейсе-
+/// подкаталоге чужого монорепо только так сравнение идёт с файлом самого
+/// кейса, а не с реестром внешнего репозитория (ложные «удалено из реестра»).
+fn git_rel_path(repo: &Path, file: &Path) -> Option<String> {
+    let top = git_toplevel(repo)?;
+    let abs = file.canonicalize().ok()?;
+    let rel = abs.strip_prefix(&top).ok()?;
+    Some(rel.to_string_lossy().replace('\\', "/"))
+}
+
 /// Содержимое файла в ревизии (`git show <rev>:<rel>`).
 ///
 /// # Errors
@@ -536,13 +564,25 @@ fn component_rule_weakened(
         );
     };
     let rel = rel.to_string_lossy();
-    if !git_rev_has_path(repo, rev, &rel) {
+    // Путь для `<rev>:<path>` — от корня git-репозитория (см. git_rel_path):
+    // на кейсе-подкаталоге монорепо сравнение идёт с файлом самого кейса,
+    // иначе читается реестр внешнего репозитория (ложные «удалено из реестра»).
+    let Some(git_rel) = git_rel_path(repo, &constraints.path) else {
+        return GateComponent::skip(
+            "rule_weakened",
+            format!(
+                "файл ограничений {} вне git-репозитория — сравнение с базой недоступно",
+                constraints.path.display()
+            ),
+        );
+    };
+    if !git_rev_has_path(repo, rev, &git_rel) {
         return GateComponent::skip(
             "rule_weakened",
             format!("в базе '{rev}' файла {rel} нет (новый реестр) — сравнивать не с чем"),
         );
     }
-    let base_src = match git_show_file(repo, rev, &rel) {
+    let base_src = match git_show_file(repo, rev, &git_rel) {
         Ok(text) => text,
         Err(e) => {
             return GateComponent::fail(
@@ -1364,6 +1404,48 @@ mod tests {
         );
         // Fitness при этом честно прогоняет внешний файл (вход есть).
         assert_eq!(status_of(&report, "fitness"), GateStatus::Pass);
+    }
+
+    #[test]
+    fn gate_on_repo_subdirectory_compares_against_case_file_not_outer_registry() {
+        // Регрессия D6b: кейс-подкаталог внутри чужого монорепо (как кейсы/
+        // внутри spine-core). `<rev>:<path>` резолвится git'ом от toplevel —
+        // сравнение обязано идти с файлом кейса, а не с реестром внешнего репо.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let outer = tmp.path().join("outer");
+        let case = outer.join("cases").join("demo");
+        std::fs::create_dir_all(&case).expect("mkdir case");
+        // Ловушка: реестр внешнего репозитория с правилом, которого нет у кейса.
+        std::fs::write(
+            outer.join("CONSTRAINTS.yaml"),
+            "rules:\n  - name: outer_only_rule\n    type: file_exists\n    path: \"OUTER.md\"\n    severity: error\n",
+        )
+        .expect("outer constraints");
+        std::fs::write(
+            case.join("CONSTRAINTS.yaml"),
+            "rules:\n  - name: spine_present\n    type: file_exists\n    path: \"ARCHITECTURE-SPINE.md\"\n    severity: error\n  - name: no_pan\n    type: must_not_contain\n    glob: \"**/*.py\"\n    pattern: 'PAN'\n    severity: error\n",
+        )
+        .expect("case constraints");
+        std::fs::write(case.join("ARCHITECTURE-SPINE.md"), "# Spine\n").expect("spine");
+        git(&outer, &["init", "-q"]);
+        git(&outer, &["add", "."]);
+        git(&outer, &["commit", "-q", "-m", "init"]);
+        // Ослабление реестра кейса в рабочем дереве: правило no_pan удалено.
+        std::fs::write(case.join("CONSTRAINTS.yaml"), WEAKENED_CONSTRAINTS)
+            .expect("ослабленный constraints");
+        let report = run(&case, None, None, None, (1, 4)).expect("гейт");
+        assert_eq!(
+            status_of(&report, "rule_weakened"),
+            GateStatus::Fail,
+            "{}",
+            render(&report)
+        );
+        let text = render(&report);
+        assert!(text.contains("no_pan"), "{text}");
+        assert!(
+            !text.contains("outer_only_rule"),
+            "сравнение с реестром внешнего репо даёт ложные находки: {text}"
+        );
     }
 
     #[test]
