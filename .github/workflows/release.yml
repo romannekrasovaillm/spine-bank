@@ -70,6 +70,11 @@ jobs:
     permissions:
       contents: write
     steps:
+      # Checkout нужен ради CHANGELOG.md: `body_path` читает файл из рабочего
+      # каталога, а job публикации ничего не чекаутил — тело релиза молча
+      # оставалось только автосгенерированным списком коммитов.
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           pattern: release-*
