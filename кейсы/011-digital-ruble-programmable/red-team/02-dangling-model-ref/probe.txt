@@ -1,1 +1,1 @@
-arch-be model validate model
+arch-be trace check .
