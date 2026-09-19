@@ -1,0 +1,13 @@
+{
+  "schema": "arch-be/rubric-report/v1",
+  "rubric": "adr_quality",
+  "target": "docs/adr/ADR-001-klyuch-idempotentnosti.md",
+  "target_sha256": "79beb261d2c67399cac5766436fbf02a6e4b14f9f6f151e248f2aeda071c4887",
+  "judge_model": "claude-code-host",
+  "author_model": "claude-code-host",
+  "weighted_total": 4.8,
+  "verdict": "accept",
+  "unstable": false,
+  "evidence_not_found": 0,
+  "judged_at": "2026-09-19T20:21:44.262628100+03:00"
+}

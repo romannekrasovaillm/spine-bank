@@ -1,5 +1,5 @@
 route: Critical
-packed_at: 2026-09-19T20:17:49.868215356+03:00
+packed_at: 2026-09-19T20:22:35.402399629+03:00
 hash_alg: sha256
 items:
 - key: problem
@@ -24,8 +24,8 @@ items:
   size: 2180
 - key: adr_or_pattern
   path: docs/adr
-  hash: 4a170bd9d1aad7957ca216edc3be51c3931b2b3319e8a4dff41ad457100eef4c
-  size: 14548
+  hash: 4d3c0459265b46c8d6b8ff515b0d1e7c98bff55905a452b2edee96217f562783
+  size: 14534
 - key: spine
   path: ARCHITECTURE-SPINE.md
   hash: b021b60821d7f32245f1737d2912a9d67b383b3ccce89789bed6c33e2be8ffba
