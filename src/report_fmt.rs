@@ -457,6 +457,23 @@ fn location_label(f: &Finding) -> String {
     }
 }
 
+/// Число error-находок отчёта — основа квитанции ценности.
+fn error_findings_count(report: &FmtReport) -> usize {
+    report
+        .groups
+        .iter()
+        .flat_map(|g| &g.findings)
+        .filter(|f| f.severity == Severity::Error)
+        .count()
+}
+
+/// Квитанция ценности — та же фраза, что в текстовом рендере гейта
+/// ([`crate::gate::render`]): дефекты, остановленные механикой до ревью,
+/// теперь видимые и в машинных форматах (D7).
+fn value_receipt(caught: usize) -> String {
+    format!("Гейт поймал {caught} нарушений до ревью — исправьте и перепроверьте")
+}
+
 /// SARIF 2.1.0: rules + results с level error/warning, locations при наличии
 /// адреса и partialFingerprints по правилу+адресу+сообщению.
 fn render_sarif(report: &FmtReport) -> String {
@@ -509,10 +526,8 @@ fn render_sarif(report: &FmtReport) -> String {
             result
         })
         .collect();
-    let doc = serde_json::json!({
-        "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
-        "version": "2.1.0",
-        "runs": [{
+    let doc = {
+        let mut run = serde_json::json!({
             "tool": {
                 "driver": {
                     "name": report.tool,
@@ -521,8 +536,22 @@ fn render_sarif(report: &FmtReport) -> String {
                 }
             },
             "results": results,
-        }],
-    });
+        });
+        // Квитанция ценности на уровне run (D7): property bag — валидная
+        // часть схемы SARIF 2.1.0; эмитится только при красном прогоне.
+        let caught = error_findings_count(report);
+        if caught > 0 {
+            run["properties"] = serde_json::json!({
+                "valueReceipt": value_receipt(caught),
+                "caughtErrorFindings": caught,
+            });
+        }
+        serde_json::json!({
+            "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+            "version": "2.1.0",
+            "runs": [run],
+        })
+    };
     // Сериализация собранного вручную JSON не падает; запасной вариант —
     // компактная форма (недостижима, но без unwrap).
     match serde_json::to_string_pretty(&doc) {
@@ -554,6 +583,12 @@ fn render_junit(report: &FmtReport) -> String {
         r#"<testsuites name="{}" tests="{total}" failures="{failures}" skipped="{skipped}">"#,
         xml_escape(report.tool)
     );
+    // Квитанция ценности (D7): комментарий внутри testsuites при красном
+    // прогоне — читается людьми и грепается CI, валидность XML не страдает
+    // (схема JUnit run-level свойств не предусматривает).
+    if failures > 0 {
+        let _ = writeln!(out, "  <!-- {} -->", value_receipt(failures));
+    }
     for g in &report.groups {
         let group_failures = g
             .findings
@@ -833,6 +868,18 @@ mod tests {
             .as_str()
             .expect("fingerprint");
         assert_eq!(fp.len(), 16, "hex u64: {fp}");
+        // Квитанция ценности на уровне run (D7): красный прогон — есть.
+        assert_eq!(
+            run["properties"]["caughtErrorFindings"], 1,
+            "квитанция в run.properties: {run}"
+        );
+        assert!(
+            run["properties"]["valueReceipt"]
+                .as_str()
+                .expect("valueReceipt")
+                .contains("Гейт поймал 1 нарушений до ревью"),
+            "{run}"
+        );
         // Детерминизм: повторный рендер даёт тот же отпечаток.
         let text2 = render(ReportFormat::Sarif, &norm);
         let doc2: serde_json::Value = serde_json::from_str(&text2).expect("валидный JSON");
@@ -840,6 +887,26 @@ mod tests {
             doc2["runs"][0]["results"][0]["partialFingerprints"]["spine/v1"],
             fp
         );
+    }
+
+    /// Зелёный прогон: квитанции нет ни в SARIF, ни в `JUnit` (D7) — она про
+    /// пойманное, а не про «0 нарушений».
+    #[test]
+    fn value_receipt_absent_on_green_run_in_machine_formats() {
+        let mut report = gate_report();
+        report.components[0].status = GateStatus::Pass;
+        report.components[0].findings.clear();
+        report.passed = true;
+        let norm = FmtReport::from_gate(&report);
+        let sarif = render(ReportFormat::Sarif, &norm);
+        let doc: serde_json::Value = serde_json::from_str(&sarif).expect("валидный JSON");
+        assert!(
+            doc["runs"][0]["properties"].is_null(),
+            "зелёный прогон — без квитанции: {doc}"
+        );
+        let junit = render(ReportFormat::Junit, &norm);
+        assert!(!junit.contains("Гейт поймал"), "{junit}");
+        assert_xml_balanced(&junit);
     }
 
     /// `JUnit`: валидный каркас XML (баланс тегов), testsuite на составляющую,
@@ -867,6 +934,12 @@ mod tests {
         );
         assert!(text.contains("<skipped"), "{text}");
         assert!(text.contains(r#"<testsuite name="delta_guard""#), "{text}");
+        // Квитанция ценности (D7): XML-комментарий внутри testsuites при
+        // красном прогоне с числом пойманных error-находок.
+        assert!(
+            text.contains("<!-- Гейт поймал 1 нарушений до ревью — исправьте и перепроверьте -->"),
+            "{text}"
+        );
         assert_xml_balanced(&text);
     }
 
