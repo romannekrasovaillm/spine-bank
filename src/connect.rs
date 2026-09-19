@@ -747,6 +747,12 @@ fn upsert_claude_md(path: &Path, dry_run: bool, report: &mut ConnectReport) -> R
     commit_file(path, old.as_deref(), &new, dry_run, report)
 }
 
+/// Финальная строка `next_steps` каждого хоста («первая ценность за
+/// 5 минут», C-1): плейбук-промпт MCP-сервера и демо-кейс FAIL→fix→PASS.
+const FIRST_VALUE_STEP: &str = "Первая ценность за 5 минут: попросите агента \
+     «действуй по плейбуку spine-quickstart»; демо FAIL→fix→PASS — кейс \
+     drift-control из репозитория Spine.";
+
 /// `arch-be connect claude`: проектный `.mcp.json`, хуки в
 /// `.claude/settings.json`, скиллы в `.claude/skills/`, блок в CLAUDE.md.
 fn connect_claude(opts: &ConnectOptions, report: &mut ConnectReport) -> Result<()> {
@@ -787,6 +793,7 @@ fn connect_claude(opts: &ConnectOptions, report: &mut ConnectReport) -> Result<(
                 "read-only"
             }
         ),
+        FIRST_VALUE_STEP.to_string(),
     ]);
     Ok(())
 }
@@ -984,6 +991,7 @@ fn connect_qwen(opts: &ConnectOptions, report: &mut ConnectReport) -> Result<()>
     report.next_steps.extend([
         "перезапустите Qwen Code (`qwen`) в этом каталоге".to_string(),
         "проверьте список MCP-серверов хоста — в нём «spine»".to_string(),
+        FIRST_VALUE_STEP.to_string(),
     ]);
     Ok(())
 }
@@ -1083,6 +1091,7 @@ fn connect_gigacode(opts: &ConnectOptions, report: &mut ConnectReport) -> Result
          `qwen mcp approve spine`; в GigaCode — аналог вашей сборки)"
             .to_string(),
         "проверьте подключение: `arch-be doctor --host gigacode`".to_string(),
+        FIRST_VALUE_STEP.to_string(),
     ]);
     Ok(())
 }
@@ -1122,6 +1131,7 @@ fn connect_codex(opts: &ConnectOptions, report: &mut ConnectReport) -> Result<()
     report.next_steps.extend([
         "перезапустите `codex` в этом каталоге".to_string(),
         "проверьте список MCP-серверов: `codex mcp list` — в нём «spine»".to_string(),
+        FIRST_VALUE_STEP.to_string(),
     ]);
     Ok(())
 }
@@ -1190,6 +1200,7 @@ fn connect_kimi(opts: &ConnectOptions, report: &mut ConnectReport) -> Result<()>
                 "read-only"
             }
         ),
+        FIRST_VALUE_STEP.to_string(),
     ]);
     Ok(())
 }
@@ -1277,6 +1288,7 @@ fn connect_omp(opts: &ConnectOptions, report: &mut ConnectReport) -> Result<()> 
                 "read-only"
             }
         ),
+        FIRST_VALUE_STEP.to_string(),
     ]);
     Ok(())
 }
@@ -1319,6 +1331,7 @@ fn connect_generic(opts: &ConnectOptions, report: &mut ConnectReport) {
     report.next_steps.extend([
         "вставьте сниппеты выше в конфигурацию вашего агента".to_string(),
         "перезапустите агента и проверьте, что MCP-сервер «spine» поднялся".to_string(),
+        FIRST_VALUE_STEP.to_string(),
     ]);
 }
 
@@ -1936,6 +1949,41 @@ mod tests {
                 })
                 .count()
         })
+    }
+
+    /// Финальной строкой `next_steps` каждого хоста идёт «первая ценность
+    /// за 5 минут» (C-1): плейбук spine-quickstart + демо-кейс drift-control.
+    #[test]
+    fn every_host_next_steps_end_with_first_value() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        for (i, host) in [
+            Host::Claude,
+            Host::Qwen,
+            Host::GigaCode,
+            Host::Codex,
+            Host::Kimi,
+            Host::Omp,
+            Host::Generic,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let dir = tmp.path().join(format!("proj-{i}"));
+            std::fs::create_dir_all(&dir).expect("mkdir");
+            let report = connect(&ConnectOptions::new(host, dir)).expect("connect");
+            let last = report
+                .next_steps
+                .last()
+                .unwrap_or_else(|| panic!("{host:?}: next_steps пуст"));
+            assert_eq!(
+                last, FIRST_VALUE_STEP,
+                "{host:?}: финальная строка — «первая ценность за 5 минут»"
+            );
+            assert!(
+                last.contains("spine-quickstart") && last.contains("drift-control"),
+                "{host:?}: {last}"
+            );
+        }
     }
 
     /// (a) connect claude в пустой каталог: .mcp.json, settings.json,
