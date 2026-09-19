@@ -268,6 +268,10 @@ pub struct GuardReport {
     /// Покрытие каждого изменённого защищённого файла: (файл, имена ВСЕХ
     /// активных дельт, его упоминающих; пустой список — нарушение).
     pub mentions: Vec<(String, Vec<String>)>,
+    /// Чем именно покрыт файл: (файл, причина) — «по пути», «по id NFR-005».
+    /// Аддитивное поле (0.3.4, Н4): архитектору важно видеть, засчитано ли
+    /// упоминание по идентификатору или по полному пути.
+    pub reasons: Vec<(String, String)>,
 }
 
 /// Защищён ли путь: совпадение с записью-файлом или вхождение в каталог-префикс
@@ -280,24 +284,110 @@ fn is_protected(path: &str, protected: &[String]) -> bool {
     })
 }
 
-/// Упоминает ли текст дельты файл: полным относительным путём, именем файла
-/// или стемом (от 4 символов — короткие стемы вроде `a` не матчим).
-fn delta_mentions(body: &str, path: &str) -> bool {
+/// Вхождение `needle` в `haystack` как ОТДЕЛЬНОГО слова: соседние символы —
+/// не буква, не цифра и не дефис. `NFR-0051` не содержит слова `NFR-005`.
+fn contains_word(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+    let mut from = 0;
+    while let Some(pos) = haystack[from..].find(needle) {
+        let start = from + pos;
+        let end = start + needle.len();
+        let before_ok = haystack[..start]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !(c.is_alphanumeric() || c == '-'));
+        let after_ok = haystack[end..]
+            .chars()
+            .next()
+            .is_none_or(|c| !(c.is_alphanumeric() || c == '-'));
+        if before_ok && after_ok {
+            return true;
+        }
+        from = end;
+    }
+    false
+}
+
+/// Идентификатор сущности из frontmatter файла модели (`model/NFR-005-*.md` →
+/// `NFR-005`): строка `id: <ID>`. Не модель — `None`.
+fn entity_id(path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    for line in text.lines().take(40) {
+        let t = line.trim();
+        let Some(rest) = t.strip_prefix("id:") else {
+            continue;
+        };
+        let id = rest.trim().trim_matches('"').trim_matches('\'').trim();
+        if !id.is_empty() {
+            return Some(id.to_string());
+        }
+        return None;
+    }
+    None
+}
+
+/// Идентификатор сущности, выведенный ИЗ ИМЕНИ файла: `NFR-005-recovery.md` →
+/// `NFR-005` (префикс вида `<ЛАТИНИЦА>-<ЦИФРЫ>`). `None` — имя не в этой форме.
+fn id_from_stem(stem: &str) -> Option<String> {
+    let (head, tail) = stem.split_once('-')?;
+    if head.is_empty() || !head.chars().all(|c| c.is_ascii_alphabetic()) {
+        return None;
+    }
+    let digits: String = tail.chars().take_while(char::is_ascii_digit).collect();
+    if digits.is_empty() {
+        return None;
+    }
+    Some(format!("{head}-{digits}"))
+}
+
+/// Чем текст дельты покрывает файл: `None` — не упоминает.
+///
+/// Признаётся (в порядке убывания точности): полный относительный путь; имя
+/// файла; стем (от 4 символов); путь без расширения и слага-суффикса
+/// (`model/NFR-005`); идентификатор сущности из frontmatter или имени файла
+/// (`NFR-005`) — последние два как ОТДЕЛЬНОЕ слово, иначе `NFR-0051` «покрывал»
+/// бы `NFR-005`.
+fn delta_mentions(body: &str, path: &str) -> Option<String> {
     if body.contains(path) {
-        return true;
+        return Some("по пути".to_string());
     }
-    let name = Path::new(path)
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    if !name.is_empty() && body.contains(&name) {
-        return true;
+    let p = Path::new(path);
+    let name = p.file_name().map(|n| n.to_string_lossy().into_owned());
+    if let Some(name) = &name {
+        if !name.is_empty() && body.contains(name.as_str()) {
+            return Some("по имени файла".to_string());
+        }
     }
-    let stem = Path::new(path)
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    stem.chars().count() >= 4 && body.contains(&stem)
+    let stem = p.file_stem().map(|s| s.to_string_lossy().into_owned());
+    if let Some(stem) = &stem {
+        // Стем — тоже идентификатор: `NFR-0051` не должен «покрывать»
+        // файл `NFR-005.md` (Н4б).
+        if stem.chars().count() >= 4 && contains_word(body, stem) {
+            return Some(format!("по стему '{stem}'"));
+        }
+    }
+    // Идентификатор сущности: сначала из frontmatter (истина), затем из имени.
+    let id = p
+        .is_file()
+        .then(|| entity_id(p))
+        .flatten()
+        .or_else(|| stem.as_deref().and_then(id_from_stem));
+    if let Some(id) = id {
+        if contains_word(body, &id) {
+            return Some(format!("по id {id}"));
+        }
+        // Путь со слагом: `model/NFR-005-…` → `model/NFR-005`.
+        if let Some(parent) = p.parent() {
+            let short = parent.join(&id);
+            let short = short.to_string_lossy().replace('\\', "/");
+            if contains_word(body, &short) {
+                return Some(format!("по пути '{short}' (id {id})"));
+            }
+        }
+    }
+    None
 }
 
 /// Первая непустая строка stderr git без префикса «fatal:» — краткая причина
@@ -343,12 +433,33 @@ pub fn guard(repo: &Path, base: Option<&str>, protect: &[String]) -> Result<Guar
         )));
     }
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let changed: Vec<String> = stdout
+    let mut changed: Vec<String> = stdout
         .lines()
         .map(str::trim)
         .filter(|l| !l.is_empty())
         .map(str::to_owned)
         .collect();
+    // Н4: `git diff` не показывает НЕотслеживаемые файлы, поэтому вердикт
+    // зависел от того, сделан ли `git add` — до него guard пропускал новый
+    // `model/AD-009-*.md`, после — краснел. Вердикт обязан совпадать.
+    if let Ok(untracked) = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["ls-files", "--others", "--exclude-standard"])
+        .output()
+    {
+        if untracked.status.success() {
+            changed.extend(
+                String::from_utf8_lossy(&untracked.stdout)
+                    .lines()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty())
+                    .map(str::to_owned),
+            );
+        }
+    }
+    changed.sort();
+    changed.dedup();
 
     // Тела активных дельт (архив — уже влитая истина, покрытием не считается).
     let mut active: Vec<(String, String)> = Vec::new();
@@ -364,18 +475,25 @@ pub fn guard(repo: &Path, base: Option<&str>, protect: &[String]) -> Result<Guar
     let mut covered = Vec::new();
     let mut violations = Vec::new();
     let mut mentions = Vec::new();
+    let mut reasons = Vec::new();
     for file in changed.iter().filter(|f| is_protected(f, &protected)) {
         protected_changed.push(file.clone());
-        let by: Vec<String> = active
+        let by: Vec<(String, Option<String>)> = active
             .iter()
-            .filter(|(_, body)| delta_mentions(body, file))
-            .map(|(name, _)| name.clone())
+            .map(|(name, body)| (name.clone(), delta_mentions(body, file)))
+            .filter(|(_, reason)| reason.is_some())
             .collect();
+        let by_names: Vec<String> = by.iter().map(|(name, _)| name.clone()).collect();
         match by.first() {
-            Some(name) => covered.push((file.clone(), name.clone())),
+            Some((name, reason)) => {
+                covered.push((file.clone(), name.clone()));
+                if let Some(reason) = reason {
+                    reasons.push((file.clone(), reason.clone()));
+                }
+            }
             None => violations.push(file.clone()),
         }
-        mentions.push((file.clone(), by));
+        mentions.push((file.clone(), by_names));
     }
     let passed = violations.is_empty();
     Ok(GuardReport {
@@ -387,6 +505,7 @@ pub fn guard(repo: &Path, base: Option<&str>, protect: &[String]) -> Result<Guar
         passed,
         active_deltas: active.len(),
         mentions,
+        reasons,
     })
 }
 
@@ -427,7 +546,12 @@ pub fn render_guard(report: &GuardReport) -> String {
                     );
                 }
                 [single] => {
-                    let _ = writeln!(out, "[ok] {file} — покрыт активной дельтой '{single}'");
+                    let why = report
+                        .reasons
+                        .iter()
+                        .find(|(f, _)| f == file)
+                        .map_or(String::new(), |(_, r)| format!(" ({r})"));
+                    let _ = writeln!(out, "[ok] {file} — покрыт активной дельтой '{single}'{why}");
                 }
                 many => {
                     let quoted: Vec<String> = many.iter().map(|d| format!("'{d}'")).collect();
@@ -716,6 +840,100 @@ mod tests {
         let text = render_guard(&report);
         assert!(text.contains("arch-be delta new"), "{text}");
         assert!(text.contains("FAIL"), "{text}");
+    }
+
+    /// Н4а: вердикт guard не зависит от того, сделан ли `git add`.
+    /// `git diff --name-only HEAD` неотслеживаемые файлы не показывает.
+    #[test]
+    fn guard_sees_untracked_protected_files() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("repo");
+        make_guard_repo(&repo);
+        // Новый защищённый файл, ещё не в индексе.
+        std::fs::write(repo.join("model/AD-009-tehnologii.md"), "# AD-009\n").expect("write");
+        let before = guard(&repo, None, &[]).expect("guard");
+        assert!(
+            before
+                .violations
+                .contains(&"model/AD-009-tehnologii.md".to_string()),
+            "до git add: {:?}",
+            before.violations
+        );
+        assert!(!before.passed);
+        git(&repo, &["add", "-A"]);
+        let after = guard(&repo, None, &[]).expect("guard");
+        assert_eq!(
+            before.violations, after.violations,
+            "вердикт обязан совпадать до и после git add"
+        );
+        assert_eq!(before.passed, after.passed);
+    }
+
+    /// Н4б: упоминание по идентификатору сущности засчитывается, и отчёт
+    /// говорит, чем именно покрыт файл.
+    #[test]
+    fn guard_accepts_entity_id_mention() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("repo");
+        make_guard_repo(&repo);
+        let file = repo.join("model/NFR-005-recovery-rto-rpo.md");
+        std::fs::write(
+            &file,
+            "---\nid: NFR-005\ntype: nfr\ntitle: \"RTO\"\nstatus: \"accepted\"\n---\n\nRTO 15 мин.\n",
+        )
+        .expect("write");
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-q", "-m", "nfr"]);
+        std::fs::write(&file, "---\nid: NFR-005\ntype: nfr\ntitle: \"RTO\"\nstatus: \"accepted\"\n---\n\nRTO 10 мин.\n")
+            .expect("edit");
+        let path = new(&repo, "recovery-rto-rpo").expect("new");
+        let body = std::fs::read_to_string(&path).expect("read");
+        std::fs::write(
+            &path,
+            format!("{body}\nМеняем NFR-005 (срок восстановления).\n"),
+        )
+        .expect("mention");
+        let report = guard(&repo, None, &[]).expect("guard");
+        assert!(report.passed, "{report:?}");
+        assert!(
+            report
+                .reasons
+                .iter()
+                .any(|(_, r)| r.contains("по id NFR-005")),
+            "{:?}",
+            report.reasons
+        );
+        let text = render_guard(&report);
+        assert!(text.contains("по id NFR-005"), "{text}");
+    }
+
+    /// Н4б-граница: `NFR-0051` не покрывает `NFR-005` (совпадение слова).
+    #[test]
+    fn guard_does_not_match_id_substring() {
+        assert!(!contains_word("правим NFR-0051", "NFR-005"));
+        assert!(contains_word("правим NFR-005, срок", "NFR-005"));
+        assert!(contains_word("(NFR-005)", "NFR-005"));
+        assert!(!contains_word("AD-0091", "AD-009"));
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("repo");
+        make_guard_repo(&repo);
+        std::fs::write(repo.join("model/NFR-005.md"), "---\nid: NFR-005\n---\n").expect("write");
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-q", "-m", "nfr"]);
+        std::fs::write(
+            repo.join("model/NFR-005.md"),
+            "---\nid: NFR-005\n---\n\nv2\n",
+        )
+        .expect("edit");
+        let path = new(&repo, "nfr-005").expect("new");
+        let body = std::fs::read_to_string(&path).expect("read");
+        std::fs::write(&path, format!("{body}\nЗатронут NFR-0051 (соседний).\n")).expect("mention");
+        let report = guard(&repo, None, &[]).expect("guard");
+        assert!(
+            report.violations.contains(&"model/NFR-005.md".to_string()),
+            "NFR-0051 не покрывает NFR-005: {:?}",
+            report.covered
+        );
     }
 
     #[test]

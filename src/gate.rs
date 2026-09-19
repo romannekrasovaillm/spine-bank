@@ -2097,6 +2097,10 @@ mod tests {
                 ("CMP-002", "depends_on: []"),
             ],
         );
+        // Модель коммитится: с Н4 delta guard видит и неотслеживаемые файлы,
+        // и незакоммиченная модель — это правка спайна без дельты.
+        git(dir, &["add", "."]);
+        git(dir, &["commit", "-q", "-m", "model"]);
         let limits = (1, 4);
         let clean = run_with(
             dir,
@@ -2197,6 +2201,8 @@ mod tests {
                 ("NFR-001", "verification: \"\"\naffects: [CMP-001]"),
             ],
         );
+        git(dir, &["add", "."]);
+        git(dir, &["commit", "-q", "-m", "model"]);
         let standard = run_with(
             dir,
             Some(Route::Standard),
