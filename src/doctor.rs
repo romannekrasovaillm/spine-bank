@@ -70,7 +70,30 @@ pub fn run_checks(cfg: &Config) -> Vec<Check> {
         check_web(cfg),
         check_archify(cfg),
         check_git(),
+        check_ci_releases_url(),
     ]
+}
+
+/// Заглушка `<org>/<repo>` в конфигурации CI проекта (волна C 0.3.4):
+/// джоба `spine-gate` скачивает binary с адреса релизов, и незаменённая
+/// заглушка означает красный пайплайн при первом же прогоне. Молчащая джоба
+/// выглядит рабочей — предупреждаем заранее.
+fn check_ci_releases_url() -> Check {
+    let dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    if !crate::connect::ci_placeholder_present(&dir) {
+        return Check {
+            name: "ci-releases",
+            verdict: Verdict::Ok,
+            text: "в конфигурации CI нет заглушки <org>/<repo>".to_string(),
+        };
+    }
+    Check {
+        name: "ci-releases",
+        verdict: Verdict::Warn,
+        text: "в джобе CI осталась заглушка <org>/<repo>: задайте адрес релизов — \
+               `arch-be connect ci --provider <p> --releases-url <URL>`"
+            .to_string(),
+    }
 }
 
 /// Текстовый отчёт по списку проверок.

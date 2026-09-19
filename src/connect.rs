@@ -1890,10 +1890,11 @@ fn upsert_ci_job(
     provider: CiProvider,
     dir: &Path,
     dry_run: bool,
+    releases_url: Option<&str>,
     report: &mut ConnectReport,
 ) -> Result<()> {
     let path = provider.job_file(dir);
-    let block = provider.job_block();
+    let block = substitute_releases_url(&provider.job_block(), releases_url);
     let old = match std::fs::read_to_string(&path) {
         Ok(text) => Some(text),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
@@ -1933,12 +1934,17 @@ fn upsert_ci_job(
 ///
 /// # Errors
 /// Целевой файл GitHub существует без нашего маркера; ошибки чтения/записи.
-pub fn connect_ci(provider: CiProvider, dir: &Path, dry_run: bool) -> Result<ConnectReport> {
+pub fn connect_ci(
+    provider: CiProvider,
+    dir: &Path,
+    dry_run: bool,
+    releases_url: Option<&str>,
+) -> Result<ConnectReport> {
     let mut report = ConnectReport {
         dry_run,
         ..ConnectReport::default()
     };
-    upsert_ci_job(provider, dir, dry_run, &mut report)?;
+    upsert_ci_job(provider, dir, dry_run, releases_url, &mut report)?;
     match provider {
         CiProvider::GitLab => {
             report.notes.push(
@@ -1950,9 +1956,14 @@ pub fn connect_ci(provider: CiProvider, dir: &Path, dry_run: bool) -> Result<Con
                 "закоммитьте .gitlab-ci.yml и откройте merge request — джоба spine-gate \
                  появится в пайплайне MR"
                     .to_string(),
-                "замените <org>/<repo> в RELEASES_URL на адрес релизов/хранилища, где лежит \
-                 arch-be-linux-x86_64"
-                    .to_string(),
+                if releases_url.is_none() {
+                    "задайте адрес релизов: `arch-be connect ci --provider gitlab \
+                     --releases-url https://github.com/<org>/<repo>/releases/download` — \
+                     сейчас в шаблоне заглушка <org>/<repo>"
+                        .to_string()
+                } else {
+                    "адрес релизов подставлен из --releases-url".to_string()
+                },
             ]);
         }
         CiProvider::GitHub => {
@@ -2013,6 +2024,37 @@ fn git_common_dir(dir: &Path) -> Result<PathBuf> {
     } else {
         dir.join(path)
     })
+}
+
+/// Есть ли в конфигурации CI проекта незаменённая заглушка `<org>/<repo>`.
+///
+/// Читает `doctor`: молчаливая заглушка в джобе выглядит как рабочая
+/// настройка, а пайплайн упадёт на первом же прогоне — предупреждать надо
+/// заранее, а не по факту красного CI.
+#[must_use]
+pub fn ci_placeholder_present(dir: &Path) -> bool {
+    [
+        ".gitlab-ci.yml",
+        ".github/workflows/spine-gate.yml",
+        "Jenkinsfile",
+    ]
+    .iter()
+    .filter_map(|rel| std::fs::read_to_string(dir.join(rel)).ok())
+    .any(|text| text.contains("<org>/<repo>"))
+}
+
+/// Подставляет адрес релизов в шаблон джобы вместо заглушки `<org>/<repo>`.
+///
+/// Без `--releases-url` шаблон остаётся с заглушкой (джоба печатается как
+/// черновик), но в «Следующих шагах» появляется строка, которую надо
+/// отредактировать, а `doctor` предупреждает — молчаливая заглушка в CI
+/// выглядит как рабочая конфигурация (Н-CI волны C 0.3.4).
+fn substitute_releases_url(block: &str, releases_url: Option<&str>) -> String {
+    let Some(url) = releases_url else {
+        return block.to_string();
+    };
+    let url = url.trim().trim_end_matches('/');
+    block.replace("https://github.com/<org>/<repo>/releases/download", url)
 }
 
 /// Блок pre-commit: быстрый гейт fitness-правил. Fail-soft: нет `arch-be`
@@ -3420,7 +3462,7 @@ mod tests {
             std::fs::create_dir_all(&dir).expect("mkdir");
 
             // --dry-run: план есть, файла нет.
-            let report = connect_ci(provider, &dir, true).expect("dry-run");
+            let report = connect_ci(provider, &dir, true, None).expect("dry-run");
             assert!(report.dry_run);
             assert!(
                 report.created.iter().any(|p| p.ends_with(rel)),
@@ -3435,7 +3477,7 @@ mod tests {
             );
 
             // Реальный прогон.
-            let report = connect_ci(provider, &dir, false).expect("connect ci");
+            let report = connect_ci(provider, &dir, false, None).expect("connect ci");
             let text = read(&dir.join(rel));
             assert!(text.contains(BLOCK_BEGIN), "{}: {text}", provider.name());
             assert!(text.contains(BLOCK_END), "{}: {text}", provider.name());
@@ -3461,7 +3503,7 @@ mod tests {
             );
 
             // Повтор — без изменений и без дублей маркеров.
-            let report = connect_ci(provider, &dir, false).expect("повтор");
+            let report = connect_ci(provider, &dir, false, None).expect("повтор");
             assert_eq!(
                 read(&dir.join(rel)),
                 text,
@@ -3491,7 +3533,7 @@ mod tests {
         )
         .expect("write .gitlab-ci.yml");
 
-        connect_ci(CiProvider::GitLab, &dir, false).expect("connect ci");
+        connect_ci(CiProvider::GitLab, &dir, false, None).expect("connect ci");
         let text = read(&dir.join(".gitlab-ci.yml"));
         assert!(text.contains("unit-tests:"), "чужая джоба цела: {text}");
         assert!(text.contains("spine-gate:"), "наша джоба: {text}");
@@ -3501,7 +3543,7 @@ mod tests {
         );
 
         // Повтор: блок заменяется, чужая зона не трогается, дублей нет.
-        connect_ci(CiProvider::GitLab, &dir, false).expect("повтор");
+        connect_ci(CiProvider::GitLab, &dir, false, None).expect("повтор");
         let again = read(&dir.join(".gitlab-ci.yml"));
         assert_eq!(again, text, "повтор изменил файл");
         assert_eq!(again.matches("spine-gate:").count(), 1, "{again}");
@@ -3517,7 +3559,7 @@ mod tests {
         std::fs::create_dir_all(wf.parent().expect("parent")).expect("mkdir");
         std::fs::write(&wf, "name: mine\non: [push]\n").expect("write workflow");
 
-        let err = connect_ci(CiProvider::GitHub, &dir, false).expect_err("отказ");
+        let err = connect_ci(CiProvider::GitHub, &dir, false, None).expect_err("отказ");
         assert!(err.to_string().contains("не затираю"), "{err}");
         assert_eq!(read(&wf), "name: mine\non: [push]\n", "файл цел");
 
@@ -3527,7 +3569,7 @@ mod tests {
             "# spine-connect:begin\nname: spine-gate\n# spine-connect:end\n",
         )
         .expect("write marked");
-        connect_ci(CiProvider::GitHub, &dir, false).expect("обновление нашего файла");
+        connect_ci(CiProvider::GitHub, &dir, false, None).expect("обновление нашего файла");
         let text = read(&wf);
         assert!(text.contains("--format sarif"), "{text}");
         assert_eq!(text.matches(BLOCK_BEGIN).count(), 1, "{text}");
@@ -3658,5 +3700,66 @@ mod tests {
             !wt.join(".git/hooks").exists(),
             "у worktree .git — файл, каталога hooks в нём нет"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests_releases_url {
+    //! Волна C 0.3.4: заглушка `<org>/<repo>` в шаблоне CI не должна выглядеть
+    //! рабочей конфигурацией.
+
+    use super::*;
+
+    fn ci_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "arch-be-ci-{name}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        dir
+    }
+
+    /// `--releases-url` подставляется в джобу; заглушки в файле не остаётся.
+    #[test]
+    fn releases_url_is_substituted_into_ci_job() {
+        let dir = ci_dir("url");
+        connect_ci(
+            CiProvider::GitLab,
+            &dir,
+            false,
+            Some("https://releases.example.invalid/arch-be/"),
+        )
+        .expect("connect ci");
+        let text = std::fs::read_to_string(dir.join(".gitlab-ci.yml")).expect("read");
+        assert!(
+            text.contains(r#"RELEASES_URL: "https://releases.example.invalid/arch-be""#),
+            "адрес обязан быть подставлен без хвостового слэша: {text}"
+        );
+        assert!(
+            !text.contains("<org>/<repo>"),
+            "заглушки в джобе остаться не должно: {text}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Без адреса — заглушка остаётся, но «Следующие шаги» прямо называют
+    /// команду с `--releases-url`, а не молчат.
+    #[test]
+    fn missing_releases_url_is_named_in_next_steps() {
+        let dir = ci_dir("no-url");
+        let report = connect_ci(CiProvider::GitLab, &dir, false, None).expect("connect ci");
+        assert!(
+            report
+                .next_steps
+                .iter()
+                .any(|s| s.contains("--releases-url")),
+            "шаг обязан называть команду: {:?}",
+            report.next_steps
+        );
+        // Проверка для doctor/CI-файла: заглушка видна.
+        assert!(super::ci_placeholder_present(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

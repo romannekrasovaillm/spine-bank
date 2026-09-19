@@ -479,6 +479,11 @@ enum Cmd {
         /// Только показать план, ничего не записывать.
         #[arg(long)]
         dry_run: bool,
+        /// Адрес релизов для джобы CI (только `connect ci`): подставляется в
+        /// шаблон вместо заглушки `<org>/<repo>`. Без него джоба остаётся
+        /// черновиком, и об этом сказано в «Следующих шагах» и в `doctor`.
+        #[arg(long, value_name = "URL")]
+        releases_url: Option<String>,
     },
 }
 
@@ -2038,6 +2043,7 @@ async fn main() -> Result<()> {
             strict_hooks,
             apply_global,
             dry_run,
+            releases_url,
         }) => {
             let dir = match dir {
                 Some(d) => d,
@@ -2048,6 +2054,11 @@ async fn main() -> Result<()> {
                 // Гейты, не зависящие от хоста (волна 2, п.8): флаги агентных
                 // хостов здесь неприменимы — отклоняем явно, чтобы не
                 // молча игнорировать.
+                if releases_url.is_some() && special != "ci" {
+                    return Err(anyhow::anyhow!(
+                        "--releases-url применим только к `connect ci`"
+                    ));
+                }
                 if rw || no_skills || no_hooks || no_agents_md || strict_hooks || apply_global {
                     return Err(anyhow::anyhow!(
                         "флаги --rw/--no-skills/--no-hooks/--no-agents-md/--strict-hooks/--apply-global применимы только к хостам агентов, не к `connect {special}`"
@@ -2059,7 +2070,12 @@ async fn main() -> Result<()> {
                     })?;
                     let provider = arch_harness::connect::CiProvider::parse(raw)
                         .map_err(anyhow::Error::msg)?;
-                    let report = arch_harness::connect::connect_ci(provider, &dir, dry_run)?;
+                    let report = arch_harness::connect::connect_ci(
+                        provider,
+                        &dir,
+                        dry_run,
+                        releases_url.as_deref(),
+                    )?;
                     print!(
                         "{}",
                         arch_harness::connect::render_plan(

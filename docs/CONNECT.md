@@ -70,6 +70,18 @@ lifecycle-хуков нет; CI и git-хуки — единственный г�
 | `ci --provider gitlab` | блок между `# spine-connect:begin/end` в `.gitlab-ci.yml` (мердж, чужие джобы сохраняются) | джоба `spine-gate`: `arch-be gate --route auto --format gitlab-codequality` в артефакт `reports.codequality` — **нарушения видны в интерфейсе merge request без ручной настройки** |
 | `ci --provider github` | новый `.github/workflows/spine-gate.yml` (существующий без маркера не затирается — отказ) | `gate --format sarif` артефактом прогона + markdown в Job Summary; загрузка в code scanning — закомментированным шагом (нужен Advanced Security) |
 | `ci --provider jenkins` | блок между `// spine-connect:begin/end` в `Jenkinsfile` | `gate --format junit` + публикация `junit(...)`; красный гейт — `error(...)` по коду возврата |
+
+**Адрес релизов (`--releases-url`).** Джоба `spine-gate` скачивает binary
+`arch-be` с адреса релизов. Без `--releases-url` в шаблоне остаётся заглушка
+`<org>/<repo>`, и джоба падает при первом же прогоне:
+
+```bash
+arch-be connect ci --provider gitlab \
+  --releases-url https://github.com/<org>/<repo>/releases/download
+```
+
+Без флага «Следующие шаги» называют эту команду, а `arch-be doctor` выдаёт
+предупреждение `ci-releases` — молчащая заглушка выглядит как рабочая настройка.
 | `git-hooks` | `.git/hooks/pre-commit` (быстрый `arch-be control check .`) и `pre-push` (полный `arch-be gate --route auto --base <remote sha>...HEAD` — база берётся из stdin git'а, для новой ветки `merge-base` с основной); в worktree — в hooks основного git-каталога | блоки между маркерами, чужие строки хуков сохраняются; fail-soft: нет `arch-be` в PATH (у pre-commit — и `.arch-handoff/CONSTRAINTS.yaml`) — молча пропуск |
 
 Установка бинаря в CI-джобах — curl из релизов (в публичных релизах GitHub
