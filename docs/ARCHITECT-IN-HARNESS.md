@@ -10,7 +10,7 @@
 
 | Канал | Что это | Куда попадает |
 |---|---|---|
-| **MCP** | 20 read-only инструментов (+8 под `--rw`): гейты, трасса, модель, контракты, знания, судья-механика | `.mcp.json` / `.qwen/settings.json` / `.kimi-code/mcp.json` |
+| **MCP** | 33 read-only инструмента (+10 под `--rw`): гейты, трасса, модель, контракты, NFR, evidence, реестры, знания, судья-механика | `.mcp.json` / `.qwen/settings.json` / `.kimi-code/mcp.json` |
 | **Скиллы** | 62 SKILL.md: методы (ADR, saga, fitness…) + **плейбуки работы со Spine** (`spine-*`) | `.claude/skills`, `.qwen/skills`, `.kimi-code/skills`, workspace OpenClaw |
 | **Хуки** | Гейт на событиях харнесса: Stop (Claude/Kimi), TS-хук (omp), плагин (OpenClaw) | `settings.json` / `--hook` / плагин |
 
@@ -103,7 +103,8 @@ API-ключа у Spine:
 
 - **Read-only по умолчанию**: `--rw` открывает только белый список
   (`adr_new`, `handoff_create`, `agentsmd_generate`, `skill_distill`,
-  `archify_*`), а `bash`/`write_file`/`harness_run`/`subagent_*`/`web_*`
+  `archify_*`, `reverse_survey`, `evidence_pack`, `delta_propose`), а
+  `bash`/`write_file`/`harness_run`/`subagent_*`/`web_*`
   закрыты навсегда (never-список + охранные тесты реестра).
 - **Политика R-уровней** работает и внутри MCP-моста: RequireConfirm в
   неинтерактиве = отказ с пояснением.

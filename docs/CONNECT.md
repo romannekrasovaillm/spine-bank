@@ -72,8 +72,10 @@ lifecycle-хуков нет; CI и git-хуки — единственный г�
 | `ci --provider jenkins` | блок между `// spine-connect:begin/end` в `Jenkinsfile` | `gate --format junit` + публикация `junit(...)`; красный гейт — `error(...)` по коду возврата |
 | `git-hooks` | `.git/hooks/pre-commit` (быстрый `arch-be control check .`) и `pre-push` (полный `arch-be gate --route auto`); в worktree — в hooks основного git-каталога | блоки между маркерами, чужие строки хуков сохраняются; fail-soft: нет `arch-be` в PATH (у pre-commit — и `.arch-handoff/CONSTRAINTS.yaml`) — молча пропуск |
 
-Установка бинаря в CI-джобах — curl из релизов (`arch-be-linux-x86_64.tar.gz`)
-или офлайн-бандл из внутреннего хранилища: оба варианта закомментированы в
+Установка бинаря в CI-джобах — curl из релизов (в публичных релизах GitHub
+артефакты — сырые бинари `arch-be-linux-x86_64` + `SHA256SUMS`; tar.gz —
+формат офлайн-бандла из внутреннего хранилища и текстов самих джоб): оба
+варианта закомментированы в
 тексте джобы (замените `<org>/<repo>` в `RELEASES_URL`). `--dry-run` печатает
 план без записи, повторный запуск дублей не плодит (маркерные блоки).
 
@@ -197,7 +199,8 @@ evidence — см. `docs/control.md`), и при ненулевом коде в�
 ## 4. Режимы MCP-сервера
 
 ```bash
-arch-be mcp serve          # дефолт: строго read-only (25 инструментов)
+arch-be mcp serve          # дефолт: строго read-only (33 инструмента:
+                           #   13 ручных + 20 моста в реестр)
 arch-be mcp serve --rw     # + записывающие: handoff_create, adr_new,
                            #   agentsmd_generate, skill_distill, archify_*,
                            #   reverse_survey, evidence_pack, delta_propose

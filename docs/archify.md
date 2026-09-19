@@ -176,6 +176,10 @@ deliver → compare**. Прогоны ниже выполнены на этал�
 `banking/demos/cli-from-claude-code/scenario2-archify-cli/`
 (`sbp-v1.architecture.json`, `sbp-v2.architecture.json` — снапшоты
 СБП-контура; те же файлы — фикстуры SDK-тестов по `sdk/CONTRACT.md` §5).
+Эталоны — из полной редакции (зона `banking/`, в публичный снапшот не
+входит); в публичном клоне те же команды исполняются на IR из
+`docs/diagrams/` (например `spine-be-architecture.architecture.json` —
+см. `docs/getting_started.md` §8).
 
 ### 1. Авторинг IR
 
@@ -186,7 +190,8 @@ removed+added), типы компонентов строго из enum (`fronten
 `database`, `cloud`, `security`, `messagebus`, `external`), геометрия
 вручную (`via`/`fromSide`/`labelAt`) — только по диагностике валидатора.
 Образец формы полей —
-`banking/plugins/ru-archify/skills/archify-diagrams/references/bank-target-landscape.architecture.json`.
+`banking/plugins/ru-archify/skills/archify-diagrams/references/bank-target-landscape.architecture.json`
+(полная редакция; в публичном снапшоте — `docs/diagrams/*.architecture.json`).
 
 ### 2. validate — приёмка после каждой правки
 

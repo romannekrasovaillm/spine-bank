@@ -21,7 +21,10 @@
 | **omp (oh-my-pi)** 15.10.3 | ✅ `.mcp.json` авто-дискавери | ✅ | ✅ нативный discovery `.claude/skills` (81 видимый, 55 spine) | ✅ TS-хук `--hook`: `{block:true}` на правку CONSTRAINTS.yaml |
 | **OpenClaw** 2026.7.1 | ✅ `openclaw mcp add` | ✅ | ✅ 55/55 ready (workspace `skills/`) | ✅ через плагин (`before_agent_finalize` → повторный проход при FAIL) |
 
-Распределение инструментов по прогонам (каждый из 20 вызван хотя бы раз):
+Распределение инструментов по прогонам (каждый из 20 вызван хотя бы раз;
+на момент раунда сервер отдавал 20 read-only инструментов — обновлено
+2026-09-19: после волн 1–3 их 33 плюс 7 промптов-плейбуков, прогон волн —
+[HARNESS-TESTS.md](HARNESS-TESTS.md)):
 fitness_check — все 5 · split-judge (`rubric_prompt`+`rubric_verify`) —
 claude · `model_query`, `trace_check`, `significance_score` — kimi ·
 `openapi_lint`, `asyncapi_lint`, `contract_diff` — qwen · `mermaid_render`,

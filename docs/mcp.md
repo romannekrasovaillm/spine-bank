@@ -17,7 +17,8 @@ architectural verdict (`passed` + находки) **в момент написа
 хоста. Флаг `--rw` дополнительно открывает белый список аддитивных записей
 в рабочий каталог клиента: `handoff_create`, `adr_new`, `agentsmd_generate`,
 `skill_distill`, `archify_deliver`/`archify_show`/`archify_compare`,
-`reverse_survey`.
+`reverse_survey`, `evidence_pack`, `delta_propose` (полный состав —
+в разделе «Инструменты» ниже).
 
 Поверх контрольного контура (ADR-008) сервер отдаёт **чтение знаний**
 (транш T4, ADR-015): поиск по базе знаний архитектора и библиотеке скиллов
@@ -27,9 +28,13 @@ arch-be + рендер mermaid-диаграмм — это read-only-инстр�
 семь плейбуков spine-workflows как слэш-команды хоста (см. ниже).
 
 Помимо ручных инструментов работает **мост в реестр** (`tools::full_registry`):
-белый список read-only доменных инструментов (`openapi_lint`, `asyncapi_lint`,
-`contract_diff`, `fleet_audit`, `agentsmd_lint`, `archify_validate`,
-`rubric_list`, `plugin_list`) маршрутизируется в `ToolRegistry::dispatch`
+белый список read-only доменных инструментов (20 штук: верификаторы
+`nfr_check`/`model_validate`/`delta_guard`/`evidence_verify`, отчёты
+`landscape_report`/`adr_registry`/`rules_report`/`openspec_coverage`/`model_graph`,
+составные `architect_review`/`change_impact`, `model_drift`, линтеры контрактов
+`openapi_lint`/`asyncapi_lint`/`contract_diff` и реестровые
+`fleet_audit`/`agentsmd_lint`/`archify_validate`/`rubric_list`/`plugin_list`)
+маршрутизируется в `ToolRegistry::dispatch`
 с политикой R-уровней из конфига. Спеки этих инструментов генерируются из
 `Tool::spec()`; каждый принимает дополнительный аргумент `cwd` — рабочий
 каталог клиента для резолва относительных путей (по умолчанию — cwd процесса

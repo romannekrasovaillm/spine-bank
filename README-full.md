@@ -61,7 +61,6 @@ spine-инвариантов до пакета передачи кодовому
 | [fleet-spine-drift](кейсы/fleet-spine-drift/) | — (механический) | Аудит флота: дубли 66.7% и дрейф `CONSTRAINTS.yaml` как exit-код; delta guard запрещает правки спайна мимо дельты |
 | [legacy-survey](кейсы/legacy-survey/) | — (механический) | Reverse discovery legacy-монолита: скрытые связи с `[confirmed]` и честные `[gap]` |
 | [jvm-archunit-gate](кейсы/jvm-archunit-gate/) | — (механический) | Один `CONSTRAINTS.yaml` — два исполнителя: нативный гейт и настоящий ArchUnit по байткоду |
-| [fleet-patterns](кейсы/fleet-patterns/) | — (механический) | Движок оркестрации флотов: fanout / pipeline / map_reduce / tournament / dag с механическими гейтами узлов |
 
 <p align="center">
   <a href="docs/handoff_walkthrough.md"><img src="docs/screenshots/05-handoff.png" alt="Handoff кодовому харнессу: handoff_create собирает пакет .arch-handoff/, harness_run прогоняет Claude Code с умными таймаутами, контракт результата в сводке, control_check подтверждает целостность · handoff walkthrough" width="92%"></a><br>
@@ -501,12 +500,19 @@ CI-джобой `dogfood` (`arch-be control spine` + `arch-be control check .` +
   > CI и кейсах `кейсы/`.
 - **MCP-клиент** (`docs/mcp.md`), **веб-доступ** (11 кураторских сайтов
   архитектора) и **локальная база знаний** (`docs/web_kb.md`).
-- **MCP-сервер** `arch-be mcp serve` (ADR-008): инструменты `spine_lint`, `fitness_check`,
-  `significance_score`, `trace_check`, `model_query`, `rubric_run` наружу кодовым агентам
+- **MCP-сервер** `arch-be mcp serve` (ADR-008): 33 read-only инструмента
+  (контроль: `spine_lint`, `fitness_check`, `significance_score`/`significance_from_diff`,
+  `trace_check`, `model_query`, `nfr_check`, `delta_guard`, `evidence_verify`,
+  `contract_diff`; реестры: `landscape_report`, `adr_registry`, `rules_report`,
+  `openspec_coverage`, `model_graph`; составные `architect_review`/`change_impact`;
+  знания и судья-механика) наружу кодовым агентам
   (Claude Code и др.) — структурированный verdict (`passed` + находки) в момент написания
-  кода; read-only, пути аргументами вызова (`docs/mcp.md`). Подключение одной командой:
-  `arch-be connect <claude|qwen|codex|kimi|generic>` — MCP-конфиг (мердж, чужие ключи
-  сохраняются), пакет скиллов, хуки (`Stop` → `control check`, fail-soft на инфраструктуру).
+  кода; read-only, пути аргументами вызова, `--rw` открывает белый список записей
+  (`docs/mcp.md`); 7 промптов-плейбуков `spine-*` — слэш-команды хоста. Подключение одной командой:
+  `arch-be connect <claude|qwen|gigacode|codex|kimi|omp|generic>` — MCP-конфиг (мердж, чужие ключи
+  сохраняются), пакет скиллов, хуки (`Stop` → `arch-be gate --route auto`, fail-soft на
+  инфраструктуру, fail-hard на вердикте); хосто-независимые гейты — `arch-be connect ci`
+  (gitlab/github/jenkins) и `arch-be connect git-hooks`.
 - **Планировщик md-задач** «md + cron + LLM + баш-пайпы» (`docs/cron_and_md_pipes.md`).
 - **Библиотека промптов** (`assets/prompts/`, `arch-be prompts`).
 - **Глобальная md-память** (`MEMORY.md` в `~/.arch-harness`, в стиле Kimi Code):
@@ -652,16 +658,25 @@ arch-be [--config <path>] <command>   # без команды — TUI
 | `kb <query> [--limit]` | Поиск по локальной базе знаний |
 | `web search <query> [--arch]` / `web fetch <url>` / `web sites` | Веб: поиск, фетч, кураторские сайты |
 | `mcp list` / `mcp call <server__tool>` | MCP-серверы и вызовы инструментов |
-| `mcp serve` | MCP-сервер (stdio): архитектурный контроль кодовым агентам — verdict в момент написания кода (ADR-008, `docs/mcp.md`) |
-| `connect <claude\|qwen\|codex\|kimi\|generic> [--dir] [--rw] [--no-skills] [--no-hooks] [--no-agents-md] [--strict-hooks] [--apply-global] [--dry-run]` | Подключение Spine к внешнему CLI-агенту: MCP-конфиг (мердж, чужое сохраняется), скиллы, хуки; `--dry-run` — только план (`docs/mcp.md`) |
+| `mcp serve` | MCP-сервер (stdio): архитектурный контроль кодовым агентам — verdict в момент написания кода (ADR-008, `docs/mcp.md`); 33 read-only инструмента + 7 промптов-плейбуков `spine-*`; `--rw` — белый список записей (`handoff_create`, `adr_new`, …); каждый вызов журналируется в `.arch-handoff/mcp-calls.jsonl` |
+| `connect <claude\|qwen\|gigacode\|codex\|kimi\|omp\|generic> [--dir] [--rw] [--no-skills] [--no-hooks] [--no-agents-md] [--strict-hooks] [--apply-global] [--dry-run]` | Подключение Spine к внешнему CLI-агенту: MCP-конфиг (мердж, чужое сохраняется), скиллы, хуки (`arch-be gate --route auto`); `--dry-run` — только план (`docs/CONNECT.md`, `docs/mcp.md`) |
+| `connect ci --provider gitlab\|github\|jenkins` / `connect git-hooks` | Хосто-независимые гейты: джоба `arch-be gate` под площадку CI (нативный формат отчёта: codequality/sarif/junit) / локальные pre-commit + pre-push (`docs/CONNECT.md`) |
 | `handoff <harness> --repo <path> --task <text>` | Handoff-пакет `.arch-handoff/` |
 | `harness-run <harness> --repo <path> [--task]` | Прогнать кодовый харнесс по пакету |
 | `harnesses` | Известные кодовые харнессы и их доступность |
-| `control check/spine/sensors/score/adr` | Архитектурный контроль (fitness, линтеры, значимость) |
+| `control check/spine/sensors/score/adr` | Архитектурный контроль (fitness, линтеры, значимость); у `check` — `--baseline`/`--baseline-update` (ratchet для brownfield), `--changed-since`, `--format sarif\|junit\|gitlab-codequality\|markdown` |
+| `control rules-report` / `control fp mark <правило> <файл>` | Реестр правил CONSTRAINTS.yaml (карточки, находки, git-прокси стоимости) / регистр ложных срабатываний (`docs/outcome-metrics.md`) |
+| `gate [--route auto\|fast\|standard\|critical] [--repo] [--base] [--constraints] [--format]` | Единый архитектурный гейт: fitness + delta guard + rule_weakened (анти-ослабление) + spine-линт + трассировка (+ nfr и evidence на Standard/Critical); провал любой составляющей — exit 1 |
+| `review <dir> [--base] [--json]` | Составное архитектурное ревью одним ответом: гейт + целостность модели + линт контрактов OpenAPI/AsyncAPI |
+| `digest [--week\|--days N] [--json]` | Недельный дайджест outcome-данных MCP-контроля из журнала `.arch-handoff/mcp-calls.jsonl` (итерации FAIL→PASS, топ правил, доля FP, истекающие overrides) |
+| `contract-diff <old> <new> [--contract-format] [--format] [--model] [--json]` | Дифф контрактов на ломающие изменения: OpenAPI (CD-001..CD-007), proto/gRPC, Avro, JSON Schema, DDL; `--model` — потребители/владельцы по модели (ADR-035); breaking → exit 1 |
 | `control report --level corp [--json]` | Отчёт вверх по корп-спайну (`docs/corp-spine.md`): покрытие унаследованных правил, overrides, просроченные |
-| `archunit gen/check/fetch` | ArchUnit-мост (ADR-039): JVM-гейты из CONSTRAINTS.yaml настоящим ArchUnit — standalone-раннер без правок Java-репо, JUnit-тест для встраивания, пинnutые jar'ы |
+| `archunit gen/check/fetch` | ArchUnit-мост (ADR-039): JVM-гейты из CONSTRAINTS.yaml настоящим ArchUnit — standalone-раннер без правок Java-репо, JUnit-тест для встраивания, запиненные jar'ы |
 | `control gate A4 <repo> [--rehearse]` | Гейт A4: репетиция отката handoff-пакета (rollback-first для Critical) |
-| `model validate/show/graph/project/export/import` | Типизированная модель архитектуры (model/): ссылочная целостность, карточки сущностей, граф связей, проекция ADR; обмен с отраслевыми форматами — экспорт SYS/CMP/INT в Structurizr DSL/PlantUML/drawio, импорт Structurizr DSL (round-trip, ADR-009) |
+| `model validate/show/graph/project/export/import` | Типизированная модель архитектуры (model/): ссылочная целостность, карточки сущностей, граф связей, проекция ADR; обмен с отраслевыми форматами — экспорт SYS/CMP/INT в Structurizr DSL/PlantUML/drawio/ArchiMate, импорт Structurizr DSL (round-trip, ADR-009) и реестров систем `csv`/`xlsx`/`backstage` |
+| `model drift <dir>` / `model impact <dir> --id\|--paths` / `model landscape <root> [--aliases] [--diff-since]` | Дрейф «модель ↔ код» (code_roots, манифесты без CMP, INT→контракт) / радиус изменения по графу модели (сущности, правила, контракты, владельцы) / ландшафт систем набора проектов (EA-3, ADR-036/037) |
+| `adr registry <root> [--strict]` | Глобальный реестр ADR по набору проектов (ADR-036): коллизии номеров, дубли, пропуски полей |
+| `survey <repo> [--out]` | Обратное обследование legacy-репозитория (reverse discovery): детерминированный сканер → каркас карты `docs/reverse/survey.md` |
 | `trace check <dir>` | Трассируемость модели: покрытие звеньев REQ → NFR → AD/ADR → CMP → fitness-правило, сироты, exit 1 на обязательных звеньях |
 | `nfr budget/availability/capacity/cost <dir>` | Количественные NFR поверх модели (ADR-007): latency-бюджет по hop'ам INT-* против цели p99 (расхождение — error с виновными hop'ами), доступность участков против SLA (+RTO/RPO), ёмкость против RPS-цели, TCO и цена выхода; error → exit 1 |
 | `agents-md refresh/lint/lint-all <repo>` | AGENTS.md для репозиториев команд |
@@ -672,8 +687,9 @@ arch-be [--config <path>] <command>   # без команды — TUI
 | `fleet audit [paths…] [--repo] [--include] [--fail-on-dupes]` | SSOT-аудит флота worktree: дубли и дрейф копий спайна (дрейф → exit 1) |
 | `skills list/search/show` / `plugins list/show` | Библиотека скиллов и плагинов |
 | `policy [--check "<cmd>"]` | Политика автономии R0–R5 |
-| `doctor` | Диагностика окружения |
+| `doctor [--host <хост>] [--dir]` | Диагностика окружения; `--host` — точечная проверка подключения `connect <хост>` (бинарь в PATH, запись mcpServers.spine, скиллы, версия хоста) |
 | `export <word\|excel> <session> <out>` | Экспорт журнала сессии |
+| `publish confluence/jira` | Публикация артефактов в корпоративные системы (файловые адаптеры, ADR-033): Markdown → Confluence XHTML, JSON handoff → Jira-CSV — в stdout |
 | `cron list/run/tick` | Планировщик md-задач |
 | `worktree new/list/diff/accept/drop` | Worktree-фабрика |
 
@@ -912,12 +928,20 @@ Live mini-case: [`кейсы/fleet-spine-drift`](кейсы/fleet-spine-drift/) 
   attribute scenarios** (`QAS-*` entities: source/stimulus/artifact/response/
   measure) unfold automatically into the acceptance-criteria section of the
   handoff `TASK.md`.
-- **MCP server** `arch-be mcp serve` (ADR-008): exposes `spine_lint`, `fitness_check`,
-  `significance_score`, `trace_check`, `model_query`, `rubric_run` to coding agents
+- **MCP server** `arch-be mcp serve` (ADR-008): 33 read-only tools (control:
+  `spine_lint`, `fitness_check`, `significance_score`/`significance_from_diff`,
+  `trace_check`, `model_query`, `nfr_check`, `delta_guard`, `evidence_verify`,
+  `contract_diff`; registries: `landscape_report`, `adr_registry`, `rules_report`,
+  `openspec_coverage`, `model_graph`; composite `architect_review`/`change_impact`;
+  knowledge and judge mechanics) exposed to coding agents
   (Claude Code etc.) — structured verdict (`passed` + findings) at code-writing
-  time; read-only, all targets passed as call arguments (`docs/mcp.md`). One-command
-  onboarding: `arch-be connect <claude|qwen|codex|kimi|generic>` lays down the MCP
-  config (merged, foreign keys preserved), the skills pack and lifecycle hooks.
+  time; read-only, all targets passed as call arguments, `--rw` opens an additive
+  write whitelist (`docs/mcp.md`); 7 `spine-*` playbook prompts surface as host
+  slash-commands. One-command
+  onboarding: `arch-be connect <claude|qwen|gigacode|codex|kimi|omp|generic>` lays down the MCP
+  config (merged, foreign keys preserved), the skills pack and lifecycle hooks
+  (`Stop` → `arch-be gate --route auto`); host-independent gates: `arch-be connect ci`
+  (gitlab/github/jenkins) and `arch-be connect git-hooks`.
 
 **Switching the autonomy level (R0–R5).** The level lives in the config:
 

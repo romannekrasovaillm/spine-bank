@@ -1,7 +1,7 @@
 # Eval-сьюты конфигурации харнесса (continuous evals)
 
 Регрессионный контур конфигурации самого харнесса (`src/eval.rs`, команда
-`arch eval run`): сьют реальных задач прогоняется по расписанию и в CI, гейт
+`arch-be eval run`): сьют реальных задач прогоняется по расписанию и в CI, гейт
 pass-rate ломает сборку при деградации конфига. Мотивация — практика
 Anthropic SDLC (20–50 реальных задач с гейтом pass-rate на каждое изменение
 CLAUDE.md/skills/hooks): без сьюта деградация конфигурации замечается поздно.
@@ -18,12 +18,12 @@ CLAUDE.md/skills/hooks): без сьюта деградация конфигур
 ## Запуск
 
 ```bash
-arch eval run                                   # встроенный сьют agent-config (герметично, офлайн)
-arch eval run --gate 100                        # явный гейт pass-rate, %
-arch eval run --judge                           # + слой LLM-судьи (нужен API-ключ)
-arch eval run --judge --model glm               # судья/испытуемая — glm
-arch eval run --suite ~/.arch-harness/assets/evals/agent-config   # против живой установки
-arch eval run --suite ./my-suite --gate 80      # свой сьют, мягче гейт
+arch-be eval run                                   # встроенный сьют agent-config (герметично, офлайн)
+arch-be eval run --gate 100                        # явный гейт pass-rate, %
+arch-be eval run --judge                           # + слой LLM-судьи (нужен API-ключ)
+arch-be eval run --judge --model glm               # судья/испытуемая — glm
+arch-be eval run --suite ~/.arch-harness/assets/evals/agent-config   # против живой установки
+arch-be eval run --suite ./my-suite --gate 80      # свой сьют, мягче гейт
 ```
 
 - Без `--suite` прогон **герметичен**: ассеты и конфиг разворачиваются во
@@ -99,7 +99,7 @@ Slash-команды в сьют не входят осознанно: у них
 моделью):
 
 ```cron
-20 7 * * * arch eval run >> ~/.arch-harness/evals/eval.log 2>&1
+20 7 * * * arch-be eval run >> ~/.arch-harness/evals/eval.log 2>&1
 ```
 
 (закомментированный пример — в `cron.example.toml`). В CI сьют гейтит каждый
@@ -114,12 +114,12 @@ push/PR — джоба `eval-suite` в `.github/workflows/ci.yml`.
 3. Правила для встроенного сьюта: только офлайн-команды через `{arch}`,
    обязательна проверка `command_succeeds`; prompt/рубрики — в
    пользовательские сьюты (герметичность CI без ключей важнее).
-4. Локальная проверка перед коммитом: `cargo build && ./target/debug/arch eval run`.
+4. Локальная проверка перед коммитом: `cargo build && ./target/debug/arch-be eval run`.
 
 ## Ограничения
 
 - Сьют проверяет **конфигурацию и механики** харнесса, а не качество моделей
-  (для моделей — `arch bench run` и golden-гейт судьи, ADR-004).
+  (для моделей — `arch-be bench run` и golden-гейт судьи, ADR-004).
 - Команды сьюта — доверенная конфигурация (как правила CONSTRAINTS.yaml):
   окружение наследуется, `bash env_scrub` не применяется.
 - Live-режим `--suite` зависит от состояния машины (установленные плагины,

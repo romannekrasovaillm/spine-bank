@@ -323,21 +323,22 @@ Per-rule timing (M-1a): длительность каждого правила �
 Флаг `--json` печатает в stdout одну строку JSON — сериализацию
 `FitnessReport` (поля — `src/control.rs::FitnessReport`; назначение —
 SDK и CI, см. `docs/sdk.md` и `sdk/CONTRACT.md` §2). Живой прогон
-2026-09-03 на фикстуре `banking/demos/cli-from-claude-code/scenario3-gate/fixtures`:
+2026-09-19 на кейсе 006 (`кейсы/drift-control/`, обе руки воспроизводимы
+из репозитория):
 
 ```bash
-arch-be control check banking/demos/cli-from-claude-code/scenario3-gate/fixtures \
-  --constraints banking/demos/cli-from-claude-code/scenario3-gate/fixtures/CONSTRAINTS.yaml --json
+arch-be control check кейсы/drift-control/armB-solution \
+  --constraints кейсы/drift-control/handoff-example/CONSTRAINTS.yaml --json
 ```
 
 ```json
-{"repo":"banking/demos/cli-from-claude-code/scenario3-gate/fixtures","passed":true,"issues":[],"summary":"Правил: 3, нарушений: 0 (error: 0, warn: 0)"}
+{"repo":"кейсы/drift-control/armB-solution","passed":true,"issues":[],"summary":"Правил: 6, нарушений: 0 (error: 0, warn: 0)","durations":[…],"inherited":[],"overrides":[]}
 ```
 
-Красный прогон (временная копия фикстуры + `src/hotfix.py` с 16-значным PAN):
+Красный прогон (рука A — голая задача без handoff-пакета):
 
 ```json
-{"repo":"/tmp/…/repo","passed":false,"issues":[{"file":"src/hotfix.py","line":1,"rule":"no_pan_in_code","message":"must_not_contain: запрещённый паттерн '\\b\\d{16}\\b': pan = \"4276550012345678\"","severity":"error"}],"summary":"Правил: 3, нарушений: 1 (error: 1, warn: 0)"}
+{"repo":"кейсы/drift-control/armA-solution","passed":false,"issues":[{"file":"Cargo.toml","line":0,"rule":"thiserror_for_errors","message":"must_contain: паттерн 'thiserror' не найден ни в одном файле по glob 'Cargo.toml'","severity":"error"},{"file":"src/**/*.rs","line":0,"rule":"authorize_idempotent","message":"must_contain: паттерн '[Ii]dempotenc' не найден ни в одном файле по glob 'src/**/*.rs'","severity":"error"}],"summary":"Правил: 6, нарушений: 2 (error: 2, warn: 0)", …}
 ```
 
 Схема: `repo` (путь как передан), `passed`, `summary` (та же строка, что в
@@ -591,7 +592,7 @@ Rollback-first по мотивам AI-native SDLC (у Anthropic rollback — «�
 требует, чтобы план отката был не просто написан, а **отрепетирован**.
 
 Handoff-пакет несёт машиночитаемый план `.arch-handoff/ROLLBACK.yaml`
-(генерируется `handoff_create`/`arch handoff` вместе с пакетом, повторная
+(генерируется `handoff_create`/`arch-be handoff` вместе с пакетом, повторная
 генерация не затирает правки архитектора). Схема (`src/rehearsal.rs::RollbackPlan`):
 
 ```yaml
@@ -608,7 +609,7 @@ verify: test -z "$(git status --porcelain --untracked-files=no)"   # опцио�
 отката (валидация на генерации handoff).
 
 ```bash
-arch control gate A4 <repo> --rehearse
+arch-be control gate A4 <repo> --rehearse
 # Репетиция отката (baseline a1b2c3d):
 #   [PASS] якорь-доступен — commit
 #   [PASS] откат-на-baseline — ...
@@ -630,7 +631,7 @@ baseline_commit** (detached, каталог в `/tmp`, убирается авт
 
 Результат (PASS/FAIL + лог шагов) пишется в evidence пакета —
 `.arch-handoff/REHEARSAL.json`; для маршрута Critical этот артефакт входит и
-в Evidence Bundle (`arch evidence pack`). Гейт можно оценивать и без
+в Evidence Bundle (`arch-be evidence pack`). Гейт можно оценивать и без
 `--rehearse` — по существующему evidence; если план изменился после репетиции
 (baseline в `ROLLBACK.yaml` ≠ baseline в evidence), evidence считается
 протухшим и гейт падает.
@@ -835,11 +836,13 @@ CMP-покрытия попадают в `gaps` (сигнал дописать �
 **exit 1** (гейт для CI):
 
 ```bash
-arch-be contract-diff <old> <new> [--format auto|openapi|proto|avro|jsonschema|ddl] [--model <кейс>] [--json]
+arch-be contract-diff <old> <new> [--contract-format auto|openapi|proto|avro|jsonschema|ddl] [--format text|sarif|junit|gitlab-codequality|markdown] [--model <кейс>] [--json]
 ```
 
-Формат определяется автоматически (расширение, затем содержимое) либо
-принудительно `--format`; оба файла обязаны быть одного формата.
+Формат контракта определяется автоматически (расширение, затем содержимое)
+либо принудительно `--contract-format`; оба файла обязаны быть одного
+формата. (`--format` — это формат ВЫВОДА для CI, см. «Форматы CI» выше;
+у MCP-инструмента `contract_diff` язык контракта задаёт аргумент `format`.)
 
 | Формат | Файлы | Breaking (error) | Non-breaking (warn) |
 |---|---|---|---|

@@ -16,7 +16,7 @@ merge_gate = "owner"       # мерж результата — только с �
 
 Оба дефолта выключены/совместимы с прежним поведением: `require_worktree =
 false` (прогон в рабочем дереве как раньше), `merge_gate = "owner"` (гейт
-включён для `arch fleet merge`; прямые `arch worktree accept` им не
+включён для `arch-be fleet merge`; прямые `arch-be worktree accept` им не
 затрагиваются).
 
 ## Enforcement: нет пути в main (`require_worktree`)
@@ -37,15 +37,15 @@ worktree:
 4. Каталог не git-репозиторий — понятная ошибка ДО запуска харнесса.
 
 Сводка прогона сообщает run-id и дальнейшие шаги; merge — только через гейт
-владельца (см. ниже), отклонение — `arch worktree drop <run-id>`.
+владельца (см. ниже), отклонение — `arch-be worktree drop <run-id>`.
 
-## Гейт мерджа: `arch fleet merge <run-id>`
+## Гейт мерджа: `arch-be fleet merge <run-id>`
 
 Интеграция результата прогона в основную ветку — решение владельца:
 
 ```bash
-arch fleet merge claude-code-20260825143000                 # review: сводка, мерж ОТКЛОНЁН (exit 1)
-arch fleet merge claude-code-20260825143000 --owner-approve # влить (merge --no-ff + уборка worktree)
+arch-be fleet merge claude-code-20260825143000                 # review: сводка, мерж ОТКЛОНЁН (exit 1)
+arch-be fleet merge claude-code-20260825143000 --owner-approve # влить (merge --no-ff + уборка worktree)
 ```
 
 Без `--owner-approve` (при `merge_gate = "owner"`; неизвестные значения
@@ -60,12 +60,12 @@ arch fleet merge claude-code-20260825143000 --owner-approve # влить (merge 
 
 С `--owner-approve` выполняется accept-семантика worktree-фабрики: merge
 `--no-ff` в текущую ветку основного дерева, удаление worktree и ветки.
-Отказ при незакоммиченных изменениях — как у `arch worktree accept`.
+Отказ при незакоммиченных изменениях — как у `arch-be worktree accept`.
 `merge_gate = "none"` отключает гейт (мерж без флага).
 
-Связанное: `arch fleet audit` — SSOT-аудит дублей/дрейфа копий спайна
+Связанное: `arch-be fleet audit` — SSOT-аудит дублей/дрейфа копий спайна
 (см. README и `кейсы/fleet-spine-drift`); для каждого worktree показывает
 размер на диске (`du -sh`, недоступен — «—») и возраст последнего коммита
 (`git log -1`, не-git — «—»), а для worktree старше 30 дней — рекомендацию
-prune (`git worktree remove`); `arch worktree …` — ручная
+prune (`git worktree remove`); `arch-be worktree …` — ручная
 фабрика worktree (`docs/slash_commands.md`, `/worktree`).

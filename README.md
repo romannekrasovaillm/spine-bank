@@ -393,7 +393,7 @@ arch-be mcp serve --rw    # + handoff_create (теперь и в core), adr_new,
 | [parallel-epics](кейсы/parallel-epics/) · [fleet-of-ten](кейсы/fleet-of-ten/) | Спайн как клей флота Claude Code |
 | [legacy-survey](кейсы/legacy-survey/) · [jvm-archunit-gate](кейсы/jvm-archunit-gate/) | Reverse discovery, гейт по байткоду |
 
-Реестр — [`кейсы/AGENTS.md`](кейсы/AGENTS.md); ещё шесть кейсов —
+Реестр — [`кейсы/AGENTS.md`](кейсы/AGENTS.md); ещё три кейса —
 в [README-full.md](README-full.md).
 
 ## Документация

@@ -31,6 +31,15 @@ use `AGENTS.md` instead.
 |---|---|
 | Significance routing Fast/Standard/Critical | `src/control.rs` (`score`) |
 | Architecture-spine invariants + linter | `src/control.rs`, `assets/prompts/spine.md` |
+| Unified repo gate (`arch-be gate`) | `src/gate.rs` |
+| Composite review + change-impact radius | `src/review.rs`, `src/model/graph.rs` |
+| Brownfield baseline / ratchet for fitness rules | `src/control/baseline.rs` |
+| Contract diff (OpenAPI/proto/Avro/JSON Schema/DDL) | `src/contract_diff.rs` |
+| Model↔code drift, registry import (csv/xlsx/backstage) | `src/model/drift.rs`, `src/model/registry.rs` |
+| CI report formats (SARIF/JUnit/GitLab Code Quality) | `src/report_fmt.rs` |
+| MCP server for coding agents (33 read-only tools + 7 playbook prompts) | `src/mcp_server.rs` |
+| MCP call journal + weekly outcome digest | `src/mcp_journal.rs`, `src/digest.rs` |
+| Host onboarding (`connect`, hooks, CI jobs) | `src/connect.rs` |
 | Anchor/dynamic rubrics, LLM judge with evidence | `src/rubric.rs`, `src/bench.rs` |
 | Autonomy policy R0–R5 (per-tool risk classes) | `src/policy.rs` |
 | Secret redaction in output/journals | `src/secrets.rs` |
@@ -46,7 +55,7 @@ use `AGENTS.md` instead.
 | Transformation KPIs (approval theater, drift, cost/outcome) | `src/metrics.rs` |
 | Mermaid → Unicode art | `src/mermaid.rs`, `src/mermaid/` |
 | TUI (Tokyo Night, ask-modal, picker, viewer) | `src/tui/` |
-| Handoff packages to coding harnesses | `src/harness.rs` |
+| Handoff packages to coding harnesses | `src/handoff.rs` (package creation, core), `src/harness.rs` (run, harness-only) |
 | AGENTS.md generation/drift for team repos | `src/agentsmd.rs` |
 
 ## Reading safely (no keys needed)

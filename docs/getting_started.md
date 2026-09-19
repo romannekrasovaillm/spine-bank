@@ -165,8 +165,8 @@ arch-be run -q --model glm-5.3-flash --timeout 240 --max-turns 1 \
 ```
 
 Пример вывода — из зафиксированного живого прогона
-(`banking/demos/cli-from-claude-code/scenario1-headless/test-run.md`,
-exit 0 за 2 мин 39 с):
+(exit 0 за 2 мин 39 с; записанный эталон лежит в демо-пакете
+проприетарной зоны `banking/demos/`, в публичный снапшот не входящей):
 
 ```
 1. Канал инициирования (мобильный/интернет-банк, аутентификация и подтверждение операции клиентом) — доступность ≥ 99,9% в месяц на функцию инициирования перевода.
@@ -184,38 +184,36 @@ exit 0 за 2 мин 39 с):
 
 `control check` — детерминированный fitness-контроль репозитория по
 `CONSTRAINTS.yaml`, без LLM. Итог PASS/FAIL; при FAIL — **exit 1**
-(годится для CI). Учебный набор правил «банковский контур СБП» —
-`banking/demos/cli-from-claude-code/scenario3-gate/fixtures`
-(BANK-01: нет PAN в коде; BANK-02: `Idempotency-Key`; BANK-03: шапка
-лицензии). Прогоняем на копии:
+(годится для CI). Учебный набор правил — кейс 006 `кейсы/drift-control/`
+(A/B-эксперимент «спайн удерживает дрейф»; воспроизводится голым
+бинарём): 6 fitness-правил платёжного ядра в `handoff-example/CONSTRAINTS.yaml`
+(thiserror для ошибок, идемпотентность `authorize`, деньги не в float,
+тесты зелёные). Прогоняем обе руки эксперимента:
 
-```bash
-cp -r banking/demos/cli-from-claude-code/scenario3-gate/fixtures /tmp/arch-gate
-cd /tmp/arch-gate
-```
-
-Зелёный прогон:
+Зелёный прогон (рука B — задача с handoff-пакетом):
 
 ```
-$ arch-be control check . --constraints CONSTRAINTS.yaml
-Правил: 3, нарушений: 0 (error: 0, warn: 0)
+$ arch-be control check кейсы/drift-control/armB-solution \
+    --constraints кейсы/drift-control/handoff-example/CONSTRAINTS.yaml
+Правил: 6, нарушений: 0 (error: 0, warn: 0)
+Самые медленные правила:
+  2.6s tests_pass
 Итог: PASS
 # exit 0
 ```
 
-Красный прогон — добавим файл с тестовым PAN:
+Красный прогон (рука A — голая задача, дрейф по орг-инвариантам при
+зелёных тестах):
 
 ```bash
-cat > src/hotfix.py <<'EOF'
-# быстрый хотфикс: тестовый PAN зашит в код
-pan = "4276550012345678"  # TODO: убрать тестовый PAN
-EOF
-arch-be control check . --constraints CONSTRAINTS.yaml
+arch-be control check кейсы/drift-control/armA-solution \
+  --constraints кейсы/drift-control/handoff-example/CONSTRAINTS.yaml
 ```
 
 ```
-Правил: 3, нарушений: 1 (error: 1, warn: 0)
-  [error] src/hotfix.py:2 no_pan_in_code — must_not_contain: запрещённый паттерн '\b\d{16}\b': pan = "4276550012345678"  # TODO: убрать тестовый PAN
+Правил: 6, нарушений: 2 (error: 2, warn: 0)
+  [error] Cargo.toml:0 thiserror_for_errors — must_contain: паттерн 'thiserror' не найден ни в одном файле по glob 'Cargo.toml'
+  [error] src/**/*.rs:0 authorize_idempotent — must_contain: паттерн '[Ii]dempotenc' не найден ни в одном файле по glob 'src/**/*.rs'
 Итог: FAIL
 # exit 1
 ```
@@ -229,21 +227,21 @@ arch-be control check . --constraints CONSTRAINTS.yaml
 
 Archify — контур «архитектура как код»: JSON IR → валидация (9 artifact
 checks + composition-профиль) → атомарная доставка HTML с SHA-256
-receipt. Фикстуры контура СБП —
-`banking/demos/cli-from-claude-code/scenario2-archify-cli`.
+receipt. Готовые IR — в `docs/diagrams/` (диаграммы этого репозитория,
+авторствованные самим Spine):
 
 ```
-$ arch-be archify validate architecture banking/demos/cli-from-claude-code/scenario2-archify-cli/sbp-v1.architecture.json
+$ arch-be archify validate architecture docs/diagrams/spine-be-architecture.architecture.json
 archify validate: ok
 checks: 9/9
 composition: pass (errors 0, warnings 0)
 # exit 0
 
-$ arch-be archify deliver architecture banking/demos/cli-from-claude-code/scenario2-archify-cli/sbp-v1.architecture.json /tmp/sbp-v1.html
+$ arch-be archify deliver architecture docs/diagrams/spine-be-architecture.architecture.json /tmp/spine-be-arch.html
 archify deliver: ok
 validation: 9/9 checks, errors 0, warnings 0
-spec: sha256 cb492b86486d8f9c2f3db3e5003ce0e09d4f557da97560a26868e3622d26a20b (7456 байт)
-artifact: sha256 4ac963b6b923e88c68a5d0c78db389800a0a345706e20148943e860cd68779e1 (725537 байт)
+spec: sha256 2dfcb0cbdab30001ac75230537a718bc475335048cda5ee5001cbbd2547f98c5 (7308 байт)
+artifact: sha256 07d4e3bc9a373d847e45d1d62ca4d6bd75e2a66664bb5a48d6b2782923cdf088 (725270 байт)
 # exit 0
 ```
 
@@ -257,19 +255,23 @@ artifact: sha256 4ac963b6b923e88c68a5d0c78db389800a0a345706e20148943e860cd68779e
 SDK — тонкие клиенты поверх headless CLI (без shell, без сети; контракт
 v1 — `sdk/CONTRACT.md`). Бинарь разрешается так: параметр `binary` →
 `SPINE_BE_BIN` → `arch-be` из `PATH` (шаг 2 уже позаботился). Готовый
-пример — CI-гейт на Python SDK:
+пример — CI-гейт на Python SDK; прогоняем его на зелёной руке кейса 006
+из шага 7:
 
 ```bash
-python3 sdk/python/examples/ci_gate.py /tmp/arch-gate \
-  --constraints /tmp/arch-gate/CONSTRAINTS.yaml
+python3 sdk/python/examples/ci_gate.py кейсы/drift-control/armB-solution \
+  --constraints кейсы/drift-control/handoff-example/CONSTRAINTS.yaml
 ```
 
 ```
-Репозиторий: /tmp/arch-gate
-Сводка: Правил: 3, нарушений: 0 (error: 0, warn: 0)
+Репозиторий: кейсы/drift-control/armB-solution
+Сводка: Правил: 6, нарушений: 0 (error: 0, warn: 0)
 ГЕЙТ: PASS
 # exit 0
 ```
+
+(Тот же вызов на `armA-solution` даёт `ГЕЙТ: FAIL` с двумя находками и
+exit 1 — красный гейт это данные, а не сбой примера.)
 
 Коды выхода примера: 0 — гейт зелёный, 1 — гейт красный (нарушения —
 это данные, не ошибка), 2 — ошибка исполнения (бинарь не найден, процесс
@@ -288,8 +290,12 @@ python3 sdk/python/examples/ci_gate.py /tmp/arch-gate \
 | Устройство харнесса | `docs/architecture.md` |
 | Модели и провайдеры | `docs/models.md` |
 | SDK: контракт и клиенты (Python/Rust/Java) | `sdk/CONTRACT.md`, `sdk/README.md` |
-| Демо-сценарии (проприетарная зона) | `banking/demos/`: `cli-from-claude-code`, `archify-adf`, `sdk-embedding`, `payments`, `pangolin-migration` |
+| Учебные кейсы (публичный снапшот) | `кейсы/` (реестр — `кейсы/AGENTS.md`): `sbp-gateway`, `drift-control`, `fleet-spine-drift` и др. |
+| Демо-сценарии (проприетарная зона) | `banking/demos/` — в публичный снапшот не входит: `cli-from-claude-code`, `archify-adf`, `sdk-embedding`, `payments`, `pangolin-migration` |
 
-Демо-сценарии `banking/demos/cli-from-claude-code` — те же шаги, что в
-этом гайде, с зафиксированными прогонами (`test-run.md` в каждом
-каталоге сценария): headless-ответ, диаграммы СБП, красный/зелёный гейт.
+Демо-сценарии `banking/demos/cli-from-claude-code` (проприетарная зона,
+в публичный снапшот не входит) — те же шаги, что в этом гайде, с
+зафиксированными прогонами (`test-run.md` в каждом каталоге сценария):
+headless-ответ, диаграммы СБП, красный/зелёный гейт. Публичная замена
+фикстур в этом гайде — кейс `кейсы/drift-control/` (шаги 7 и 9) и
+`docs/diagrams/` (шаг 8).

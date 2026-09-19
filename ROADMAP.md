@@ -1,6 +1,8 @@
 # ROADMAP — Spine Banking Edition
 
-Снимок: 2026-09-04. Документ пересматривается владельцем не реже раза в
+Снимок: 2026-09-04 (статусы треков, пришедших волнами 1–3 бэклога
+spine-core-improvements, обновлены 2026-09-19 — релиз v0.3.0). Документ
+пересматривается владельцем не реже раза в
 квартал и по завершении каждого пункта (статус обновляется в том же
 коммите). История и обоснования — в ADR (`docs/adr/`), не здесь.
 
@@ -16,12 +18,12 @@
 
 | # | Трек | Статус 2026-09-04 |
 |---|---|---|
-| Транши инструментальной поверхности (ADR-015): openapi-lint → asyncapi → contract chain | T1 done, T2–T4 в работе | частично |
+| Транши инструментальной поверхности (ADR-015): openapi-lint → asyncapi → contract chain | **done 2026-09-19** (волны 1–3: T1 — верификаторы `nfr_check`/`model_validate`/`delta_guard`/`evidence_verify` мостом в MCP; T2 — реестры `landscape_report`/`adr_registry`/`rules_report`/`openspec_coverage`/`model_graph`; T3 — составные `architect_review`/`change_impact`; contract chain расширен: proto/Avro/JSON Schema/DDL + `--model`; T4 — чтение знаний) | done |
 | Закрытие ревью: fitness-структуры, EA-экспорт, метрики, угрозы, процесс | 11 из 12 замечаний закрыто (P0+P1) | done |
-| Brownfield-функция: `arch-be survey` + кейс 008 | в работе (P2) | — |
-| Ландшафт систем (EA-3), ранбук архкомитета (PR-4) | в работе (P2) | — |
-| Модель угроз: sandbox bwrap + injection-гигиена (T-4) | в работе (P2) | — |
-| Пилот ДИТ: деплой bank-profile, первые outcome-данные (дефекты, MAE людей, распределение маршрутов) | подготовка | — |
+| Brownfield-функция: `arch-be survey` + кейс 008 | **done 2026-09-19**: `arch-be survey` (CLI + MCP `reverse_survey` под `--rw`), кейс 008 `кейсы/legacy-survey/` в репо | done |
+| Ландшафт систем (EA-3), ранбук архкомитета (PR-4) | **ландшафт done 2026-09-19** (`arch-be model landscape` + алиасы/дифф, MCP `landscape_report`, ADR-037); ранбук архкомитета — в работе (P2) | частично |
+| Модель угроз: sandbox bwrap + injection-гигиена (T-4) | **done 2026-09-19**: ADR-038, `[bash] sandbox = "bwrap"` (`src/tools/bash.rs`), injection-гигиена — `src/injection.rs`, живой реестр — `docs/threat-model.md` | done |
+| Пилот ДИТ: деплой bank-profile, первые outcome-данные (дефекты, MAE людей, распределение маршрутов) | подготовка; инструментарий outcome-данных пришёл волной 2 (2026-09-19): журнал `.arch-handoff/mcp-calls.jsonl`, `arch-be digest`, регистр FP (`control fp mark`) | — |
 
 ## Горизонт 2 — волны библиотеки правил (Q4 2026 – Q1 2027)
 

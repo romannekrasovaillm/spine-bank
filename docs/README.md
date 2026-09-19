@@ -15,8 +15,8 @@ Spine Banking Edition — доменный харнесс solution-архите�
 | впервые запускаю Spine-BE | [getting_started.md](getting_started.md) — сборка → конфиг → doctor → первый гейт, диаграмма и вызов SDK |
 | встраиваю Spine-BE в скрипты и CI (без SDK) | [headless.md](headless.md) — контракт stdout/stderr/exit, пайпы, гейты |
 | встраиваю Spine-BE в продукт/CI команды | [sdk.md](sdk.md) → [sdk/CONTRACT.md](../sdk/CONTRACT.md) → примеры в `sdk/*/examples/` |
-| хочу диаграммы как код (комитет, версии, дельта) | [archify.md](archify.md) → плагин `banking/plugins/ru-archify` |
-| строю контур архитектурного контроля | [control.md](control.md) → [governance.md](governance.md) → `banking/library/` |
+| хочу диаграммы как код (комитет, версии, дельта) | [archify.md](archify.md) → плагин `ru-archify` (зона `banking/`, в публичный снапшот не входит) |
+| строю контур архитектурного контроля | [control.md](control.md) → [governance.md](governance.md) |
 | подключаю модели и окружение | [models.md](models.md) → [mcp.md](mcp.md) → [web_kb.md](web_kb.md) |
 | работаю в TUI | [tui.md](tui.md) — гид по интерфейсу → [slash_commands.md](slash_commands.md) → [tools.md](tools.md) |
 | передаю задачу кодовому агенту (Claude Code и др.) | [handoff_walkthrough.md](handoff_walkthrough.md) → [harness_integrations.md](harness_integrations.md) |
@@ -73,14 +73,19 @@ Spine Banking Edition — доменный харнесс solution-архите�
 
 ## Банковская зона (`banking/`, proprietary)
 
-- [banking/README.md](../banking/README.md) — карта зоны: пресеты (payments,
+Слой `banking/` распространяется по договору (`LICENSE.banking`, ADR-013) и
+**в публичный снапшот не входит** — ссылки ниже работают только в полной
+редакции репозитория:
+
+- `banking/README.md` — карта зоны: пресеты (payments,
   compliance, bank-profile), библиотека правил, плагины, ADF, compliance-карты.
-- Демо-пакеты: [demos/archify-adf](../banking/demos/archify-adf/) (TUI-сценарии
-  с ADF), [demos/cli-from-claude-code](../banking/demos/cli-from-claude-code/)
-  (headless CLI), [demos/sdk-embedding](../banking/demos/sdk-embedding/)
+- Демо-пакеты: `demos/archify-adf` (TUI-сценарии
+  с ADF), `demos/cli-from-claude-code`
+  (headless CLI), `demos/sdk-embedding`
   (встраивание SDK).
 - SDK и контракт: [sdk/README.md](../sdk/README.md),
-  [sdk/CONTRACT.md](../sdk/CONTRACT.md) (источник истины машинного контракта).
+  [sdk/CONTRACT.md](../sdk/CONTRACT.md) (источник истины машинного контракта) —
+  сам `sdk/` входит в публичный снапшот.
 
 ## Правила документации
 

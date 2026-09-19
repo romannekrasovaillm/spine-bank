@@ -26,7 +26,7 @@ CodeWhale) — без потери архитектурного контекст
    - `CONSTRAINTS.yaml` — fitness-правила под стек репозитория (заготовка,
      переписывается под spine AD-n перед передачей);
    - `ROLLBACK.yaml` — машиночитаемый план отката (baseline-якорь + шаги):
-     репетируется на гейте A4 (`arch control gate A4 <repo> --rehearse`,
+     репетируется на гейте A4 (`arch-be control gate A4 <repo> --rehearse`,
      см. `docs/control.md`); для маршрута Critical пакет без якоря и плана
      не собирается;
    - `RUBRIC.yaml` — якорная рубрика приёмки;
@@ -131,7 +131,7 @@ CLI-эквивалент вне диалога: `arch-be handoff --repo <path> -
    (stack-detected fitness rules, a scaffold to be rewritten against the
    spine), `RUBRIC.yaml` (acceptance rubric), `ROLLBACK.yaml` (machine-readable
    rollback plan — baseline anchor + steps; rehearsed at gate A4 via
-   `arch control gate A4 <repo> --rehearse`, see `docs/control.md`; the
+   `arch-be control gate A4 <repo> --rehearse`, see `docs/control.md`; the
    Critical route refuses to assemble a package without an anchor and a plan),
    `MANIFEST.json` (including the
    significance route and the recommended run timeout: Fast/Standard/Critical

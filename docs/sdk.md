@@ -90,10 +90,18 @@ Rust — path-зависимость `spine-be-sdk = { path = "sdk/rust" }`; Jav
 | `sdk/rust/examples/agent_loop.rs` | Rust | кодовый агент проверяет себя сам: «сгенерировал → гейт красный → починил → гейт зелёный → диаграмма» |
 
 Связанный демо-пакет с записанными прогонами (три сценария, по одному на
-язык): [`banking/demos/sdk-embedding/`](../banking/demos/sdk-embedding/) —
-все выводы ниже воспроизводятся по SCENARIO.md каждого из трёх сценариев.
+язык): `banking/demos/sdk-embedding/` (проприетарная зона, в публичный
+снапшот не входит) — все выводы ниже воспроизводятся по SCENARIO.md
+каждого из трёх сценариев.
 
-### Живой прогон: CI-гейт (Python, 2026-09-03)
+> Обновлено 2026-09-19: фикстуры `banking/demos/…` в живых прогонах ниже —
+> из полной редакции; в публичном снапшоте их заменяют
+> `кейсы/drift-control/` (гейт: `handoff-example/CONSTRAINTS.yaml` против
+> `armA-solution`/`armB-solution`) и `docs/diagrams/*.architecture.json`
+> (validate/deliver/compare) — команды из `docs/getting_started.md` §7–§9
+> исполняются в публичном клоне как есть.
+
+### Живой прогон: CI-гейт (Python, 2026-09-03; фикстура `banking/demos/…` — полная редакция, публичная замена — `кейсы/drift-control/`)
 
 ```bash
 export SPINE_BE_BIN=<репо>/target/release/arch-be

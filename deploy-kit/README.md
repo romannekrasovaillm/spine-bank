@@ -8,7 +8,7 @@
 
 | Файл | Назначение |
 |---|---|
-| `arch-be` | Бинарь харнесса (Linux x86-64; версия бинаря 0.1.3, комплект v0.1.3, сборка 2026-09-08 из ветки `spine-be`). Другие платформы (linux-aarch64, macos-arm64, windows-x86_64) — готовые бинари обеих редакций в GitHub Releases, см. «Шаг 0» в `README.md` |
+| `arch-be` | Бинарь харнесса (Linux x86-64; актуальный релиз — v0.3.0, см. GitHub Releases; текст инструкций исторически писался под комплект v0.1.3 от 2026-09-08). Другие платформы (linux-aarch64, macos-arm64, windows-x86_64) — готовые бинари обеих редакций (core/full) + сводный `SHA256SUMS` в GitHub Releases, см. «Шаг 0» в `README.md` |
 | `ИНСТРУКЦИЯ_ЧЕЛОВЕК.md` | Пошаговая инструкция для человека: установка, ключи, модели, контекстные папки, грабли |
 | `ИНСТРУКЦИЯ_АГЕНТ.md` | Сжатый контракт для ИИ-агента, выполняющего развёртывание |
 | `config.starter.toml` | Готовый минимальный конфиг: DeepSeek + GLM + Kimi + локальная модель |
@@ -26,9 +26,10 @@
 - **Бенчмарки** (6 + golden): payment_integration, event_driven_design,
   legacy_decomposition, gigachat_sla_resilience, pangolin_replication,
   meta_agent_realtime.
-- **Плагины и скиллы**: 7 плагинов, 52 скилла (arch-core, arch-governance,
+- **Плагины и скиллы**: 9 плагинов, 62 скилла (arch-core, arch-governance,
   arch-office, patterns-integration, patterns-resilience, aws-agentic-ai,
-  spine-be-docs и др.) — разворачиваются в `~/.arch-harness/plugins/`.
+  aws-builders-library, spine-workflows, spine-be-docs) — разворачиваются
+  в `~/.arch-harness/plugins/`.
 - **Дефолтные модели**: deepseek, deepseek-pro, glm, glm-4.7, glm-air,
   glm-flash, glm-5.3-flash, kimi, gigachat* — работают сразу после
   установки ключа в окружение, конфиг для них править не нужно.
