@@ -9,7 +9,8 @@
 //! - [`architect_review`] — единое ревью репозитория одним ответом: маршрут
 //!   значимости из git-диффа + весь контур [`crate::gate`] (`fitness`,
 //!   `delta_guard`, `rule_weakened`, `spine_lint`, `trace_check`; на маршрутах
-//!   Standard/Critical — `nfr` и `evidence`) + две дополнительные секции:
+//!   Standard/Critical — `sensors`, `nfr` и `evidence`) + две дополнительные
+//!   секции:
 //!   `model_validate` (ссылочная целостность `model/`) и `contracts`
 //!   (линт контрактов `OpenAPI`/`AsyncAPI` — файлы из полей `contract`
 //!   сущностей INT (ADR-035) и из каталога `contracts/`). Каждая секция
@@ -919,7 +920,8 @@ impl Tool for ArchitectReviewTool {
             description: "Составное архитектурное ревью (review) репозитория одним вызовом: \
                           маршрут значимости из git-диффа + весь контур контроля (fitness \
                           CONSTRAINTS.yaml, гейт правок спайна, анти-ослабление правил, линт \
-                          spine, трассировка; на Standard/Critical — NFR и evidence) + \
+                          spine, трассировка; на Standard/Critical — сенсоры спецификаций \
+                          docs/spec, NFR и evidence) + \
                           целостность модели + линт контрактов OpenAPI/AsyncAPI. Ответ — JSON: \
                           passed + route + components (секции со статусами PASS/FAIL/SKIP и \
                           находками) + summary; passed=false — основание отказать изменению"

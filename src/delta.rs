@@ -253,12 +253,20 @@ pub struct GuardReport {
     pub changed: usize,
     /// Изменённые защищённые файлы.
     pub protected_changed: Vec<String>,
-    /// Покрытые правки: (файл, имя активной дельты).
+    /// Покрытые правки: (файл, имя активной дельты) — первая из упомянувших
+    /// (совместимость JSON-вердикта; полный список — в `mentions`).
     pub covered: Vec<(String, String)>,
     /// Нарушения: защищённые файлы без упоминания в активных дельтах.
     pub violations: Vec<String>,
     /// Гейт пройден (нет непокрытых правок защищённых путей).
     pub passed: bool,
+    /// Число активных дельт (`changes/<name>/DELTA.md` в статусе Proposed):
+    /// контекст честности вывода — нарушение при нуле дельт означает
+    /// «правку нечем покрыть», а не «дельта не та».
+    pub active_deltas: usize,
+    /// Покрытие каждого изменённого защищённого файла: (файл, имена ВСЕХ
+    /// активных дельт, его упоминающих; пустой список — нарушение).
+    pub mentions: Vec<(String, Vec<String>)>,
 }
 
 /// Защищён ли путь: совпадение с записью-файлом или вхождение в каталог-префикс
@@ -291,6 +299,18 @@ fn delta_mentions(body: &str, path: &str) -> bool {
     stem.chars().count() >= 4 && body.contains(&stem)
 }
 
+/// Первая непустая строка stderr git без префикса «fatal:» — краткая причина
+/// для ошибки команды. Сырой stderr целиком не проксируем (D9): там
+/// многострочная справка использования.
+fn git_stderr_reason(stderr: &[u8]) -> String {
+    let text = String::from_utf8_lossy(stderr);
+    let reason = text.lines().map(str::trim).find(|l| !l.is_empty()).map_or(
+        "git завершился с ошибкой без сообщения",
+        |l| l.strip_prefix("fatal:").map_or(l, str::trim),
+    );
+    reason.chars().take(160).collect()
+}
+
 /// Гейт прямых правок спайна мимо дельты (CI-запрет «прямых коммитов в model/
 /// мимо changes/»): каждый изменённый защищённый файл обязан упоминаться
 /// (путём или именем) в теле хотя бы одной АКТИВНОЙ дельты
@@ -316,10 +336,9 @@ pub fn guard(repo: &Path, base: Option<&str>, protect: &[String]) -> Result<Guar
         .output()
         .map_err(|e| HarnessError::Control(format!("git не запустился: {e}")))?;
     if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
         return Err(HarnessError::Control(format!(
             "git diff --name-only {base}: {}",
-            stderr.trim().chars().take(300).collect::<String>()
+            git_stderr_reason(&out.stderr)
         )));
     }
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -343,12 +362,19 @@ pub fn guard(repo: &Path, base: Option<&str>, protect: &[String]) -> Result<Guar
     let mut protected_changed = Vec::new();
     let mut covered = Vec::new();
     let mut violations = Vec::new();
+    let mut mentions = Vec::new();
     for file in changed.iter().filter(|f| is_protected(f, &protected)) {
         protected_changed.push(file.clone());
-        match active.iter().find(|(_, body)| delta_mentions(body, file)) {
-            Some((name, _)) => covered.push((file.clone(), name.clone())),
+        let by: Vec<String> = active
+            .iter()
+            .filter(|(_, body)| delta_mentions(body, file))
+            .map(|(name, _)| name.clone())
+            .collect();
+        match by.first() {
+            Some(name) => covered.push((file.clone(), name.clone())),
             None => violations.push(file.clone()),
         }
+        mentions.push((file.clone(), by));
     }
     let passed = violations.is_empty();
     Ok(GuardReport {
@@ -358,10 +384,15 @@ pub fn guard(repo: &Path, base: Option<&str>, protect: &[String]) -> Result<Guar
         covered,
         violations,
         passed,
+        active_deltas: active.len(),
+        mentions,
     })
 }
 
-/// Текстовый рендер отчёта гейта (в стиле остальных delta-команд).
+/// Текстовый рендер отчёта гейта (в стиле остальных delta-команд): сводка,
+/// по каждому изменённому защищённому файлу — статус его упоминания в
+/// активных дельтах (все дельты поимённо; при полном их отсутствии — честное
+/// «активных дельт нет», а не обтекаемое «не упоминается»).
 #[must_use]
 pub fn render_guard(report: &GuardReport) -> String {
     use std::fmt::Write as _;
@@ -369,25 +400,43 @@ pub fn render_guard(report: &GuardReport) -> String {
     let _ = writeln!(out, "Гейт прямых правок спайна (база: {})", report.base);
     let _ = writeln!(
         out,
-        "Изменённых файлов: {}, защищённых среди них: {}",
+        "Изменённых файлов: {}, защищённых среди них: {} (активных дельт: {})",
         report.changed,
-        report.protected_changed.len()
+        report.protected_changed.len(),
+        report.active_deltas
     );
     if !report.protected_changed.is_empty() {
         out.push('\n');
-        for (file, delta) in &report.covered {
-            let _ = writeln!(out, "[ok] {file} — покрыт активной дельтой '{delta}'");
-        }
-        for file in &report.violations {
-            let _ = writeln!(
-                out,
-                "[error] {file} — не упоминается ни в одной активной дельте"
-            );
-            let _ = writeln!(
-                out,
-                "  → оформите правку дельтой: arch-be delta new <name>, опишите изменение \
-                 в changes/<name>/DELTA.md (архивные дельты не засчитываются)"
-            );
+        for (file, deltas) in &report.mentions {
+            match deltas.as_slice() {
+                [] => {
+                    let _ = writeln!(
+                        out,
+                        "[error] {file} — не упоминается ни в одной активной дельте{}",
+                        if report.active_deltas == 0 {
+                            " (активных дельт нет)".to_string()
+                        } else {
+                            format!(" (активных дельт: {})", report.active_deltas)
+                        }
+                    );
+                    let _ = writeln!(
+                        out,
+                        "  → оформите правку дельтой: arch-be delta new <name>, опишите изменение \
+                         в changes/<name>/DELTA.md (архивные дельты не засчитываются)"
+                    );
+                }
+                [single] => {
+                    let _ = writeln!(out, "[ok] {file} — покрыт активной дельтой '{single}'");
+                }
+                many => {
+                    let quoted: Vec<String> = many.iter().map(|d| format!("'{d}'")).collect();
+                    let _ = writeln!(
+                        out,
+                        "[ok] {file} — покрыт активными дельтами: {}",
+                        quoted.join(", ")
+                    );
+                }
+            }
         }
     }
     let _ = writeln!(
@@ -440,8 +489,9 @@ impl Tool for DeltaGuardTool {
                           файл под защищёнными путями (по умолчанию model/, \
                           ARCHITECTURE-SPINE.md, CONSTRAINTS.yaml) обязан упоминаться в активной \
                           дельте changes/<name>/DELTA.md. Ответ — JSON: passed + violations \
-                          (непокрытые правки) + covered + summary; passed=false — основание \
-                          отказать изменению"
+                          (непокрытые правки) + covered + mentions (все дельты по каждому \
+                          файлу) + active_deltas + summary; passed=false — основание отказать \
+                          изменению"
                 .into(),
             parameters: json!({
                 "type": "object",
@@ -475,11 +525,12 @@ impl Tool for DeltaGuardTool {
         };
         let summary = format!(
             "Гейт прямых правок спайна (база: {}): изменённых файлов {}, защищённых {}, \
-             непокрытых нарушений {}",
+             непокрытых нарушений {} (активных дельт: {})",
             report.base,
             report.changed,
             report.protected_changed.len(),
-            report.violations.len()
+            report.violations.len(),
+            report.active_deltas
         );
         let verdict = json!({
             "tool": "delta_guard",
@@ -489,6 +540,10 @@ impl Tool for DeltaGuardTool {
             "protected_changed": report.protected_changed,
             "covered": report.covered.iter().map(|(f, d)| json!({"file": f, "delta": d})).collect::<Vec<_>>(),
             "violations": report.violations,
+            // Аддитивные поля (SDK-контракт v1): полный статус упоминания
+            // каждого защищённого файла — все активные дельты, а не первая.
+            "active_deltas": report.active_deltas,
+            "mentions": report.mentions.iter().map(|(f, ds)| json!({"file": f, "deltas": ds})).collect::<Vec<_>>(),
             "summary": summary,
         });
         // Сериализация собранного объекта не падает; запасной вариант — компактная форма.
@@ -726,6 +781,60 @@ mod tests {
         assert!(err.to_string().contains("git diff"), "{err}");
     }
 
+    #[test]
+    fn guard_lists_all_mentioning_deltas_in_report() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("repo");
+        make_guard_repo(&repo);
+        std::fs::write(repo.join("model/adr/ADR-003.md"), "# ADR-003 v2\n").expect("edit");
+        // ДВЕ активные дельты упоминают файл — отчёт обязан показать обе,
+        // а не первую попавшуюся (D8: отчёт вместо галочки).
+        for name in ["update-adr-003", "adr-003-followup"] {
+            let path = new(&repo, name).expect("new");
+            let body = std::fs::read_to_string(&path).expect("read");
+            std::fs::write(&path, format!("{body}\nЗатронут ADR-003.\n")).expect("mention");
+        }
+        let report = guard(&repo, None, &[]).expect("guard");
+        assert!(report.passed, "{report:?}");
+        assert_eq!(report.active_deltas, 2);
+        assert_eq!(
+            report.mentions,
+            vec![(
+                "model/adr/ADR-003.md".to_string(),
+                // Порядок — по имени дельты (list сортирует), детерминирован.
+                vec!["adr-003-followup".to_string(), "update-adr-003".to_string()]
+            )]
+        );
+        // Совместимость: covered держит первую дельту.
+        assert_eq!(report.covered.len(), 1);
+        let text = render_guard(&report);
+        assert!(
+            text.contains("покрыт активными дельтами: 'adr-003-followup', 'update-adr-003'"),
+            "{text}"
+        );
+        assert!(text.contains("активных дельт: 2"), "{text}");
+    }
+
+    #[test]
+    fn guard_is_honest_when_no_active_deltas_at_all() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("repo");
+        make_guard_repo(&repo);
+        std::fs::write(repo.join("model/adr/ADR-003.md"), "# ADR-003 v2\n").expect("edit");
+        // Дельт нет вообще: честно «активных дельт нет», а не обтекаемое
+        // «не упоминается ни в одной» (D8).
+        let report = guard(&repo, None, &[]).expect("guard");
+        assert!(!report.passed);
+        assert_eq!(report.active_deltas, 0);
+        assert_eq!(
+            report.mentions,
+            vec![("model/adr/ADR-003.md".to_string(), Vec::new())]
+        );
+        let text = render_guard(&report);
+        assert!(text.contains("(активных дельт нет)"), "{text}");
+        assert!(text.contains("arch-be delta new"), "{text}");
+    }
+
     // --- инструменты delta_guard / delta_propose ----------------------------
 
     /// Тестовый контекст без LLM.
@@ -761,6 +870,13 @@ mod tests {
         let v: Value = serde_json::from_str(&out.content).expect("JSON-вердикт");
         assert_eq!(v["passed"], false, "{v}");
         assert_eq!(v["violations"], json!(["model/adr/ADR-003.md"]));
+        // Аддитивные поля D8: полный статус упоминания и счётчик дельт.
+        assert_eq!(v["active_deltas"], 0, "{v}");
+        assert_eq!(
+            v["mentions"],
+            json!([{"file": "model/adr/ADR-003.md", "deltas": []}]),
+            "{v}"
+        );
 
         // Не git-репозиторий — мягкая ошибка инструмента.
         let out = DeltaGuardTool

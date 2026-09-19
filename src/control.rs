@@ -249,10 +249,24 @@ fn git_diff_out(repo: &Path, diff_args: &[String], extra: &[&str]) -> Result<Str
             ))
         })?;
     if !out.status.success() {
+        // Сырой stderr git в отчёт не проксируем (D9): после первой строки
+        // там многострочная справка использования («Используйте «--» для
+        // отделения путей от редакций…»), засорявшая строку маршрута гейта
+        // на репозитории без коммитов. Причина — первая непустая строка
+        // без префикса «fatal:»; fail-safe семантика сохраняется.
         let stderr = String::from_utf8_lossy(&out.stderr);
-        let detail = stderr.trim().chars().take(200).collect::<String>();
+        let reason = stderr
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+            .map_or(
+                "git завершился с ошибкой без сообщения",
+                |l| l.strip_prefix("fatal:").map_or(l, str::trim),
+            );
+        let detail: String = reason.chars().take(160).collect();
         return Err(HarnessError::Control(format!(
-            "anti-bypass: {} не git-репозиторий или некорректный GIT_REF ({detail})",
+            "anti-bypass: {} — база диффа недоступна: {detail} \
+             (не git-репозиторий, нет базового коммита или некорректный GIT_REF)",
             repo.display()
         )));
     }
