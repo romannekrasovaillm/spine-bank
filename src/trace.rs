@@ -5,7 +5,8 @@
 //! - [`trace_check`] читает `<case>/model/`, `<case>/CONSTRAINTS.yaml` (ID
 //!   правил — разделяемый загрузчик из `model::validate`) и опциональный
 //!   `<case>/ARCHITECTURE-SPINE.md` (перечень инвариантов — сверка модели
-//!   со spine);
+//!   со spine; все ссылки spine на сущности модели обязаны существовать —
+//!   error `spine-ref-missing-in-model`);
 //! - обязательное звено одно: `AD → fitness-правило` (`verified_by` на
 //!   существующее правило `C-NNN` либо непустое `unverifiable`) — нарушение
 //!   даёт `error` и exit code 1; сироты остальных звеньев — `warn`;
@@ -25,7 +26,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::error::Result;
+use crate::error::{HarnessError, Result};
 use crate::llm::ToolSpec;
 use crate::model::validate::{Constraints, load_constraint_ids};
 use crate::model::{EntityKind, LinkKind, Model, Severity, load_model};
@@ -421,6 +422,12 @@ fn int_level(case_dir: &Path, model: &Model, issues: &mut Vec<TraceIssue>) -> Le
 
 /// Сверка со spine (если файл есть): каждый AD из ARCHITECTURE-SPINE.md
 /// обязан быть в модели (error); AD в модели вне spine — warn.
+/// Дополнительно проверяются ВСЕ ссылки spine на сущности модели
+/// (`REQ|NFR|QAS|CMP|INT|ADR|RISK|CAP|SYS|OWNER-N`): ссылка на отсутствующую
+/// сущность — error `spine-ref-missing-in-model` (слепое пятно живого
+/// эксперимента: spine ссылался на NFR-008, а лаг сверки — это NFR-009,
+/// и ни один гейт этого не поймал). AD-ссылки этой проверкой не покрываются —
+/// они сверены выше отдельной логикой, дублировать находки нельзя.
 /// `Ok(None)` — spine-файла нет.
 fn spine_crosscheck(
     case_dir: &Path,
@@ -454,7 +461,39 @@ fn spine_crosscheck(
             format!("AD-{n}: есть в модели, но нет в ARCHITECTURE-SPINE.md"),
         );
     }
+    // Все ссылки spine на сущности модели обязаны существовать (префикс AD
+    // исключён из паттерна — он сверен выше, дубли находок не будет).
+    let content =
+        std::fs::read_to_string(&spine_path).map_err(|e| HarnessError::io(&spine_path, e))?;
+    let re = spine_refs_re()?;
+    let refs: BTreeSet<&str> = re.find_iter(&content).map(|m| m.as_str()).collect();
+    for id in refs {
+        if model.get(id).is_none() {
+            issue(
+                issues,
+                Severity::Error,
+                "spine-ref-missing-in-model",
+                format!("{id}: ARCHITECTURE-SPINE.md ссылается на сущность, которой нет в модели"),
+            );
+        }
+    }
     Ok(Some(spine_ids.len()))
+}
+
+/// Regex ссылок spine на сущности модели: все префиксы ID из
+/// [`crate::model::ID_PATTERN`], КРОМЕ `AD` — AD-инварианты сверяются
+/// отдельно ([`crate::control::spine_ad_ids`], правила
+/// `spine-ad-missing-in-model`/`ad-not-in-spine`), дублировать находки нельзя.
+const SPINE_REF_PATTERN: &str = r"\b(?:CAP|SYS|CMP|INT|NFR|REQ|ADR|RISK|OWNER|QAS)-[0-9]+\b";
+
+/// Компилирует [`SPINE_REF_PATTERN`].
+///
+/// # Errors
+/// Невозможна при корректном паттерне; ошибка компиляции пробрасывается,
+/// чтобы не паниковать на статике (та же дисциплина, что у `model::id_re`).
+fn spine_refs_re() -> Result<regex::Regex> {
+    regex::Regex::new(SPINE_REF_PATTERN)
+        .map_err(|e| HarnessError::Model(format!("внутренний regex ссылок spine: {e}")))
 }
 
 /// Считает покрытие одного звена по предикату и регистрирует сирот.
@@ -558,7 +597,8 @@ impl Tool for TraceCheckTool {
             description: "Трассируемость архитектуры как fitness-функция: покрытие звеньев \
                           REQ → NFR → AD/ADR → CMP → правило CONSTRAINTS.yaml, INT → контракт \
                           (поле contract, ADR-035), поимённые сироты, \
-                          сверка модели с ARCHITECTURE-SPINE.md. AD без правила и без unverifiable — \
+                          сверка модели с ARCHITECTURE-SPINE.md (AD-инварианты + все ссылки \
+                          spine на сущности модели). AD без правила и без unverifiable — \
                           error. Отчёт markdown (пригоден для evidence bundle)"
                 .into(),
             parameters: json!({
@@ -1011,5 +1051,75 @@ mod tests {
             .await
             .expect("вызов");
         assert!(out.is_error, "несуществующий каталог — мягкая ошибка");
+    }
+
+    #[test]
+    fn spine_ref_missing_in_model_is_error() {
+        // Слепое пятно живого эксперимента: spine ссылается на NFR-009, а в
+        // модели только NFR-001 — раньше это не ловил ни один гейт.
+        let dir = tempfile::tempdir().expect("tmp");
+        let spine = "# Spine\n\n## AD-1: Инвариант\n\n- **Rule**: латентность по NFR-009, отвечает CMP-001.\n";
+        let case = write_case(dir.path(), &full_entities(), Some(CONSTRAINTS), Some(spine));
+        let report = trace_check(&case).expect("trace");
+        assert!(report.has_errors(), "битая ссылка spine — error");
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|i| i.rule == "spine-ref-missing-in-model"
+                    && i.severity == Severity::Error
+                    && i.message.contains("NFR-009")),
+            "{:?}",
+            report.issues.iter().map(|i| i.rule).collect::<Vec<_>>()
+        );
+        // CMP-001 в модели есть — находок про него нет; единственная находка
+        // вообще — про NFR-009.
+        assert_eq!(
+            report.issues.len(),
+            1,
+            "{:?}",
+            report.issues.iter().map(|i| i.rule).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn spine_refs_all_valid_add_no_issues() {
+        // Все ссылки spine (разные префиксы) существуют в модели — новых
+        // находок generic-проверка не добавляет.
+        let dir = tempfile::tempdir().expect("tmp");
+        let spine = "# Spine\n\n## AD-1: Инвариант\n\n- **Rule**: REQ-001 и NFR-001 на CMP-001; см. ADR-001 и INT-001.\n";
+        let case = write_case(dir.path(), &full_entities(), Some(CONSTRAINTS), Some(spine));
+        let report = trace_check(&case).expect("trace");
+        assert!(
+            report.issues.is_empty(),
+            "{:?}",
+            report.issues.iter().map(|i| i.rule).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn spine_ad_refs_not_duplicated_by_generic_check() {
+        // AD-ссылки остаются на AD-логике: AD-2 из spine отсутствует в модели
+        // — ровно одна находка (spine-ad-missing-in-model), generic-проверка
+        // префикс AD пропускает и не дублирует.
+        let dir = tempfile::tempdir().expect("tmp");
+        let spine = "# Spine\n\n## AD-1: Инвариант\n\n- **Rule**: …\n\n## AD-2: Второй\n\n- **Rule**: ссылается на AD-1 и NFR-001.\n";
+        let case = write_case(dir.path(), &full_entities(), Some(CONSTRAINTS), Some(spine));
+        let report = trace_check(&case).expect("trace");
+        let ad2: Vec<_> = report
+            .issues
+            .iter()
+            .filter(|i| i.message.contains("AD-2"))
+            .collect();
+        assert_eq!(ad2.len(), 1, "ровно одна находка про AD-2: {ad2:?}");
+        assert_eq!(ad2[0].rule, "spine-ad-missing-in-model");
+        assert!(
+            !report
+                .issues
+                .iter()
+                .any(|i| i.rule == "spine-ref-missing-in-model"),
+            "generic-проверка не срабатывает: {:?}",
+            report.issues.iter().map(|i| i.rule).collect::<Vec<_>>()
+        );
     }
 }

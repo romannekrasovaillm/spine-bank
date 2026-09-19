@@ -56,10 +56,18 @@ const DEPTH_SHALLOW: usize = 2;
 /// Глубина рендера прочих секций при недоборе epic-context (абзацев).
 const DEPTH_DEEP: usize = 8;
 
+/// Баннер машинной компиляции — первая строка сгенерированного SPEC.md
+/// (находка живого эксперимента: исполнитель принимал машинную компиляцию
+/// за авторскую спеку архитектора). Пишется в обеих ветках генерации
+/// (шаблон и сборка из переданных спек); пользовательский файл не затирается.
+const SPEC_MACHINE_BANNER: &str =
+    "> СКОМПИЛИРОВАНО МАШИНОЙ из spine/ADR/NFR — требует авторской правки архитектора.";
+
 /// Шаблон SPEC.md — верифицируемые контракты интерфейсов компонента
 /// (модель «5.2»: прозаический ARCHITECTURE.md компонента заменяется spec'ом
 /// с контрактами, проверяемыми тестами). Пишется только при отсутствии —
 /// заполненный архитектором файл повторная генерация не затирает.
+/// Первая строка готового файла — баннер [`SPEC_MACHINE_BANNER`].
 const SPEC_TEMPLATE: &str = "# SPEC — контракты интерфейсов компонента\n\
 \n\
 > Шаблон handoff-пакета (НЕ затирается при повторной генерации). Заполняется\n\
@@ -89,7 +97,8 @@ const SPEC_TEMPLATE: &str = "# SPEC — контракты интерфейсо�
 
 /// Собирает SPEC.md из переданных спек архитектора: полные тексты контрактов
 /// с заголовками-источниками (шаблон-заполнитель уже не нужен — контракты
-/// переданы явно). Не-UTF8 читается с потерями.
+/// переданы явно). Первая строка — баннер машинной компиляции
+/// [`SPEC_MACHINE_BANNER`]. Не-UTF8 читается с потерями.
 fn render_spec_from_sources(spec_files: &[PathBuf]) -> String {
     let mut out = String::from(
         "# SPEC — контракты интерфейсов компонента\n\n\
@@ -134,10 +143,15 @@ fn default_constraints(repo: &Path) -> String {
     } else {
         "generic"
     };
+    // Контент каждого шаблона начинается сразу после открывающей кавычки на
+    // той же строке: форма `"\<перевод строки>` съедала бы перевод строки И
+    // ведущие пробелы первой строки, ломая отступы YAML (дефект A1 живого
+    // эксперимента — исполнителю уезжал нечитаемый CONSTRAINTS.yaml).
+    // Отступы консистентны с корневым CONSTRAINTS.yaml репозитория: пункты
+    // списка — 2 пробела под `rules:`, ключи правила — 4 пробела.
     let rules = match stack {
         "Rust" => {
-            "\
-  - name: no-unwrap-in-src
+            "  - name: no-unwrap-in-src
     type: must_not_contain
     glob: \"src/**\"
     pattern: 'unwrap\\('
@@ -159,8 +173,7 @@ fn default_constraints(repo: &Path) -> String {
 "
         }
         "Python" => {
-            "\
-  - name: no-print-in-py
+            "  - name: no-print-in-py
     type: must_not_contain
     glob: \"**/*.py\"
     pattern: 'print\\('
@@ -177,8 +190,7 @@ fn default_constraints(repo: &Path) -> String {
 "
         }
         "Go" => {
-            "\
-  - name: go-build-passes
+            "  - name: go-build-passes
     type: command_succeeds
     command: 'go build ./...'
     timeout_secs: 180
@@ -195,8 +207,7 @@ fn default_constraints(repo: &Path) -> String {
 "
         }
         "Node" => {
-            "\
-  - name: readme-exists
+            "  - name: readme-exists
     type: file_exists
     path: README.md
     severity: warn
@@ -208,8 +219,7 @@ fn default_constraints(repo: &Path) -> String {
 "
         }
         _ => {
-            "\
-  - name: readme-exists
+            "  - name: readme-exists
     type: file_exists
     path: README.md
     severity: warn
@@ -223,6 +233,24 @@ fn default_constraints(repo: &Path) -> String {
          # перепишите правила под spine-инварианты (AD-n) эпика.\n\
          rules:\n{rules}"
     )
+}
+
+/// Самовалидация генератора: сгенерированный текст CONSTRAINTS.yaml обязан
+/// парситься как YAML ДО записи в пакет — битый файл лучше отклонить здесь,
+/// чем выдать исполнителю нечитаемый (дефект A1: шаблоны теряли отступ
+/// первой строки и выдавали YAML с `ScannerError`).
+///
+/// # Errors
+/// Текст не парсится как YAML — это дефект генератора, а не данных репозитория.
+fn validate_constraints_text(text: &str) -> Result<()> {
+    serde_yaml_ng::from_str::<serde_yaml_ng::Value>(text)
+        .map(|_| ())
+        .map_err(|e| {
+            HarnessError::Harness(format!(
+                "сгенерированный CONSTRAINTS.yaml невалиден как YAML: {e} — пакет не \
+                 собирается (это дефект шаблонов генератора, а не данных репозитория)"
+            ))
+        })
 }
 
 /// Итог генерации handoff-пакета.
@@ -247,6 +275,10 @@ pub struct HandoffPacket {
     /// Рекомендованный таймаут прогона по маршруту значимости, секунд.
     #[serde(default)]
     pub recommended_timeout_secs: u64,
+    /// Детерминированные предупреждения готовности пакета (тонкая
+    /// декомпозиция REQ → задачи и т.п.); не блокируют сборку.
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 /// Метаданные пакета (`MANIFEST.json`).
@@ -340,11 +372,15 @@ pub fn generate_handoff(
     // (ADR-007): нет model/ или нет QAS — секции нет; битая модель — ошибка.
     let qas_section = qas_acceptance_section(repo)?;
     let task_path = dir.join("TASK.md");
-    std::fs::write(
-        &task_path,
-        render_task_md(task, &rollback_text, qas_section.as_deref()),
-    )
-    .map_err(|e| HarnessError::io(&task_path, e))?;
+    let task_md = render_task_md(task, &rollback_text, qas_section.as_deref());
+    std::fs::write(&task_path, &task_md).map_err(|e| HarnessError::io(&task_path, e))?;
+
+    // Детерминированные предупреждения готовности пакета (не блокируют
+    // сборку): тонкая декомпозиция REQ → задачи TASK.md.
+    let mut warnings = Vec::new();
+    if let Some(w) = req_decomposition_warning(repo, &task_md) {
+        warnings.push(w);
+    }
 
     // ARCHITECTURE.md — всегда перезаписывается (компиляция актуальных спек).
     let arch_md = compile_epic_context(spec_files)?;
@@ -371,7 +407,11 @@ pub fn generate_handoff(
     // Дефолт — под стек репозитория (Cargo.toml/pyproject.toml/go.mod/package.json).
     let constraints_path = dir.join("CONSTRAINTS.yaml");
     if !constraints_path.exists() {
-        std::fs::write(&constraints_path, default_constraints(repo))
+        let constraints_text = default_constraints(repo);
+        // Самовалидация генератора до записи: падение здесь — дефект шаблонов,
+        // а не данных репозитория (лучше ошибка, чем битый файл исполнителю).
+        validate_constraints_text(&constraints_text)?;
+        std::fs::write(&constraints_path, constraints_text)
             .map_err(|e| HarnessError::io(&constraints_path, e))?;
     }
 
@@ -379,14 +419,18 @@ pub fn generate_handoff(
     // с переданными спеками — собирается ИЗ НИХ (полные тексты контрактов,
     // кейс 2026-09-01: исполнители спотыкались о пустой шаблон, когда
     // архитектор передал спеки через --spec); без спек — шаблон.
+    // В обеих ветках генерации первая строка — баннер машинной компиляции:
+    // исполнитель обязан отличать скомпилированную спеку от авторской
+    // (находка живого эксперимента — компиляция принималась за авторскую).
     let spec_path = dir.join("SPEC.md");
     if !spec_path.exists() {
-        let spec_md = if spec_files.is_empty() {
+        let spec_body = if spec_files.is_empty() {
             SPEC_TEMPLATE.to_string()
         } else {
             render_spec_from_sources(spec_files)
         };
-        std::fs::write(&spec_path, spec_md).map_err(|e| HarnessError::io(&spec_path, e))?;
+        std::fs::write(&spec_path, format!("{SPEC_MACHINE_BANNER}\n{spec_body}"))
+            .map_err(|e| HarnessError::io(&spec_path, e))?;
     }
 
     // ROLLBACK.yaml — машиночитаемый план отката для репетиции на гейте A4;
@@ -466,6 +510,7 @@ pub fn generate_handoff(
         git_initialized: baseline.initialized,
         git_dirty_tracked: baseline.dirty_tracked,
         recommended_timeout_secs: timeout,
+        warnings,
     })
 }
 
@@ -505,6 +550,81 @@ fn render_task_md(task: &str, rollback: &str, acceptance: Option<&str>) -> Strin
     s.push_str("## Чеклист перед финальным ответом\n\n");
     s.push_str("- [ ] `SPEC.md` (контракты интерфейсов: входы/выходы, структуры данных, границы ошибок, критерии верификации) заполнен архитектором — сверь реализацию с ним; расхождения фиксируй в `conflicts_with_prior_decisions`, а не молчаливым отступлением.\n");
     s
+}
+
+/// Минимум REQ-сущностей модели, с которого проверяется декомпозиция
+/// REQ → задачи TASK.md (мелкие эпики не обязаны дробиться в список).
+const REQ_DECOMP_MIN_REQS: usize = 3;
+
+/// Порог предупреждения о тонкой декомпозиции: REQ-сущностей больше, чем
+/// в [`REQ_DECOMP_RATIO`] раз, числа пунктов задач в TASK.md.
+const REQ_DECOMP_RATIO: usize = 2;
+
+/// Предупреждение о тонкой декомпозиции REQ → задачи (детерминированное):
+/// если модель репозитория несёт [`REQ_DECOMP_MIN_REQS`]+ REQ-сущностей, а
+/// рабочая область TASK.md (формулировка задачи + критерии приёмки QAS — всё
+/// до раздела «План отката»; служебные секции шаблона не считаются) содержит
+/// существенно меньше пунктов списка (REQ > [`REQ_DECOMP_RATIO`]× задач),
+/// декомпозиция выглядит неполной (находка живого эксперимента: исполнитель
+/// получал TASK.md, чей список задач недопокрывал REQ-множество).
+///
+/// `None` — нет model/, нет REQ-* или декомпозиция достаточная.
+fn req_decomposition_warning(repo: &Path, task_md: &str) -> Option<String> {
+    let model_dir = repo.join("model");
+    if !model_dir.is_dir() {
+        return None;
+    }
+    // Ошибку разбора модели здесь безопасно игнорировать: битая модель уже
+    // упала в qas_acceptance_section выше по generate_handoff (ошибка, а не
+    // молчаливый пропуск) — до этой точки исполнение просто не доходит.
+    let model = load_model(&model_dir).ok()?;
+    let reqs = model
+        .entities
+        .iter()
+        .filter(|e| e.kind == EntityKind::Req)
+        .count();
+    if reqs < REQ_DECOMP_MIN_REQS {
+        return None;
+    }
+    let work_region = task_md.split("\n## План отката").next().unwrap_or(task_md);
+    let tasks = count_task_items(work_region);
+    if reqs > REQ_DECOMP_RATIO * tasks {
+        Some(format!(
+            "в модели {reqs} REQ-сущностей, а в TASK.md — {tasks} пункт(ов) задач: \
+             декомпозиция REQ → задачи выглядит неполной (порог REQ > {REQ_DECOMP_RATIO}× задач). \
+             Проверьте, что каждая REQ покрыта пунктом TASK.md или осознанно отложена."
+        ))
+    } else {
+        None
+    }
+}
+
+/// Число пунктов списка/чекбоксов в markdown-тексте вне кодовых блоков:
+/// маркированные `- `/`* ` (включая чекбоксы `- [ ]`) и нумерованные `1. `/`1) `.
+fn count_task_items(markdown: &str) -> usize {
+    let mut in_fence = false;
+    let mut count = 0;
+    for line in markdown.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence {
+            continue;
+        }
+        let is_bullet = trimmed.starts_with("- ") || trimmed.starts_with("* ");
+        let is_ordered = trimmed.find(['.', ')']).is_some_and(|pos| {
+            pos > 0
+                && pos <= 3
+                && trimmed[..pos].bytes().all(|b| b.is_ascii_digit())
+                && trimmed[pos + 1..].starts_with(' ')
+        });
+        if is_bullet || is_ordered {
+            count += 1;
+        }
+    }
+    count
 }
 
 /// Секция «Критерии приёмки» из QAS-сущностей модели репозитория (ADR-007).
@@ -701,55 +821,204 @@ pub fn recommended_timeout_secs(repo: &Path) -> Option<u64> {
 }
 
 /// Компилирует epic-context из спецификаций: заголовок с датой и источниками,
-/// далее — сжатые рендеры спек; итог усечён до [`EPIC_CONTEXT_MAX_CHARS`].
+/// далее — сжатые рендеры спек; итог удерживается в [`EPIC_CONTEXT_MAX_CHARS`].
 ///
 /// Глубина адаптивная: прочие секции рендерятся по [`DEPTH_SHALLOW`] абзацев,
 /// но если контекст недобирает до [`EPIC_CONTEXT_MIN_CHARS`] (низ окна рубрики
 /// `handoff_quality`, ~800 токенов), спеки перерендериваются глубже
 /// ([`DEPTH_DEEP`]) — «реализация без доступа к источникам» требует массы.
 ///
+/// При переполнении работает лесенка деградации (дефект A2 живого эксперимента:
+/// тупое усечение по символам обрезало инвариант AD-010 на полуслове):
+/// DEEP → SHALLOW (если мелкий рендер в окне рубрики) → прозаические секции
+/// с хвоста сокращаются до заголовков → прозаические секции с хвоста
+/// выкидываются целиком. **ADR-блоки spine (секции с полями Binds/Prevents/
+/// Rule) не режутся никогда** — ценой превышения лимита, если документ
+/// состоит из одних инвариантов. Сноска об усечении перечисляет сокращённые
+/// и выкинутые секции поимённо.
+///
 /// # Errors
 /// Спека не читается.
 fn compile_epic_context(spec_files: &[PathBuf]) -> Result<String> {
-    let mut out = render_epic(spec_files, DEPTH_SHALLOW)?;
-    if out.chars().count() < EPIC_CONTEXT_MIN_CHARS {
-        out = render_epic(spec_files, DEPTH_DEEP)?;
+    let mut depth = ProseDepth::Paragraphs(DEPTH_SHALLOW);
+    let mut render = render_epic_structured(spec_files, depth)?;
+    if render.chars_len() < EPIC_CONTEXT_MIN_CHARS {
+        depth = ProseDepth::Paragraphs(DEPTH_DEEP);
+        render = render_epic_structured(spec_files, depth)?;
     }
-    if out.chars().count() > EPIC_CONTEXT_MAX_CHARS {
-        let notice = "\n\n> **Контекст усечён** до 6000 символов; полные тексты — в файлах-источниках (см. MANIFEST.json).\n";
-        let keep = EPIC_CONTEXT_MAX_CHARS.saturating_sub(notice.chars().count());
-        let truncated: String = out.chars().take(keep).collect();
-        out = truncated;
-        out.push_str(notice);
+    if render.chars_len() <= EPIC_CONTEXT_MAX_CHARS {
+        return Ok(render.assemble(None));
     }
-    Ok(out)
+    // Шаг 1 лесенки: глубокий рендер (недобор до окна рубрики) переполнен —
+    // пробуем умолчательный мелкий. Если он в окне [MIN, MAX], это дефолтная
+    // глубина без всякого усечения — сноски не нужно. Если мелкий тоже
+    // переполнен, деградируем его (он компактнее); если недобирает до окна,
+    // остаёмся на глубоком и деградируем его (иначе контекст провалится под
+    // окно рубрики и убьёт маршрут Critical).
+    if depth == ProseDepth::Paragraphs(DEPTH_DEEP) {
+        let shallow = render_epic_structured(spec_files, ProseDepth::Paragraphs(DEPTH_SHALLOW))?;
+        if shallow.chars_len() >= EPIC_CONTEXT_MIN_CHARS
+            && shallow.chars_len() <= EPIC_CONTEXT_MAX_CHARS
+        {
+            return Ok(shallow.assemble(None));
+        }
+        if shallow.chars_len() > EPIC_CONTEXT_MAX_CHARS {
+            render = shallow;
+        }
+    }
+    // Шаг 2: прозаические секции с хвоста сокращаются до заголовков
+    // (ADR-блоки пропускаются и остаются дословными).
+    let mut dropped: Vec<String> = Vec::new();
+    for pos in (0..render.sections.len()).rev() {
+        let notice = truncation_notice(&render, &dropped);
+        if render.chars_len() + notice.chars().count() <= EPIC_CONTEXT_MAX_CHARS {
+            break;
+        }
+        let section = &mut render.sections[pos];
+        if !section.is_adr && !section.body.is_empty() {
+            section.body.clear();
+            section.shortened_to_heading = true;
+        }
+    }
+    // Шаг 3: всё ещё переполнение — выкидываем прозаические секции с хвоста
+    // целиком. ADR-блоки не выкидываются никогда: если остались только они,
+    // документ уходит за лимит дословным (честнее, чем инвариант на полуслове).
+    loop {
+        let notice = truncation_notice(&render, &dropped);
+        if render.chars_len() + notice.chars().count() <= EPIC_CONTEXT_MAX_CHARS {
+            break;
+        }
+        let Some(pos) = render.sections.iter().rposition(|s| !s.is_adr) else {
+            break;
+        };
+        dropped.push(render.sections.remove(pos).title);
+    }
+    let notice = truncation_notice(&render, &dropped);
+    Ok(render.assemble(Some(&notice)))
 }
 
-/// Рендер epic-context на заданной глубине секций (абзацев на прочую секцию;
-/// ADR-блоки spine всегда целиком).
-fn render_epic(spec_files: &[PathBuf], depth: usize) -> Result<String> {
-    let mut out = String::with_capacity(EPIC_CONTEXT_MAX_CHARS);
-    out.push_str("# Архитектурный контекст (epic-context)\n\n");
-    let _ = write!(out, "Собран: {}\n\n", Utc::now().to_rfc3339());
-    out.push_str("Источники:\n");
-    for f in spec_files {
-        let _ = writeln!(out, "- {}", f.display());
+/// Режим рендера прозаических (не-ADR) секций epic-context: заголовок +
+/// первые N абзацев тела секции. ADR-блоки spine рендерятся целиком в любом
+/// режиме — они не сокращаются никогда (сокращение прозы до заголовков делает
+/// шаг 2 лесенки в [`compile_epic_context`], очищая тела секций, а не
+/// перерендером).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ProseDepth {
+    /// Заголовок + первые N абзацев тела секции.
+    Paragraphs(usize),
+}
+
+/// Секция epic-context в структурном рендере (для лесенки деградации).
+struct EpicSection {
+    /// Название секции для сноски об усечении (заголовок без маркеров `#`;
+    /// у преамбулы — «вводная часть»).
+    title: String,
+    /// Заголовок секции (у преамбулы — пусто); сюда же вклеивается маркер
+    /// `<!-- источник: ... -->` первой секции спеки.
+    heading: String,
+    /// Тело секции на текущей глубине (у ADR-блоков — всегда дословное;
+    /// обрезается шагом 2 лесенки).
+    body: String,
+    /// ADR-блок spine: не сокращается и не выкидывается никогда.
+    is_adr: bool,
+    /// Тело сокращено до заголовка шагом 2 лесенки — секция попадает в
+    /// сноску об усечении (пока не выкинута шагом 3).
+    shortened_to_heading: bool,
+}
+
+impl EpicSection {
+    /// Длина секции в собранном документе (символов, без разделителя).
+    fn chars_len(&self) -> usize {
+        let mut n = self.heading.chars().count();
+        if !self.body.is_empty() {
+            n += 2 + self.body.chars().count();
+        }
+        n
     }
-    out.push('\n');
+
+    /// Дописывает секцию в документ.
+    fn render_into(&self, out: &mut String) {
+        out.push_str(&self.heading);
+        if !self.body.is_empty() {
+            out.push_str("\n\n");
+            out.push_str(&self.body);
+        }
+    }
+}
+
+/// Структурный рендер epic-context: неизменная шапка + секции по порядку.
+struct EpicRender {
+    /// Шапка: заголовок, дата сборки, список источников (не усечается).
+    header: String,
+    /// Секции всех спек в порядке обхода файлов.
+    sections: Vec<EpicSection>,
+}
+
+impl EpicRender {
+    /// Длина собранного документа без сноски об усечении (символов).
+    fn chars_len(&self) -> usize {
+        self.header.chars().count()
+            + self
+                .sections
+                .iter()
+                .map(|s| s.chars_len() + 2)
+                .sum::<usize>()
+    }
+
+    /// Собирает документ: шапка + секции через пустую строку + сноска (если есть).
+    fn assemble(&self, notice: Option<&str>) -> String {
+        let mut out = self.header.clone();
+        for s in &self.sections {
+            s.render_into(&mut out);
+            out.push_str("\n\n");
+        }
+        if let Some(notice) = notice {
+            out.push_str(notice);
+        }
+        out
+    }
+}
+
+/// Структурный рендер epic-context на заданной глубине прозаических секций
+/// (ADR-блоки spine всегда целиком).
+fn render_epic_structured(spec_files: &[PathBuf], depth: ProseDepth) -> Result<EpicRender> {
+    let mut header = String::with_capacity(512);
+    header.push_str("# Архитектурный контекст (epic-context)\n\n");
+    let _ = write!(header, "Собран: {}\n\n", Utc::now().to_rfc3339());
+    header.push_str("Источники:\n");
+    for f in spec_files {
+        let _ = writeln!(header, "- {}", f.display());
+    }
+    header.push('\n');
+    let mut sections = Vec::new();
     for f in spec_files {
         let text = std::fs::read_to_string(f).map_err(|e| HarnessError::io(f, e))?;
-        let _ = write!(out, "<!-- источник: {} -->\n\n", f.display());
-        out.push_str(render_spec(&text, depth).trim_end());
-        out.push_str("\n\n");
+        let marker = format!("<!-- источник: {} -->", f.display());
+        let mut spec_sections = render_spec_structured(&text, depth);
+        if let Some(first) = spec_sections.first_mut() {
+            // Маркер источника привязывается к первой секции спеки.
+            first.heading = format!("{marker}\n\n{}", first.heading);
+        } else {
+            sections.push(EpicSection {
+                title: format!("источник {}", f.display()),
+                heading: marker,
+                body: String::new(),
+                is_adr: false,
+                shortened_to_heading: false,
+            });
+        }
+        sections.extend(spec_sections);
     }
-    Ok(out)
+    Ok(EpicRender { header, sections })
 }
 
-/// Рендерит одну спецификацию: секции с полями Binds/Prevents/Rule (ADR-блоки
-/// spine) — целиком, прочие секции — заголовок + первые `depth` абзацев.
-fn render_spec(text: &str, depth: usize) -> String {
+/// Разбирает одну спецификацию в секции epic-context: преамбула (если есть) +
+/// секции по markdown-заголовкам. Секции с полями Binds/Prevents/Rule
+/// (ADR-блоки spine) помечаются `is_adr` и рендерятся дословно; проза —
+/// по глубине `depth`.
+fn render_spec_structured(text: &str, depth: ProseDepth) -> Vec<EpicSection> {
     let mut preamble = String::new();
-    let mut sections: Vec<(String, String)> = Vec::new();
+    let mut raw_sections: Vec<(String, String)> = Vec::new();
     let mut cur: Option<(String, String)> = None;
     let mut in_fence = false;
     for line in text.lines() {
@@ -759,7 +1028,7 @@ fn render_spec(text: &str, depth: usize) -> String {
         }
         if !in_fence && line.starts_with('#') {
             if let Some(s) = cur.take() {
-                sections.push(s);
+                raw_sections.push(s);
             }
             cur = Some((line.trim_end().to_string(), String::new()));
         } else if let Some((_, body)) = cur.as_mut() {
@@ -771,25 +1040,104 @@ fn render_spec(text: &str, depth: usize) -> String {
         }
     }
     if let Some(s) = cur.take() {
-        sections.push(s);
+        raw_sections.push(s);
     }
 
-    let mut out = String::new();
+    let mut sections = Vec::new();
     if !preamble.trim().is_empty() {
-        out.push_str(&first_paragraphs(&preamble, depth));
-        out.push_str("\n\n");
+        let is_adr = is_adr_block(&preamble);
+        sections.push(EpicSection {
+            title: "вводная часть".to_string(),
+            heading: String::new(),
+            body: render_section_body(&preamble, depth, is_adr),
+            is_adr,
+            shortened_to_heading: false,
+        });
     }
-    for (heading, body) in &sections {
-        out.push_str(heading);
-        out.push_str("\n\n");
-        if is_adr_block(body) {
-            out.push_str(body.trim());
-        } else {
-            out.push_str(&first_paragraphs(body, depth));
-        }
-        out.push_str("\n\n");
+    for (heading, body) in &raw_sections {
+        let is_adr = is_adr_block(body);
+        sections.push(EpicSection {
+            title: heading.trim_start_matches('#').trim().to_string(),
+            heading: heading.clone(),
+            body: render_section_body(body, depth, is_adr),
+            is_adr,
+            shortened_to_heading: false,
+        });
     }
-    out
+    sections
+}
+
+/// Тело секции на заданной глубине: ADR-блок — дословно, проза — первые N
+/// абзацев.
+fn render_section_body(body: &str, depth: ProseDepth, is_adr: bool) -> String {
+    if is_adr {
+        return body.trim().to_string();
+    }
+    match depth {
+        ProseDepth::Paragraphs(n) => first_paragraphs(body, n),
+    }
+}
+
+/// Бюджет перечня секций в сноске об усечении (символов): длинный список
+/// заменяется компактной формой «первые, …, последняя (всего N)» — сноска
+/// не должна сама съедать лимит epic-context.
+const NOTICE_LIST_MAX_CHARS: usize = 240;
+
+/// Сколько первых имён секций показывается в компактной форме перечня сноски.
+const NOTICE_LIST_HEAD: usize = 3;
+
+/// Компактное перечисление секций в сноске об усечении: полный список, а при
+/// превышении [`NOTICE_LIST_MAX_CHARS`] — первые [`NOTICE_LIST_HEAD`] и
+/// последняя секция + счётчик.
+fn compact_section_list(names: &[String]) -> String {
+    let joined = names.join(", ");
+    if joined.chars().count() <= NOTICE_LIST_MAX_CHARS || names.len() <= NOTICE_LIST_HEAD + 1 {
+        return joined;
+    }
+    format!(
+        "{}, …, {} (всего {})",
+        names[..NOTICE_LIST_HEAD].join(", "),
+        names[names.len() - 1],
+        names.len()
+    )
+}
+
+/// Сноска об усечении epic-context: честно перечисляет, какие секции
+/// сокращены до заголовков и какие выкинуты с хвоста; инварианты spine
+/// подчёркнуто дословны. Маркер «Контекст усечён» сохраняется для
+/// потребителей (рубрики, регрессионные проверки).
+fn truncation_notice(render: &EpicRender, dropped: &[String]) -> String {
+    let shortened: Vec<String> = render
+        .sections
+        .iter()
+        .filter(|s| s.shortened_to_heading)
+        .map(|s| s.title.clone())
+        .collect();
+    let mut notice = String::from("\n\n> **Контекст усечён**");
+    let mut parts: Vec<String> = Vec::new();
+    if !shortened.is_empty() {
+        parts.push(format!(
+            "прозаические секции сокращены до заголовков: {}",
+            compact_section_list(&shortened)
+        ));
+    }
+    if !dropped.is_empty() {
+        parts.push(format!(
+            "выкинуты прозаические секции с хвоста: {}",
+            compact_section_list(dropped)
+        ));
+    }
+    if parts.is_empty() {
+        notice
+            .push_str(" — лимит превышен документом из инвариантов spine, которые не сокращаются");
+    } else {
+        let _ = write!(notice, ": {}", parts.join("; "));
+    }
+    notice.push_str(
+        ". Инварианты spine (AD-блоки) приведены дословно и не сокращались; полные тексты — \
+         в файлах-источниках (см. MANIFEST.json).\n",
+    );
+    notice
 }
 
 /// Признак ADR-блока spine: секция содержит поля Binds/Prevents/Rule.
@@ -973,6 +1321,10 @@ impl Tool for HandoffCreateTool {
                          добавьте спеки через 'spec' или расширьте источники.",
                         packet.epic_context_tokens
                     );
+                }
+                // Детерминированные предупреждения готовности пакета.
+                for w in &packet.warnings {
+                    let _ = write!(out, "\nВНИМАНИЕ: {w}");
                 }
                 out.push_str(
                     "\nНапоминание: CONSTRAINTS.yaml — стековая заготовка; перед передачей \
@@ -1679,5 +2031,299 @@ mod tests {
         assert!(!out.is_error, "{}", out.content);
         assert!(out.content.contains("Handoff-пакет создан"));
         assert!(repo.join(".arch-handoff/TASK.md").is_file());
+    }
+
+    #[test]
+    fn default_constraints_yaml_is_valid_for_every_stack() {
+        // Дефект A1: шаблоны теряли 2-пробельный отступ первой строки и
+        // выдавали YAML с ScannerError. Для каждого из 5 стеков итоговый
+        // документ (с корнем `rules:`) обязан парситься и как YAML, и по
+        // боевой схеме fitness-правил.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("mkdir repo");
+        let stacks: [(&str, &str, &str); 5] = [
+            ("generic", "", ""),
+            ("Rust", "Cargo.toml", "[package]\nname = \"demo\"\n"),
+            ("Python", "requirements.txt", "pytest\n"),
+            ("Go", "go.mod", "module demo\n"),
+            ("Node", "package.json", "{}\n"),
+        ];
+        let mut marker: Option<&str> = None;
+        for (stack, file, content) in stacks {
+            if let Some(prev) = marker.take() {
+                std::fs::remove_file(repo.join(prev)).expect("remove marker");
+            }
+            if !file.is_empty() {
+                write_file(&repo.join(file), content);
+                marker = Some(file);
+            }
+            let text = default_constraints(&repo);
+            assert!(text.contains(&format!("Стек: {stack}")), "{text}");
+            let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&text)
+                .unwrap_or_else(|e| panic!("стек {stack}: YAML не парсится: {e}\n{text}"));
+            let rules = parsed["rules"]
+                .as_sequence()
+                .unwrap_or_else(|| panic!("стек {stack}: нет списка rules:\n{text}"));
+            assert!(!rules.is_empty(), "стек {stack}: пустые rules:\n{text}");
+            for rule in rules {
+                for key in ["name", "type", "severity"] {
+                    assert!(
+                        rule[key].is_string(),
+                        "стек {stack}: у правила нет '{key}':\n{text}"
+                    );
+                }
+            }
+            // Боевая схема (control::check): файл читается загрузчиком правил.
+            let path = tmp.path().join("CONSTRAINTS.yaml");
+            write_file(&path, &text);
+            let loaded = crate::control::load_fitness_rules(&path)
+                .unwrap_or_else(|e| panic!("стек {stack}: схема не принимает: {e}\n{text}"));
+            assert_eq!(loaded.len(), rules.len(), "стек {stack}");
+        }
+    }
+
+    #[test]
+    fn constraints_self_validation_rejects_broken_yaml() {
+        // Самовалидация генератора: битый YAML отклоняется до записи файла —
+        // лучше упасть, чем выдать исполнителю нечитаемый CONSTRAINTS.yaml.
+        let broken = "rules:\n- name: x\n    type: must_not_contain\n";
+        let err = validate_constraints_text(broken).expect_err("битый YAML — ошибка");
+        assert!(err.to_string().contains("дефект шаблонов"), "{err}");
+        let valid =
+            "rules:\n  - name: x\n    type: file_exists\n    path: README.md\n    severity: warn\n";
+        validate_constraints_text(valid).expect("валидный YAML проходит");
+    }
+
+    #[test]
+    fn handoff_writes_parseable_constraints_yaml() {
+        // Сквозная проверка A1: записанный в пакет CONSTRAINTS.yaml парсится
+        // (раньше исполнителю уезжал файл с ScannerError).
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("mkdir repo");
+        write_file(&repo.join("Cargo.toml"), "[package]\nname = \"demo\"\n");
+        let cfg = cfg_in(tmp.path());
+        let packet =
+            generate_handoff(&repo, "задача", &[], &cfg, None, Route::Fast).expect("handoff");
+        let text =
+            std::fs::read_to_string(packet.dir.join("CONSTRAINTS.yaml")).expect("CONSTRAINTS.yaml");
+        let parsed: serde_yaml_ng::Value =
+            serde_yaml_ng::from_str(&text).expect("CONSTRAINTS.yaml пакета парсится");
+        assert!(parsed["rules"].as_sequence().is_some_and(|r| !r.is_empty()));
+    }
+
+    #[test]
+    fn epic_context_ladder_preserves_adr_blocks_verbatim() {
+        // Дефект A2: тупое усечение по символам обрезало инвариант AD-010 на
+        // полуслове. Фикстура: сумма > EPIC_CONTEXT_MAX_CHARS, несколько
+        // AD-блоков в хвосте — все они обязаны остаться дословно и целиком,
+        // сноска перечисляет сокращённые и выкинутые секции.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("mkdir repo");
+        let cfg = cfg_in(tmp.path());
+        let mut text = String::from("# Спека эпика\n\n");
+        for i in 0..120 {
+            let _ = write!(
+                text,
+                "## Прозаическая секция номер {i} с длинным хвостом имени\n\n\
+                 Наполнитель PROSE-{i}: длинный абзац прозы про контракты, стыки, \
+                 ограничения и детали реализации для объёма контекста.\n\n"
+            );
+        }
+        for i in 10..13 {
+            let _ = write!(
+                text,
+                "## AD-{i}: Инвариант интеграции\n\n\
+                 **Binds:** MARKER-BINDS-{i} — дословное правило стыковки компонентов.\n\n\
+                 **Prevents:** MARKER-PREVENTS-{i} — запрещённый класс отказов.\n\n\
+                 **Rule:** MARKER-RULE-{i} — финальная строка правила, обязана доехать целиком.\n\n"
+            );
+        }
+        let spec = tmp.path().join("spec-ladder.md");
+        write_file(&spec, &text);
+
+        let packet = generate_handoff(&repo, "задача", &[spec], &cfg, None, Route::Standard)
+            .expect("handoff");
+        let arch = std::fs::read_to_string(packet.dir.join("ARCHITECTURE.md")).expect("arch");
+        // Все AD-блоки присутствуют дословно, целиком — до последней строки.
+        for i in 10..13 {
+            for marker in [
+                format!("**Binds:** MARKER-BINDS-{i}"),
+                format!("**Prevents:** MARKER-PREVENTS-{i}"),
+                format!(
+                    "**Rule:** MARKER-RULE-{i} — финальная строка правила, обязана доехать целиком."
+                ),
+            ] {
+                assert!(arch.contains(&marker), "AD-{i} обрезан ({marker}):\n{arch}");
+            }
+        }
+        // Честная сноска: маркер усечения + перечень сокращённого и выкинутого.
+        assert!(arch.contains("Контекст усечён"), "{arch}");
+        assert!(arch.contains("сокращены до заголовков"), "{arch}");
+        assert!(
+            arch.contains("выкинуты прозаические секции с хвоста"),
+            "{arch}"
+        );
+        assert!(arch.contains("дословно"), "{arch}");
+        // Секция 119 выкинута с хвоста (есть в сноске, но нет как заголовка).
+        assert!(arch.contains("Прозаическая секция номер 119"), "{arch}");
+        assert!(
+            !arch.contains("## Прозаическая секция номер 119 с длинным хвостом имени"),
+            "{arch}"
+        );
+        // Ранняя секция осталась (хотя бы заголовком), AD не пострадали.
+        assert!(arch.contains("## Прозаическая секция номер 0"), "{arch}");
+        assert!(
+            arch.chars().count() <= EPIC_CONTEXT_MAX_CHARS,
+            "len = {}",
+            arch.chars().count()
+        );
+    }
+
+    #[test]
+    fn epic_context_fits_keeps_everything_without_notice() {
+        // Случай «влезает без усечения» не меняется: ни сноски, ни потерь.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("mkdir repo");
+        let cfg = cfg_in(tmp.path());
+        let spec = tmp.path().join("spec.md");
+        write_file(
+            &spec,
+            "# Спека\n\n## AD-1: Стек\n\n**Binds:** точный текст инварианта.\n\n## Детали\n\nабзац\n",
+        );
+        let packet = generate_handoff(&repo, "задача", &[spec], &cfg, None, Route::Standard)
+            .expect("handoff");
+        let arch = std::fs::read_to_string(packet.dir.join("ARCHITECTURE.md")).expect("arch");
+        assert!(!arch.contains("Контекст усечён"), "{arch}");
+        assert!(arch.contains("точный текст инварианта"), "{arch}");
+        assert!(arch.contains("абзац"), "{arch}");
+    }
+
+    /// Модель из `n` REQ-сущностей в `<repo>/model/` (для проверки
+    /// предупреждения о декомпозиции REQ → задачи).
+    fn repo_with_req_model(repo: &Path, n: usize) {
+        for i in 1..=n {
+            write_file(
+                &repo.join(format!("model/REQ-{i:03}.md")),
+                &format!(
+                    "---\nid: REQ-{i:03}\ntype: req\ntitle: Требование {i}\nstatus: accepted\n---\n"
+                ),
+            );
+        }
+    }
+
+    #[test]
+    fn handoff_warns_on_thin_req_task_decomposition() {
+        // B3: REQ существенно больше задач в TASK.md — детерминированное
+        // предупреждение в пакете (исполнитель получал TASK.md, чей список
+        // задач недопокрывал REQ-множество).
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cfg = cfg_in(tmp.path());
+
+        // 4 REQ против задачи без пунктов: 4 > 2×0 и 4 >= 3 — предупреждение.
+        let repo = tmp.path().join("repo-thin");
+        std::fs::create_dir_all(&repo).expect("mkdir");
+        repo_with_req_model(&repo, 4);
+        let packet =
+            generate_handoff(&repo, "сделать фичу", &[], &cfg, None, Route::Fast).expect("handoff");
+        assert_eq!(packet.warnings.len(), 1, "{:?}", packet.warnings);
+        assert!(
+            packet.warnings[0].contains("4 REQ-сущностей"),
+            "{:?}",
+            packet.warnings
+        );
+        assert!(
+            packet.warnings[0].contains("декомпозиция"),
+            "{:?}",
+            packet.warnings
+        );
+
+        // Достаточная декомпозиция: 4 REQ против 2 пунктов — 4 > 2×2 ложно.
+        let repo2 = tmp.path().join("repo-ok");
+        std::fs::create_dir_all(&repo2).expect("mkdir");
+        repo_with_req_model(&repo2, 4);
+        let packet2 = generate_handoff(
+            &repo2,
+            "сделать фичу:\n\n- задача раз\n\n- задача два",
+            &[],
+            &cfg,
+            None,
+            Route::Fast,
+        )
+        .expect("handoff 2");
+        assert!(packet2.warnings.is_empty(), "{:?}", packet2.warnings);
+
+        // Мелкий эпик: 2 REQ — ниже минимума проверки, предупреждения нет.
+        let repo3 = tmp.path().join("repo-small");
+        std::fs::create_dir_all(&repo3).expect("mkdir");
+        repo_with_req_model(&repo3, 2);
+        let packet3 = generate_handoff(&repo3, "сделать фичу", &[], &cfg, None, Route::Fast)
+            .expect("handoff 3");
+        assert!(packet3.warnings.is_empty(), "{:?}", packet3.warnings);
+
+        // Нет model/ — проверка не включается.
+        let repo4 = tmp.path().join("repo-nomodel");
+        std::fs::create_dir_all(&repo4).expect("mkdir");
+        let packet4 = generate_handoff(&repo4, "сделать фичу", &[], &cfg, None, Route::Fast)
+            .expect("handoff 4");
+        assert!(packet4.warnings.is_empty(), "{:?}", packet4.warnings);
+    }
+
+    #[tokio::test]
+    async fn handoff_create_tool_prints_warnings() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("mkdir repo");
+        repo_with_req_model(&repo, 5);
+        let cfg = cfg_in(tmp.path());
+        let tool = HandoffCreateTool::new(cfg.clone());
+        let ctx = ToolContext::new(tmp.path().to_path_buf(), Arc::new(cfg));
+        let out = tool
+            .call(json!({"repo": "repo", "task": "сделать фичу"}), &ctx)
+            .await
+            .expect("call");
+        assert!(!out.is_error, "{}", out.content);
+        assert!(
+            out.content.contains("ВНИМАНИЕ: в модели 5 REQ-сущностей"),
+            "{}",
+            out.content
+        );
+    }
+
+    #[test]
+    fn spec_md_carries_machine_banner() {
+        // B3: сгенерированный SPEC.md первой строкой несёт баннер машинной
+        // компиляции — и в ветке шаблона, и в ветке сборки из спек (исполнитель
+        // принимал компиляцию за авторскую спеку архитектора).
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cfg = cfg_in(tmp.path());
+
+        // Ветка шаблона (без спек).
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("mkdir");
+        let packet =
+            generate_handoff(&repo, "задача", &[], &cfg, None, Route::Fast).expect("handoff");
+        let spec = std::fs::read_to_string(packet.dir.join("SPEC.md")).expect("SPEC.md");
+        assert!(spec.starts_with(SPEC_MACHINE_BANNER), "{spec}");
+
+        // Ветка сборки из переданных спек.
+        let repo2 = tmp.path().join("repo2");
+        std::fs::create_dir_all(&repo2).expect("mkdir");
+        let spec_src = tmp.path().join("spec-src.md");
+        write_file(&spec_src, "# Контракты\n\n- идемпотентность по id\n");
+        let packet2 = generate_handoff(
+            &repo2,
+            "задача",
+            std::slice::from_ref(&spec_src),
+            &cfg,
+            None,
+            Route::Fast,
+        )
+        .expect("handoff 2");
+        let spec2 = std::fs::read_to_string(packet2.dir.join("SPEC.md")).expect("SPEC.md 2");
+        assert!(spec2.starts_with(SPEC_MACHINE_BANNER), "{spec2}");
     }
 }
