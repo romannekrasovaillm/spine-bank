@@ -185,11 +185,22 @@ enum Cmd {
         /// Файл ограничений (по умолчанию <repo>/.arch-handoff/`CONSTRAINTS.yaml`).
         #[arg(long)]
         constraints: Option<PathBuf>,
-        /// Формат вывода: text (дефолт) | sarif | junit | gitlab-codequality |
-        /// markdown. Машинные форматы — строго в stdout (артефакт CI),
-        /// exit-код не меняется (красный гейт — данные отчёта: exit 1).
+        /// Формат вывода: text (дефолт) | json (конверт вердикта с
+        /// аттестацией) | sarif | junit | gitlab-codequality | markdown.
+        /// Машинные форматы — строго в stdout (артефакт CI), exit-код не
+        /// меняется (красный гейт — данные отчёта: 1; INCOMPLETE: 3).
         #[arg(long, default_value = "text", value_name = "FORMAT")]
         format: String,
+    },
+    /// Метаморфный самотест вердикта (П8 ДКА): свойства ответов гейта на
+    /// изолированной песочнице — монотонность по маршруту, достижимость
+    /// зелёного, чувствительность к засеянному дефекту, храповик ROUTE.lock,
+    /// идемпотентность, инвариантность к написанию пути. Ненулевой exit —
+    /// свойство нарушено.
+    Selftest {
+        /// Машиночитаемый вывод: JSON-отчёт.
+        #[arg(long)]
+        json: bool,
     },
     /// Составное архитектурное ревью репозитория одним ответом (бэклог
     /// волны 3, п.13): маршрут значимости из git-диффа + весь контур
@@ -841,6 +852,12 @@ enum ControlCmd {
             conflicts_with = "json"
         )]
         format: String,
+        /// База git для сверки состава правил (П5, анти-ослабление): по
+        /// умолчанию — merge-base с основной веткой, иначе HEAD. Сверка
+        /// добавляет находку `rule_weakened`, если правило исчезло или
+        /// ослаблено; недоступность базы честно печатается в сводке.
+        #[arg(long, value_name = "GIT_REF")]
+        base: Option<String>,
     },
     /// Линтер ARCHITECTURE-SPINE.md.
     Spine {
@@ -964,8 +981,10 @@ enum AdrCmd {
         /// Машиночитаемый вывод: единый JSON {entries, findings}.
         #[arg(long)]
         json: bool,
-        /// Exit 1 при любой находке (коллизия номеров, дубль заголовка,
-        /// пропуск даты/статуса) — гейт для CI; по умолчанию exit 0.
+        /// Exit 1 при любой находке (расхождение прозы и типизированной
+        /// записи `prose_model_divergence`, коллизия номеров внутри одного
+        /// представления, дубль заголовка, пропуск даты/статуса) — гейт для
+        /// CI; по умолчанию exit 0.
         #[arg(long)]
         strict: bool,
     },
@@ -1624,37 +1643,83 @@ async fn main() -> Result<()> {
                         .map_err(|e: String| anyhow::anyhow!(e))?,
                 ),
             };
-            let format = arch_harness::report_fmt::ReportFormat::parse(&format)
-                .map_err(anyhow::Error::msg)?;
+            // `--format json` — конверт вердикта (П7); остальные форматы —
+            // через общий рендер report_fmt.
+            let json_envelope = format.trim().eq_ignore_ascii_case("json");
+            let format = if json_envelope {
+                arch_harness::report_fmt::ReportFormat::Text
+            } else {
+                arch_harness::report_fmt::ReportFormat::parse(&format)
+                    .map_err(anyhow::Error::msg)?
+            };
             // Пороги маршрутов — из конфига ([significance], ADR-034).
             let limits = cfg
                 .significance
                 .limits()
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
-            let report = arch_harness::gate::run(
+            let report = arch_harness::gate::run_with(
                 &repo,
                 route,
                 base.as_deref(),
                 constraints.as_deref(),
                 limits,
+                &arch_harness::gate::GateRequirements::from_config(&cfg.gate),
             )?;
-            match format {
-                arch_harness::report_fmt::ReportFormat::Text => {
-                    print!("{}", arch_harness::gate::render(&report));
-                }
-                machine => {
-                    // Машинные форматы — строго в stdout (артефакт CI);
-                    // exit-код тот же, что у текста.
-                    print!(
-                        "{}",
-                        arch_harness::report_fmt::render(
-                            machine,
-                            &arch_harness::report_fmt::FmtReport::from_gate(&report),
-                        )
-                    );
+            if json_envelope {
+                let envelope = report.envelope_json();
+                let text = serde_json::to_string_pretty(&envelope)
+                    .unwrap_or_else(|_| envelope.to_string());
+                println!("{text}");
+            } else {
+                match format {
+                    arch_harness::report_fmt::ReportFormat::Text => {
+                        print!("{}", arch_harness::gate::render(&report));
+                    }
+                    machine => {
+                        // Машинные форматы — строго в stdout (артефакт CI);
+                        // exit-код тот же, что у текста.
+                        print!(
+                            "{}",
+                            arch_harness::report_fmt::render(
+                                machine,
+                                &arch_harness::report_fmt::FmtReport::from_gate(&report),
+                            )
+                        );
+                    }
                 }
             }
-            if !report.passed {
+            let code = report.outcome.exit_code();
+            if code != 0 {
+                std::process::exit(code);
+            }
+        }
+        Some(Cmd::Selftest { json }) => {
+            let report = arch_harness::selftest::run();
+            if json {
+                let invariants: Vec<serde_json::Value> = report
+                    .invariants
+                    .iter()
+                    .map(|i| {
+                        serde_json::json!({
+                            "name": i.name,
+                            "passed": i.passed,
+                            "detail": i.detail,
+                        })
+                    })
+                    .collect();
+                let out = serde_json::json!({
+                    "tool": "arch-be selftest",
+                    "passed": report.passed(),
+                    "invariants": invariants,
+                });
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string())
+                );
+            } else {
+                print!("{}", report.render());
+            }
+            if !report.passed() {
                 std::process::exit(1);
             }
         }
@@ -1685,8 +1750,9 @@ async fn main() -> Result<()> {
             } else {
                 print!("{}", arch_harness::review::render_review(&report));
             }
-            if !report.gate.passed {
-                std::process::exit(1);
+            let code = report.gate.outcome.exit_code();
+            if code != 0 {
+                std::process::exit(code);
             }
         }
         Some(Cmd::Publish { cmd }) => cmd_publish(cmd)?,
@@ -2821,6 +2887,7 @@ fn cmd_control(cfg: &arch_harness::config::Config, cmd: ControlCmd) -> Result<()
             baseline_update,
             changed_since,
             format,
+            base,
         } => {
             let c = resolve_constraints_cli(&repo, constraints);
             let options = arch_harness::control::baseline::CheckOptions {
@@ -2828,7 +2895,10 @@ fn cmd_control(cfg: &arch_harness::config::Config, cmd: ControlCmd) -> Result<()
                 baseline_update,
                 changed_since,
             };
-            let report = arch_harness::control::check_with_options(&repo, &c, &options)?;
+            // П5: сверка состава правил с git-базой — «правило выполняется»
+            // плюс «правило ещё существует» в любом канале, не только в gate.
+            let report =
+                arch_harness::control::check_anchored(&repo, &c, &options, base.as_deref())?;
             let format = arch_harness::report_fmt::ReportFormat::parse(&format)
                 .map_err(anyhow::Error::msg)?;
             if json {
@@ -3608,6 +3678,9 @@ fn cmd_evidence(cmd: EvidenceCmd) -> Result<()> {
         EvidenceCmd::Verify { dir } => {
             let v = arch_harness::evidence::verify(&dir)?;
             println!("{}", v.summary);
+            for w in &v.warnings {
+                println!("  ⚠ {w}");
+            }
             for m in &v.missing {
                 println!("  ✗ ОТСУТСТВУЕТ: {m}");
             }

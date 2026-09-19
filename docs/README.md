@@ -44,6 +44,7 @@ Spine Banking Edition — доменный харнесс solution-архите�
 | Документ | Содержание |
 |---|---|
 | [control.md](control.md) | Архитектурный контроль: significance score, fitness functions (`control check`, в т.ч. `--json`), линтер спайна, сенсоры, ADR, гейты |
+| [verdict.md](verdict.md) | Вердикт 0.3.3: PASS/FAIL/INCOMPLETE (exit 3), матрица обязательности, `ROUTE.lock`, конверт с аттестацией, `selftest`, инвариантность (ADR-040) |
 | [archify.md](archify.md) | Контур диаграмм Archify: 5 типов IR, validate/deliver/compare, quality-профили, вендоринг (ADR-027) |
 | [governance.md](governance.md) | Политика автономии (R-уровни), evidence bundle, метрики, дельта-спеки |
 | [openspec.md](openspec.md) | Адаптер OpenSpec: требования SHALL/MUST → покрытие через `covers:`, скелет CONSTRAINTS + SPINE.draft, archive-гейт |

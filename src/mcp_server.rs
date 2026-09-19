@@ -1011,6 +1011,9 @@ impl McpServe {
             /// Файл ограничений (дефолт `<repo>/.arch-handoff/CONSTRAINTS.yaml`,
             /// иначе `<repo>/CONSTRAINTS.yaml`).
             constraints: Option<String>,
+            /// База git для сверки состава правил (П5): по умолчанию —
+            /// merge-base с основной веткой, иначе HEAD.
+            base: Option<String>,
         }
         let args: Args = parse_args(args, "fitness_check")?;
         let repo = PathBuf::from(args.repo);
@@ -1027,7 +1030,18 @@ impl McpServe {
         let constraints =
             resolution.map_or_else(|| repo.join(control::HANDOFF_CONSTRAINTS_PATH), |r| r.path);
         let constraints_label = constraints.display().to_string();
-        let report = blocking("fitness_check", move || control::check(&repo, &constraints)).await?;
+        let base = args.base;
+        // П5: сверка состава правил с git-базой — анти-ослабление доступно
+        // не только составному гейту.
+        let report = blocking("fitness_check", move || {
+            control::check_anchored(
+                &repo,
+                &constraints,
+                &control::baseline::CheckOptions::default(),
+                base.as_deref(),
+            )
+        })
+        .await?;
         Ok(json!({
             "passed": report.passed,
             "repo": report.repo,
@@ -1035,6 +1049,7 @@ impl McpServe {
             "drift_note": drift_note,
             "issue_count": report.issues.len(),
             "issues": report.issues,
+            "fingerprint": report.fingerprint,
             "summary": report.summary,
         }))
     }
@@ -1954,6 +1969,10 @@ fn tool_specs() -> Vec<Value> {
                     "constraints": {
                         "type": "string",
                         "description": "Путь к CONSTRAINTS.yaml (по умолчанию <repo>/.arch-handoff/CONSTRAINTS.yaml)",
+                    },
+                    "base": {
+                        "type": "string",
+                        "description": "База git для сверки состава правил (анти-ослабление, П5): по умолчанию merge-base с основной веткой, иначе HEAD",
                     },
                 },
                 "required": ["repo"],

@@ -57,6 +57,7 @@ pub mod gate;
 pub mod handoff;
 #[cfg(feature = "harness")]
 pub mod harness;
+pub mod hash;
 pub mod hooks;
 pub mod injection;
 pub mod kb;
@@ -87,6 +88,7 @@ pub mod review;
 pub mod rubric;
 pub mod rules_suggest;
 pub mod secrets;
+pub mod selftest;
 #[cfg(feature = "harness")]
 pub mod subagent;
 pub mod survey;

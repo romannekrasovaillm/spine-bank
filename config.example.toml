@@ -536,3 +536,16 @@ state_dir = "~/.arch-harness/state"      # персистентное состо
 memory_file = "~/.arch-harness/MEMORY.md"  # глобальная md-память: дописывается
                                            # в системный промпт каждой сессии
                                            # (см. /memory и `arch-be memory`)
+
+# -----------------------------------------------------------------------------
+# Матрица обязательных составляющих гейта по маршруту (ADR-040, П1 ДКА).
+# SKIP обязательной составляющей даёт итог INCOMPLETE и exit 3, а не PASS;
+# SKIP необязательной допустим (fail-soft на инфраструктуру первого подключения).
+# Имена — составляющие `arch-be gate`: fitness, delta_guard, rule_weakened,
+# spine_lint, trace_check, sensors, nfr, evidence_verify.
+# -----------------------------------------------------------------------------
+[gate.required]
+fast     = ["fitness", "spine_lint"]
+standard = ["fitness", "spine_lint", "trace_check", "rule_weakened", "nfr"]
+critical = ["fitness", "spine_lint", "trace_check", "rule_weakened",
+            "delta_guard", "sensors", "nfr", "evidence_verify"]

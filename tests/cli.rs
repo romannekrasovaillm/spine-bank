@@ -686,10 +686,11 @@ fn gate_override_legalizes_weakening_exits_0() {
         .stdout(contains("Итог: PASS"));
 }
 
-/// Fail-soft: каталог без git и без ограничений — составляющие SKIP, exit 0
-/// (контракт хуков `arch-be connect`: нет входа — гейт молча пропускается).
+/// Fail-soft на инфраструктуру сохранён (FAIL-составляющих нет), но П1 ДКА:
+/// SKIP обязательных для fail-safe Critical составляющих даёт INCOMPLETE и
+/// exit 3, а не ложный зелёный PASS.
 #[test]
-fn gate_without_git_and_constraints_is_skip_and_exits_0() {
+fn gate_without_git_and_constraints_is_incomplete_and_exits_3() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let plain = tmp.path().join("plain");
     std::fs::create_dir_all(&plain).expect("mkdir plain");
@@ -697,16 +698,17 @@ fn gate_without_git_and_constraints_is_skip_and_exits_0() {
     let mut cmd = arch_cmd(tmp.path());
     cmd.arg("gate").arg("--repo").arg(plain.as_os_str());
     cmd.assert()
-        .success()
+        .code(3)
         .stdout(contains("[SKIP] fitness"))
         .stdout(contains("[SKIP] delta_guard"))
         .stdout(contains("[SKIP] rule_weakened"))
         .stdout(contains("fail-safe маршрут Critical"))
-        .stdout(contains("Итог: PASS"));
+        .stdout(contains("Итог: INCOMPLETE"));
 }
 
 /// Явный `--route standard` добавляет составляющие nfr/evidence (здесь —
-/// SKIP за неимением model/ и бандлов); неизвестный маршрут — ошибка clap.
+/// SKIP за неимением model/ и бандлов) — итог INCOMPLETE, exit 3; неизвестный
+/// маршрут — ошибка clap.
 #[test]
 fn gate_explicit_route_adds_standard_components() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -719,10 +721,11 @@ fn gate_explicit_route_adds_standard_components() {
         .arg("--route")
         .arg("standard");
     cmd.assert()
-        .success()
+        .code(3)
         .stdout(contains("Маршрут: Standard (явный --route"))
         .stdout(contains("[SKIP] nfr"))
-        .stdout(contains("[SKIP] evidence_verify"));
+        .stdout(contains("[SKIP] evidence_verify"))
+        .stdout(contains("Итог: INCOMPLETE"));
 
     let mut cmd = arch_cmd(tmp.path());
     cmd.arg("gate")

@@ -398,10 +398,7 @@ pub fn architect_review(
     let mut gate_report = gate::run(repo, None, base, constraints, limits)?;
     gate_report.components.push(component_model_validate(repo));
     gate_report.components.push(component_contracts(repo));
-    gate_report.passed = gate_report
-        .components
-        .iter()
-        .all(|c| c.status != GateStatus::Fail);
+    gate_report.recompute();
     Ok(ReviewReport { gate: gate_report })
 }
 
@@ -442,12 +439,25 @@ pub fn render_review(report: &ReviewReport) -> String {
     let _ = writeln!(
         out,
         "Итог: {}",
-        if gate.passed {
-            "PASS".to_string()
-        } else {
-            format!("FAIL — провалено секций: {failed} (exit 1)")
+        match gate.outcome {
+            crate::gate::GateOutcome::Pass => "PASS".to_string(),
+            crate::gate::GateOutcome::Fail => format!("FAIL — провалено секций: {failed} (exit 1)"),
+            crate::gate::GateOutcome::Incomplete => format!(
+                "INCOMPLETE — обязательные секции без входа: {} (exit 3)",
+                gate.not_checked.join(", ")
+            ),
         }
     );
+    if !gate.not_checked.is_empty() {
+        let _ = writeln!(
+            out,
+            "Не проверено (обязательно для маршрута): {}",
+            gate.not_checked.join(", ")
+        );
+    }
+    if !gate.attestation.is_empty() {
+        let _ = writeln!(out, "Аттестация вердикта: sha256:{}", gate.attestation);
+    }
     out
 }
 
@@ -464,6 +474,7 @@ pub fn review_json(report: &ReviewReport) -> Value {
             json!({
                 "name": c.name,
                 "status": status_label(c.status),
+                "required": gate.required.iter().any(|r| r == c.name),
                 "detail": c.detail,
                 "findings": c.findings.iter().take(MAX_SECTION_FINDINGS).collect::<Vec<_>>(),
                 "findings_total": c.findings.len(),
@@ -473,6 +484,10 @@ pub fn review_json(report: &ReviewReport) -> Value {
     json!({
         "tool": "architect_review",
         "passed": gate.passed,
+        "outcome": gate.outcome.label(),
+        "exit_code": gate.outcome.exit_code(),
+        "not_checked": gate.not_checked,
+        "attestation": gate.attestation,
         "repo": gate.repo.display().to_string(),
         "route": gate.route.to_string(),
         "route_auto": gate.route_auto,

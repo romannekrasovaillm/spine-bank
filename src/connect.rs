@@ -315,7 +315,113 @@ pub fn connect(opts: &ConnectOptions) -> Result<ConnectReport> {
         Host::Omp => connect_omp(opts, &mut report)?,
         Host::Generic => connect_generic(opts, &mut report),
     }
+    write_connect_manifest(opts, &mut report)?;
     Ok(report)
+}
+
+/// Провенанс установки (П3 ДКА): `connect` записывает
+/// `.arch-handoff/connect-manifest.json` — какие пути положил сам Spine,
+/// с версией и хэшами. Детекторы значимости ([`crate::control`]) исключают
+/// эти пути, поэтому подключение инструмента не меняет маршрут проекта.
+///
+/// # Errors
+/// Ошибка записи манифеста (нет прав на `.arch-handoff/`).
+fn write_connect_manifest(opts: &ConnectOptions, report: &mut ConnectReport) -> Result<()> {
+    if opts.dry_run {
+        return Ok(());
+    }
+    let rel = |p: &Path| {
+        p.strip_prefix(&opts.dir)
+            .ok()
+            .map(|r| r.to_string_lossy().replace('\\', "/"))
+    };
+    let path = opts.dir.join(crate::control::CONNECT_MANIFEST_PATH);
+    // Манифест — про установленное СОСТОЯНИЕ, а не про текущий прогон: слияние
+    // с предыдущим делает повтор `connect` байт-в-байт идемпотентным и не
+    // «теряет» пути, которые в этом прогоне уже были без изменений.
+    let prev: Option<Value> = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok());
+    let mut paths: Vec<String> = prev
+        .as_ref()
+        .and_then(|v| v.get("paths"))
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut sha256: serde_json::Map<String, Value> = prev
+        .as_ref()
+        .and_then(|v| v.get("sha256"))
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    for p in report.created.iter().chain(report.merged.iter()) {
+        if let Some(r) = rel(p) {
+            paths.push(r.clone());
+            if p.is_file() {
+                if let Ok(bytes) = std::fs::read(p) {
+                    sha256.insert(r, json!(crate::hash::sha256_hex(&bytes)));
+                }
+            }
+        }
+    }
+    // Каталоги скиллов — паттерном (файлов много, исключается весь каталог).
+    for root in [
+        ".claude/skills",
+        ".qwen/skills",
+        ".gigacode/skills",
+        ".kimi-code/skills",
+    ] {
+        if opts.dir.join(root).is_dir() {
+            paths.push(format!("{root}/**"));
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    // Пути, которых больше нет, из манифеста выпадают.
+    paths.retain(|p| p.ends_with("/**") || opts.dir.join(p).exists());
+    sha256.retain(|k, _| paths.contains(k));
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let manifest = json!({
+        "arch_be": env!("CARGO_PKG_VERSION"),
+        "host": format!("{:?}", opts.host).to_ascii_lowercase(),
+        "installed_at": chrono::Local::now().to_rfc3339(),
+        "paths": paths,
+        "sha256": Value::Object(sha256),
+    });
+    // Идемпотентность: неизменившийся манифест не перезаписывается (иначе
+    // `installed_at` ломает байт-в-байт повтор `connect`).
+    let unchanged = prev.as_ref().is_some_and(|p| {
+        p.get("paths") == manifest.get("paths")
+            && p.get("sha256") == manifest.get("sha256")
+            && p.get("host") == manifest.get("host")
+            && p.get("arch_be") == manifest.get("arch_be")
+    });
+    if unchanged {
+        report.notes.push(format!(
+            "провенанс установки: {} (без изменений)",
+            crate::control::CONNECT_MANIFEST_PATH
+        ));
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| HarnessError::io(parent, e))?;
+    }
+    let text = serde_json::to_string_pretty(&manifest)
+        .map_err(|e| HarnessError::Config(format!("сериализация connect-manifest: {e}")))?;
+    std::fs::write(&path, text).map_err(|e| HarnessError::io(&path, e))?;
+    report.notes.push(format!(
+        "провенанс установки: {} ({} путей исключены из детекторов значимости)",
+        crate::control::CONNECT_MANIFEST_PATH,
+        manifest["paths"].as_array().map_or(0, Vec::len)
+    ));
+    Ok(())
 }
 
 /// Описание нашего MCP-сервера для JSON-конфигов хостов.

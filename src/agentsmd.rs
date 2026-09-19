@@ -492,11 +492,32 @@ fn embedded_hash(existing: &str) -> Option<u64> {
 /// Линтер AGENTS.md: наличие зоны, свежесть (хэш входов), валидность ссылок,
 /// заглушки.
 ///
+/// Отсутствие файла — находка о проекте (`agents_md_missing`) с `fix_hint`,
+/// а не технический io error (П10 ДКА: технический отказ не равен находке,
+/// но и не прячется за сбоем инструмента).
+///
 /// # Errors
-/// AGENTS.md отсутствует/не читается.
+/// AGENTS.md есть, но не читается (права, кодировка).
 pub fn lint(repo: &Path) -> Result<Vec<LintIssue>> {
     let path = repo.join("AGENTS.md");
-    let text = std::fs::read_to_string(&path).map_err(|e| HarnessError::io(&path, e))?;
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(vec![LintIssue {
+                file: path,
+                line: 0,
+                rule: "agents_md_missing".into(),
+                message:
+                    "AGENTS.md отсутствует — карта репозитория и инварианты не доставлены агенту"
+                        .into(),
+                severity: "error".into(),
+                fix_hint: Some("arch-be agents-md refresh <repo> — сгенерировать AGENTS.md".into()),
+                skill: Some("spine-content-bootstrap".into()),
+                ..LintIssue::default()
+            }]);
+        }
+        Err(e) => return Err(HarnessError::io(&path, e)),
+    };
     let mut issues = Vec::new();
     let push =
         |issues: &mut Vec<LintIssue>, line: usize, rule: &str, message: String, severity: &str| {

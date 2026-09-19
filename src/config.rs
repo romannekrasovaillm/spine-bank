@@ -47,6 +47,9 @@ pub struct Config {
     pub fleet: FleetConfig,
     /// Пороги маршрутизации значимости (Architecture Significance Score).
     pub significance: SignificanceConfig,
+    /// Матрица обязательных составляющих гейта по маршруту (П1 ДКА, ADR-039):
+    /// SKIP обязательной составляющей даёт INCOMPLETE и exit 3, а не PASS.
+    pub gate: GateConfig,
     /// Пути к ассетам, отчётам и сессиям.
     pub paths: PathsConfig,
     /// Откуда конфиг загружен (нужно `harness_run` для горячего
@@ -792,6 +795,61 @@ impl SignificanceConfig {
     }
 }
 
+/// Матрица обязательных составляющих составного гейта по маршруту (П1 ДКА).
+///
+/// Имена — имена составляющих `arch-be gate`: `fitness`, `delta_guard`,
+/// `rule_weakened`, `spine_lint`, `trace_check`, `sensors`, `nfr`,
+/// `evidence_verify`. Пустой список = на маршруте обязательных нет.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GateConfig {
+    /// Обязательные составляющие по маршрутам.
+    pub required: RequiredRules,
+}
+
+impl Default for GateConfig {
+    fn default() -> Self {
+        Self {
+            required: RequiredRules::default(),
+        }
+    }
+}
+
+/// Списки обязательных составляющих для Fast / Standard / Critical.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RequiredRules {
+    /// Маршрут Fast.
+    pub fast: Vec<String>,
+    /// Маршрут Standard.
+    pub standard: Vec<String>,
+    /// Маршрут Critical.
+    pub critical: Vec<String>,
+}
+
+impl Default for RequiredRules {
+    fn default() -> Self {
+        let base = vec!["fitness".to_string(), "spine_lint".to_string()];
+        let mut standard = base.clone();
+        standard.extend(
+            ["trace_check", "rule_weakened", "nfr"]
+                .iter()
+                .map(|s| (*s).to_string()),
+        );
+        let mut critical = standard.clone();
+        critical.extend(
+            ["delta_guard", "sensors", "evidence_verify"]
+                .iter()
+                .map(|s| (*s).to_string()),
+        );
+        Self {
+            fast: base,
+            standard,
+            critical,
+        }
+    }
+}
+
 /// Пути к ассетам и данным харнесса.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1062,6 +1120,7 @@ impl Default for Config {
             judge: JudgeConfig::default(),
             fleet: FleetConfig::default(),
             significance: SignificanceConfig::default(),
+            gate: GateConfig::default(),
             paths: PathsConfig::default(),
             loaded_from: None,
         }

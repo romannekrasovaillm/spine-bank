@@ -251,9 +251,10 @@ impl FmtReport {
                 report.repo.display(),
                 report.route,
                 report.route_note,
-                if report.passed { "PASS" } else { "FAIL" }
+                report.outcome.label()
             ),
-            passed: report.passed,
+            // FAIL и INCOMPLETE для CI — не зелёные (exit 1 / exit 3).
+            passed: report.outcome == crate::gate::GateOutcome::Pass,
             groups,
         }
     }
@@ -777,12 +778,12 @@ fn render_markdown(report: &FmtReport) -> String {
 mod tests {
     use super::*;
     use crate::control::Route;
-    use crate::gate::{GateComponent, GateFinding, GateReport, GateStatus};
+    use crate::gate::{GateComponent, GateFinding, GateOutcome, GateReport, GateStatus};
 
     /// Отчёт-фикстура гейта: одна FAIL-составляющая с адресной находкой,
     /// одна PASS, одна SKIP.
     fn gate_report() -> GateReport {
-        GateReport {
+        let mut report = GateReport {
             repo: std::path::PathBuf::from("."),
             route: Route::Fast,
             route_auto: true,
@@ -813,8 +814,15 @@ mod tests {
                     findings: Vec::new(),
                 },
             ],
-            passed: false,
-        }
+            outcome: GateOutcome::Pass,
+            required: Vec::new(),
+            not_checked: Vec::new(),
+            inputs: Vec::new(),
+            attestation: String::new(),
+            passed: true,
+        };
+        report.recompute();
+        report
     }
 
     /// FAIL-группа без находок (сбой выполнения) даёт синтетическую находку.
@@ -896,7 +904,7 @@ mod tests {
         let mut report = gate_report();
         report.components[0].status = GateStatus::Pass;
         report.components[0].findings.clear();
-        report.passed = true;
+        report.recompute();
         let norm = FmtReport::from_gate(&report);
         let sarif = render(ReportFormat::Sarif, &norm);
         let doc: serde_json::Value = serde_json::from_str(&sarif).expect("валидный JSON");

@@ -221,6 +221,9 @@ pub struct DiffTriggers {
     pub triggers: BTreeSet<String>,
     /// Основания срабатываний («триггер: файл») — для отчёта и аудита.
     pub evidence: Vec<String>,
+    /// Пути, исключённые из детекторов манифестом `connect`/`.spineignore`
+    /// (П3: исключение видимо, а не молчаливо).
+    pub excluded: Vec<String>,
 }
 
 impl DiffTriggers {
@@ -331,6 +334,98 @@ fn diff_regex(pattern: &str) -> Result<Regex> {
         .map_err(|e| HarnessError::Control(format!("внутренний regex anti-bypass: {e}")))
 }
 
+/// Манифест установки `connect` (П3): провенанс того, что положил сам Spine.
+pub const CONNECT_MANIFEST_PATH: &str = ".arch-handoff/connect-manifest.json";
+
+/// Файл ручных исключений детекторов (синтаксис, близкий к gitignore).
+pub const SPINEIGNORE_PATH: &str = ".spineignore";
+
+/// Паттерны исключения путей из детекторов значимости: манифест `connect`
+/// (установленное самим Spine не должно менять маршрут проекта, Д3) плюс
+/// ручной `.spineignore`.
+fn exclusion_patterns(repo: &Path) -> Vec<String> {
+    let mut patterns: Vec<String> = Vec::new();
+    if let Ok(text) = std::fs::read_to_string(repo.join(CONNECT_MANIFEST_PATH)) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+            if let Some(arr) = v.get("paths").and_then(serde_json::Value::as_array) {
+                patterns.extend(arr.iter().filter_map(|x| x.as_str()).map(str::to_string));
+            }
+        }
+    }
+    if let Ok(text) = std::fs::read_to_string(repo.join(SPINEIGNORE_PATH)) {
+        for line in text.lines() {
+            let l = line.trim();
+            if l.is_empty() || l.starts_with('#') {
+                continue;
+            }
+            patterns.push(l.to_string());
+        }
+    }
+    patterns
+}
+
+/// Путь исключён хотя бы одним паттерном.
+fn path_excluded(patterns: &[String], path: &str) -> bool {
+    let path = path.trim_start_matches("./");
+    patterns
+        .iter()
+        .any(|p| glob_match(p.trim_start_matches('/').trim_end_matches('/'), path))
+}
+
+/// Простое сопоставление пути с паттерном-исключением: `dir/**` — весь
+/// подкаталог, `*` — любой фрагмент внутри сегмента, иначе точное имя.
+fn glob_match(pattern: &str, path: &str) -> bool {
+    if pattern.is_empty() {
+        return false;
+    }
+    if let Some(prefix) = pattern.strip_suffix("/**") {
+        return path == prefix || path.starts_with(&format!("{prefix}/"));
+    }
+    if let Some(prefix) = pattern.strip_suffix('/') {
+        return path.starts_with(prefix);
+    }
+    if let Some(prefix) = pattern
+        .split("**")
+        .next()
+        .filter(|_| pattern.contains("**"))
+    {
+        return path.starts_with(prefix);
+    }
+    let p: Vec<&str> = pattern.split('/').collect();
+    let s: Vec<&str> = path.split('/').collect();
+    p.len() == s.len() && p.iter().zip(s.iter()).all(|(pp, ss)| segment_match(pp, ss))
+}
+
+/// Сопоставление одного сегмента пути с сегментом паттерна (`*` — glob).
+fn segment_match(pat: &str, seg: &str) -> bool {
+    if pat == "*" {
+        return true;
+    }
+    if !pat.contains('*') {
+        return pat == seg;
+    }
+    let parts: Vec<&str> = pat.split('*').collect();
+    let mut rest = seg;
+    for (i, part) in parts.iter().enumerate() {
+        if part.is_empty() {
+            continue;
+        }
+        if i == 0 {
+            if !rest.starts_with(part) {
+                return false;
+            }
+            rest = &rest[part.len()..];
+        } else if i == parts.len() - 1 {
+            return rest.ends_with(part);
+        } else if let Some(pos) = rest.find(part) {
+            rest = &rest[pos + part.len()..];
+        } else {
+            return false;
+        }
+    }
+    true
+}
+
 /// Механический вывод триггеров значимости из git-диффа (S-1, ADR-034).
 ///
 /// Диапазон: `git_ref = None` — рабочее дерево против `HEAD` (staged +
@@ -346,7 +441,8 @@ fn diff_regex(pattern: &str) -> Result<Regex> {
 /// - `irreversible_migration` — в диффе файла миграций (каталог `migrations/`
 ///   или `*.sql`) есть `DROP TABLE`/`TRUNCATE`/`DROP COLUMN`;
 /// - `new_datastore` — в конфигах добавлены строки подключения
-///   `postgres://`/`mysql://`/`kafka`/`mongodb`/`redis://`.
+///   (`postgres://`/`postgresql://`/`mysql://`/`mongodb://`/`redis://`/
+///   `kafka://`/`bootstrap.servers`), а не голое слово.
 ///
 /// # Errors
 /// Не git-репозиторий, git недоступен, некорректный `GIT_REF`.
@@ -421,8 +517,31 @@ pub fn detect_diff_triggers(repo: &Path, git_ref: Option<&str>) -> Result<DiffTr
         }
     }
 
+    // П3 (Д3): пути, установленные самим Spine (`connect`), и явные
+    // исключения `.spineignore` не участвуют в оценке значимости изменения
+    // проекта — иначе подключение инструмента завышает маршрут.
+    let patterns = exclusion_patterns(repo);
+    let mut excluded: Vec<String> = Vec::new();
+    if !patterns.is_empty() {
+        files.retain(|(_, p)| {
+            if path_excluded(&patterns, p) {
+                excluded.push(p.clone());
+                false
+            } else {
+                true
+            }
+        });
+        added.retain(|k, _| !path_excluded(&patterns, k));
+        excluded.sort();
+        excluded.dedup();
+    }
+
     let re_migration = diff_regex(r"(?i)\b(?:drop\s+table|truncate|drop\s+column)\b")?;
-    let re_datastore = diff_regex(r"(?i)(?:postgres://|mysql://|mongodb|redis://|kafka)")?;
+    // Строки подключения, а не голое слово (ДКА: `kafka` без схемы ловило
+    // любое упоминание в YAML/JSON и давало ложный `new_datastore`).
+    let re_datastore = diff_regex(
+        r"(?i)(?:postgres(?:ql)?://|mysql://|mongodb(?:\+srv)?://|redis://|kafka://|bootstrap\.servers)",
+    )?;
 
     let mut found = DiffTriggers::default();
     for (code, path) in &files {
@@ -498,6 +617,7 @@ pub fn detect_diff_triggers(repo: &Path, git_ref: Option<&str>) -> Result<DiffTr
             }
         }
     }
+    found.excluded = excluded;
     Ok(found)
 }
 
@@ -909,6 +1029,19 @@ pub struct RuleDuration {
     pub ms: u64,
 }
 
+/// Отпечаток состава реестра правил (П5 ДКА): SHA-256 отсортированного
+/// набора `id|name|severity` плюс счётчики. Делает строку «14 правил» при
+/// вчерашних 15 самостоятельным сигналом, а не молчаливым зелёным.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RulesFingerprint {
+    /// SHA-256 состава правил (полный hex).
+    pub hash: String,
+    /// Число правил в реестре.
+    pub rules: usize,
+    /// Число error-правил.
+    pub errors: usize,
+}
+
 /// Отчёт fitness-контроля.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FitnessReport {
@@ -954,6 +1087,9 @@ pub struct FitnessReport {
     /// v1.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skipped_unknown: Vec<SkippedUnknownRule>,
+    /// Отпечаток состава реестра правил (П5). Аддитивное поле SDK-контракта v1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<RulesFingerprint>,
 }
 
 /// Тип fitness-правила из `CONSTRAINTS.yaml`.
@@ -2111,6 +2247,8 @@ pub fn check_with_options(
     let (override_infos, override_findings, disabled) =
         evaluate_overrides(&resolved.overrides, &resolved.rules, constraints);
 
+    // П5: отпечаток состава реестра — до перемещения правил.
+    let fingerprint = Some(rules_fingerprint_of(&resolved.rules));
     let rules = resolved.rules;
     let skipped_unknown = resolved.skipped_unknown;
     let rule_refs: Vec<&FitnessRule> = rules
@@ -2280,6 +2418,16 @@ pub fn check_with_options(
             types.into_iter().collect::<Vec<_>>().join(", ")
         );
     }
+    if let Some(fp) = &fingerprint {
+        // Запись в String не может завершиться ошибкой — игнор безопасен.
+        let _ = write!(
+            summary,
+            "; реестр: {} правил (error: {}), отпечаток {}",
+            fp.rules,
+            fp.errors,
+            fp.hash.get(..8).unwrap_or(fp.hash.as_str())
+        );
+    }
     Ok(FitnessReport {
         repo: repo.to_path_buf(),
         passed: errors == 0,
@@ -2293,7 +2441,215 @@ pub fn check_with_options(
         changed_since: options.changed_since.clone(),
         changed_files: changed.as_ref().map(BTreeSet::len),
         skipped_unknown,
+        fingerprint,
     })
+}
+
+/// Отпечаток состава реестра правил (П5): SHA-256 отсортированного набора
+/// `id|name|severity` + счётчики.
+fn rules_fingerprint_of(rules: &[FitnessRule]) -> RulesFingerprint {
+    let mut keys: Vec<String> = rules
+        .iter()
+        .map(|r| {
+            format!(
+                "{}|{}|{}",
+                r.id.as_deref().unwrap_or("-"),
+                r.name,
+                r.severity
+            )
+        })
+        .collect();
+    keys.sort();
+    RulesFingerprint {
+        hash: crate::hash::sha256_hex(keys.join("\n").as_bytes()),
+        rules: rules.len(),
+        errors: rules
+            .iter()
+            .filter(|r| normalize_severity(&r.severity, &r.name).map_or(true, |s| s == "error"))
+            .count(),
+    }
+}
+
+/// Итог сверки состава правил с git-базой (П5).
+#[derive(Debug, Clone)]
+pub struct RuleAnchor {
+    /// База сверки (ревизия git).
+    pub base: Option<String>,
+    /// Сверка выполнена.
+    pub checked: bool,
+    /// Причина, если сверка не выполнена (честная строка, а не молчание).
+    pub note: Option<String>,
+    /// Находки `rule_weakened`.
+    pub issues: Vec<LintIssue>,
+}
+
+/// База сверки по умолчанию: точка ответвления от основной ветки
+/// (`merge-base HEAD origin/main|main|origin/master|master`), иначе `HEAD`.
+/// `None` — git-база недоступна.
+#[must_use]
+pub fn default_anchor_base(repo: &Path) -> Option<String> {
+    for branch in ["origin/main", "main", "origin/master", "master"] {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(["merge-base", "HEAD", branch])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output();
+        if let Ok(out) = out {
+            if out.status.success() {
+                let rev = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !rev.is_empty() {
+                    return Some(rev);
+                }
+            }
+        }
+    }
+    let head_ok = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["rev-parse", "--verify", "--quiet", "HEAD"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
+    head_ok.then(|| "HEAD".to_string())
+}
+
+/// Сверка состава правил с git-базой (П5, Д4): анти-ослабление доступно не
+/// только составному гейту. Никогда не падает: недоступность базы — честный
+/// `note`, а не молчаливый PASS.
+#[must_use]
+pub fn rule_anchor(repo: &Path, constraints: &Path, base: Option<&str>) -> RuleAnchor {
+    let Some(rev) = base
+        .map(str::to_string)
+        .or_else(|| default_anchor_base(repo))
+    else {
+        return RuleAnchor {
+            base: None,
+            checked: false,
+            note: Some("git-база недоступна — сверка состава правил не выполнена".into()),
+            issues: Vec::new(),
+        };
+    };
+    if !constraints.is_file() {
+        return RuleAnchor {
+            base: Some(rev),
+            checked: false,
+            note: Some("нет файла ограничений — сверять нечего".into()),
+            issues: Vec::new(),
+        };
+    }
+    let (Ok(abs_repo), Ok(abs_constraints)) = (repo.canonicalize(), constraints.canonicalize())
+    else {
+        return RuleAnchor {
+            base: Some(rev),
+            checked: false,
+            note: Some("путь репозитория/реестра не канонизируется".into()),
+            issues: Vec::new(),
+        };
+    };
+    let Ok(rel) = abs_constraints.strip_prefix(&abs_repo) else {
+        return RuleAnchor {
+            base: Some(rev),
+            checked: false,
+            note: Some("реестр вне репозитория — сравнение невозможно".into()),
+            issues: Vec::new(),
+        };
+    };
+    let git_rel = rel.to_string_lossy().replace('\\', "/");
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .arg("show")
+        .arg(format!("{rev}:{git_rel}"))
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output();
+    match out {
+        Ok(out) if out.status.success() => {
+            let base_src = String::from_utf8_lossy(&out.stdout).into_owned();
+            let current_src = match std::fs::read_to_string(constraints) {
+                Ok(text) => text,
+                Err(e) => {
+                    return RuleAnchor {
+                        base: Some(rev),
+                        checked: false,
+                        note: Some(format!("сбой чтения реестра: {e}")),
+                        issues: Vec::new(),
+                    };
+                }
+            };
+            match rule_weakened(&current_src, &base_src, constraints) {
+                Ok(issues) => RuleAnchor {
+                    base: Some(rev),
+                    checked: true,
+                    note: None,
+                    issues,
+                },
+                Err(e) => RuleAnchor {
+                    base: Some(rev),
+                    checked: false,
+                    note: Some(format!("сбой сравнения: {e}")),
+                    issues: Vec::new(),
+                },
+            }
+        }
+        _ => {
+            let note = format!("в базе '{rev}' файла {git_rel} нет — новый реестр");
+            RuleAnchor {
+                base: Some(rev),
+                checked: false,
+                note: Some(note),
+                issues: Vec::new(),
+            }
+        }
+    }
+}
+
+/// [`check_with_options`] + сверка состава правил с git-базой (П5): «правило
+/// выполняется» дополняется вопросом «правило ещё существует». Вызывается
+/// каналами `control check` и MCP `fitness_check`.
+///
+/// # Errors
+/// Те же, что у [`check_with_options`].
+pub fn check_anchored(
+    repo: &Path,
+    constraints: &Path,
+    options: &baseline::CheckOptions,
+    base: Option<&str>,
+) -> Result<FitnessReport> {
+    let mut report = check_with_options(repo, constraints, options)?;
+    let anchor = rule_anchor(repo, constraints, base);
+    if anchor.checked {
+        if anchor.issues.is_empty() {
+            let _ = write!(
+                report.summary,
+                "; сверка состава правил с {}: ослаблений нет",
+                anchor.base.as_deref().unwrap_or("?")
+            );
+        } else {
+            let base = anchor.base.clone().unwrap_or_else(|| "?".into());
+            let count = anchor.issues.len();
+            report.issues.extend(anchor.issues);
+            let _ = write!(
+                report.summary,
+                "; сверка состава правил с {base}: ослаблений {count}"
+            );
+            // Итог пересчитывается по полному набору находок.
+            report.passed = !report
+                .issues
+                .iter()
+                .any(|i| i.severity.eq_ignore_ascii_case("error"));
+        }
+    } else if let Some(note) = anchor.note {
+        let _ = write!(
+            report.summary,
+            "; сверка состава правил не выполнена: {note}"
+        );
+    }
+    Ok(report)
 }
 
 // --- Анти-ослабление гейта (находка `rule_weakened`, `arch-be gate`) -------
@@ -4889,9 +5245,12 @@ mod tests {
              \x20   command: 'false'\n",
         );
         let report = check(&repo, &constraints).unwrap();
-        assert_eq!(
-            report.summary,
-            "Правил: 7, нарушений: 4 (error: 3, warn: 1)"
+        assert!(
+            report
+                .summary
+                .starts_with("Правил: 7, нарушений: 4 (error: 3, warn: 1)"),
+            "{}",
+            report.summary
         );
         assert!(!report.passed);
         let by_rule = |name: &str| report.issues.iter().find(|i| i.rule == name).unwrap();
@@ -5197,9 +5556,12 @@ mod tests {
             "max_age и старые типы парсятся и проходят: {:?}",
             report.issues
         );
-        assert_eq!(
-            report.summary,
-            "Правил: 4, нарушений: 0 (error: 0, warn: 0)"
+        assert!(
+            report
+                .summary
+                .starts_with("Правил: 4, нарушений: 0 (error: 0, warn: 0)"),
+            "{}",
+            report.summary
         );
         // max_age без обязательных полей — ошибка парсинга правила.
         let no_days = write_file(
@@ -5248,9 +5610,12 @@ mod tests {
         assert_eq!(report.issues.len(), 1);
         assert_eq!(report.issues[0].severity, "warn");
         assert!(report.issues[0].message.contains("устарел"));
-        assert_eq!(
-            report.summary,
-            "Правил: 1, нарушений: 1 (error: 0, warn: 1)"
+        assert!(
+            report
+                .summary
+                .starts_with("Правил: 1, нарушений: 1 (error: 0, warn: 1)"),
+            "{}",
+            report.summary
         );
     }
 
@@ -5397,9 +5762,12 @@ mod tests {
         let report = check(&repo, &constraints).unwrap();
         assert!(report.passed);
         assert!(report.issues.is_empty());
-        assert_eq!(
-            report.summary,
-            "Правил: 2, нарушений: 0 (error: 0, warn: 0)"
+        assert!(
+            report
+                .summary
+                .starts_with("Правил: 2, нарушений: 0 (error: 0, warn: 0)"),
+            "{}",
+            report.summary
         );
     }
 
@@ -7097,5 +7465,87 @@ mod command_capture_tests {
             "rules:\n  - name: x\n    type: must_contain\n    glob: 123\n",
         );
         assert!(load_fitness_rules(&c).is_err(), "битая запись — ошибка");
+    }
+
+    /// П5: отпечаток состава реестра меняется при удалении правила.
+    #[test]
+    fn rules_fingerprint_tracks_composition() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path();
+        let c = repo.join("CONSTRAINTS.yaml");
+        std::fs::write(
+            &c,
+            "rules:\n  - id: C-1\n    name: a\n    type: file_exists\n    path: \"A\"\n    severity: error\n  - id: C-2\n    name: b\n    type: file_exists\n    path: \"B\"\n    severity: warn\n",
+        )
+        .expect("write");
+        let first = check(repo, &c)
+            .expect("check")
+            .fingerprint
+            .expect("отпечаток");
+        assert_eq!(first.rules, 2);
+        assert_eq!(first.errors, 1);
+        std::fs::write(
+            &c,
+            "rules:\n  - id: C-2\n    name: b\n    type: file_exists\n    path: \"B\"\n    severity: warn\n",
+        )
+        .expect("write");
+        let second = check(repo, &c)
+            .expect("check")
+            .fingerprint
+            .expect("отпечаток");
+        assert_eq!(second.rules, 1);
+        assert_ne!(
+            first.hash, second.hash,
+            "состав реестра изменился — отпечаток обязан измениться"
+        );
+    }
+
+    /// П5 (Д4): `control check`-канал ловит исчезновение правила через
+    /// сверку с git-базой, а не только составной гейт.
+    #[test]
+    fn check_anchored_flags_removed_rule() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path();
+        let c = repo.join("CONSTRAINTS.yaml");
+        let two = "rules:\n  - id: C-1\n    name: a\n    type: file_exists\n    path: \"A\"\n    severity: error\n  - id: C-2\n    name: b\n    type: file_exists\n    path: \"B\"\n    severity: error\n";
+        std::fs::write(&c, two).expect("write");
+        let git = |args: &[&str]| {
+            let status = Command::new("git")
+                .arg("-C")
+                .arg(repo)
+                .args(args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .expect("git");
+            assert!(status.success(), "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        git(&["add", "CONSTRAINTS.yaml"]);
+        git(&[
+            "-c",
+            "user.email=t@example.invalid",
+            "-c",
+            "user.name=test",
+            "commit",
+            "-q",
+            "-m",
+            "init",
+        ]);
+        // Правило C-1 удалено из рабочего дерева (антикейс «зеленения»).
+        std::fs::write(
+            &c,
+            "rules:\n  - id: C-2\n    name: b\n    type: file_exists\n    path: \"B\"\n    severity: error\n",
+        )
+        .expect("write");
+        let report =
+            check_anchored(repo, &c, &baseline::CheckOptions::default(), None).expect("check");
+        assert!(!report.passed, "{}", report.summary);
+        assert!(
+            report.issues.iter().any(|i| i.rule == "rule_weakened"),
+            "находки: {:?}",
+            report.issues.iter().map(|i| &i.rule).collect::<Vec<_>>()
+        );
     }
 }

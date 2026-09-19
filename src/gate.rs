@@ -202,6 +202,80 @@ impl GateComponent {
     }
 }
 
+/// Итог гейта — три состояния (П1 ДКА): бинарный PASS/FAIL не различал
+/// «проверено и чисто» и «проверять было нечего».
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GateOutcome {
+    /// Все обязательные для маршрута составляющие пройдены, FAIL нет.
+    Pass,
+    /// Есть FAIL.
+    Fail,
+    /// FAIL нет, но обязательная для маршрута составляющая в SKIP (нет входа):
+    /// «зелёный» не полон, выпускать по нему нельзя.
+    Incomplete,
+}
+
+impl GateOutcome {
+    /// Метка для отчёта и конверта.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Pass => "PASS",
+            Self::Fail => "FAIL",
+            Self::Incomplete => "INCOMPLETE",
+        }
+    }
+
+    /// Exit-код канала: 0 — PASS, 1 — FAIL, 3 — INCOMPLETE (отличим в CI).
+    #[must_use]
+    pub fn exit_code(self) -> i32 {
+        match self {
+            Self::Pass => 0,
+            Self::Fail => 1,
+            Self::Incomplete => 3,
+        }
+    }
+}
+
+/// Матрица обязательных составляющих гейта по маршруту (П1 ДКА).
+#[derive(Debug, Clone)]
+pub struct GateRequirements {
+    /// Обязательные составляющие маршрута Fast.
+    pub fast: Vec<String>,
+    /// Обязательные составляющие маршрута Standard.
+    pub standard: Vec<String>,
+    /// Обязательные составляющие маршрута Critical.
+    pub critical: Vec<String>,
+}
+
+impl Default for GateRequirements {
+    fn default() -> Self {
+        Self::from_config(&crate::config::GateConfig::default())
+    }
+}
+
+impl GateRequirements {
+    /// Из секции `[gate]` конфига.
+    #[must_use]
+    pub fn from_config(cfg: &crate::config::GateConfig) -> Self {
+        Self {
+            fast: cfg.required.fast.clone(),
+            standard: cfg.required.standard.clone(),
+            critical: cfg.required.critical.clone(),
+        }
+    }
+
+    /// Список обязательных составляющих для маршрута.
+    #[must_use]
+    pub fn for_route(&self, route: Route) -> &[String] {
+        match route {
+            Route::Fast => &self.fast,
+            Route::Standard => &self.standard,
+            Route::Critical => &self.critical,
+        }
+    }
+}
+
 /// Отчёт гейта `arch-be gate`.
 #[derive(Debug)]
 pub struct GateReport {
@@ -215,8 +289,114 @@ pub struct GateReport {
     pub route_note: String,
     /// Составляющие в порядке прогона.
     pub components: Vec<GateComponent>,
-    /// Гейт пройден (нет FAIL ни в одной составляющей).
+    /// Итог: PASS / FAIL / INCOMPLETE (П1).
+    pub outcome: GateOutcome,
+    /// Имена составляющих, обязательных для этого маршрута.
+    pub required: Vec<String>,
+    /// Обязательные составляющие без входа (SKIP) — честный список
+    /// «на что зелёный цвет не распространяется».
+    pub not_checked: Vec<String>,
+    /// Хэши входов вердикта (П7): реестр правил, файл ограничений.
+    pub inputs: Vec<(String, String)>,
+    /// SHA-256 канонического конверта вердикта (П7) — вердикт как документ.
+    pub attestation: String,
+    /// Гейт пройден: все обязательные PASS, FAIL нет (`outcome == Pass`).
     pub passed: bool,
+}
+
+impl GateReport {
+    /// Пересчитывает производные итога из состава и матрицы обязательности.
+    /// Вызывается после сборки и после добавления секций (`architect_review`).
+    pub fn recompute(&mut self) {
+        let has_fail = self.components.iter().any(|c| c.status == GateStatus::Fail);
+        self.not_checked = self
+            .required
+            .iter()
+            .filter(|req| {
+                self.components
+                    .iter()
+                    .any(|c| c.name == req.as_str() && c.status == GateStatus::Skip)
+            })
+            .cloned()
+            .collect();
+        self.outcome = if has_fail {
+            GateOutcome::Fail
+        } else if self.not_checked.is_empty() {
+            GateOutcome::Pass
+        } else {
+            GateOutcome::Incomplete
+        };
+        self.passed = self.outcome == GateOutcome::Pass;
+        self.attestation = self.compute_attestation();
+    }
+
+    /// Канонический конверт вердикта без абсолютных путей и времени: тот же
+    /// коммит на той же матрице обязан дать ту же аттестацию во всех каналах.
+    fn compute_attestation(&self) -> String {
+        let mut canon = String::new();
+        // Запись в String не может завершиться ошибкой — игноры безопасны.
+        let _ = writeln!(canon, "arch-be/gate-verdict/v1");
+        let _ = writeln!(canon, "route={}", self.route);
+        let _ = writeln!(canon, "outcome={}", self.outcome.label());
+        for (name, hash) in &self.inputs {
+            let _ = writeln!(canon, "input:{name}={hash}");
+        }
+        for c in &self.components {
+            let req = self.required.iter().any(|r| r == c.name);
+            let _ = writeln!(
+                canon,
+                "component:{}={} required={req}",
+                c.name,
+                c.status.label()
+            );
+        }
+        for n in &self.not_checked {
+            let _ = writeln!(canon, "not_checked={n}");
+        }
+        crate::hash::sha256_hex(canon.as_bytes())
+    }
+
+    /// Конверт вердикта (П7 ДКА): одна структура, которую отдают все каналы
+    /// (`--format json`, MCP, хук, CI). Поле `not_checked` честно говорит, на
+    /// что зелёный цвет не распространяется; `attestation` привязывает вердикт
+    /// к входам и составу проверок.
+    #[must_use]
+    pub fn envelope_json(&self) -> serde_json::Value {
+        let inputs: BTreeMap<&str, &str> = self
+            .inputs
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        let components: Vec<serde_json::Value> = self
+            .components
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "name": c.name,
+                    "status": c.status.label(),
+                    "required": self.required.iter().any(|r| r == c.name),
+                    "detail": c.detail,
+                    "findings_total": c.findings.len(),
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "schema": "arch-be/gate-verdict/v1",
+            "verdict": self.outcome.label(),
+            "exit_code": self.outcome.exit_code(),
+            "arch_be": env!("CARGO_PKG_VERSION"),
+            "route": {
+                "effective": self.route.to_string(),
+                "auto": self.route_auto,
+                "note": self.route_note,
+            },
+            "inputs": inputs,
+            "components": components,
+            "not_checked": self.not_checked,
+            "required": self.required,
+            "attestation": format!("sha256:{}", self.attestation),
+        })
+    }
 }
 
 /// Предпроверка git-окружения репозитория (один раз на прогон).
@@ -846,12 +1026,16 @@ fn component_nfr(repo: &Path) -> GateComponent {
     }
 }
 
-/// Составляющая `evidence_verify` (маршруты Standard/Critical): полнота и
-/// целостность хэшей evidence-бандлов активных дельт
-/// (`changes/<name>/EVIDENCE.yaml`; архивные — уже выпущенные, не гейтуются).
-fn component_evidence(repo: &Path) -> GateComponent {
-    let changes = repo.join("changes");
+/// Каталоги с EVIDENCE.yaml, подлежащие проверке: активные дельты
+/// `changes/<name>/` (архивные — уже выпущены) и **корень репозитория**, куда
+/// бандл кладёт `evidence pack` при работе по кейсу (П1 ДКА: раньше корневой
+/// бандл был невидим гейту, и `evidence_verify` молча уходил в SKIP).
+fn evidence_bundle_dirs(repo: &Path) -> Vec<PathBuf> {
     let mut bundles: Vec<PathBuf> = Vec::new();
+    if repo.join("EVIDENCE.yaml").is_file() {
+        bundles.push(repo.to_path_buf());
+    }
+    let changes = repo.join("changes");
     if let Ok(rd) = std::fs::read_dir(&changes) {
         for entry in rd.flatten() {
             let dir = entry.path();
@@ -864,10 +1048,18 @@ fn component_evidence(repo: &Path) -> GateComponent {
         }
     }
     bundles.sort();
+    bundles.dedup();
+    bundles
+}
+
+/// Составляющая `evidence_verify` (маршруты Standard/Critical): полнота и
+/// целостность хэшей evidence-бандлов активных дельт и корня репозитория.
+fn component_evidence(repo: &Path) -> GateComponent {
+    let bundles = evidence_bundle_dirs(repo);
     if bundles.is_empty() {
         return GateComponent::skip(
             "evidence_verify",
-            "нет активных change-dir с EVIDENCE.yaml".to_string(),
+            "нет EVIDENCE.yaml ни в корне, ни в активных change-dir".to_string(),
         );
     }
     let mut failed = Vec::new();
@@ -875,9 +1067,19 @@ fn component_evidence(repo: &Path) -> GateComponent {
         match evidence::verify(dir) {
             Ok(verdict) if verdict.passed => {}
             Ok(verdict) => {
+                let label = dir.strip_prefix(repo).map_or_else(
+                    |_| dir.display().to_string(),
+                    |p| {
+                        if p.as_os_str().is_empty() {
+                            ".".to_string()
+                        } else {
+                            p.display().to_string()
+                        }
+                    },
+                );
                 failed.push(GateFinding::text(
                     "error",
-                    format!("{}: {}", dir.display(), verdict.summary),
+                    format!("{label}: {}", verdict.summary),
                 ));
                 failed.extend(
                     verdict
@@ -928,9 +1130,20 @@ fn auto_route(repo: &Path, base: Option<&str>, limits: (usize, usize)) -> (Route
             } else {
                 scored.significance.fired.join(", ")
             };
+            let excluded_note = if diff.excluded.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "; исключено по манифесту connect/.spineignore: {} файлов",
+                    diff.excluded.len()
+                )
+            };
             (
                 scored.significance.route,
-                format!("auto: score {} ({fired})", scored.significance.score),
+                format!(
+                    "auto: score {} ({fired}){excluded_note}",
+                    scored.significance.score
+                ),
             )
         }
         Err(e) => (
@@ -940,20 +1153,137 @@ fn auto_route(repo: &Path, base: Option<&str>, limits: (usize, usize)) -> (Route
     }
 }
 
-/// Прогоняет единый гейт по репозиторию.
-///
-/// `route_override`: `None` — маршрут вычисляется из диффа (`--route auto`).
-/// `base`: git-ref базы для диффа, delta guard и сравнения правил (`None` —
-/// рабочее дерево против HEAD). `constraints`: файл ограничений (дефолт
-/// `<repo>/.arch-handoff/CONSTRAINTS.yaml`, как у `control check`; D6 —
-/// fallback: если его нет, но есть `<repo>/CONSTRAINTS.yaml`, берётся он —
-/// и для fitness, и для анти-ослабления).
-/// `limits` — пороги маршрутов `(fast_max, standard_max)` из конфига
-/// (`[significance]`, ADR-034).
+/// Заявленный маршрут репозитория из `.arch-handoff/ROUTE.lock` (П4 ДКА).
+#[derive(Debug, Clone)]
+struct RouteLock {
+    /// Минимальный маршрут контроля для репозитория.
+    route: Route,
+    /// Кем решён (ожидается ссылка на ADR при понижении).
+    decided_by: Option<String>,
+}
+
+/// Сырой YAML `ROUTE.lock`.
+#[derive(Debug, serde::Deserialize)]
+struct RouteLockRaw {
+    /// Маршрут строкой (`fast|standard|critical`).
+    route: String,
+    /// Ссылка на решение (ADR-…).
+    #[serde(default)]
+    decided_by: Option<String>,
+}
+
+/// Ранг маршрута для операции «не ниже»: Fast < Standard < Critical.
+fn route_rank(route: Route) -> u8 {
+    match route {
+        Route::Fast => 0,
+        Route::Standard => 1,
+        Route::Critical => 2,
+    }
+}
+
+/// Разбирает `ROUTE.lock`; невалидный YAML/маршрут — `None` (fail-soft:
+/// файла нет или он битый не должен валить гейт, но и не поднимает маршрут).
+fn parse_route_lock(text: &str) -> Option<RouteLock> {
+    let raw: RouteLockRaw = serde_yaml_ng::from_str(text).ok()?;
+    let route = raw
+        .route
+        .trim()
+        .to_ascii_lowercase()
+        .parse::<Route>()
+        .ok()?;
+    Some(RouteLock {
+        route,
+        decided_by: raw.decided_by,
+    })
+}
+
+/// Путь `ROUTE.lock` в репозитории (пакетный, затем корневой).
+fn route_lock_path(repo: &Path) -> Option<PathBuf> {
+    let handoff = repo.join(".arch-handoff/ROUTE.lock");
+    if handoff.is_file() {
+        return Some(handoff);
+    }
+    let root = repo.join("ROUTE.lock");
+    root.is_file().then_some(root)
+}
+
+/// Заявленный маршрут репозитория.
+fn read_route_lock(repo: &Path) -> Option<RouteLock> {
+    let path = route_lock_path(repo)?;
+    let text = std::fs::read_to_string(path).ok()?;
+    parse_route_lock(&text)
+}
+
+/// Составляющая `route_lock` (П4): заявленный маршрут и анти-понижение.
+/// Понижение относительно git-базы без `decided_by: ADR-…` — FAIL
+/// (по образцу `rule_weakened`).
+fn component_route_lock(
+    repo: &Path,
+    base: Option<&str>,
+    git: &GitProbe,
+    lock: &RouteLock,
+) -> GateComponent {
+    let rel = if repo.join(".arch-handoff/ROUTE.lock").is_file() {
+        ".arch-handoff/ROUTE.lock"
+    } else {
+        "ROUTE.lock"
+    };
+    let decided = lock.decided_by.as_deref().unwrap_or("без ADR");
+    let detail = format!(
+        "заявленный маршрут: {} ({decided}) — файл: {rel}",
+        lock.route
+    );
+    if !git.repo || !git.head {
+        return GateComponent::pass("route_lock", detail);
+    }
+    let rev = base_rev(base.unwrap_or("HEAD"));
+    let Some(git_rel) = git_rel_path(repo, &repo.join(rel)) else {
+        return GateComponent::pass("route_lock", detail);
+    };
+    if !git_rev_exists(repo, rev) || !git_rev_has_path(repo, rev, &git_rel) {
+        return GateComponent::pass("route_lock", detail);
+    }
+    let Ok(base_src) = git_show_file(repo, rev, &git_rel) else {
+        return GateComponent::pass("route_lock", detail);
+    };
+    if let Some(base_lock) = parse_route_lock(&base_src) {
+        if route_rank(base_lock.route) > route_rank(lock.route) {
+            let has_adr = lock
+                .decided_by
+                .as_deref()
+                .is_some_and(|d| d.trim().to_ascii_uppercase().starts_with("ADR"));
+            if !has_adr {
+                return GateComponent::fail(
+                    "route_lock",
+                    format!(
+                        "route_lowered: маршрут понижен {} → {} без ADR — файл: {rel}",
+                        base_lock.route, lock.route
+                    ),
+                    vec![GateFinding::text(
+                        "error",
+                        "понижение заявленного маршрута требует decided_by со ссылкой на ADR"
+                            .to_string(),
+                    )],
+                );
+            }
+            return GateComponent::pass(
+                "route_lock",
+                format!(
+                    "{detail}; понижение {} → {} подтверждено ADR",
+                    base_lock.route, lock.route
+                ),
+            );
+        }
+    }
+    GateComponent::pass("route_lock", detail)
+}
+
+/// Прогоняет единый гейт по репозиторию с матрицей обязательности по
+/// умолчанию (П1 ДКА). Полная форма — [`run_with`].
 ///
 /// # Errors
 /// Репозиторий недоступен. Провалы составляющих — НЕ ошибка: они в отчёте
-/// (`passed = false`), exit-код ставит CLI-край.
+/// (`outcome`/`passed = false`), exit-код ставит CLI-край.
 pub fn run(
     repo: &Path,
     route_override: Option<Route>,
@@ -961,18 +1291,56 @@ pub fn run(
     constraints: Option<&Path>,
     limits: (usize, usize),
 ) -> Result<GateReport> {
+    run_with(
+        repo,
+        route_override,
+        base,
+        constraints,
+        limits,
+        &GateRequirements::default(),
+    )
+}
+
+/// Прогоняет единый гейт по репозиторию с заданной матрицей обязательных
+/// составляющих (`[gate.required]` конфига, П1 ДКА).
+///
+/// # Errors
+/// Репозиторий недоступен. Провалы составляющих — НЕ ошибка: они в отчёте
+/// (`outcome`/`passed = false`), exit-код ставит CLI-край.
+pub fn run_with(
+    repo: &Path,
+    route_override: Option<Route>,
+    base: Option<&str>,
+    constraints: Option<&Path>,
+    limits: (usize, usize),
+    requirements: &GateRequirements,
+) -> Result<GateReport> {
     if !repo.is_dir() {
         return Err(HarnessError::Control(format!(
             "репозиторий недоступен: {}",
             repo.display()
         )));
     }
-    let (route, route_auto, route_note) = if let Some(r) = route_override {
+    let (mut route, route_auto, mut route_note) = if let Some(r) = route_override {
         (r, false, format!("явный --route {r}"))
     } else {
         let (r, note) = auto_route(repo, base, limits);
         (r, true, note)
     };
+    // П4: храповик маршрута — эффективный маршрут не ниже заявленного в
+    // ROUTE.lock. Критический проект проверяется как Critical даже на чистом
+    // дереве и на маленьком MR (раньше auto давал Fast).
+    let route_lock = read_route_lock(repo);
+    if let Some(lock) = &route_lock {
+        if route_rank(lock.route) > route_rank(route) {
+            route_note = format!(
+                "{route_note}; поднят ROUTE.lock → {} ({})",
+                lock.route,
+                lock.decided_by.as_deref().unwrap_or("без ADR")
+            );
+            route = lock.route;
+        }
+    }
     let constraints = if let Some(path) = constraints {
         ConstraintsPath {
             path: path.to_path_buf(),
@@ -1010,20 +1378,34 @@ pub fn run(
         components.push(component_nfr(repo));
         components.push(component_evidence(repo));
     }
-    let passed = components.iter().all(|c| c.status != GateStatus::Fail);
-    Ok(GateReport {
+    if let Some(lock) = &route_lock {
+        components.push(component_route_lock(repo, base, &git, lock));
+    }
+    // Хэш входа «реестр правил» (П7): вердикт привязан к тому, что проверяли.
+    let constraints_hash = match std::fs::read(&constraints.path) {
+        Ok(bytes) => format!("sha256:{}", crate::hash::sha256_hex(&bytes)),
+        Err(_) => "absent".to_string(),
+    };
+    let mut report = GateReport {
         repo: repo.to_path_buf(),
         route,
         route_auto,
         route_note,
         components,
-        passed,
-    })
+        outcome: GateOutcome::Pass,
+        required: requirements.for_route(route).to_vec(),
+        not_checked: Vec::new(),
+        inputs: vec![("constraints".to_string(), constraints_hash)],
+        attestation: String::new(),
+        passed: true,
+    };
+    report.recompute();
+    Ok(report)
 }
 
 /// Текстовый рендер отчёта гейта: строка маршрута, по каждой составляющей
 /// PASS/FAIL/SKIP + краткая причина, находки отступом (с потолком
-/// [`MAX_COMPONENT_FINDINGS`]), итоговая строка «Итог: PASS/FAIL».
+/// [`MAX_COMPONENT_FINDINGS`]), итоговая строка `Итог: PASS/FAIL/INCOMPLETE`.
 #[must_use]
 pub fn render(report: &GateReport) -> String {
     let mut out = String::new();
@@ -1031,7 +1413,18 @@ pub fn render(report: &GateReport) -> String {
     let _ = writeln!(out, "Гейт: {}", report.repo.display());
     let _ = writeln!(out, "Маршрут: {} ({})", report.route, report.route_note);
     for c in &report.components {
-        let _ = writeln!(out, "  [{}] {} — {}", c.status.label(), c.name, c.detail);
+        let req = if report.required.iter().any(|r| r == c.name) {
+            " *"
+        } else {
+            ""
+        };
+        let _ = writeln!(
+            out,
+            "  [{}] {}{req} — {}",
+            c.status.label(),
+            c.name,
+            c.detail
+        );
         for f in c.findings.iter().take(MAX_COMPONENT_FINDINGS) {
             let _ = writeln!(out, "      ↳ {f}");
         }
@@ -1051,15 +1444,29 @@ pub fn render(report: &GateReport) -> String {
     let _ = writeln!(
         out,
         "Итог: {}",
-        if report.passed {
-            "PASS".to_string()
-        } else {
-            format!("FAIL — провалено составляющих: {failed} (exit 1)")
+        match report.outcome {
+            GateOutcome::Pass => "PASS".to_string(),
+            GateOutcome::Fail => format!("FAIL — провалено составляющих: {failed} (exit 1)"),
+            GateOutcome::Incomplete => format!(
+                "INCOMPLETE — обязательные составляющие без входа: {} (exit 3)",
+                report.not_checked.join(", ")
+            ),
         }
     );
+    if !report.not_checked.is_empty() {
+        let _ = writeln!(
+            out,
+            "Не проверено (обязательно для маршрута {}): {}",
+            report.route,
+            report.not_checked.join(", ")
+        );
+    }
+    if !report.attestation.is_empty() {
+        let _ = writeln!(out, "Аттестация вердикта: sha256:{}", report.attestation);
+    }
     // Квитанция ценности (аддитивная строка): сумма error-находок всех
     // составляющих — это дефекты, остановленные механикой до ревью.
-    if !report.passed {
+    if report.outcome == GateOutcome::Fail {
         let caught = report
             .components
             .iter()
@@ -1249,7 +1656,23 @@ mod tests {
         std::fs::write(repo.join("ARCHITECTURE-SPINE.md"), "# Spine\n").expect("spine");
         // Не git: delta guard и rule_weakened — SKIP; auto-маршрут — fail-safe.
         let report = run(&repo, None, None, None, (1, 4)).expect("гейт");
-        assert!(report.passed, "{}", render(&report));
+        // Fail-soft на инфраструктуру сохранён (FAIL-составляющих нет), но
+        // П1: обязательные для fail-safe Critical составляющие без входа →
+        // честный INCOMPLETE, а не зелёный PASS.
+        assert!(!report.passed, "{}", render(&report));
+        assert_eq!(
+            report.outcome,
+            GateOutcome::Incomplete,
+            "{}",
+            render(&report)
+        );
+        assert!(
+            report
+                .components
+                .iter()
+                .all(|c| c.status != GateStatus::Fail),
+            "fail-soft: ни одна составляющая не провалена"
+        );
         assert_eq!(report.route, Route::Critical, "fail-safe без диффа");
         assert_eq!(status_of(&report, "delta_guard"), GateStatus::Skip);
         assert_eq!(status_of(&report, "rule_weakened"), GateStatus::Skip);
@@ -1350,6 +1773,12 @@ mod tests {
         // Без docs/spec — честный SKIP (fail-soft на инфраструктуру).
         let report = run(&repo, Some(Route::Standard), None, None, (1, 4)).expect("гейт");
         assert_eq!(status_of(&report, "sensors"), GateStatus::Skip);
+        assert_eq!(
+            report.outcome,
+            GateOutcome::Incomplete,
+            "{}",
+            render(&report)
+        );
         // Полная спека (все секции REQUIRED_SECTIONS, ссылок нет) — PASS.
         write_spec(
             &repo,
@@ -1363,7 +1792,17 @@ mod tests {
             "{}",
             render(&report)
         );
-        assert!(report.passed, "{}", render(&report));
+        // Требование к sensors выполнено: его нет в «не проверено». Итог всё
+        // ещё INCOMPLETE — trace_check/nfr обязательны на Standard, а model/
+        // в этом репозитории нет.
+        assert!(!report.not_checked.iter().any(|n| n == "sensors"));
+        assert!(report.not_checked.iter().any(|n| n == "trace_check"));
+        assert_eq!(
+            report.outcome,
+            GateOutcome::Incomplete,
+            "{}",
+            render(&report)
+        );
     }
 
     // --- пути ограничений и fail-closed `rule_weakened` (D6) -----------------
@@ -1516,7 +1955,10 @@ mod tests {
         let repo = tmp.path().join("repo");
         make_uncommitted_repo(&repo);
         let report = run(&repo, None, None, None, (1, 4)).expect("гейт");
-        assert!(report.passed, "{}", render(&report));
+        // Базы для сравнения нет: rule_weakened честно SKIP; П1 — INCOMPLETE,
+        // потому что маршрут Critical требует эту составляющую.
+        assert!(!report.passed, "{}", render(&report));
+        assert_eq!(report.outcome, GateOutcome::Incomplete);
         assert_eq!(status_of(&report, "rule_weakened"), GateStatus::Skip);
         let component = report
             .components
@@ -1610,6 +2052,109 @@ mod tests {
                 .contains("покрытие: ARCHITECTURE-SPINE.md ← 'spine-update'"),
             "{}",
             component.detail
+        );
+    }
+
+    // --- П1/П4/П7: честный зелёный, храповик маршрута, конверт вердикта ------
+
+    /// П1 (Д1): evidence-бандл в КОРНЕ репозитория виден гейту — раньше он
+    /// искался только в `changes/<имя>/` и составляющая молча уходила в SKIP.
+    #[test]
+    fn gate_finds_evidence_bundle_in_repo_root() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("mkdir");
+        make_gate_repo(&repo);
+        // Неполный бандл Critical в корне: обязательных артефактов нет.
+        std::fs::write(
+            repo.join("EVIDENCE.yaml"),
+            "route: Critical\npacked_at: \"2026-09-19T00:00:00+00:00\"\nitems: []\n",
+        )
+        .expect("bundle");
+        let report = run(&repo, Some(Route::Critical), None, None, (1, 4)).expect("гейт");
+        assert_eq!(
+            status_of(&report, "evidence_verify"),
+            GateStatus::Fail,
+            "корневой бандл обязан проверяться: {}",
+            render(&report)
+        );
+        assert_eq!(report.outcome, GateOutcome::Fail, "{}", render(&report));
+    }
+
+    /// П4: `ROUTE.lock` поднимает маршрут на чистом дереве до заявленного,
+    /// критические составляющие реально прогоняются.
+    #[test]
+    fn route_lock_raises_clean_tree_to_critical() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("mkdir");
+        make_gate_repo(&repo);
+        std::fs::write(
+            repo.join(".arch-handoff/ROUTE.lock"),
+            "route: critical\nreason: \"обработка ЦР, 10/15 триггеров\"\ndecided_by: ADR-012\n",
+        )
+        .expect("route lock");
+        let report = run(&repo, None, None, None, (1, 4)).expect("гейт");
+        assert_eq!(report.route, Route::Critical, "{}", render(&report));
+        assert!(
+            report.components.iter().any(|c| c.name == "nfr"),
+            "критические составляющие обязаны попасть в прогон"
+        );
+        assert!(
+            report.route_note.contains("поднят ROUTE.lock"),
+            "{}",
+            report.route_note
+        );
+    }
+
+    /// П4: понижение заявленного маршрута без ADR — находка `route_lowered`.
+    #[test]
+    fn route_lock_lowering_without_adr_fails() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("mkdir");
+        make_gate_repo(&repo);
+        std::fs::write(
+            repo.join(".arch-handoff/ROUTE.lock"),
+            "route: critical\ndecided_by: ADR-012\n",
+        )
+        .expect("lock");
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-q", "-m", "route lock"]);
+        // Понижаем до fast без ссылки на ADR.
+        std::fs::write(repo.join(".arch-handoff/ROUTE.lock"), "route: fast\n").expect("lowered");
+        let report = run(&repo, None, None, None, (1, 4)).expect("гейт");
+        assert_eq!(
+            status_of(&report, "route_lock"),
+            GateStatus::Fail,
+            "{}",
+            render(&report)
+        );
+        assert_eq!(report.outcome, GateOutcome::Fail);
+    }
+
+    /// П7: конверт вердикта стабилен (идемпотентность) и честно называет
+    /// непроверенное; exit-код INCOMPLETE — 3.
+    #[test]
+    fn envelope_attestation_is_stable_and_lists_not_checked() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("mkdir");
+        make_gate_repo(&repo);
+        let first = run(&repo, Some(Route::Standard), None, None, (1, 4)).expect("гейт");
+        let second = run(&repo, Some(Route::Standard), None, None, (1, 4)).expect("гейт");
+        let a = first.envelope_json();
+        let b = second.envelope_json();
+        assert_eq!(
+            a["attestation"], b["attestation"],
+            "тот же вход — та же аттестация"
+        );
+        assert_eq!(a["verdict"], "INCOMPLETE");
+        assert_eq!(a["exit_code"], 3);
+        let not_checked = a["not_checked"].as_array().expect("not_checked");
+        assert!(
+            not_checked.iter().any(|v| v == "trace_check" || v == "nfr"),
+            "{a}"
         );
     }
 }

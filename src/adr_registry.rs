@@ -13,12 +13,22 @@
 //!   `id`/`title`/`status`/`date` (разбор — [`crate::model::parse_entity`];
 //!   файлы сущностей других типов игнорируются — фильтр по префиксу `ADR-`).
 //!
-//! Находки: коллизия номеров (один `ADR-NNN` в разных проектах с разными
-//! заголовками — глобального пространства номеров нет; либо два файла с
-//! одним `ADR-NNN` ВНУТРИ одного проекта — локальное пространство номеров
-//! неоднозначно независимо от заголовков), дубль заголовка (одинаковый
-//! заголовок у разных номеров — возможный дубль решения), запись без
-//! даты/статуса. Проект без ADR — не находка: просто не попадает в индекс.
+//! Проза и типизированная сущность одного проекта с одним номером — это
+//! ДВА ПРЕДСТАВЛЕНИЯ ОДНОГО решения, а не два решения: реестр сливает их в
+//! одну запись с двумя гранями (`prose`/`model`, поле `source` —
+//! `docs/adr+model`). Слияние выполняется только когда в группе
+//! (проект, номер) ровно по одной грани каждого вида; иначе это уже дубль
+//! внутри представления, и его разбирает `number_collision`.
+//!
+//! Находки: расхождение граней (проза и модель одного решения разошлись по
+//! заголовку, статусу или дате — единственная находка на пару, с обоими
+//! значениями), коллизия номеров (два файла с одним `ADR-NNN` внутри одного
+//! проекта в ОДНОМ представлении — локальное пространство номеров
+//! неоднозначно; либо один `ADR-NNN` в разных проектах с разными
+//! заголовками — глобального пространства номеров нет), дубль заголовка
+//! (одинаковый заголовок у разных номеров — возможный дубль решения),
+//! запись без даты/статуса. Проект без ADR — не находка: просто не попадает
+//! в индекс.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -36,7 +46,26 @@ use crate::tool::{Tool, ToolContext, ToolOutput};
 /// Каталоги, которые не считаются проектами при сканировании `ROOT`.
 const SKIP_DIRS: [&str; 3] = [".git", "target", "node_modules"];
 
-/// Одна запись реестра ADR.
+/// Одна грань решения: файл-источник (проза `docs/adr/*.md` или
+/// типизированная сущность `model/ADR-*.md`) и разобранные из него поля.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdrFace {
+    /// Файл грани относительно каталога проекта.
+    pub file: String,
+    /// Заголовок решения в этой грани.
+    pub title: String,
+    /// Статус (`None` — поле не заполнено).
+    #[serde(default)]
+    pub status: Option<String>,
+    /// Дата (`None` — поле не заполнено).
+    #[serde(default)]
+    pub date: Option<String>,
+}
+
+/// Одна запись реестра ADR: решение проекта. Если решение описано и прозой,
+/// и типизированной сущностью, запись несёт две грани ([`Self::prose`] и
+/// [`Self::model`]), а поля верхнего уровня отражают её основную грань
+/// (проза, а при её отсутствии — модель).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegistryEntry {
     /// Проект (имя непосредственного подкаталога `ROOT`; сам `ROOT` — его
@@ -44,17 +73,24 @@ pub struct RegistryEntry {
     pub project: String,
     /// Номер ADR (`ADR-007` → 7).
     pub number: u64,
-    /// Заголовок решения.
+    /// Заголовок решения (основной грани).
     pub title: String,
     /// Статус (`None` — пропуск обязательного поля, находка).
     pub status: Option<String>,
     /// Дата (`None` — пропуск обязательного поля, находка).
     pub date: Option<String>,
-    /// Источник записи: `docs/adr` (проза) или `model` (типизированная
-    /// сущность ADR-003).
+    /// Источник записи: `docs/adr` (проза), `model` (типизированная
+    /// сущность ADR-003) или `docs/adr+model` (слитая пара граней).
     pub source: String,
-    /// Файл записи относительно каталога проекта (для диагностики).
+    /// Файл основной грани записи относительно каталога проекта
+    /// (для диагностики).
     pub file: String,
+    /// Прозаическая грань (`docs/adr/...`), если решение ею описано.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prose: Option<AdrFace>,
+    /// Типизированная грань (`model/...`), если решение ею описано.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<AdrFace>,
 }
 
 impl RegistryEntry {
@@ -68,7 +104,8 @@ impl RegistryEntry {
 /// Находка реестра.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegistryFinding {
-    /// Тип находки: `number_collision` | `title_duplicate` | `missing_fields`.
+    /// Тип находки: `prose_model_divergence` | `number_collision` |
+    /// `title_duplicate` | `missing_fields`.
     pub kind: String,
     /// Описание (проекты, номера, заголовки).
     pub message: String,
@@ -82,7 +119,8 @@ pub struct RegistryReport {
     /// Записи индекса (детерминированная сортировка: проект, номер,
     /// источник, файл).
     pub entries: Vec<RegistryEntry>,
-    /// Находки (коллизии номеров, дубли заголовков, пропуски полей).
+    /// Находки (расхождения прозы и модели, коллизии номеров, дубли
+    /// заголовков, пропуски полей).
     pub findings: Vec<RegistryFinding>,
 }
 
@@ -182,6 +220,8 @@ fn collect_project(project: &str, dir: &Path, entries: &mut Vec<RegistryEntry>) 
                 date: adr.date,
                 source: "docs/adr".to_string(),
                 file: rel.to_string_lossy().replace('\\', "/"),
+                prose: None,
+                model: None,
             });
         }
     }
@@ -229,15 +269,152 @@ fn collect_project(project: &str, dir: &Path, entries: &mut Vec<RegistryEntry>) 
                 date: entity.date,
                 source: "model".to_string(),
                 file: rel.to_string_lossy().replace('\\', "/"),
+                prose: None,
+                model: None,
             });
         }
     }
     Ok(())
 }
 
+/// Каноническая форма статуса для сравнения граней: регистр не важен, а
+/// хвостовая оговорка в скобках — пояснение к статусу, а не другой статус
+/// («Proposed (A3 — решение архитектора)» ≡ «proposed»). Разные статусные
+/// слова («accepted» и «proposed») остаются разными.
+fn canonical_status(status: Option<&str>) -> Option<String> {
+    let raw = status?.trim();
+    let base = raw.split('(').next().unwrap_or_default().trim();
+    let base = base.trim_end_matches(['.', ',', ';']).trim();
+    (!base.is_empty()).then(|| base.to_lowercase())
+}
+
+/// Каноническая форма даты для сравнения граней: значимый непустой текст.
+fn canonical_date(date: Option<&str>) -> Option<String> {
+    let raw = date?.trim();
+    (!raw.is_empty()).then(|| raw.to_string())
+}
+
+/// Грань записи по её полям (файл + разобранное решение).
+fn face_of(entry: &RegistryEntry) -> AdrFace {
+    AdrFace {
+        file: entry.file.clone(),
+        title: entry.title.clone(),
+        status: entry.status.clone(),
+        date: entry.date.clone(),
+    }
+}
+
+/// Сливает пару «проза + типизированная сущность» одного решения в одну
+/// запись с двумя гранями. Основная грань — прозаическая (её поля попадают
+/// в поля верхнего уровня для совместимости с прежним видом отчёта), а
+/// отсутствующие у неё дата/статус подставляются из типизированной грани.
+fn merge_pair(prose: &RegistryEntry, model: &RegistryEntry) -> RegistryEntry {
+    let title = if prose.title.trim().is_empty() {
+        model.title.clone()
+    } else {
+        prose.title.clone()
+    };
+    let status = prose.status.clone().or_else(|| model.status.clone());
+    let date = prose.date.clone().or_else(|| model.date.clone());
+    RegistryEntry {
+        project: prose.project.clone(),
+        number: prose.number,
+        title,
+        status,
+        date,
+        source: "docs/adr+model".to_string(),
+        file: prose.file.clone(),
+        prose: Some(face_of(prose)),
+        model: Some(face_of(model)),
+    }
+}
+
+/// Сливает прозаическую и типизированную грань одного проекта и номера в
+/// одну запись. Слияние — только когда в группе (проект, номер) ровно по
+/// одной грани каждого вида: иначе соответствие неоднозначно, и группа
+/// остаётся как есть — её разбирает `number_collision`.
+fn merge_faces(entries: Vec<RegistryEntry>) -> Vec<RegistryEntry> {
+    let mut groups: BTreeMap<(String, u64), Vec<RegistryEntry>> = BTreeMap::new();
+    for e in entries {
+        groups
+            .entry((e.project.clone(), e.number))
+            .or_default()
+            .push(e);
+    }
+    let mut merged = Vec::new();
+    for (_, group) in groups {
+        let prose_count = group.iter().filter(|e| e.source == "docs/adr").count();
+        let model_count = group.iter().filter(|e| e.source == "model").count();
+        if prose_count != 1 || model_count != 1 {
+            merged.extend(group);
+            continue;
+        }
+        let mut prose: Option<RegistryEntry> = None;
+        let mut model: Option<RegistryEntry> = None;
+        for e in group {
+            match e.source.as_str() {
+                "docs/adr" => prose = Some(e),
+                "model" => model = Some(e),
+                _ => merged.push(e),
+            }
+        }
+        match (prose, model) {
+            (Some(p), Some(m)) => merged.push(merge_pair(&p, &m)),
+            // Недостижимо при посчитанных выше счётчиках; подстраховка без паники.
+            (p, m) => merged.extend(p.into_iter().chain(m)),
+        }
+    }
+    merged
+}
+
 /// Находки по собранному индексу.
 fn find_issues(entries: &[RegistryEntry]) -> Vec<RegistryFinding> {
     let mut findings = Vec::new();
+
+    // Расхождение граней одного решения: проза и типизированная сущность
+    // одного проекта и номера описывают решение по-разному. Это не коллизия
+    // номера (номер как раз общий), а дрейф: архитектору нужно свести
+    // источники к одному тексту. Значения обеих граней — в сообщении.
+    for e in entries {
+        let (Some(prose), Some(model)) = (&e.prose, &e.model) else {
+            continue;
+        };
+        let mut drift: Vec<String> = Vec::new();
+        if prose.title.trim() != model.title.trim() {
+            drift.push(format!(
+                "заголовок: проза «{}» ≠ модель «{}»",
+                prose.title.trim(),
+                model.title.trim()
+            ));
+        }
+        if canonical_status(prose.status.as_deref()) != canonical_status(model.status.as_deref()) {
+            drift.push(format!(
+                "статус: проза «{}» ≠ модель «{}»",
+                prose.status.as_deref().unwrap_or("—"),
+                model.status.as_deref().unwrap_or("—")
+            ));
+        }
+        if canonical_date(prose.date.as_deref()) != canonical_date(model.date.as_deref()) {
+            drift.push(format!(
+                "дата: проза «{}» ≠ модель «{}»",
+                prose.date.as_deref().unwrap_or("—"),
+                model.date.as_deref().unwrap_or("—")
+            ));
+        }
+        if !drift.is_empty() {
+            findings.push(RegistryFinding {
+                kind: "prose_model_divergence".to_string(),
+                message: format!(
+                    "{} {} — расхождение прозы и модели: {} (файлы: {}, {})",
+                    e.project,
+                    e.id(),
+                    drift.join("; "),
+                    prose.file,
+                    model.file
+                ),
+            });
+        }
+    }
 
     // Коллизия номеров ВНУТРИ одного проекта: два файла с одним ADR-NNN.
     // В отличие от межпроектной коллизии заголовки роли не играют: дубль
@@ -266,12 +443,15 @@ fn find_issues(entries: &[RegistryEntry]) -> Vec<RegistryFinding> {
         } else {
             "тот же заголовок — вероятная копия файла"
         };
+        let sources: std::collections::BTreeSet<&str> =
+            group.iter().map(|e| e.source.as_str()).collect();
+        let reps = sources.into_iter().collect::<Vec<_>>().join(" + ");
         findings.push(RegistryFinding {
             kind: "number_collision".to_string(),
             message: format!(
-                "ADR-{number:03} дублируется в проекте {project}: {detail} \
-                 ({nuance}; в одном проекте номер обязан быть уникальным — \
-                 ссылки на номер неоднозначны)"
+                "ADR-{number:03} дублируется в проекте {project} ({reps}): {detail} \
+                 ({nuance}; номер обязан быть уникальным внутри одного \
+                 представления — ссылки на номер неоднозначны)"
             ),
         });
     }
@@ -420,6 +600,7 @@ pub fn build_registry(root: &Path) -> Result<RegistryReport> {
         )));
     }
 
+    let mut entries = merge_faces(entries);
     entries.sort_by(|a, b| {
         (&a.project, a.number, &a.source, &a.file).cmp(&(&b.project, b.number, &b.source, &b.file))
     });
@@ -499,9 +680,11 @@ impl Tool for AdrRegistryTool {
             name: "adr_registry".into(),
             description: "Глобальный реестр ADR по набору проектов (ADR-036): скан самого ROOT \
                           и непосредственных подкаталогов, источники — docs/adr/*.md (проза) и \
-                          model/ADR-*.md (типизированные сущности). Ответ — JSON: passed + \
-                          счётчики entries/findings + находки (коллизия номеров, дубль \
-                          заголовка, пропуск даты/статуса) + report_markdown. Реестр — отчёт, \
+                          model/ADR-*.md (типизированные сущности). Проза и сущность одного \
+                          проекта с одним номером сливаются в одну запись с двумя гранями. \
+                          Ответ — JSON: passed + счётчики entries/findings + находки \
+                          (расхождение прозы и модели, коллизия номеров, дубль заголовка, \
+                          пропуск даты/статуса) + report_markdown. Реестр — отчёт, \
                           а не гейт: passed=false только в strict-режиме при наличии находок"
                 .into(),
             parameters: json!({
@@ -758,6 +941,198 @@ mod tests {
         );
         // strict: любая находка → гейт падает.
         assert_eq!(exit_code(&report, true), 1);
+    }
+
+    /// Фикстура «две грани одного решения»: прозаический ADR-001 в
+    /// `docs/adr/` и типизированный ADR-001 в `model/` одного проекта.
+    /// `prose` — шапка прозы, `front` — строки frontmatter модели
+    /// (`title`/`status`/`date`); возвращает корень реестра.
+    fn faces_fixture(dir: &Path, prose: &str, front: &str) -> PathBuf {
+        let root = dir.join("root");
+        write_file(&root, "docs/adr/ADR-001-x.md", prose);
+        write_file(
+            &root,
+            "model/ADR-001-x.md",
+            &format!("---\nid: ADR-001\ntype: adr\n{front}\n---\nТело.\n"),
+        );
+        root
+    }
+
+    /// Идентичная пара проза+модель — ОДНА запись с двумя гранями и без
+    /// находок: это два представления одного решения, а не коллизия.
+    #[test]
+    fn registry_merges_identical_faces_without_finding() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = faces_fixture(
+            dir.path(),
+            "# ADR-001. Outbox pattern\n\n- Date: 2026-02-01\n- Status: Accepted\n",
+            "title: Outbox pattern\nstatus: Accepted\ndate: 2026-02-01",
+        );
+        let report = build_registry(&root).unwrap();
+        assert_eq!(report.entries.len(), 1, "{:?}", report.entries);
+        let e = &report.entries[0];
+        assert_eq!(e.source, "docs/adr+model");
+        assert_eq!(e.title, "Outbox pattern");
+        let prose = e.prose.as_ref().expect("прозаическая грань");
+        let model = e.model.as_ref().expect("типизированная грань");
+        assert_eq!(prose.file, "docs/adr/ADR-001-x.md");
+        assert_eq!(model.file, "model/ADR-001-x.md");
+        assert!(report.findings.is_empty(), "{:?}", report.findings);
+        assert_eq!(exit_code(&report, true), 0, "идентичная пара — не гейт");
+    }
+
+    /// Скобочная оговорка к статусу — пояснение, а не другой статус:
+    /// «Proposed (A3 …)» в прозе и «Proposed» в модели не расходятся
+    /// (кейс digital-ruble, ADR-009).
+    #[test]
+    fn registry_status_note_in_parentheses_is_not_divergence() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = faces_fixture(
+            dir.path(),
+            "# ADR-001. Решение\n\n- Date: 2026-09-19\n- Status: Proposed (A3 — решение архитектора)\n",
+            "title: Решение\nstatus: Proposed\ndate: 2026-09-19",
+        );
+        let report = build_registry(&root).unwrap();
+        assert_eq!(report.entries.len(), 1, "{:?}", report.entries);
+        assert!(report.findings.is_empty(), "{:?}", report.findings);
+    }
+
+    /// Расхождение заголовка — ровно одна находка `prose_model_divergence`
+    /// (не `number_collision`), в сообщении оба значения и оба файла.
+    #[test]
+    fn registry_reports_title_divergence_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = faces_fixture(
+            dir.path(),
+            "# ADR-001. Журнал — единственный источник аудита\n\n- Date: 2026-09-19\n- Status: Accepted\n",
+            "title: Журнал — источник аудита\nstatus: Accepted\ndate: 2026-09-19",
+        );
+        let report = build_registry(&root).unwrap();
+        assert_eq!(report.entries.len(), 1, "{:?}", report.entries);
+        let div: Vec<_> = report
+            .findings
+            .iter()
+            .filter(|f| f.kind == "prose_model_divergence")
+            .collect();
+        assert_eq!(div.len(), 1, "{:?}", report.findings);
+        assert!(div[0].message.contains("заголовок"), "{div:?}");
+        assert!(
+            div[0].message.contains("единственный источник аудита")
+                && div[0].message.contains("Журнал — источник аудита"),
+            "{div:?}"
+        );
+        assert!(
+            div[0].message.contains("docs/adr/ADR-001-x.md")
+                && div[0].message.contains("model/ADR-001-x.md"),
+            "{div:?}"
+        );
+        assert!(
+            report.findings.iter().all(|f| f.kind != "number_collision"),
+            "слитая пара — не коллизия: {:?}",
+            report.findings
+        );
+    }
+
+    /// Расхождение статуса — ровно одна находка, оба значения в сообщении.
+    #[test]
+    fn registry_reports_status_divergence_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = faces_fixture(
+            dir.path(),
+            "# ADR-001. Решение\n\n- Date: 2026-09-19\n- Status: Accepted\n",
+            "title: Решение\nstatus: proposed\ndate: 2026-09-19",
+        );
+        let report = build_registry(&root).unwrap();
+        assert_eq!(report.entries.len(), 1, "{:?}", report.entries);
+        let div: Vec<_> = report
+            .findings
+            .iter()
+            .filter(|f| f.kind == "prose_model_divergence")
+            .collect();
+        assert_eq!(div.len(), 1, "{:?}", report.findings);
+        assert!(div[0].message.contains("статус"), "{div:?}");
+        assert!(
+            div[0].message.contains("Accepted") && div[0].message.contains("proposed"),
+            "{div:?}"
+        );
+    }
+
+    /// Расхождение даты — ровно одна находка, оба значения в сообщении.
+    #[test]
+    fn registry_reports_date_divergence_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = faces_fixture(
+            dir.path(),
+            "# ADR-001. Решение\n\n- Date: 2026-01-01\n- Status: Accepted\n",
+            "title: Решение\nstatus: Accepted\ndate: 2026-02-02",
+        );
+        let report = build_registry(&root).unwrap();
+        assert_eq!(report.entries.len(), 1, "{:?}", report.entries);
+        let div: Vec<_> = report
+            .findings
+            .iter()
+            .filter(|f| f.kind == "prose_model_divergence")
+            .collect();
+        assert_eq!(div.len(), 1, "{:?}", report.findings);
+        assert!(div[0].message.contains("дата"), "{div:?}");
+        assert!(
+            div[0].message.contains("2026-01-01") && div[0].message.contains("2026-02-02"),
+            "{div:?}"
+        );
+    }
+
+    /// Заголовок, статус и дата разошлись одновременно — всё равно РОВНО
+    /// одна находка на пару, а не три.
+    #[test]
+    fn registry_one_divergence_finding_per_pair() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = faces_fixture(
+            dir.path(),
+            "# ADR-001. Первое\n\n- Date: 2026-01-01\n- Status: Accepted\n",
+            "title: Второе\nstatus: Proposed\ndate: 2026-02-02",
+        );
+        let report = build_registry(&root).unwrap();
+        let div: Vec<_> = report
+            .findings
+            .iter()
+            .filter(|f| f.kind == "prose_model_divergence")
+            .collect();
+        assert_eq!(div.len(), 1, "{:?}", report.findings);
+        for needle in ["заголовок", "статус", "дата"] {
+            assert!(div[0].message.contains(needle), "{div:?}");
+        }
+    }
+
+    /// Настоящий дубль внутри ОДНОГО представления (две прозы с одним
+    /// номером) остаётся `number_collision` — это не расхождение граней.
+    #[test]
+    fn registry_same_representation_duplicate_is_number_collision() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        let hdr = "# ADR-001. Копия\n\n- Date: 2026-01-01\n- Status: Accepted\n";
+        write_file(&root, "docs/adr/ADR-001-a.md", hdr);
+        write_file(&root, "docs/adr/ADR-001-b.md", hdr);
+        let report = build_registry(&root).unwrap();
+        assert_eq!(report.entries.len(), 2, "{:?}", report.entries);
+        let collisions: Vec<_> = report
+            .findings
+            .iter()
+            .filter(|f| f.kind == "number_collision")
+            .collect();
+        assert_eq!(collisions.len(), 1, "{:?}", report.findings);
+        assert!(
+            collisions[0].message.contains("docs/adr/ADR-001-a.md")
+                && collisions[0].message.contains("docs/adr/ADR-001-b.md"),
+            "{collisions:?}"
+        );
+        assert!(
+            report
+                .findings
+                .iter()
+                .all(|f| f.kind != "prose_model_divergence"),
+            "обе записи — проза, расхождения граней нет: {:?}",
+            report.findings
+        );
     }
 
     #[test]

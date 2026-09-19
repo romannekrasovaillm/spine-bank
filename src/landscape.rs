@@ -17,9 +17,16 @@
 //!   дефисов) → проекты/id/статусы всех вхождений (дедуп-витрина);
 //! - находки: `id-divergence` (одна система — разные id в разных проектах),
 //!   `status-conflict` (расхождение статусов), `dangling-ref` (связь
-//!   `depends_on`/`implements`/`affects` на id, отсутствующий во всём
-//!   наборе), `cross-project-link` (связь на систему другого проекта —
-//!   показываемый положительный факт, не ошибка);
+//!   `depends_on`/`implements`/`affects` на id, отсутствующий и в своём
+//!   проекте, и во всём наборе);
+//! - факты (не ошибки): `cross-project-link` — связь на систему (SYS/INT)
+//!   другого проекта, разрешившаяся вне проекта-источника;
+//! - разрешение цели связи — с приоритетом СВОЕГО проекта (id локальны для
+//!   проекта: `SYS-001` есть почти в каждой модели): сначала ищем в
+//!   проекте-источнике, и только при отсутствии локальной цели — сквозным
+//!   поиском по набору. Явная межпроектная ссылка записывается
+//!   квалифицированно — `проект:SYS-001` — и ищется только в указанном
+//!   проекте (если проекта нет или в нём нет id — `dangling-ref`);
 //! - топ-5 систем по связности (вход+исход); `--mermaid` — `graph TD`
 //!   канонических систем;
 //! - `--diff-since` — дифф ландшафта против версии в git: ссылка
@@ -28,6 +35,14 @@
 //!   (`git ls-tree` + `git show` файлов `model/*.md`) и агрегируется тем же
 //!   кодом; в диффе — появившиеся/исчезнувшие/изменившиеся системы (смена
 //!   статуса или набора id). Текущее состояние — РАБОЧЕЕ ДЕРЕВО (не HEAD).
+//!
+//! Границы витрины: РЁБРАМИ (и узлами mermaid) считаются только СВЯЗИ МЕЖДУ
+//! КАНОНИЧЕСКИМИ СИСТЕМАМИ — когда и источник, и цель — SYS/INT. Ссылки
+//! NFR/RISK/CMP на систему рёбрами ландшафта не являются (они живут в
+//! локальной валидации модели). Поэтому «0 связей» при непустом реестре —
+//! ФАКТ ДАННЫХ (в моделях набора просто нет ссылок между системами), а не
+//! сбой детектора: отчёт явно помечает этот случай. `links > 0` — свойство
+//! данных, и оно не подделывается счётом несистемных источников.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -76,11 +91,11 @@ pub struct LandscapeSystem {
     pub occurrences: Vec<Occurrence>,
 }
 
-/// Находка ландшафта.
+/// Находка ландшафта (ошибка) или факт (информационное наблюдение).
 #[derive(Debug, Clone)]
 pub struct LandscapeFinding {
-    /// Тип: `id-divergence` | `status-conflict` | `dangling-ref` |
-    /// `cross-project-link`.
+    /// Тип: `id-divergence` | `status-conflict` | `dangling-ref` (находки)
+    /// либо `cross-project-link` (факт).
     pub kind: String,
     /// Описание.
     pub message: String,
@@ -93,8 +108,10 @@ pub struct LandscapeReport {
     pub root: PathBuf,
     /// Реестр систем (сортировка по каноническому имени).
     pub systems: Vec<LandscapeSystem>,
-    /// Находки.
+    /// Находки (ошибки): `id-divergence`, `status-conflict`, `dangling-ref`.
     pub findings: Vec<LandscapeFinding>,
+    /// Факты (не ошибки): `cross-project-link` — межпроектные связи.
+    pub facts: Vec<LandscapeFinding>,
     /// Сущности, пропущенные при толерантной загрузке моделей набора (E3):
     /// агрегация выполнена по валидному подмножеству.
     pub load_issues: Vec<crate::model::ModelLoadIssue>,
@@ -138,6 +155,48 @@ fn load_project(dir: &Path) -> Result<Option<(String, crate::model::Model)>> {
     }
     let model = crate::model::load_model_tolerant(&model_dir)?;
     Ok(Some((project_name(dir), model)))
+}
+
+/// Разрешение цели связи с приоритетом СВОЕГО проекта (ADR-037: id локальны
+/// для проекта, глобального пространства ID нет).
+///
+/// - `project:ID` — явная квалифицированная ссылка: ищем строго в проекте
+///   `project` (неизвестный проект или отсутствующий id → пустой результат →
+///   вызывающий код фиксирует `dangling-ref`);
+/// - `ID` без квалификатора — сначала в проекте-источнике, и только если
+///   локально цели нет — сквозным поиском по всему набору (такая находка
+///   затем классифицируется как межпроектная связь).
+///
+/// Возвращает отображаемую цель (с квалификатором, как записана) и найденные
+/// вхождения `(проект, сущность)`.
+fn resolve_target<'a>(
+    global: &BTreeMap<&'a str, Vec<(&'a str, &'a crate::model::Entity)>>,
+    project: &str,
+    target: &str,
+) -> (String, Vec<(&'a str, &'a crate::model::Entity)>) {
+    let trimmed = target.trim();
+    let (qualifier, bare) = match trimmed.split_once(':') {
+        Some((q, id)) if !q.trim().is_empty() && !id.trim().is_empty() => {
+            (Some(q.trim()), id.trim())
+        }
+        _ => (None, trimmed),
+    };
+    let matches = global.get(bare).cloned().unwrap_or_default();
+    if let Some(q) = qualifier {
+        let scoped: Vec<_> = matches.into_iter().filter(|(p, _)| *p == q).collect();
+        (format!("{q}:{bare}"), scoped)
+    } else {
+        let local: Vec<_> = matches
+            .iter()
+            .filter(|(p, _)| *p == project)
+            .copied()
+            .collect();
+        if local.is_empty() {
+            (bare.to_string(), matches)
+        } else {
+            (bare.to_string(), local)
+        }
+    }
 }
 
 /// Строит ландшафт систем по `ROOT`: сам каталог + непосредственные
@@ -202,9 +261,11 @@ pub fn build_landscape_with_aliases(
         )));
     }
 
-    // Глобальный индекс id → (проект, сущность) по всем проектам набора
-    // (разрешение связей — сквозное: dangling/cross-project определяются
-    // против ВСЕГО набора, а не локальной модели).
+    // Глобальный индекс id → (проект, сущность) по всем проектам набора.
+    // Используется ТОЛЬКО как запасной путь: id локальны для проекта
+    // (ADR-037), поэтому связь сначала разрешается в своём проекте, и лишь
+    // при отсутствии локальной цели — сквозным поиском по набору
+    // (квалифицированная ссылка `проект:ID` ищет строго в указанном проекте).
     let mut global: BTreeMap<&str, Vec<(&str, &crate::model::Entity)>> = BTreeMap::new();
     for (project, model) in &projects {
         for e in &model.entities {
@@ -253,16 +314,19 @@ pub fn build_landscape_with_aliases(
         })
         .collect();
     systems.sort_by(|a, b| a.canonical.cmp(&b.canonical));
-    let canonical_of: BTreeMap<&str, &str> = systems
+    // Каноническое имя по ВХОЖДЕНИЮ (проект, id), а не по глобальному id:
+    // один и тот же id в разных проектах — разные системы.
+    let canonical_of: BTreeMap<(&str, &str), &str> = systems
         .iter()
         .flat_map(|s| {
             s.occurrences
                 .iter()
-                .map(move |o| (o.id.as_str(), s.canonical.as_str()))
+                .map(move |o| ((o.project.as_str(), o.id.as_str()), s.canonical.as_str()))
         })
         .collect();
 
     let mut findings = Vec::new();
+    let mut facts = Vec::new();
 
     // id-divergence / status-conflict по реестру.
     for s in &systems {
@@ -296,7 +360,8 @@ pub fn build_landscape_with_aliases(
         }
     }
 
-    // Связи: dangling-ref / cross-project-link + рёбра ландшафта.
+    // Связи: dangling-ref (находка) / cross-project-link (факт) + рёбра
+    // ландшафта. Разрешение цели — с приоритетом своего проекта.
     let mut edges: BTreeSet<(String, String)> = BTreeSet::new();
     let mut seen_dangling: BTreeSet<(String, String, String)> = BTreeSet::new();
     let mut seen_cross: BTreeSet<(String, String, String)> = BTreeSet::new();
@@ -304,64 +369,74 @@ pub fn build_landscape_with_aliases(
         for e in &model.entities {
             for kind in LINK_KINDS {
                 for target in e.link_targets(kind) {
-                    match global.get(target.as_str()) {
-                        None => {
-                            // dangling-ref: цели нет ни в одном проекте набора.
-                            if seen_dangling.insert((
+                    let (display_target, resolved) = resolve_target(&global, project, target);
+                    if resolved.is_empty() {
+                        // dangling-ref: цели нет ни в своём проекте, ни в наборе.
+                        if seen_dangling.insert((
+                            e.id.clone(),
+                            kind.field_name().to_string(),
+                            display_target.clone(),
+                        )) {
+                            findings.push(LandscapeFinding {
+                                kind: "dangling-ref".to_string(),
+                                message: format!(
+                                    "{project} {} -[{}]-> {display_target}: цель отсутствует \
+                                     в проекте и во всех моделях набора",
+                                    e.id,
+                                    kind.field_name()
+                                ),
+                            });
+                        }
+                    } else {
+                        for (t_project, t_entity) in &resolved {
+                            // cross-project-link: цель — система (SYS/INT)
+                            // ДРУГОГО проекта. Информационный факт, не ошибка.
+                            if *t_project == project.as_str()
+                                || !matches!(t_entity.kind, EntityKind::Sys | EntityKind::Int)
+                            {
+                                continue;
+                            }
+                            if seen_cross.insert((
                                 e.id.clone(),
-                                kind.field_name().to_string(),
-                                target.clone(),
+                                display_target.clone(),
+                                (*t_project).to_string(),
                             )) {
-                                findings.push(LandscapeFinding {
-                                    kind: "dangling-ref".to_string(),
+                                facts.push(LandscapeFinding {
+                                    kind: "cross-project-link".to_string(),
                                     message: format!(
-                                        "{project} {} -[{}]-> {target}: цель отсутствует \
-                                         во всех моделях набора",
+                                        "{project} {} -[{}]-> {display_target} (проект {t_project}, «{}»)",
                                         e.id,
-                                        kind.field_name()
+                                        kind.field_name(),
+                                        t_entity.title.trim()
                                     ),
                                 });
                             }
                         }
-                        Some(targets) => {
-                            for (t_project, t_entity) in targets {
-                                // cross-project-link: цель — система (SYS/INT)
-                                // ДРУГОГО проекта. Положительный факт, не ошибка.
-                                if *t_project == project.as_str()
-                                    || !matches!(t_entity.kind, EntityKind::Sys | EntityKind::Int)
-                                {
-                                    continue;
-                                }
-                                if seen_cross.insert((
-                                    e.id.clone(),
-                                    target.clone(),
-                                    (*t_project).to_string(),
-                                )) {
-                                    findings.push(LandscapeFinding {
-                                        kind: "cross-project-link".to_string(),
-                                        message: format!(
-                                            "{project} {} -[{}]-> {target} (проект {t_project}, «{}»)",
-                                            e.id,
-                                            kind.field_name(),
-                                            t_entity.title.trim()
-                                        ),
-                                    });
-                                }
-                            }
-                        }
                     }
                     // Ребро ландшафта — только между системами (SYS/INT),
-                    // разрешёнными в канонические имена.
-                    let (Some(src_canonical), Some(dst_canonical)) = (
-                        canonical_of
-                            .get(e.id.as_str())
-                            .filter(|_| matches!(e.kind, EntityKind::Sys | EntityKind::Int)),
-                        canonical_of.get(target.as_str()),
-                    ) else {
+                    // разрешёнными в канонические имена ПО ВХОЖДЕНИЮ
+                    // (один id в разных проектах — разные системы).
+                    let Some(src_canonical) = canonical_of
+                        .get(&(project.as_str(), e.id.as_str()))
+                        .filter(|_| matches!(e.kind, EntityKind::Sys | EntityKind::Int))
+                    else {
                         continue;
                     };
-                    if src_canonical != dst_canonical {
-                        edges.insert(((*src_canonical).to_string(), (*dst_canonical).to_string()));
+                    for (t_project, t_entity) in &resolved {
+                        if !matches!(t_entity.kind, EntityKind::Sys | EntityKind::Int) {
+                            continue;
+                        }
+                        let Some(dst_canonical) =
+                            canonical_of.get(&(*t_project, t_entity.id.as_str()))
+                        else {
+                            continue;
+                        };
+                        if src_canonical != dst_canonical {
+                            edges.insert((
+                                (*src_canonical).to_string(),
+                                (*dst_canonical).to_string(),
+                            ));
+                        }
                     }
                 }
             }
@@ -395,13 +470,25 @@ pub fn build_landscape_with_aliases(
         root: root.to_path_buf(),
         systems,
         findings,
+        facts,
         load_issues,
         edges: edges.into_iter().collect(),
         top,
     })
 }
 
-/// Рендер отчёта в markdown: реестр систем, находки, топ связности.
+/// Пояснение к пустому набору рёбер: реестр систем непуст, но связей между
+/// системами в моделях набора нет — это факт данных, а не сбой инструмента.
+/// `None`, когда пояснять нечего (реестр пуст или рёбра есть).
+fn edges_note(report: &LandscapeReport) -> Option<String> {
+    (report.edges.is_empty() && !report.systems.is_empty()).then(|| {
+        "связей между системами: 0 — в моделях набора нет ссылок между \
+         системами (SYS/INT); это факт данных, а не сбой инструмента"
+            .to_string()
+    })
+}
+
+/// Рендер отчёта в markdown: реестр систем, находки, факты, топ связности.
 #[must_use]
 pub fn render_markdown(report: &LandscapeReport) -> String {
     let mut out = String::new();
@@ -436,17 +523,31 @@ pub fn render_markdown(report: &LandscapeReport) -> String {
             let _ = writeln!(out, "- [{}] {}", f.kind, f.message);
         }
     }
+    // Факты — информация, не ошибка: отдельная секция, в счётчик находок
+    // и в вердикт «проблема» не входит.
+    let _ = writeln!(out, "\n## Факты (не ошибки)\n");
+    if report.facts.is_empty() {
+        let _ = writeln!(out, "- нет");
+    } else {
+        for f in &report.facts {
+            let _ = writeln!(out, "- [{}] {}", f.kind, f.message);
+        }
+    }
     let _ = writeln!(out, "\n## Топ связности\n");
     for (i, (name, n)) in report.top.iter().enumerate() {
         let _ = writeln!(out, "{}. {name} — {n} связей", i + 1);
     }
     let _ = write!(
         out,
-        "\nИтого: {} систем, {} связей, {} находок",
+        "\nИтого: {} систем, {} связей, {} находок, {} фактов",
         report.systems.len(),
         report.edges.len(),
-        report.findings.len()
+        report.findings.len(),
+        report.facts.len()
     );
+    if let Some(note) = edges_note(report) {
+        let _ = write!(out, "\n\n> {note}");
+    }
     out
 }
 
@@ -514,10 +615,13 @@ impl Tool for LandscapeReportTool {
             name: "landscape_report".into(),
             description: "Ландшафт систем набора проектов (EA-3, ADR-037): агрегация model/ \
                           самого ROOT и непосредственных подкаталогов в реестр систем SYS/INT \
-                          с дедупликацией по нормализованному имени, находки (id-divergence, \
-                          status-conflict, dangling-ref, cross-project-link) и топ связности. \
-                          Ответ — JSON: format + счётчики systems/edges/findings + summary + \
-                          report (markdown-отчёт или mermaid graph TD). Отчёт, а не гейт: \
+                          с дедупликацией по нормализованному имени; id локальны для проекта — \
+                          цель связи разрешается сначала в своём проекте, квалифицированная \
+                          ссылка `проект:SYS-001` — строго в указанном проекте. Находки \
+                          (id-divergence, status-conflict, dangling-ref), отдельная секция \
+                          фактов (cross-project-link) и топ связности. Ответ — JSON: format + \
+                          счётчики systems/edges/findings/facts + summary + report \
+                          (markdown-отчёт или mermaid graph TD). Отчёт, а не гейт: \
                           verdict passed не применим"
                 .into(),
             parameters: json!({
@@ -566,12 +670,17 @@ impl Tool for LandscapeReportTool {
             render_markdown(&report)
         };
         let mut summary = format!(
-            "Ландшафт {}: {} систем, {} связей, {} находок",
+            "Ландшафт {}: {} систем, {} связей, {} находок, {} фактов",
             report.root.display(),
             report.systems.len(),
             report.edges.len(),
-            report.findings.len()
+            report.findings.len(),
+            report.facts.len()
         );
+        let edge_note = edges_note(&report);
+        if let Some(note) = &edge_note {
+            let _ = write!(summary, "; {note}"); // записи в String не падают
+        }
         if let Some(note) = crate::model::load_issues_note(&report.load_issues) {
             let _ = write!(summary, "; внимание: {note}"); // записи в String не падают
         }
@@ -581,6 +690,8 @@ impl Tool for LandscapeReportTool {
             "systems": report.systems.len(),
             "edges": report.edges.len(),
             "findings": report.findings.len(),
+            "facts": report.facts.len(),
+            "edges_note": edge_note,
             "load_issues": report.load_issues,
             "summary": summary,
             "report": text,
@@ -957,7 +1068,7 @@ mod tests {
                 .all(|o| o.project != "p3")
         );
 
-        // Находки: все четыре типа.
+        // Находки: id-divergence / status-conflict / dangling-ref.
         let kinds = |k: &str| {
             report
                 .findings
@@ -977,7 +1088,20 @@ mod tests {
         let dangling = kinds("dangling-ref");
         assert_eq!(dangling.len(), 1, "{dangling:?}");
         assert!(dangling[0].message.contains("SYS-099"), "{dangling:?}");
-        let cross = kinds("cross-project-link");
+        // cross-project-link — ФАКТ (отдельная секция), не находка.
+        assert!(
+            !report
+                .findings
+                .iter()
+                .any(|f| f.kind == "cross-project-link"),
+            "{:?}",
+            report.findings
+        );
+        let cross = report
+            .facts
+            .iter()
+            .filter(|f| f.kind == "cross-project-link")
+            .collect::<Vec<_>>();
         assert_eq!(cross.len(), 1, "{cross:?}");
         assert!(
             cross[0].message.contains("INT-007") && cross[0].message.contains("p1"),
@@ -1036,9 +1160,171 @@ mod tests {
         );
         assert!(md.contains("[id-divergence]"), "{md}");
         assert!(md.contains("[dangling-ref]"), "{md}");
+        // Факты — отдельная секция, не «Находки».
+        assert!(md.contains("## Факты (не ошибки)"), "{md}");
         assert!(md.contains("[cross-project-link]"), "{md}");
+        let facts_at = md.find("## Факты").expect("секция фактов");
+        let cross_at = md.find("[cross-project-link]").expect("факт");
+        assert!(cross_at > facts_at, "факт — в секции фактов: {md}");
         assert!(md.contains("## Топ связности"), "{md}");
         assert!(md.contains("1. Процессинг — 2 связей"), "{md}");
+        assert!(md.contains("3 находок, 1 фактов"), "{md}");
+        // Рёбра есть — пояснение о нулевых связях не показывается.
+        assert!(!md.contains("связей между системами: 0"), "{md}");
+    }
+
+    /// Локальный id (`SYS-001` есть почти в каждом проекте) разрешается
+    /// В СВОЁМ проекте: никаких cross-project-фактов из-за чужих одноимённых
+    /// id (регрессия 0.3.2: 74 ложных cross-project-link).
+    #[test]
+    fn landscape_local_id_link_does_not_leak_cross_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        write_file(
+            &root,
+            "p1/model/SYS-001-alpha.md",
+            "---\nid: SYS-001\ntype: sys\ntitle: Альфа\nstatus: adopted\n---\n",
+        );
+        write_file(
+            &root,
+            "p1/model/INT-001-alpha-gw.md",
+            "---\nid: INT-001\ntype: int\ntitle: Шлюз Альфы\nstatus: adopted\ndepends_on: [SYS-001]\n---\n",
+        );
+        write_file(
+            &root,
+            "p2/model/SYS-001-beta.md",
+            "---\nid: SYS-001\ntype: sys\ntitle: Бета\nstatus: adopted\n---\n",
+        );
+        write_file(
+            &root,
+            "p2/model/INT-001-beta-gw.md",
+            "---\nid: INT-001\ntype: int\ntitle: Шлюз Беты\nstatus: adopted\ndepends_on: [SYS-001]\n---\n",
+        );
+        let report = build_landscape(&root).unwrap();
+        assert!(
+            report
+                .findings
+                .iter()
+                .all(|f| f.kind != "cross-project-link"),
+            "{:?}",
+            report.findings
+        );
+        assert!(
+            !report.findings.iter().any(|f| f.kind == "dangling-ref"),
+            "локальная цель найдена — не dangling: {:?}",
+            report.findings
+        );
+        assert!(report.facts.is_empty(), "{:?}", report.facts);
+        // Рёбра — только внутри своих проектов (кросс-рёбер нет).
+        assert_eq!(
+            report.edges,
+            vec![
+                ("шлюз альфы".to_string(), "альфа".to_string()),
+                ("шлюз беты".to_string(), "бета".to_string()),
+            ],
+            "{:?}",
+            report.edges
+        );
+    }
+
+    /// Квалифицированная ссылка `проект:ID` адресует сущность другого проекта
+    /// явно — это настоящая межпроектная связь (факт + ребро), а не dangling.
+    #[test]
+    fn landscape_qualified_ref_resolves_across_projects() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        write_file(
+            &root,
+            "p1/model/SYS-001-alpha.md",
+            "---\nid: SYS-001\ntype: sys\ntitle: Альфа\nstatus: adopted\n---\n",
+        );
+        write_file(
+            &root,
+            "p2/model/INT-001-beta-gw.md",
+            "---\nid: INT-001\ntype: int\ntitle: Шлюз Беты\nstatus: adopted\ndepends_on: [p1:SYS-001]\n---\n",
+        );
+        let report = build_landscape(&root).unwrap();
+        assert!(report.findings.is_empty(), "{:?}", report.findings);
+        assert_eq!(report.facts.len(), 1, "{:?}", report.facts);
+        assert!(
+            report.facts[0].message.contains("p1:SYS-001"),
+            "{:?}",
+            report.facts
+        );
+        assert_eq!(
+            report.edges,
+            vec![("шлюз беты".to_string(), "альфа".to_string())],
+            "{:?}",
+            report.edges
+        );
+        // Квалификатор на несуществующий проект/id — dangling с квалификатором.
+        write_file(
+            &root,
+            "p2/model/INT-002-ghost.md",
+            "---\nid: INT-002\ntype: int\ntitle: Призрак\nstatus: adopted\ndepends_on: [nope:SYS-999]\n---\n",
+        );
+        let report = build_landscape(&root).unwrap();
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|f| f.kind == "dangling-ref" && f.message.contains("nope:SYS-999")),
+            "{:?}",
+            report.findings
+        );
+    }
+
+    /// id-divergence — по-прежнему настоящая находка (одна система под
+    /// разными id в разных проектах), а не «факт».
+    #[test]
+    fn landscape_id_divergence_still_a_finding() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        write_file(
+            &root,
+            "legacy/model/SYS-001-core.md",
+            "---\nid: SYS-001\ntype: sys\ntitle: Core Banking (АБС)\nstatus: adopted\n---\n",
+        );
+        write_file(
+            &root,
+            "platform/model/SYS-005-core.md",
+            "---\nid: SYS-005\ntype: sys\ntitle: Core Banking (АБС)\nstatus: adopted\n---\n",
+        );
+        let report = build_landscape(&root).unwrap();
+        let divergence: Vec<_> = report
+            .findings
+            .iter()
+            .filter(|f| f.kind == "id-divergence")
+            .collect();
+        assert_eq!(divergence.len(), 1, "{:?}", report.findings);
+        assert!(
+            divergence[0].message.contains("SYS-001") && divergence[0].message.contains("SYS-005"),
+            "{divergence:?}"
+        );
+        assert!(report.facts.is_empty(), "{:?}", report.facts);
+    }
+
+    /// Нулевые рёбра при непустом реестре — факт данных: отчёт явно это
+    /// помечает, а не выглядит как сбой инструмента.
+    #[test]
+    fn landscape_zero_edges_is_explained_as_data_fact() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        write_file(
+            &root,
+            "p1/model/SYS-001-alpha.md",
+            "---\nid: SYS-001\ntype: sys\ntitle: Альфа\nstatus: adopted\n---\n",
+        );
+        write_file(
+            &root,
+            "p2/model/SYS-001-beta.md",
+            "---\nid: SYS-001\ntype: sys\ntitle: Бета\nstatus: adopted\n---\n",
+        );
+        let report = build_landscape(&root).unwrap();
+        assert!(report.edges.is_empty() && !report.systems.is_empty());
+        let md = render_markdown(&report);
+        assert!(md.contains("связей между системами: 0"), "{md}");
+        assert!(md.contains("факт данных"), "{md}");
     }
 
     #[test]
@@ -1092,6 +1378,8 @@ mod tests {
         assert_eq!(v["format"], "markdown");
         assert!(v["systems"].as_u64().expect("systems") >= 1, "{v}");
         assert!(v["findings"].as_u64().expect("findings") >= 1, "{v}");
+        // Рёбра есть — пояснение о нулевых связях не выставляется.
+        assert!(v["edges_note"].is_null(), "{v}");
         let report = v["report"].as_str().expect("report");
         assert!(report.contains("# Ландшафт систем"), "{report}");
         assert!(

@@ -16,6 +16,17 @@ use crate::error::{HarnessError, Result};
 use crate::llm::ToolSpec;
 use crate::tool::{Tool, ToolContext, ToolOutput};
 
+/// Алгоритм хэшей новых бандлов: криптостойкий SHA-256 (П2 ДКА).
+pub const HASH_ALG_SHA256: &str = "sha256";
+/// Алгоритм бандлов старого формата (FNV-1a 64) — только чтение,
+/// с предупреждением о необходимости переупаковки.
+pub const HASH_ALG_LEGACY: &str = "fnv1a64";
+
+/// Дефолт поля `hash_alg` для бандлов, собранных до П2: старый алгоритм.
+fn default_hash_alg() -> String {
+    HASH_ALG_LEGACY.to_string()
+}
+
 /// Запись манифеста об одном артефакте.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EvidenceItem {
@@ -23,7 +34,7 @@ pub struct EvidenceItem {
     pub key: String,
     /// Путь относительно каталога изменения.
     pub path: String,
-    /// FNV-1a хэш содержимого на момент упаковки.
+    /// SHA-256 содержимого на момент упаковки (старые бандлы — FNV-1a).
     pub hash: String,
     /// Размер в байтах.
     pub size: u64,
@@ -36,6 +47,10 @@ pub struct EvidenceBundle {
     pub route: String,
     /// Метка времени упаковки.
     pub packed_at: String,
+    /// Алгоритм хэшей `items` (П2): `sha256`; отсутствие поля в старом
+    /// бандле означает `fnv1a64`.
+    #[serde(default = "default_hash_alg")]
+    pub hash_alg: String,
     /// Артефакты.
     pub items: Vec<EvidenceItem>,
 }
@@ -49,6 +64,8 @@ pub struct EvidenceVerdict {
     pub missing: Vec<String>,
     /// Артефакты с изменённым хэшем (подмена/дрейф после упаковки).
     pub tampered: Vec<String>,
+    /// Предупреждения, не блокирующие выпуск (бандл старого формата и т.п.).
+    pub warnings: Vec<String>,
     /// Сводка для отчёта.
     pub summary: String,
 }
@@ -114,15 +131,126 @@ fn candidate_paths(key: &str) -> Vec<&'static str> {
     }
 }
 
-/// FNV-1a 64 — детекция изменения артефакта после упаковки.
-fn hash_file(path: &Path) -> Result<(String, u64)> {
-    let bytes = std::fs::read(path).map_err(|e| HarnessError::io(path, e))?;
+/// FNV-1a 64 — только чтение бандлов старого формата.
+fn fnv1a64(bytes: &[u8]) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in &bytes {
+    for b in bytes {
         hash ^= u64::from(*b);
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
-    Ok((format!("{hash:016x}"), bytes.len() as u64))
+    hash
+}
+
+/// Временный/служебный файл, не влияющий на смысл артефакта.
+fn is_transient(name: &str) -> bool {
+    name.ends_with('~')
+        || name.ends_with(".tmp")
+        || name.ends_with(".swp")
+        || name.ends_with(".swo")
+        || name == ".DS_Store"
+}
+
+/// Файлы каталога рекурсивно (П2: правка во вложенном подкаталоге обязана
+/// менять хэш), с игнором `.git` и временных файлов. Порядок — по полному
+/// пути; нечитаемые каталоги пропускаются (не повод валить проверку).
+fn dir_files(root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in rd.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if path.is_dir() {
+                if name != ".git" {
+                    stack.push(path);
+                }
+            } else if path.is_file() && !is_transient(&name) {
+                out.push(path);
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Хэш содержимого файла выбранным алгоритмом (П2: SHA-256 по умолчанию).
+fn hash_file(path: &Path, alg: &str) -> Result<(String, u64)> {
+    let bytes = std::fs::read(path).map_err(|e| HarnessError::io(path, e))?;
+    let hash = if alg == HASH_ALG_SHA256 {
+        crate::hash::sha256_hex(&bytes)
+    } else {
+        format!("{:016x}", fnv1a64(&bytes))
+    };
+    Ok((hash, bytes.len() as u64))
+}
+
+/// Хэш артефакта: файла — содержимого; каталога — рекурсивно, по
+/// относительным путям внутри самого артефакта с разделителем `/`.
+///
+/// Канонический вход (П2): способ написания пути-аргумента (`.`, абсолютный,
+/// с завершающим `/`) на вердикт не влияет — в свёртку идёт путь файла
+/// относительно проверяемого артефакта, а не то, как был передан каталог.
+fn hash_artifact(path: &Path, alg: &str) -> Result<(String, u64)> {
+    if path.is_file() {
+        return hash_file(path, alg);
+    }
+    let mut acc = String::new();
+    let mut size = 0u64;
+    for file in dir_files(path) {
+        let (h, s) = hash_file(&file, alg)?;
+        let rel = file.strip_prefix(path).map_or_else(
+            |_| file.display().to_string(),
+            |p| p.to_string_lossy().replace('\\', "/"),
+        );
+        // Запись в String не может завершиться ошибкой — игнор безопасен.
+        let _ = write!(acc, "{rel}\0{h}\n");
+        size += s;
+    }
+    let digest = if alg == HASH_ALG_SHA256 {
+        crate::hash::sha256_hex(acc.as_bytes())
+    } else {
+        format!("{:016x}", fnv1a64(acc.as_bytes()))
+    };
+    Ok((digest, size))
+}
+
+/// Хэш артефакта алгоритмом старого формата (FNV-1a, нерекурсивно, путь
+/// через `display()`): только проверка уже собранных бандлов. Новые бандлы
+/// собираются [`hash_artifact`] с SHA-256.
+fn hash_artifact_legacy(path: &Path) -> Result<(String, u64)> {
+    if path.is_file() {
+        let bytes = std::fs::read(path).map_err(|e| HarnessError::io(path, e))?;
+        return Ok((format!("{:016x}", fnv1a64(&bytes)), bytes.len() as u64));
+    }
+    let mut acc = String::new();
+    let mut size = 0u64;
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(path)
+        .map_err(|e| HarnessError::io(path, e))?
+        .flatten()
+        .map(|e| e.path())
+        .collect();
+    entries.sort();
+    for e in entries {
+        if e.is_file() {
+            let bytes = std::fs::read(&e).map_err(|err| HarnessError::io(&e, err))?;
+            let _ = write!(acc, "{}:{:016x};", e.display(), fnv1a64(&bytes));
+            size += bytes.len() as u64;
+        }
+    }
+    Ok((format!("{:016x}", fnv1a64(acc.as_bytes())), size))
+}
+
+/// Хэш артефакта алгоритмом бандла: `sha256` — канонический рекурсивный,
+/// иначе (старый формат) — legacy-свёртка.
+fn hash_with_alg(path: &Path, alg: &str) -> Result<(String, u64)> {
+    if alg == HASH_ALG_SHA256 {
+        hash_artifact(path, HASH_ALG_SHA256)
+    } else {
+        hash_artifact_legacy(path)
+    }
 }
 
 /// Ищет артефакт по каноническим путям (файл или каталог с ≥1 md).
@@ -146,34 +274,6 @@ fn find_artifact(change_dir: &Path, key: &str) -> Option<PathBuf> {
     None
 }
 
-/// Хэш артефакта: файла — содержимого; каталога — имён+хэшей содержимого.
-fn hash_artifact(path: &Path) -> Result<(String, u64)> {
-    if path.is_file() {
-        return hash_file(path);
-    }
-    let mut acc = String::new();
-    let mut size = 0u64;
-    let mut entries: Vec<PathBuf> = std::fs::read_dir(path)
-        .map_err(|e| HarnessError::io(path, e))?
-        .flatten()
-        .map(|e| e.path())
-        .collect();
-    entries.sort();
-    for e in entries {
-        if e.is_file() {
-            let (h, s) = hash_file(&e)?;
-            let _ = write!(acc, "{}:{h};", e.display());
-            size += s;
-        }
-    }
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in acc.as_bytes() {
-        hash ^= u64::from(*b);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    Ok((format!("{hash:016x}"), size))
-}
-
 /// Собирает Evidence Bundle: манифест `EVIDENCE.yaml` в каталоге изменения.
 ///
 /// # Errors
@@ -184,7 +284,7 @@ pub fn pack(change_dir: &Path, route: Route) -> Result<(EvidenceBundle, Evidence
     for (key, _desc) in required_artifacts(route) {
         match find_artifact(change_dir, key) {
             Some(path) => {
-                let (hash, size) = hash_artifact(&path)?;
+                let (hash, size) = hash_artifact(&path, HASH_ALG_SHA256)?;
                 items.push(EvidenceItem {
                     key: key.into(),
                     path: path
@@ -200,6 +300,7 @@ pub fn pack(change_dir: &Path, route: Route) -> Result<(EvidenceBundle, Evidence
     let bundle = EvidenceBundle {
         route: format!("{route:?}"),
         packed_at: chrono::Local::now().to_rfc3339(),
+        hash_alg: HASH_ALG_SHA256.to_string(),
         items,
     };
     let manifest = change_dir.join("EVIDENCE.yaml");
@@ -215,11 +316,16 @@ pub fn pack(change_dir: &Path, route: Route) -> Result<(EvidenceBundle, Evidence
         ),
         missing,
         tampered: Vec::new(),
+        warnings: Vec::new(),
     };
     Ok((bundle, verdict))
 }
 
 /// Проверяет bundle: обязательные артефакты на месте, хэши совпадают.
+///
+/// Старый формат (`hash_alg` отсутствует или `fnv1a64`) проверяется старой
+/// свёрткой с предупреждением о переупаковке — вердикт не блокируется только
+/// из-за формата.
 ///
 /// # Errors
 /// Манифест отсутствует/не валиден.
@@ -232,6 +338,19 @@ pub fn verify(change_dir: &Path) -> Result<EvidenceVerdict> {
         "Critical" => Route::Critical,
         _ => Route::Fast,
     };
+    let alg = if bundle.hash_alg == HASH_ALG_SHA256 {
+        HASH_ALG_SHA256
+    } else {
+        HASH_ALG_LEGACY
+    };
+    let mut warnings = Vec::new();
+    if alg == HASH_ALG_LEGACY {
+        warnings.push(format!(
+            "бандл старого формата ({}): переупакуйте (`arch-be evidence pack`) — \
+             новые бандлы используют SHA-256",
+            bundle.hash_alg
+        ));
+    }
     let mut missing = Vec::new();
     let mut tampered = Vec::new();
     for (key, _desc) in required_artifacts(route) {
@@ -245,7 +364,7 @@ pub fn verify(change_dir: &Path) -> Result<EvidenceVerdict> {
             tampered.push(format!("{} (удалён: {})", item.key, item.path));
             continue;
         }
-        let (hash, _) = hash_artifact(&path)?;
+        let (hash, _) = hash_with_alg(&path, alg)?;
         if hash != item.hash {
             tampered.push(format!(
                 "{} (изменён после упаковки: {})",
@@ -265,6 +384,7 @@ pub fn verify(change_dir: &Path) -> Result<EvidenceVerdict> {
         ),
         missing,
         tampered,
+        warnings,
     })
 }
 
@@ -340,6 +460,7 @@ impl Tool for EvidenceVerifyTool {
             "tool": "evidence_verify",
             "passed": verdict.passed,
             "issues": issues,
+            "warnings": verdict.warnings,
             "summary": verdict.summary,
         });
         // Сериализация собранного объекта не падает; запасной вариант — компактная форма.
@@ -365,7 +486,7 @@ impl Tool for EvidencePackTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "evidence_pack".into(),
-            description: "Собрать Evidence Bundle: манифест EVIDENCE.yaml с FNV-1a хэшами \
+            description: "Собрать Evidence Bundle: манифест EVIDENCE.yaml с SHA-256 хэшами \
                           артефактов каталога изменения по профилю маршрута (fast/standard/\
                           critical). Пишет манифест в рабочий каталог; вердикт полноты — \
                           в ответе (passed=false — не хватает обязательных артефактов)"
@@ -421,6 +542,7 @@ impl Tool for EvidencePackTool {
             "passed": verdict.passed,
             "manifest": dir.join("EVIDENCE.yaml").display().to_string(),
             "route": bundle.route,
+            "hash_alg": bundle.hash_alg,
             "items": bundle.items.len(),
             "missing": verdict.missing,
             "summary": verdict.summary,
@@ -493,6 +615,93 @@ mod tests {
             v.tampered.iter().any(|t| t.contains("spec_or_delta")),
             "{:?}",
             v.tampered
+        );
+    }
+
+    // --- П2: канонический вход, рекурсия, SHA-256, миграция формата --------
+
+    /// Вердикт не зависит от написания пути, каталог хэшируется рекурсивно,
+    /// хэши — SHA-256.
+    #[test]
+    fn hash_is_path_invariant_and_recursive() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        put(dir, "PROBLEM.md", "p");
+        put(dir, "SPEC.md", "s\n## Критерии приёмки\n");
+        put(dir, "RISK.md", "r");
+        put(dir, "ROLLBACK.md", "rb");
+        put(dir, "docs/adr/ADR-001.md", "a1");
+        put(dir, "docs/adr/archive/ADR-002.md", "a2");
+        put(dir, "VALIDATION.md", "v");
+        put(dir, "reports/fitness.md", "f");
+        let (bundle, verdict) = pack(dir, Route::Standard).expect("pack");
+        assert!(verdict.passed, "missing: {:?}", verdict.missing);
+        assert_eq!(bundle.hash_alg, HASH_ALG_SHA256);
+        assert!(
+            bundle.items.iter().all(|i| i.hash.len() == 64),
+            "хэши обязаны быть SHA-256 hex: {:?}",
+            bundle
+                .items
+                .iter()
+                .map(|i| i.hash.len())
+                .collect::<Vec<_>>()
+        );
+        // Инвариантность к написанию пути (Д2): «.», абсолютный, с «/».
+        let trailing = PathBuf::from(format!("{}/", dir.display()));
+        let abs = dir.canonicalize().expect("canonicalize");
+        let v1 = verify(dir).expect("verify");
+        let v2 = verify(&trailing).expect("verify trailing");
+        let v3 = verify(&abs).expect("verify abs");
+        assert!(v1.passed && v2.passed && v3.passed, "{v1:?} {v2:?} {v3:?}");
+        assert_eq!(v1.tampered, v2.tampered);
+        assert_eq!(v1.tampered, v3.tampered);
+        // Рекурсия: правка во вложенном подкаталоге каталога-артефакта видна.
+        put(dir, "docs/adr/archive/ADR-002.md", "a2 ИЗМЕНЁН");
+        let v4 = verify(&abs).expect("verify");
+        assert!(!v4.passed);
+        assert!(
+            v4.tampered.iter().any(|t| t.contains("adr_or_pattern")),
+            "{:?}",
+            v4.tampered
+        );
+    }
+
+    /// Бандл старого формата (без `hash_alg`) проверяется старой свёрткой
+    /// и получает предупреждение о переупаковке.
+    #[test]
+    fn legacy_bundle_verified_with_old_alg_and_warned() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        put(dir, "PROBLEM.md", "p");
+        put(dir, "SPEC.md", "s");
+        put(dir, "RISK.md", "r");
+        put(dir, "ROLLBACK.md", "rb");
+        let (mut bundle, _v) = pack(dir, Route::Fast).expect("pack");
+        bundle.hash_alg = HASH_ALG_LEGACY.to_string();
+        for item in &mut bundle.items {
+            let p = dir.join(&item.path);
+            let (h, s) = hash_artifact_legacy(&p).expect("legacy hash");
+            item.hash = h;
+            item.size = s;
+        }
+        // Эмулируем старый манифест: поля hash_alg в нём не было.
+        let text = serde_yaml_ng::to_string(&bundle).expect("yaml");
+        let text = text
+            .lines()
+            .filter(|l| !l.starts_with("hash_alg:"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(dir.join("EVIDENCE.yaml"), text).expect("write");
+        let v = verify(dir).expect("verify");
+        assert!(
+            v.passed,
+            "missing: {:?}, tampered: {:?}",
+            v.missing, v.tampered
+        );
+        assert!(
+            v.warnings.iter().any(|w| w.contains("старого формата")),
+            "{:?}",
+            v.warnings
         );
     }
 
