@@ -411,7 +411,11 @@ enum Cmd {
         /// Каталог проекта (по умолчанию — текущий).
         #[arg(long)]
         dir: Option<PathBuf>,
-        /// Открыть rw-контур MCP-сервера (`arch-be mcp serve --rw`).
+        /// Открыть rw-контур MCP-сервера (`arch-be mcp serve --rw`):
+        /// аддитивные записи в рабочий каталог клиента — `adr_new`,
+        ///   `agentsmd_generate`, `archify_compare`, `archify_deliver`,
+        ///   `archify_show`, `delta_propose`, `evidence_pack`, `handoff_create`,
+        ///   `reverse_survey`, `skill_distill`.
         #[arg(long)]
         rw: bool,
         /// Не раскладывать скиллы.
@@ -776,12 +780,23 @@ enum McpCmd {
         args: String,
     },
     /// MCP-сервер (stdio JSON-RPC, NDJSON): архитектурный контроль кодовым
-    /// агентам (Claude Code и др.) — `spine_lint`, `fitness_check`,
-    /// `significance_score`, `trace_check`, `model_query`, `rubric_run` (ADR-008).
+    /// агентам (Claude Code и др.), ADR-008. Read-only состав: 34 инструмента
+    /// + 7 промптов-плейбуков spine-* (capability prompts). Ручные (14):
+    ///   `spine_lint`, `fitness_check`, `significance_score`,
+    ///   `significance_from_diff`, `trace_check`, `model_query`, `rubric_run`,
+    ///   `rubric_prompt`, `rubric_verify`, `kb_search`, `skill_search`,
+    ///   `skill_load`, `mermaid_render`, `rules_suggest`. Мостовые read-only
+    ///   (20): `adr_registry`, `agentsmd_lint`, `archify_validate`,
+    ///   `architect_review`, `asyncapi_lint`, `change_impact`, `contract_diff`,
+    ///   `delta_guard`, `evidence_verify`, `fleet_audit`, `landscape_report`,
+    ///   `model_drift`, `model_graph`, `model_validate`, `nfr_check`,
+    ///   `openapi_lint`, `openspec_coverage`, `plugin_list`, `rubric_list`,
+    ///   `rules_report`.
     Serve {
         /// Открыть rw-контур моста (аддитивные записи в рабочий каталог
-        /// клиента: `handoff_create`, `adr_new`, `agentsmd_generate`,
-        /// `skill_distill`, `archify_*`, `reverse_survey`). По умолчанию
+        /// клиента: `adr_new`, `agentsmd_generate`, `archify_compare`,
+        ///   `archify_deliver`, `archify_show`, `delta_propose`, `evidence_pack`,
+        ///   `handoff_create`, `reverse_survey`, `skill_distill`). По умолчанию
         /// сервер строго read-only.
         #[arg(long)]
         rw: bool,
@@ -858,6 +873,16 @@ enum ControlCmd {
         /// Файл ограничений (по умолчанию <repo>/.arch-handoff/`CONSTRAINTS.yaml`).
         #[arg(long)]
         constraints: Option<PathBuf>,
+    },
+    /// Кандидатные fitness-правила из содержательных пробелов кейса
+    /// (read-only эвристики, `src/rules_suggest.rs`): EARS-критерии приёмки,
+    /// численные таймауты в контрактах, декомпозиция REQ→работы, RTO/RPO без
+    /// ADR, аудит операторских действий. Печать — markdown-отчёт + готовые
+    /// YAML-фрагменты для `CONSTRAINTS.yaml` (взятие правила и severity —
+    /// решение архитектора).
+    RulesSuggest {
+        /// Корень кейса (каталог с docs/, model/, .arch-handoff/).
+        path: PathBuf,
     },
     /// Отчёт вверх по корпоративному контуру (наследование `extends`,
     /// `docs/corp-spine.md`): покрытие корп-правил, исходы (pass/fail/warn),
@@ -3001,6 +3026,10 @@ fn cmd_control(cfg: &arch_harness::config::Config, cmd: ControlCmd) -> Result<()
             let c = constraints.unwrap_or_else(|| repo.join(".arch-handoff/CONSTRAINTS.yaml"));
             print!("{}", arch_harness::control::rules_report(&repo, &c)?);
         }
+        ControlCmd::RulesSuggest { path } => {
+            let report = arch_harness::rules_suggest::suggest(&path)?;
+            print!("{}", arch_harness::rules_suggest::render_markdown(&report));
+        }
         ControlCmd::Report {
             repo,
             constraints,
@@ -3945,4 +3974,63 @@ fn which(binary: &str) -> String {
 /// Метка времени для имён отчётов.
 fn timestamp() -> String {
     chrono::Local::now().format("%Y%m%d-%H%M%S").to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::CommandFactory;
+
+    use super::Cli;
+
+    /// Рендерит long-help подкоманды по пути (например, `["mcp", "serve"]`).
+    fn long_help(path: &[&str]) -> String {
+        let mut cmd = Cli::command();
+        for (i, name) in path.iter().enumerate() {
+            let sub = cmd
+                .find_subcommand(name)
+                .unwrap_or_else(|| panic!("нет подкоманды '{name}'"));
+            if i + 1 == path.len() {
+                return sub.clone().render_long_help().to_string();
+            }
+            cmd = sub.clone();
+        }
+        unreachable!("путь подкоманды пуст")
+    }
+
+    /// A4: справка `arch-be mcp serve` перечисляет ВСЕ инструменты реестра
+    /// MCP-сервера (ручные + read-only мост + rw-список `--rw`) — тест
+    /// падает при расхождении help-текста с константами `mcp_server`,
+    /// справка больше не протухает.
+    #[test]
+    fn mcp_serve_help_lists_all_registry_tools() {
+        let help = long_help(&["mcp", "serve"]);
+        for name in arch_harness::mcp_server::MANUAL_TOOLS
+            .iter()
+            .chain(arch_harness::mcp_server::BRIDGE_READ_ONLY)
+        {
+            assert!(
+                help.contains(name),
+                "справка `mcp serve` не перечисляет read-only инструмент '{name}'"
+            );
+        }
+        for rw in arch_harness::mcp_server::BRIDGE_READ_WRITE {
+            assert!(
+                help.contains(rw),
+                "справка `mcp serve --rw` не перечисляет rw-инструмент '{rw}'"
+            );
+        }
+    }
+
+    /// A4: справка `arch-be connect --rw` перечисляет полный rw-список
+    /// реестра (включая `evidence_pack` и `delta_propose`).
+    #[test]
+    fn connect_help_lists_full_rw_bridge() {
+        let help = long_help(&["connect"]);
+        for rw in arch_harness::mcp_server::BRIDGE_READ_WRITE {
+            assert!(
+                help.contains(rw),
+                "справка `connect --rw` не перечисляет rw-инструмент '{rw}'"
+            );
+        }
+    }
 }

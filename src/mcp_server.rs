@@ -31,7 +31,10 @@
 //!   ADR-015): `kb_search`, `skill_search`, `skill_load`, `mermaid_render`;
 //!   плюс split-judge без LLM у сервера: `rubric_prompt` (промпты судьи +
 //!   JSON-схема ответа) и `rubric_verify` (механическая сборка отчёта из
-//!   сырых ответов хоста — медиана, `unstable`, `evidence_not_found`).
+//!   сырых ответов хоста — медиана, `unstable`, `evidence_not_found`);
+//!   плюс `rules_suggest` — кандидатные fitness-правила из пробелов кейса
+//!   (EARS, таймауты контрактов, REQ→TASK, RTO/RPO→ADR, аудит операторских
+//!   действий; модуль [`crate::rules_suggest`]).
 //!   МОСТ: имена из белых списков [`BRIDGE_READ_ONLY`] (+ [`BRIDGE_READ_WRITE`]
 //!   под `--rw`), не пересекающиеся с ручными, маршрутизируются в
 //!   [`crate::tools::full_registry`] (`dispatch` — с политикой R-уровней;
@@ -93,7 +96,7 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader
 use crate::config::{Config, ModelConfig};
 use crate::error::Result;
 use crate::tool::{ToolContext, ToolRegistry};
-use crate::{control, kb, mcp, mermaid, model, plugin, rubric, trace};
+use crate::{control, kb, mcp, mermaid, model, plugin, rubric, rules_suggest, trace};
 
 /// Код JSON-RPC «разбор запроса не удался» (невалидный JSON).
 const PARSE_ERROR: i64 = -32700;
@@ -215,7 +218,9 @@ const PLAYBOOK_PROMPTS: &[PlaybookPrompt] = &[
 /// детерминированный контур контроля и чтения, не покрытый ручными
 /// инструментами. Все перечисленные — без записи в рабочий каталог клиента
 /// и без LLM. Доступны в обоих режимах [`ServeMode`].
-const BRIDGE_READ_ONLY: &[&str] = &[
+/// (`pub`: справка CLI `mcp serve`/`connect --rw` сверяется со списками
+/// реестра тестом в `main.rs` — расхождение справки с реестром падает в CI.)
+pub const BRIDGE_READ_ONLY: &[&str] = &[
     "adr_registry",
     "agentsmd_lint",
     "archify_validate",
@@ -245,7 +250,9 @@ const BRIDGE_READ_ONLY: &[&str] = &[
 /// `reverse_survey` классифицируются политикой как `ReadOnly`, но пишут
 /// файлы — поэтому только под `--rw` (как и `evidence_pack`/`delta_propose`,
 /// для которых политика честно даёт `Mutating`).
-const BRIDGE_READ_WRITE: &[&str] = &[
+/// (`pub`: справка CLI `mcp serve`/`connect --rw` сверяется со списками
+/// реестра тестом в `main.rs` — расхождение справки с реестром падает в CI.)
+pub const BRIDGE_READ_WRITE: &[&str] = &[
     "adr_new",
     "agentsmd_generate",
     "archify_compare",
@@ -308,7 +315,8 @@ const HARNESS_ONLY_TOOLS: &[&str] = &[
 
 /// Имена ручных инструментов (нижний слой диспетчера) — мост их не дублирует
 /// даже при наличии одноимённых реализаций в реестре (`spine_lint` и др.).
-const MANUAL_TOOLS: &[&str] = &[
+/// (`pub`: справка CLI `mcp serve` сверяется с реестром тестом в `main.rs`.)
+pub const MANUAL_TOOLS: &[&str] = &[
     "spine_lint",
     "fitness_check",
     "significance_score",
@@ -322,6 +330,7 @@ const MANUAL_TOOLS: &[&str] = &[
     "skill_search",
     "skill_load",
     "mermaid_render",
+    "rules_suggest",
 ];
 
 /// Режим MCP-сервера: какой срез инструментов отдаётся хосту.
@@ -422,6 +431,51 @@ fn parse_args<T: serde::de::DeserializeOwned>(
 ) -> std::result::Result<T, CallError> {
     serde_json::from_value(args)
         .map_err(|e| CallError::invalid_params(format!("{tool}: невалидные аргументы: {e}")))
+}
+
+/// Аргумент `triggers` инструмента `significance_score`: каноничная карта
+/// «триггер → bool» ЛИБО компактный массив строк вида `"name=true"`,
+/// `"name=false"` или голое `"name"` (= true) — та же форма, что у CLI
+/// `control score --trigger` (агенты-хосты часто копируют её в вызов MCP).
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum TriggersArg {
+    /// Карта «триггер → сработал» (каноничная форма).
+    Map(BTreeMap<String, bool>),
+    /// Массив строк «name[=true|false]»; элемент без `=` — «name=true».
+    List(Vec<String>),
+}
+
+impl TriggersArg {
+    /// Приводит аргумент к карте триггеров; значение после `=`, отличное от
+    /// `true`/`false`, и пустое имя — ошибка разбора (`-32602`).
+    fn into_map(self) -> std::result::Result<BTreeMap<String, bool>, String> {
+        match self {
+            Self::Map(map) => Ok(map),
+            Self::List(items) => {
+                let mut map = BTreeMap::new();
+                for item in items {
+                    let (name, raw_value) = item.split_once('=').unwrap_or((item.as_str(), "true"));
+                    let name = name.trim();
+                    if name.is_empty() {
+                        return Err(format!("пустое имя триггера в элементе '{item}'"));
+                    }
+                    let fired = match raw_value.trim() {
+                        "true" => true,
+                        "false" => false,
+                        other => {
+                            return Err(format!(
+                                "значение '{other}' триггера '{name}' не bool \
+                                 (ожидается true/false)"
+                            ));
+                        }
+                    };
+                    map.insert(name.to_string(), fired);
+                }
+                Ok(map)
+            }
+        }
+    }
 }
 
 /// Прогоняет синхронную доменную функцию на blocking-пуле (fitness-правила
@@ -583,7 +637,9 @@ impl McpServe {
                                          architect_review (всё ревью одним вызовом — маршрут, \
                                          контур контроля, модель, контракты) и change_impact \
                                          (что заденет изменение и с кем согласовывать); \
-                                         аргумент `cwd` — \
+                                         rules_suggest — кандидатные fitness-правила из \
+                                         пробелов кейса (EARS, таймауты контрактов, REQ→TASK, \
+                                         RTO/RPO→ADR, аудит оператора); аргумент `cwd` — \
                                          рабочий каталог клиента для относительных путей. \
                                          Чтение знаний (read-only): kb_search — поиск по \
                                          базе знаний архитектора; skill_search/skill_load — \
@@ -867,6 +923,12 @@ impl McpServe {
                 .tool_mermaid_render(args)
                 .await
                 .map(DispatchOutcome::Structured),
+            // Кандидатные fitness-правила из пробелов кейса (read-only
+            // эвристики, src/rules_suggest.rs).
+            "rules_suggest" => self
+                .tool_rules_suggest(args)
+                .await
+                .map(DispatchOutcome::Structured),
             // Мост в реестр инструментов харнесса (белые списки режима).
             other if self.bridge_allowed(other) => self.bridge_dispatch(other, args).await,
             other => Err(CallError::invalid_params(format!(
@@ -972,11 +1034,16 @@ impl McpServe {
     fn tool_significance_score(args: Value) -> std::result::Result<Value, CallError> {
         #[derive(Deserialize)]
         struct Args {
-            /// Карта «триггер → сработал».
-            triggers: BTreeMap<String, bool>,
+            /// Триггеры: карта «триггер → сработал» либо массив строк
+            /// «name[=true|false]» ([`TriggersArg`]).
+            triggers: TriggersArg,
         }
         let args: Args = parse_args(args, "significance_score")?;
-        let s = control::significance_score(&args.triggers);
+        let triggers = args
+            .triggers
+            .into_map()
+            .map_err(|e| CallError::invalid_params(format!("significance_score: {e}")))?;
+        let s = control::significance_score(&triggers);
         let unknown: Vec<&str> = s
             .fired
             .iter()
@@ -1217,11 +1284,19 @@ impl McpServe {
             target_text: Option<String>,
             /// Модель-судья (имя из `[models]`, дефолт — `default_model`).
             model: Option<String>,
+            /// Рабочий каталог клиента: относительный `target` резолвится от
+            /// него (паттерн мостовых инструментов; по умолчанию — cwd
+            /// процесса сервера).
+            cwd: Option<String>,
         }
         let args: Args = parse_args(args, "rubric_run")?;
         let text = match (args.target, args.target_text) {
             (Some(path), None) => {
-                let path = PathBuf::from(path);
+                let raw = PathBuf::from(path);
+                let path = match &args.cwd {
+                    Some(cwd) if !raw.is_absolute() => PathBuf::from(cwd).join(raw),
+                    _ => raw,
+                };
                 blocking("rubric_run", move || {
                     std::fs::read_to_string(&path)
                         .map_err(|e| crate::error::HarnessError::io(&path, e))
@@ -1356,6 +1431,10 @@ impl McpServe {
             answers: Vec<String>,
             /// Метка судьи для отчёта (имя модели хоста; дефолт — external).
             model: Option<String>,
+            /// Метка судьи, перекрывающая `model` (anti-bias «автор = судья»:
+            /// ответы судила не дефолтная модель хоста — фиксируйте фактическую;
+            /// эхо — строка «Судья: <модель>» в markdown-отчёте).
+            judge_model: Option<String>,
         }
         let args: Args = parse_args(args, "rubric_verify")?;
         if args.answers.is_empty() {
@@ -1392,7 +1471,8 @@ impl McpServe {
             )));
         }
         let judge_model = args
-            .model
+            .judge_model
+            .or(args.model)
             .unwrap_or_else(|| "external (split-judge)".into());
         let report = rubric::build_report(&rub, &judge_model, &runs, &text, &self.cfg.judge)
             .map_err(|e| CallError::execution("rubric_verify", e))?;
@@ -1578,6 +1658,38 @@ impl McpServe {
                 )),
             },
         }
+    }
+
+    /// `rules_suggest`: кандидатные fitness-правила из содержательных
+    /// пробелов кейса (детекторы [`crate::rules_suggest`]: EARS, таймауты
+    /// контрактов, REQ→TASK, RTO/RPO→ADR, аудит операторских действий).
+    /// Информационный инструмент (read-only эвристики), verdict `passed`
+    /// не применим.
+    async fn tool_rules_suggest(&self, args: Value) -> std::result::Result<Value, CallError> {
+        #[derive(Deserialize)]
+        struct Args {
+            /// Корень кейса (каталог с docs/, model/, .arch-handoff/).
+            path: String,
+            /// Рабочий каталог клиента: относительный `path` резолвится от
+            /// него (паттерн мостовых инструментов; по умолчанию — cwd
+            /// процесса сервера).
+            cwd: Option<String>,
+        }
+        let args: Args = parse_args(args, "rules_suggest")?;
+        let raw = PathBuf::from(args.path);
+        let case = match &args.cwd {
+            Some(cwd) if !raw.is_absolute() => PathBuf::from(cwd).join(raw),
+            _ => raw,
+        };
+        let case_display = case.display().to_string();
+        let report = blocking("rules_suggest", move || rules_suggest::suggest(&case)).await?;
+        Ok(json!({
+            "case": case_display,
+            "candidate_count": report.candidates.len(),
+            "candidates": report.candidates,
+            "report_markdown": rules_suggest::render_markdown(&report),
+            "summary": report.summary,
+        }))
     }
 }
 
@@ -1839,9 +1951,11 @@ fn tool_specs() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "triggers": {
-                        "type": "object",
-                        "description": "Карта «триггер → true/false», ключи — из 15 канонических триггеров",
-                        "additionalProperties": {"type": "boolean"},
+                        "oneOf": [
+                            {"type": "object", "additionalProperties": {"type": "boolean"}},
+                            {"type": "array", "items": {"type": "string"}},
+                        ],
+                        "description": "Триггеры: карта «триггер → true/false» (ключи — из 15 канонических) ЛИБО массив строк \"name=true\" / \"name=false\" / голое \"name\" (= true)",
                     }
                 },
                 "required": ["triggers"],
@@ -1893,6 +2007,7 @@ fn tool_specs() -> Vec<Value> {
                     "target": {"type": "string", "description": "Путь к оцениваемому документу (md/txt)"},
                     "target_text": {"type": "string", "description": "Текст документа inline (альтернатива target)"},
                     "model": {"type": "string", "description": "Модель-судья (имя из [models]; по умолчанию — дефолтная)"},
+                    "cwd": {"type": "string", "description": "Рабочий каталог клиента: относительный target резолвится от него (по умолчанию — cwd процесса сервера)"},
                 },
                 "required": ["rubric"],
             },
@@ -2006,6 +2121,7 @@ fn tool_specs() -> Vec<Value> {
                         "description": "Сырые ответы модели хоста (каждый — JSON судьи по response_json_schema)",
                     },
                     "model": {"type": "string", "description": "Опц.: метка судьи для отчёта (имя модели хоста)"},
+                    "judge_model": {"type": "string", "description": "Опц.: метка судьи, перекрывает model — фиксируйте фактическую модель-судью (anti-bias «автор = судья»: судья ДОЛЖЕН отличаться от модели-автора документа)"},
                 },
                 "required": ["rubric", "answers"],
             },
@@ -2041,6 +2157,28 @@ fn tool_specs() -> Vec<Value> {
                         "additionalProperties": {"type": "boolean"},
                     },
                 },
+            },
+            "annotations": read_only,
+        }),
+        // Кандидатные fitness-правила из пробелов кейса (src/rules_suggest.rs).
+        // В конце vec — порядок первых 12 ручных инструментов зафиксирован
+        // тестами.
+        json!({
+            "name": "rules_suggest",
+            "description": "Кандидатные fitness-правила из содержательных пробелов кейса \
+                            (read-only эвристики): EARS-критерии приёмки, численные таймауты \
+                            в контрактах, декомпозиция REQ→работы, RTO/RPO без ADR, аудит \
+                            операторских действий. Ответ: candidates (id, rationale, \
+                            source_skill, yaml — готовый фрагмент CONSTRAINTS.yaml или null \
+                            для честного advisory) + report_markdown. Информационный \
+                            инструмент, без passed",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Корень кейса (каталог с docs/, model/, .arch-handoff/)"},
+                    "cwd": {"type": "string", "description": "Рабочий каталог клиента: относительный path резолвится от него (по умолчанию — cwd процесса сервера)"},
+                },
+                "required": ["path"],
             },
             "annotations": read_only,
         }),
@@ -2410,6 +2548,178 @@ mod tests {
             .expect("text");
         let parsed: Value = serde_json::from_str(text).expect("text — JSON");
         assert_eq!(parsed["route"], "Critical");
+    }
+
+    #[tokio::test]
+    async fn significance_score_accepts_trigger_list_form() {
+        // Массивная форма (`control score --trigger` стиль): "name=true",
+        // "name=false", голое "name" (= true). unknown_triggers сохраняется.
+        let responses = run_lines(&[
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"significance_score","arguments":{"triggers":["new_component=true","security_boundary_change"]}}}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"significance_score","arguments":{"triggers":["new_component=false"]}}}"#,
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"significance_score","arguments":{"triggers":["alien_trigger=true"]}}}"#,
+            r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"significance_score","arguments":{"triggers":["new_component=да"]}}}"#,
+        ])
+        .await;
+        let sc = &responses[0]["result"]["structuredContent"];
+        assert_eq!(sc["route"], "Critical", "{sc}");
+        assert_eq!(sc["score"], 2, "{sc}");
+        // "new_component=false" — не сработал: пустое множество → Fast.
+        let off = &responses[1]["result"]["structuredContent"];
+        assert_eq!(off["route"], "Fast", "{off}");
+        assert_eq!(off["fired"], json!([]), "{off}");
+        let alien = &responses[2]["result"]["structuredContent"];
+        assert_eq!(alien["unknown_triggers"], json!(["alien_trigger"]));
+        // Не-bool значение после '=' — понятная ошибка разбора (-32602).
+        assert_eq!(responses[3]["error"]["code"], INVALID_PARAMS);
+        assert!(
+            responses[3]["error"]["message"]
+                .as_str()
+                .expect("сообщение")
+                .contains("не bool"),
+            "{}",
+            responses[3]
+        );
+    }
+
+    #[tokio::test]
+    async fn rules_suggest_in_tools_list_and_finds_gap_candidates() {
+        // Кейс с пробелом: контракт без численных таймаутов + спека без EARS.
+        let dir = tempfile::tempdir().expect("tmp");
+        std::fs::create_dir_all(dir.path().join("docs/contracts")).expect("mkdir");
+        std::fs::write(
+            dir.path().join("docs/contracts/api.md"),
+            "# Контракт\n\nСинхронный вызов.\n",
+        )
+        .expect("contract");
+        let case = dir.path().display().to_string();
+        let owned = [
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"#.to_string(),
+            format!(
+                r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"rules_suggest","arguments":{{"path":"{case}"}}}}}}"#
+            ),
+        ];
+        let refs: Vec<&str> = owned.iter().map(String::as_str).collect();
+        let responses = run_lines(&refs).await;
+        // Инструмент объявлен в tools/list (read-only режим).
+        let tools = responses[0]["result"]["tools"].as_array().expect("tools");
+        let spec = tools
+            .iter()
+            .find(|t| t["name"] == "rules_suggest")
+            .expect("rules_suggest в tools/list");
+        assert_eq!(spec["annotations"]["readOnlyHint"], true, "{spec}");
+        assert!(
+            spec["inputSchema"]["properties"]["cwd"].is_object(),
+            "аргумент cwd в спеке: {spec}"
+        );
+        // Вызов находит кандидатов; у механизируемых — готовый YAML.
+        let sc = &responses[1]["result"]["structuredContent"];
+        let candidates = sc["candidates"].as_array().expect("candidates");
+        let ids: Vec<&str> = candidates.iter().filter_map(|c| c["id"].as_str()).collect();
+        assert!(
+            ids.contains(&"contract-timeouts-numeric"),
+            "{ids:?} (case: {case})"
+        );
+        let timeouts = candidates
+            .iter()
+            .find(|c| c["id"] == "contract-timeouts-numeric")
+            .expect("кандидат");
+        assert!(
+            timeouts["yaml"]
+                .as_str()
+                .expect("yaml")
+                .contains("must_contain"),
+            "{timeouts}"
+        );
+        assert_eq!(timeouts["source_skill"], "adversarial-review");
+        assert!(
+            sc["report_markdown"]
+                .as_str()
+                .expect("markdown")
+                .contains("Кандидатные fitness-правила"),
+            "{sc}"
+        );
+        // Чистый кейс (пустой каталог) — честный ноль кандидатов.
+        let empty = tempfile::tempdir().expect("tmp");
+        let call = format!(
+            r#"{{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{{"name":"rules_suggest","arguments":{{"path":"{}"}}}}}}"#,
+            empty.path().display()
+        );
+        let responses = run_lines(&[&call]).await;
+        let sc = &responses[0]["result"]["structuredContent"];
+        assert_eq!(sc["candidate_count"], 0, "{sc}");
+    }
+
+    #[tokio::test]
+    async fn rubric_run_resolves_target_against_cwd() {
+        // Относительный target резолвится от аргумента `cwd` (рабочий каталог
+        // клиента), а не от cwd процесса сервера.
+        let dir = tempfile::tempdir().expect("tmp");
+        std::fs::create_dir_all(dir.path().join("docs")).expect("mkdir");
+        std::fs::write(dir.path().join("docs/adr.md"), "# ADR\n\nРешение.\n").expect("doc");
+        let cwd = dir.path().display().to_string();
+        let call = |id: u64, args: &str| {
+            format!(
+                r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"rubric_run","arguments":{args}}}}}"#
+            )
+        };
+        let owned = [
+            // target есть в cwd клиента: чтение проходит, падение — позже, на
+            // резолве несуществующей модели (-32602) — доказательство, что
+            // файл прочитан (иначе — isError io раньше).
+            call(
+                1,
+                &format!(
+                    r#"{{"rubric":"x","target":"docs/adr.md","cwd":"{cwd}","model":"ghost-model"}}"#
+                ),
+            ),
+            // Без cwd относительный путь ищется от cwd сервера — io-сбой.
+            call(
+                2,
+                r#"{"rubric":"x","target":"docs/adr.md","model":"ghost-model"}"#,
+            ),
+            // Абсолютный target cwd игнорирует.
+            call(
+                3,
+                &format!(
+                    r#"{{"rubric":"x","target":"{}/docs/adr.md","cwd":"/tmp","model":"ghost-model"}}"#,
+                    dir.path().display()
+                ),
+            ),
+        ];
+        let refs: Vec<&str> = owned.iter().map(String::as_str).collect();
+        let responses = run_lines(&refs).await;
+        assert_eq!(
+            responses[0]["error"]["code"], INVALID_PARAMS,
+            "{}",
+            responses[0]
+        );
+        assert!(
+            responses[0]["error"]["message"]
+                .as_str()
+                .expect("сообщение")
+                .contains("ghost-model"),
+            "{}",
+            responses[0]
+        );
+        assert_eq!(
+            responses[1]["result"]["isError"], true,
+            "без cwd файл не находится: {}",
+            responses[1]
+        );
+        assert!(
+            responses[1]["result"]["content"][0]["text"]
+                .as_str()
+                .expect("текст")
+                .contains("io:"),
+            "{}",
+            responses[1]
+        );
+        assert_eq!(
+            responses[2]["error"]["code"], INVALID_PARAMS,
+            "{}",
+            responses[2]
+        );
     }
 
     #[tokio::test]
@@ -3239,6 +3549,43 @@ mod tests {
                 .contains("# Оценка по рубрике «adr-quality»"),
             "markdown-отчёт как у rubric_run"
         );
+    }
+
+    #[tokio::test]
+    async fn rubric_verify_judge_model_overrides_model_label() {
+        // Anti-bias «автор = судья»: фактическая модель-судья фиксируется в
+        // отчёте; `judge_model` перекрывает метку `model`, эхо — в markdown.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let rub = rubric_fixture(tmp.path());
+        let answer = r#"{"scores":[{"criterion_id":"context","score":4,"rationale":"Цитата: \"контекст описан подробно\" — да"},{"criterion_id":"alternatives","score":2,"rationale":"Цитата: \"контекст описан подробно\" — слабо"}],"verdict":"v"}"#;
+        let answers = [answer, answer];
+        let answers_json = serde_json::to_string(&answers).expect("json");
+        let call = |id: u64, extra: &str| {
+            format!(
+                r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"rubric_verify","arguments":{{"rubric":"{}","target_text":"контекст описан подробно","answers":{answers_json}{extra}}}}}}}"#,
+                rub.display()
+            )
+        };
+        let owned = [
+            call(1, r#","judge_model":"claude-opus-4-8""#),
+            call(2, r#","model":"host-default","judge_model":"glm-5-3""#),
+            call(3, ""),
+        ];
+        let refs: Vec<&str> = owned.iter().map(String::as_str).collect();
+        let responses = run_lines(&refs).await;
+        let sc = &responses[0]["result"]["structuredContent"];
+        assert_eq!(sc["judge_model"], "claude-opus-4-8", "{sc}");
+        let md = sc["report_markdown"].as_str().expect("markdown");
+        assert!(
+            md.contains("**Судья:** claude-opus-4-8"),
+            "эхо судьи в человекочитаемом отчёте: {md}"
+        );
+        // При конфликте меток побеждает judge_model (фактический судья).
+        let sc2 = &responses[1]["result"]["structuredContent"];
+        assert_eq!(sc2["judge_model"], "glm-5-3", "{sc2}");
+        // Без меток — дефолт split-judge.
+        let sc3 = &responses[2]["result"]["structuredContent"];
+        assert_eq!(sc3["judge_model"], "external (split-judge)", "{sc3}");
     }
 
     #[tokio::test]
