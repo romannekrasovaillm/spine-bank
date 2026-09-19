@@ -447,6 +447,7 @@ arch-be mcp serve --rw    # + handoff_create (теперь и в core), adr_new,
 |------|----------------|
 | [drift-control](кейсы/drift-control/) | Голая задача → FAIL 2/6; с handoff-пакетом → PASS 6/6 |
 | [digital-ruble](кейсы/digital-ruble/) | Маршрут Critical без LLM у Spine: полный комплект, evidence FAIL — выпуск заблокирован |
+| [011-digital-ruble-programmable](кейсы/011-digital-ruble-programmable/) | Дельта-изменение поверх принятого решения (программируемые платежи ЦР), red-team контроля 7/7 |
 | [fleet-spine-drift](кейсы/fleet-spine-drift/) | Аудит флота: дрейф `CONSTRAINTS.yaml` как exit-код — без LLM |
 | [parallel-epics](кейсы/parallel-epics/) · [fleet-of-ten](кейсы/fleet-of-ten/) | Спайн как клей флота Claude Code |
 | [legacy-survey](кейсы/legacy-survey/) · [jvm-archunit-gate](кейсы/jvm-archunit-gate/) | Reverse discovery, гейт по байткоду |
