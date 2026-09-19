@@ -56,10 +56,18 @@ const DEPTH_SHALLOW: usize = 2;
 /// Глубина рендера прочих секций при недоборе epic-context (абзацев).
 const DEPTH_DEEP: usize = 8;
 
+/// Баннер машинной компиляции — первая строка сгенерированного SPEC.md
+/// (находка живого эксперимента: исполнитель принимал машинную компиляцию
+/// за авторскую спеку архитектора). Пишется в обеих ветках генерации
+/// (шаблон и сборка из переданных спек); пользовательский файл не затирается.
+const SPEC_MACHINE_BANNER: &str =
+    "> СКОМПИЛИРОВАНО МАШИНОЙ из spine/ADR/NFR — требует авторской правки архитектора.";
+
 /// Шаблон SPEC.md — верифицируемые контракты интерфейсов компонента
 /// (модель «5.2»: прозаический ARCHITECTURE.md компонента заменяется spec'ом
 /// с контрактами, проверяемыми тестами). Пишется только при отсутствии —
 /// заполненный архитектором файл повторная генерация не затирает.
+/// Первая строка готового файла — баннер [`SPEC_MACHINE_BANNER`].
 const SPEC_TEMPLATE: &str = "# SPEC — контракты интерфейсов компонента\n\
 \n\
 > Шаблон handoff-пакета (НЕ затирается при повторной генерации). Заполняется\n\
@@ -89,7 +97,8 @@ const SPEC_TEMPLATE: &str = "# SPEC — контракты интерфейсо�
 
 /// Собирает SPEC.md из переданных спек архитектора: полные тексты контрактов
 /// с заголовками-источниками (шаблон-заполнитель уже не нужен — контракты
-/// переданы явно). Не-UTF8 читается с потерями.
+/// переданы явно). Первая строка — баннер машинной компиляции
+/// [`SPEC_MACHINE_BANNER`]. Не-UTF8 читается с потерями.
 fn render_spec_from_sources(spec_files: &[PathBuf]) -> String {
     let mut out = String::from(
         "# SPEC — контракты интерфейсов компонента\n\n\
@@ -266,6 +275,10 @@ pub struct HandoffPacket {
     /// Рекомендованный таймаут прогона по маршруту значимости, секунд.
     #[serde(default)]
     pub recommended_timeout_secs: u64,
+    /// Детерминированные предупреждения готовности пакета (тонкая
+    /// декомпозиция REQ → задачи и т.п.); не блокируют сборку.
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 /// Метаданные пакета (`MANIFEST.json`).
@@ -359,11 +372,15 @@ pub fn generate_handoff(
     // (ADR-007): нет model/ или нет QAS — секции нет; битая модель — ошибка.
     let qas_section = qas_acceptance_section(repo)?;
     let task_path = dir.join("TASK.md");
-    std::fs::write(
-        &task_path,
-        render_task_md(task, &rollback_text, qas_section.as_deref()),
-    )
-    .map_err(|e| HarnessError::io(&task_path, e))?;
+    let task_md = render_task_md(task, &rollback_text, qas_section.as_deref());
+    std::fs::write(&task_path, &task_md).map_err(|e| HarnessError::io(&task_path, e))?;
+
+    // Детерминированные предупреждения готовности пакета (не блокируют
+    // сборку): тонкая декомпозиция REQ → задачи TASK.md.
+    let mut warnings = Vec::new();
+    if let Some(w) = req_decomposition_warning(repo, &task_md) {
+        warnings.push(w);
+    }
 
     // ARCHITECTURE.md — всегда перезаписывается (компиляция актуальных спек).
     let arch_md = compile_epic_context(spec_files)?;
@@ -402,14 +419,18 @@ pub fn generate_handoff(
     // с переданными спеками — собирается ИЗ НИХ (полные тексты контрактов,
     // кейс 2026-09-01: исполнители спотыкались о пустой шаблон, когда
     // архитектор передал спеки через --spec); без спек — шаблон.
+    // В обеих ветках генерации первая строка — баннер машинной компиляции:
+    // исполнитель обязан отличать скомпилированную спеку от авторской
+    // (находка живого эксперимента — компиляция принималась за авторскую).
     let spec_path = dir.join("SPEC.md");
     if !spec_path.exists() {
-        let spec_md = if spec_files.is_empty() {
+        let spec_body = if spec_files.is_empty() {
             SPEC_TEMPLATE.to_string()
         } else {
             render_spec_from_sources(spec_files)
         };
-        std::fs::write(&spec_path, spec_md).map_err(|e| HarnessError::io(&spec_path, e))?;
+        std::fs::write(&spec_path, format!("{SPEC_MACHINE_BANNER}\n{spec_body}"))
+            .map_err(|e| HarnessError::io(&spec_path, e))?;
     }
 
     // ROLLBACK.yaml — машиночитаемый план отката для репетиции на гейте A4;
@@ -489,6 +510,7 @@ pub fn generate_handoff(
         git_initialized: baseline.initialized,
         git_dirty_tracked: baseline.dirty_tracked,
         recommended_timeout_secs: timeout,
+        warnings,
     })
 }
 
@@ -528,6 +550,81 @@ fn render_task_md(task: &str, rollback: &str, acceptance: Option<&str>) -> Strin
     s.push_str("## Чеклист перед финальным ответом\n\n");
     s.push_str("- [ ] `SPEC.md` (контракты интерфейсов: входы/выходы, структуры данных, границы ошибок, критерии верификации) заполнен архитектором — сверь реализацию с ним; расхождения фиксируй в `conflicts_with_prior_decisions`, а не молчаливым отступлением.\n");
     s
+}
+
+/// Минимум REQ-сущностей модели, с которого проверяется декомпозиция
+/// REQ → задачи TASK.md (мелкие эпики не обязаны дробиться в список).
+const REQ_DECOMP_MIN_REQS: usize = 3;
+
+/// Порог предупреждения о тонкой декомпозиции: REQ-сущностей больше, чем
+/// в [`REQ_DECOMP_RATIO`] раз, числа пунктов задач в TASK.md.
+const REQ_DECOMP_RATIO: usize = 2;
+
+/// Предупреждение о тонкой декомпозиции REQ → задачи (детерминированное):
+/// если модель репозитория несёт [`REQ_DECOMP_MIN_REQS`]+ REQ-сущностей, а
+/// рабочая область TASK.md (формулировка задачи + критерии приёмки QAS — всё
+/// до раздела «План отката»; служебные секции шаблона не считаются) содержит
+/// существенно меньше пунктов списка (REQ > [`REQ_DECOMP_RATIO`]× задач),
+/// декомпозиция выглядит неполной (находка живого эксперимента: исполнитель
+/// получал TASK.md, чей список задач недопокрывал REQ-множество).
+///
+/// `None` — нет model/, нет REQ-* или декомпозиция достаточная.
+fn req_decomposition_warning(repo: &Path, task_md: &str) -> Option<String> {
+    let model_dir = repo.join("model");
+    if !model_dir.is_dir() {
+        return None;
+    }
+    // Ошибку разбора модели здесь безопасно игнорировать: битая модель уже
+    // упала в qas_acceptance_section выше по generate_handoff (ошибка, а не
+    // молчаливый пропуск) — до этой точки исполнение просто не доходит.
+    let model = load_model(&model_dir).ok()?;
+    let reqs = model
+        .entities
+        .iter()
+        .filter(|e| e.kind == EntityKind::Req)
+        .count();
+    if reqs < REQ_DECOMP_MIN_REQS {
+        return None;
+    }
+    let work_region = task_md.split("\n## План отката").next().unwrap_or(task_md);
+    let tasks = count_task_items(work_region);
+    if reqs > REQ_DECOMP_RATIO * tasks {
+        Some(format!(
+            "в модели {reqs} REQ-сущностей, а в TASK.md — {tasks} пункт(ов) задач: \
+             декомпозиция REQ → задачи выглядит неполной (порог REQ > {REQ_DECOMP_RATIO}× задач). \
+             Проверьте, что каждая REQ покрыта пунктом TASK.md или осознанно отложена."
+        ))
+    } else {
+        None
+    }
+}
+
+/// Число пунктов списка/чекбоксов в markdown-тексте вне кодовых блоков:
+/// маркированные `- `/`* ` (включая чекбоксы `- [ ]`) и нумерованные `1. `/`1) `.
+fn count_task_items(markdown: &str) -> usize {
+    let mut in_fence = false;
+    let mut count = 0;
+    for line in markdown.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence {
+            continue;
+        }
+        let is_bullet = trimmed.starts_with("- ") || trimmed.starts_with("* ");
+        let is_ordered = trimmed.find(['.', ')']).is_some_and(|pos| {
+            pos > 0
+                && pos <= 3
+                && trimmed[..pos].bytes().all(|b| b.is_ascii_digit())
+                && trimmed[pos + 1..].starts_with(' ')
+        });
+        if is_bullet || is_ordered {
+            count += 1;
+        }
+    }
+    count
 }
 
 /// Секция «Критерии приёмки» из QAS-сущностей модели репозитория (ADR-007).
@@ -1224,6 +1321,10 @@ impl Tool for HandoffCreateTool {
                          добавьте спеки через 'spec' или расширьте источники.",
                         packet.epic_context_tokens
                     );
+                }
+                // Детерминированные предупреждения готовности пакета.
+                for w in &packet.warnings {
+                    let _ = write!(out, "\nВНИМАНИЕ: {w}");
                 }
                 out.push_str(
                     "\nНапоминание: CONSTRAINTS.yaml — стековая заготовка; перед передачей \
@@ -2099,5 +2200,130 @@ mod tests {
         assert!(!arch.contains("Контекст усечён"), "{arch}");
         assert!(arch.contains("точный текст инварианта"), "{arch}");
         assert!(arch.contains("абзац"), "{arch}");
+    }
+
+    /// Модель из `n` REQ-сущностей в `<repo>/model/` (для проверки
+    /// предупреждения о декомпозиции REQ → задачи).
+    fn repo_with_req_model(repo: &Path, n: usize) {
+        for i in 1..=n {
+            write_file(
+                &repo.join(format!("model/REQ-{i:03}.md")),
+                &format!(
+                    "---\nid: REQ-{i:03}\ntype: req\ntitle: Требование {i}\nstatus: accepted\n---\n"
+                ),
+            );
+        }
+    }
+
+    #[test]
+    fn handoff_warns_on_thin_req_task_decomposition() {
+        // B3: REQ существенно больше задач в TASK.md — детерминированное
+        // предупреждение в пакете (исполнитель получал TASK.md, чей список
+        // задач недопокрывал REQ-множество).
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cfg = cfg_in(tmp.path());
+
+        // 4 REQ против задачи без пунктов: 4 > 2×0 и 4 >= 3 — предупреждение.
+        let repo = tmp.path().join("repo-thin");
+        std::fs::create_dir_all(&repo).expect("mkdir");
+        repo_with_req_model(&repo, 4);
+        let packet =
+            generate_handoff(&repo, "сделать фичу", &[], &cfg, None, Route::Fast).expect("handoff");
+        assert_eq!(packet.warnings.len(), 1, "{:?}", packet.warnings);
+        assert!(
+            packet.warnings[0].contains("4 REQ-сущностей"),
+            "{:?}",
+            packet.warnings
+        );
+        assert!(
+            packet.warnings[0].contains("декомпозиция"),
+            "{:?}",
+            packet.warnings
+        );
+
+        // Достаточная декомпозиция: 4 REQ против 2 пунктов — 4 > 2×2 ложно.
+        let repo2 = tmp.path().join("repo-ok");
+        std::fs::create_dir_all(&repo2).expect("mkdir");
+        repo_with_req_model(&repo2, 4);
+        let packet2 = generate_handoff(
+            &repo2,
+            "сделать фичу:\n\n- задача раз\n\n- задача два",
+            &[],
+            &cfg,
+            None,
+            Route::Fast,
+        )
+        .expect("handoff 2");
+        assert!(packet2.warnings.is_empty(), "{:?}", packet2.warnings);
+
+        // Мелкий эпик: 2 REQ — ниже минимума проверки, предупреждения нет.
+        let repo3 = tmp.path().join("repo-small");
+        std::fs::create_dir_all(&repo3).expect("mkdir");
+        repo_with_req_model(&repo3, 2);
+        let packet3 = generate_handoff(&repo3, "сделать фичу", &[], &cfg, None, Route::Fast)
+            .expect("handoff 3");
+        assert!(packet3.warnings.is_empty(), "{:?}", packet3.warnings);
+
+        // Нет model/ — проверка не включается.
+        let repo4 = tmp.path().join("repo-nomodel");
+        std::fs::create_dir_all(&repo4).expect("mkdir");
+        let packet4 = generate_handoff(&repo4, "сделать фичу", &[], &cfg, None, Route::Fast)
+            .expect("handoff 4");
+        assert!(packet4.warnings.is_empty(), "{:?}", packet4.warnings);
+    }
+
+    #[tokio::test]
+    async fn handoff_create_tool_prints_warnings() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("mkdir repo");
+        repo_with_req_model(&repo, 5);
+        let cfg = cfg_in(tmp.path());
+        let tool = HandoffCreateTool::new(cfg.clone());
+        let ctx = ToolContext::new(tmp.path().to_path_buf(), Arc::new(cfg));
+        let out = tool
+            .call(json!({"repo": "repo", "task": "сделать фичу"}), &ctx)
+            .await
+            .expect("call");
+        assert!(!out.is_error, "{}", out.content);
+        assert!(
+            out.content.contains("ВНИМАНИЕ: в модели 5 REQ-сущностей"),
+            "{}",
+            out.content
+        );
+    }
+
+    #[test]
+    fn spec_md_carries_machine_banner() {
+        // B3: сгенерированный SPEC.md первой строкой несёт баннер машинной
+        // компиляции — и в ветке шаблона, и в ветке сборки из спек (исполнитель
+        // принимал компиляцию за авторскую спеку архитектора).
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cfg = cfg_in(tmp.path());
+
+        // Ветка шаблона (без спек).
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("mkdir");
+        let packet =
+            generate_handoff(&repo, "задача", &[], &cfg, None, Route::Fast).expect("handoff");
+        let spec = std::fs::read_to_string(packet.dir.join("SPEC.md")).expect("SPEC.md");
+        assert!(spec.starts_with(SPEC_MACHINE_BANNER), "{spec}");
+
+        // Ветка сборки из переданных спек.
+        let repo2 = tmp.path().join("repo2");
+        std::fs::create_dir_all(&repo2).expect("mkdir");
+        let spec_src = tmp.path().join("spec-src.md");
+        write_file(&spec_src, "# Контракты\n\n- идемпотентность по id\n");
+        let packet2 = generate_handoff(
+            &repo2,
+            "задача",
+            std::slice::from_ref(&spec_src),
+            &cfg,
+            None,
+            Route::Fast,
+        )
+        .expect("handoff 2");
+        let spec2 = std::fs::read_to_string(packet2.dir.join("SPEC.md")).expect("SPEC.md 2");
+        assert!(spec2.starts_with(SPEC_MACHINE_BANNER), "{spec2}");
     }
 }
