@@ -105,7 +105,11 @@ impl EvidenceVerdict {
 
 /// Обязательные артефакты по маршруту (из обзора AI-Disrupt: объектный минимум
 /// разделяют все режимы; Standard/Critical добавляют evidence-проверки).
-fn required_artifacts(route: Route) -> Vec<(&'static str, &'static str)> {
+///
+/// `pub(crate)`: тем же списком считается прогресс бандла в проводнике
+/// (`crate::bootstrap`) — «7/13» обязано означать тот же профиль, по которому
+/// бандл будет проверен, а не похожий.
+pub(crate) fn required_artifacts(route: Route) -> Vec<(&'static str, &'static str)> {
     // (ключ, человеко-читаемое описание)
     let mut base = vec![
         ("problem", "формулировка проблемы/гипотезы результата"),
@@ -699,6 +703,22 @@ fn semantic_check(
         _ => {}
     }
     (out, notes)
+}
+
+/// Сколько обязательных артефактов профиля маршрута уже есть в каталоге
+/// изменения. `None` — манифеста нет или он не читается (проводник скажет
+/// «бандл не собран»); «есть файл» и «есть запись в манифесте» намеренно
+/// различаются: прогресс считается по манифесту, как и сама проверка.
+#[must_use]
+pub fn bundle_progress(change_dir: &Path, route: Route) -> Option<usize> {
+    let text = std::fs::read_to_string(change_dir.join("EVIDENCE.yaml")).ok()?;
+    let bundle: EvidenceBundle = serde_yaml_ng::from_str(&text).ok()?;
+    Some(
+        required_artifacts(route)
+            .iter()
+            .filter(|(key, _)| bundle.items.iter().any(|i| i.key == *key))
+            .count(),
+    )
 }
 
 /// Есть ли у бандла вход для проверки содержания артефакта (файл на месте).

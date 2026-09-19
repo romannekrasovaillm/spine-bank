@@ -2276,3 +2276,57 @@ fn redteam_json_format_reports_detections() {
     let detections = value["detections"].as_array().expect("detections");
     assert_eq!(detections.len(), 16);
 }
+
+/// W3: `bootstrap` создаёт каркас и называет следующий шаг; `--status` на
+/// существующем кейсе показывает прогресс. Проверяется сквозь процесс —
+/// проводник, который работает только в модульных тестах, архитектору не
+/// помогает.
+#[test]
+fn bootstrap_walks_a_new_case_towards_green() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let home = tmp.path();
+    let case = home.join("salary");
+
+    arch_cmd(home)
+        .args([
+            "bootstrap",
+            "Зарплатные и социальные выплаты",
+            "--dir",
+            case.to_str().expect("path"),
+            "--domain",
+            "payments",
+        ])
+        .assert()
+        .success()
+        .stdout(contains("Каркас создан"))
+        .stdout(contains("спайн ✓"))
+        .stdout(contains("Следующий шаг"));
+
+    // Заглушки каркаса ловятся семантикой бандла (Н1), а не проходят молча.
+    arch_cmd(home)
+        .args(["evidence", "verify", case.to_str().expect("path")])
+        .assert()
+        .failure()
+        .stdout(contains("evidence_stub"))
+        .stdout(contains("выпуск заблокирован"));
+
+    // `--status` на том же кейсе: прогресс и шаг, без создания чего-либо.
+    arch_cmd(home)
+        .args([
+            "bootstrap",
+            "--status",
+            "--dir",
+            case.to_str().expect("path"),
+        ])
+        .assert()
+        .success()
+        .stdout(contains("бандл 13/13"))
+        .stdout(contains("Следующий шаг — бандл"));
+
+    // Повторный bootstrap в занятый каталог — отказ с выходом, а не копия.
+    arch_cmd(home)
+        .args(["bootstrap", "Кейс", "--dir", case.to_str().expect("path")])
+        .assert()
+        .failure()
+        .stderr(contains("не пуст"));
+}

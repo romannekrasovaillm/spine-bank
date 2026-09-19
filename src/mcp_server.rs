@@ -212,6 +212,24 @@ const PLAYBOOK_PROMPTS: &[PlaybookPrompt] = &[
         embedded: crate::assets::PLUGIN_SPINE_WORKFLOWS_SKILLS_SPINE_FITNESS_GATE_SKILL_MD,
         arguments: &[],
     },
+    PlaybookPrompt {
+        name: "spine-bundle",
+        embedded: crate::assets::PLUGIN_SPINE_WORKFLOWS_SKILLS_SPINE_BUNDLE_SKILL_MD,
+        arguments: &[
+            (
+                "path",
+                "Опц.: каталог кейса (нужен для `--status` существующего каркаса)",
+            ),
+            (
+                "name",
+                "Опц.: имя нового кейса для `arch-be bootstrap <имя>`",
+            ),
+            (
+                "domain",
+                "Опц.: домен кейса (payments, …) — подставляется в тексты каркаса",
+            ),
+        ],
+    },
 ];
 
 /// Белый список read-only моста в реестр инструментов ([`crate::tools::full_registry`]):
@@ -3201,7 +3219,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prompts_list_has_seven_playbooks_with_frontmatter_descriptions() {
+    async fn prompts_list_has_eight_playbooks_with_frontmatter_descriptions() {
         // Пустой plugins-каталог → встроенные ассеты (чистая машина).
         let tmp = tempfile::tempdir().expect("tmp");
         let server = server_with_dirs(tmp.path(), tmp.path());
@@ -3227,8 +3245,9 @@ mod tests {
                 "spine-contracts-gate",
                 "spine-archify-viz",
                 "spine-fitness-gate",
+                "spine-bundle",
             ],
-            "семь плейбуков в зафиксированном порядке"
+            "восемь плейбуков в зафиксированном порядке"
         );
         for p in prompts {
             assert!(

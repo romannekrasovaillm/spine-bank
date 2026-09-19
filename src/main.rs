@@ -203,6 +203,27 @@ enum Cmd {
         #[arg(long)]
         explain: bool,
     },
+    /// Первый зелёный за 15 минут (W3): создать каркас кейса и назвать
+    /// следующую красную находку с подсказкой — «дорожка до зелёного».
+    /// Каркас намеренно красный: его заглушки ловит семантика бандла (Н1),
+    /// иначе проводник производил бы ложнозелёные пакеты. Ничего не решает
+    /// за человека: A3 не подписывает, решение не пишет, составляющие не
+    /// включает.
+    Bootstrap {
+        /// Человеческое имя кейса (идёт в титулы: «Зарплатные и социальные
+        /// выплаты»). Для `--status` необязательно, если задан `--dir`.
+        name: Option<String>,
+        /// Каталог кейса (по умолчанию — транслит имени).
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        /// Домен кейса: подставляется в тексты каркаса (payments, …).
+        #[arg(long, default_value = "payments")]
+        domain: String,
+        /// Показать прогресс существующего кейса и следующий шаг, ничего не
+        /// создавая: `спайн ✓ · правила ✓ · модель ✗ (2 находки) · бандл 7/13`.
+        #[arg(long)]
+        status: bool,
+    },
     /// Метаморфный самотест вердикта (П8 ДКА): свойства ответов гейта на
     /// изолированной песочнице — монотонность по маршруту, достижимость
     /// зелёного, чувствительность к засеянному дефекту, храповик ROUTE.lock,
@@ -1785,6 +1806,38 @@ async fn main() -> Result<()> {
             if code != 0 {
                 std::process::exit(code);
             }
+        }
+        Some(Cmd::Bootstrap {
+            name,
+            dir,
+            domain,
+            status,
+        }) => {
+            // Каталог: явный `--dir`, иначе транслит имени, иначе текущий.
+            let dir = dir
+                .or_else(|| {
+                    name.as_deref()
+                        .map(|n| PathBuf::from(arch_harness::bootstrap::slugify(n)))
+                })
+                .unwrap_or_else(|| PathBuf::from("."));
+            if status {
+                let progress = arch_harness::bootstrap::status(&dir, &cfg)?;
+                print!("{}", arch_harness::bootstrap::render(&progress));
+                return Ok(());
+            }
+            let Some(name) = name else {
+                anyhow::bail!(
+                    "укажите имя кейса: arch-be bootstrap \"Зарплатные выплаты\" \
+                     [--dir кейсы/salary] либо --status для существующего кейса"
+                );
+            };
+            let progress = arch_harness::bootstrap::create(&dir, &name, &domain, &cfg)?;
+            println!(
+                "Каркас создан: {} ({} файлов). Он красный — так и задумано.",
+                dir.display(),
+                arch_harness::bootstrap::created_files().len()
+            );
+            print!("{}", arch_harness::bootstrap::render(&progress));
         }
         Some(Cmd::Selftest {
             json,

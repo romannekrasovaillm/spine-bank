@@ -33,6 +33,7 @@ pub mod assets;
 pub mod asyncapi;
 #[cfg(feature = "harness")]
 pub mod bench;
+pub mod bootstrap;
 pub mod clipboard;
 pub mod config;
 pub mod connect;

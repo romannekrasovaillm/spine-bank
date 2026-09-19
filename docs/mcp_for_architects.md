@@ -40,15 +40,15 @@ arch-be connect qwen     # GigaCode CLI / Qwen Code; также: claude, kimi, o
 в [CONNECT.md](CONNECT.md).
 
 Живая карточка сервера после подключения (Qwen Code 0.24.0, `/mcp`):
-34 инструмента + 7 промптов — это и есть весь контур:
+35 инструментов + 8 промптов — это и есть весь контур:
 
-![Qwen Code 0.24: карточка MCP-сервера spine — 33 инструмента, 7 промптов (на момент захвата — 33; актуально — 34)](screenshots/harnesses/waves-qwen-tui-server.png)
+![Qwen Code 0.24: карточка MCP-сервера spine — 33 инструмента, 8 промптов (на момент захвата — 33; актуально — 34)](screenshots/harnesses/waves-qwen-tui-server.png)
 
 ![Claude Code: /mcp — spine connected, 33 tools (захват; актуально — 34)](screenshots/harnesses/waves-claude-tui-mcp.png)
 
 ## Карта инструментов по задачам архитектора
 
-34 read-only инструмента = 14 ручных контрольных + 20 мостовых из реестра.
+35 read-only инструментов = 15 ручных контрольных + 20 мостовых из реестра.
 Сгруппированы по задачам рабочего дня; полные сигнатуры — в [mcp.md](mcp.md).
 
 ### Маршрут и ревью изменения
@@ -104,7 +104,7 @@ arch-be connect qwen     # GigaCode CLI / Qwen Code; также: claude, kimi, o
 | Инструмент | Что даёт |
 |---|---|
 | `kb_search` | поиск по базе знаний архитектора (`knowledge.dirs`) |
-| `skill_search` / `skill_load` | поиск по библиотеке из 62 скиллов и загрузка полного текста |
+| `skill_search` / `skill_load` | поиск по библиотеке из 63 скиллов и загрузка полного текста |
 | `mermaid_render` | mermaid-диаграмма в ASCII (flowchart, sequence, ER, C4) |
 | `rubric_list` / `plugin_list` | что есть из рубрик и плагинов |
 
@@ -127,7 +127,7 @@ arch-be connect qwen     # GigaCode CLI / Qwen Code; также: claude, kimi, o
 
 ## Плейбуки `spine-*` как слэш-команды хоста (MCP prompts)
 
-Кроме инструментов сервер отдаёт capability **prompts**: семь плейбуков
+Кроме инструментов сервер отдаёт capability **prompts**: восемь плейбуков
 работы со Spine приезжают в хост как готовые команды — не нужно помнить
 формулировки и не важно, куда хост кладёт файлы скиллов.
 

@@ -4,7 +4,7 @@
 
 <p align="center">
   <b>Spine: архитектурный контур — внутри вашего CLI-агента или как отдельный харнесс с TUI</b><br>
-  <sub>GigaCode CLI · Claude Code · Kimi Code · Qwen Code · omp · OpenClaw — MCP, 62 скилла, хуки-гейты, судья без API-ключей<br>
+  <sub>GigaCode CLI · Claude Code · Kimi Code · Qwen Code · omp · OpenClaw — MCP, 63 скилла, хуки-гейты, судья без API-ключей<br>
   Spine as an organ of your coding agent — or a standalone architect harness (TUI + own LLM).</sub>
 </p>
 
@@ -26,7 +26,7 @@
 | | **Spine Core** | **Spine Harness (TUI)** |
 |---|---|---|
 | Для кого | У вас уже есть кодовый агент — **кодер или архитектор** работает внутри него | Вы — архитектор и работаете сами, без внешнего агента |
-| Что это | «Орган» чужого харнесса: MCP-сервер + 62 скилла + хуки-гейты | Полный харнесс архитектора: TUI + агентный цикл + то же ядро |
+| Что это | «Орган» чужого харнесса: MCP-сервер + 63 скилла + хуки-гейты | Полный харнесс архитектора: TUI + агентный цикл + то же ядро |
 | LLM | **Не нужна**: думает ваш агент; судья — `kind="cli"` или split-judge | Своя: DeepSeek / GLM / Kimi / GigaChat / локальная платформа |
 | Бинарь (релиз) | `arch-be-core-linux-x86_64` (~10 МБ) | `arch-be-linux-x86_64` (~19 МБ) |
 | Сборка | `cargo build --release --no-default-features --features core` | `cargo build --release` |
@@ -167,7 +167,7 @@ arch-be connect claude
 ```
 
 Пишет `.mcp.json` + `.claude/settings.json` (Stop-хук-гейт) +
-`.claude/skills/` (62 скилла) + `CLAUDE.md`. Проверка: `claude mcp list` →
+`.claude/skills/` (63 скилла) + `CLAUDE.md`. Проверка: `claude mcp list` →
 `spine … ✔ Connected`. При первом запуске — разрешите project-сервер («Yes»).
 
 ![Подключение Claude Code](docs/screenshots/connect/01-connect.png)
@@ -228,7 +228,30 @@ arch-be connect generic   # сниппеты для любого MCP-совме�
   <img src="docs/screenshots/connect/05-stop-hook.png" alt="Stop-хук блокирует завершение" width="47%">
 </p>
 
-### Б. Архитектор внутри харнесса
+### Б. Новый кейс с нуля: первый зелёный за 15 минут
+
+```bash
+arch-be bootstrap "Зарплатные и социальные выплаты" --dir кейсы/salary --domain payments
+arch-be bootstrap --status --dir кейсы/salary
+```
+
+`bootstrap` создаёт каркас (спайн с двумя примерами инвариантов, правила,
+модель, `ROUTE.lock`, первый ADR, скелет бандла с явными заглушками) и после
+каждого шага называет СЛЕДУЮЩУЮ красную находку с подсказкой:
+
+```
+спайн ✓ · правила ✓ · модель ✓ · бандл 13/13 (13 находок)
+
+Следующий шаг — бандл (evidence_verify)
+  формулировка проблемы/гипотезы результата (problem) [evidence_stub]: …
+  → замените заглушку содержанием: артефакт обязан быть написан
+```
+
+Каркас намеренно красный: его заглушки ловит семантика бандла (Н1). Зелёный
+каркас означал бы, что «ничего не написано» проходит как «выпуск разрешён».
+A3 проводник не подписывает и решение за архитектора не пишет.
+
+### В. Архитектор внутри харнесса
 
 Маршрут изменения (significance), модель системы, трассировка
 REQ→NFR→AD→CMP→правила, оценка ADR рубрикой, диаграммы — всё через MCP.
@@ -236,7 +259,7 @@ LLM у Spine нет: думает ваш агент, вердикты даёт �
 
 ![Архитектурная сессия](docs/screenshots/harnesses/architect-session.png)
 
-### В. Судья по рубрикам — без API-ключей
+### Г. Судья по рубрикам — без API-ключей
 
 1. `kind = "cli"`: `arch-be rubric run adr_quality target.md` вызывает ваш
    `claude -p` подпроцессом — платит подписка хоста;
@@ -277,7 +300,7 @@ MCP-инструмента, а плейбуки работы (`spine-*`) при�
 
 ![Headless-прогоны architect_review: omp · OpenClaw · Qwen](docs/screenshots/harnesses/waves-headless-reviews.png)
 
-Полный гид по каналу MCP — карта всех 34 инструментов по задачам
+Полный гид по каналу MCP — карта всех 35 инструментов по задачам
 архитектора, плейбуки, живые сессии, журнал вызовов, устранение
 неполадок: **[docs/mcp_for_architects.md](docs/mcp_for_architects.md)**.
 
@@ -360,8 +383,8 @@ pptx/docx/xlsx-отчёты + плейбуки spine-*) раскладывают
 агенту (на кадрах с прогонов — 55, плейбуки добавлены позже):
 
 <p align="center">
-  <img src="docs/screenshots/harnesses/claude-skills.png" alt="Claude Code видит 62 скилла Spine" width="47%">
-  <img src="docs/screenshots/harnesses/omp-skills.png" alt="omp видит 62 скилла Spine" width="47%">
+  <img src="docs/screenshots/harnesses/claude-skills.png" alt="Claude Code видит 63 скилла Spine" width="47%">
+  <img src="docs/screenshots/harnesses/omp-skills.png" alt="omp видит 63 скилла Spine" width="47%">
 </p>
 
 ---
@@ -416,8 +439,8 @@ fitness-правил, **сам** чинил его и перепроверял. 
 ## Что внутри MCP-сервера
 
 ```bash
-arch-be mcp serve         # read-only: 34 инструмента (контроль + знания + реестры)
-                          # + 7 промптов-плейбуков spine-* (слэш-команды хоста)
+arch-be mcp serve         # read-only: 35 инструментов (контроль + знания + реестры)
+                          # + 8 промптов-плейбуков spine-* (слэш-команды хоста)
 arch-be mcp serve --rw    # + handoff_create (теперь и в core), adr_new, …
 ```
 
@@ -472,7 +495,7 @@ arch-be mcp serve --rw    # + handoff_create (теперь и в core), adr_new,
   живые сессии со скриншотами.
 - [docs/mcp.md](docs/mcp.md) — контракт MCP-сервера и split-judge.
 - [docs/skills_for_architects.md](docs/skills_for_architects.md) — обзор
-  библиотеки: все 62 скилла в 9 плагинах, с чего начать.
+  библиотеки: все 63 скилла в 9 плагинах, с чего начать.
 - [docs/INVERSION.md](docs/INVERSION.md) — отчёт по плану инверсии: что сделано, отступления.
 - [README-full.md](README-full.md) — полный тур харнесса (RU/EN).
 
