@@ -560,26 +560,34 @@ fn check_sessions_dir(cfg: &Config) -> Check {
     }
 }
 
-/// Плагины: каталоги существуют, считаем плагины и скиллы.
+/// Плагины: каталоги существуют, считаем плагины и скиллы тем же путём,
+/// что `plugins list` / `skills list`, — по манифестам через
+/// [`crate::plugin::discover`] (сырой обход каталогов давал расходящиеся
+/// счётчики: SKILL.md вне layout `skills/<имя>/` и вне манифестов дискавери
+/// не считает). Сырой обход оставлен контрольным: найденные им SKILL.md
+/// сверх манифестных — пометка о дрейфе библиотеки.
 fn check_plugins(cfg: &Config) -> Check {
-    let mut plugins = 0usize;
-    let mut skills = 0usize;
     let mut missing = Vec::new();
+    let mut existing: Vec<PathBuf> = Vec::new();
     for dir in &cfg.plugins.dirs {
-        if !dir.is_dir() {
+        if dir.is_dir() {
+            existing.push(dir.clone());
+        } else {
             missing.push(dir.display().to_string());
-            continue;
-        }
-        if let Ok(rd) = std::fs::read_dir(dir) {
-            for entry in rd.flatten() {
-                let p = entry.path();
-                if p.join("plugin.json").is_file() {
-                    plugins += 1;
-                }
-                skills += count_files_named(&p, "SKILL.md", 3);
-            }
         }
     }
+    let discovered = crate::plugin::discover(&existing);
+    let plugins = discovered.len();
+    let skills: usize = discovered.iter().map(|p| p.skills.len()).sum();
+    // Контрольный сырой обход (та же глубина, что давала layout
+    // `<dir>/<плагин>/skills/<имя>/SKILL.md` от записи каталога): всё,
+    // найденное сверх манифестных скиллов, — кандидаты в дрейф: SKILL.md
+    // без plugin.json, с битым frontmatter, дубли имён, плоский layout.
+    let raw: usize = existing
+        .iter()
+        .map(|d| count_files_named(d, "SKILL.md", 4))
+        .sum();
+    let drift = raw.saturating_sub(skills);
     let verdict = if plugins == 0 {
         Verdict::Fail
     } else if missing.is_empty() {
@@ -588,6 +596,9 @@ fn check_plugins(cfg: &Config) -> Check {
         Verdict::Warn
     };
     let mut text = format!("{plugins} плагинов, {skills} скиллов");
+    if drift > 0 {
+        let _ = write!(text, "; +{drift} скиллов вне манифестов (дрейф библиотеки)");
+    }
     if !missing.is_empty() {
         let _ = write!(text, "; нет каталогов: {}", missing.join(", "));
     }
@@ -858,10 +869,11 @@ mod tests {
     fn healthy_minimal_environment() {
         let tmp = tempfile::tempdir().expect("tmp");
         let cfg = test_config(tmp.path());
-        // Плагин-заглушка.
+        // Плагин-заглушка (валидные манифест и frontmatter — счёт идёт по
+        // манифестам, как у `skills list`).
         let p = tmp.path().join("plugins/demo");
         std::fs::create_dir_all(p.join("skills/s1")).expect("mkdir");
-        std::fs::write(p.join("plugin.json"), "{}").expect("write");
+        std::fs::write(p.join("plugin.json"), r#"{"name":"demo"}"#).expect("write");
         std::fs::write(p.join("skills/s1/SKILL.md"), "---\nname: s1\n---").expect("write");
         std::fs::create_dir_all(tmp.path().join("kb")).expect("mkdir kb");
         std::fs::write(tmp.path().join("cron.toml"), "[tasks]").expect("write cron");
@@ -872,6 +884,11 @@ mod tests {
         assert_eq!(by("plugins").verdict, Verdict::Ok, "1 плагин, 1 скилл");
         assert!(by("plugins").text.contains("1 плагинов"));
         assert!(by("plugins").text.contains("1 скиллов"));
+        assert!(
+            !by("plugins").text.contains("дрейф"),
+            "без внеманифестных SKILL.md пометки дрейфа нет: {}",
+            by("plugins").text
+        );
         assert_eq!(by("knowledge").verdict, Verdict::Ok);
         assert_eq!(by("cron").verdict, Verdict::Ok);
         assert_eq!(
@@ -880,6 +897,41 @@ mod tests {
             "mcp.json не создан — warn"
         );
         assert!(render(&checks).contains("arch-be doctor"));
+    }
+
+    #[test]
+    fn plugins_check_marks_skills_outside_manifests_as_drift() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let cfg = test_config(tmp.path());
+        // Каноничный плагин: один манифестный скилл.
+        let p = tmp.path().join("plugins/demo");
+        std::fs::create_dir_all(p.join("skills/s1")).expect("mkdir");
+        std::fs::write(p.join("plugin.json"), r#"{"name":"demo"}"#).expect("write");
+        std::fs::write(p.join("skills/s1/SKILL.md"), "---\nname: s1\n---").expect("write");
+        // Дрейф: SKILL.md в каталоге без plugin.json и layout skills/<имя>/ —
+        // дискавери его не считает, сырой обход — находит.
+        let ghost = tmp.path().join("plugins/ghost");
+        std::fs::create_dir_all(&ghost).expect("mkdir ghost");
+        std::fs::write(ghost.join("SKILL.md"), "---\nname: ghost\n---").expect("write");
+
+        let checks = run_checks(&cfg);
+        let plugins = checks
+            .iter()
+            .find(|c| c.name == "plugins")
+            .expect("plugins");
+        assert_eq!(plugins.verdict, Verdict::Ok, "{plugins:?}");
+        assert!(
+            plugins.text.contains("1 плагинов, 1 скиллов"),
+            "счёт по манифестам, как у skills list: {}",
+            plugins.text
+        );
+        assert!(
+            plugins
+                .text
+                .contains("+1 скиллов вне манифестов (дрейф библиотеки)"),
+            "пометка дрейфа: {}",
+            plugins.text
+        );
     }
 
     #[test]
