@@ -1,0 +1,123 @@
+# Реестр правил кейса: зарплатные и социальные выплаты в цифровых рублях
+rules:
+  - id: C-001
+    name: spine_present
+    type: file_exists
+    path: "ARCHITECTURE-SPINE.md"
+    severity: error
+    owner: OWNER-001
+    expiry: 2027-12-31
+    effort_hours: 1
+  - id: C-002
+    name: idempotency_key_in_code
+    type: must_contain
+    glob: "skeleton/**/*.py"
+    pattern: 'idempotency_key'
+    severity: error
+    owner: OWNER-001
+    expiry: 2027-12-31
+    effort_hours: 2
+  - id: C-003
+    name: no_pii_in_skeleton
+    type: must_not_contain
+    glob: "skeleton/**/*.py"
+    pattern: 'snils'
+    severity: error
+    owner: OWNER-001
+    expiry: 2027-12-31
+    effort_hours: 2
+  - id: C-004
+    name: reconciliation_in_code
+    type: must_contain
+    glob: "skeleton/**/*.py"
+    pattern: 'reconcile'
+    severity: error
+    owner: OWNER-001
+    expiry: 2027-12-31
+    effort_hours: 2
+  - id: C-005
+    name: append_only_journal_in_code
+    type: must_contain
+    glob: "skeleton/**/*.py"
+    pattern: 'append_only'
+    severity: error
+    owner: OWNER-001
+    expiry: 2027-12-31
+    effort_hours: 2
+  - id: C-006
+    name: limits_checked_before_send
+    type: must_contain
+    glob: "skeleton/**/*.py"
+    pattern: 'check_limits'
+    severity: error
+    owner: OWNER-001
+    expiry: 2027-12-31
+    effort_hours: 2
+  - id: C-007
+    name: partial_success_handled
+    type: must_contain
+    glob: "skeleton/**/*.py"
+    pattern: 'partial'
+    severity: error
+    owner: OWNER-001
+    expiry: 2027-12-31
+    effort_hours: 2
+  - id: C-008
+    name: spine_binds
+    type: must_contain
+    glob: "ARCHITECTURE-SPINE.md"
+    pattern: 'Binds'
+    severity: error
+    owner: OWNER-001
+    expiry: 2027-12-31
+    effort_hours: 1
+  - id: C-009
+    name: adr_alternatives
+    type: each_file_must_contain
+    glob: "docs/adr/ADR-*.md"
+    pattern: 'Alternatives'
+    severity: error
+    owner: OWNER-001
+    expiry: 2027-12-31
+    effort_hours: 1
+  - id: C-010
+    name: spec_present
+    type: file_exists
+    path: "docs/spec/salary-acceptance.md"
+    severity: error
+    owner: OWNER-001
+    expiry: 2027-12-31
+    effort_hours: 1
+  - id: C-011
+    name: spec_ears
+    type: must_contain
+    glob: "docs/SPEC.md"
+    pattern: 'shall'
+    severity: error
+    owner: OWNER-001
+    expiry: 2027-12-31
+    effort_hours: 1
+  - id: C-012
+    name: reconciliation_report_present
+    type: file_exists
+    path: "docs/reconciliation.md"
+    severity: error
+    owner: OWNER-001
+    expiry: 2027-12-31
+    effort_hours: 1
+  - id: C-013
+    name: skeleton_trace_present
+    type: file_exists
+    path: "docs/WALKING-SKELETON.md"
+    severity: error
+    owner: OWNER-001
+    expiry: 2027-12-31
+    effort_hours: 1
+  - id: C-014
+    name: decision_a3_present
+    type: file_exists
+    path: "DECISION.md"
+    severity: error
+    owner: OWNER-001
+    expiry: 2027-12-31
+    effort_hours: 1
