@@ -452,6 +452,47 @@ pub fn render_markdown(report: &DigestReport) -> String {
         );
     }
 
+    // Секция для управления: квитанция ценности гейта — дефекты, которые
+    // механика остановила до ревью (fail-вердикты журнала), с разложением
+    // по правилам и ориентировочной долей FP (метод — §2 протокола).
+    let _ = writeln!(out, "\n## Дефекты, не дошедшие до ревью\n");
+    if report.fail_calls == 0 {
+        let _ = writeln!(
+            out,
+            "Fail-вызовов за окно не было — данных о пойманных дефектах нет \
+             (это отсутствие сигнала, а не доказанный «ноль дефектов»)."
+        );
+    } else {
+        let fixed: usize = report.fail_pass_iterations.values().sum();
+        let _ = writeln!(
+            out,
+            "Гейт остановил до ревью fail-вызовов: {}; из них исправлены и \
+             перепроверены (итерации FAIL→PASS): {fixed}.",
+            report.fail_calls
+        );
+        if !report.top_failed_rules.is_empty() {
+            let rules = report
+                .top_failed_rules
+                .iter()
+                .map(|(r, n)| format!("{r} {n}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let _ = writeln!(out, "Fail-вердикты по правилам: {rules}.");
+        }
+        match report.fp_share_pct {
+            Some(pct) => {
+                let _ = writeln!(
+                    out,
+                    "Ориентировочная доля FP среди них: {pct:.1}% (цель < 10% — \
+                     метод и оговорки в секции «Ложные срабатывания» ниже)."
+                );
+            }
+            None => {
+                let _ = writeln!(out, "Доля FP не считается (нет знаменателя).");
+            }
+        }
+    }
+
     let _ = writeln!(out, "\n## Итерации FAIL→PASS\n");
     if report.fail_pass_iterations.is_empty() {
         let _ = writeln!(out, "- нет");
@@ -717,6 +758,7 @@ mod tests {
         let md = render_markdown(&report);
         for section in [
             "## Вызовы MCP",
+            "## Дефекты, не дошедшие до ревью",
             "## Итерации FAIL→PASS",
             "## Топ нарушаемых правил",
             "## Ложные срабатывания",
@@ -726,5 +768,31 @@ mod tests {
         }
         assert!(md.contains("fitness_check: 1"), "{md}");
         assert!(md.contains("no-pan: 1"), "{md}");
+        // Управленческая квитанция: fail-вызовы по правилам + честная оговорка
+        // пустого состояния.
+        assert!(
+            md.contains("Гейт остановил до ревью fail-вызовов: 1"),
+            "{md}"
+        );
+        assert!(md.contains("Fail-вердикты по правилам: no-pan 1"), "{md}");
+    }
+
+    #[test]
+    fn digest_render_defects_section_is_honest_when_no_fail_calls() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        write_journal(
+            tmp.path(),
+            &[
+                line(&ts(12, 9), "kb_search", "ok", &[]),
+                line(&ts(12, 10), "fitness_check", "pass", &[]),
+            ],
+        );
+        let report = build_at(tmp.path(), 7, fixed_now()).expect("дайджест");
+        let md = render_markdown(&report);
+        assert!(
+            md.contains("Fail-вызовов за окно не было"),
+            "пустое состояние — честная оговорка: {md}"
+        );
+        assert!(md.contains("не доказанный «ноль дефектов»"), "{md}");
     }
 }
