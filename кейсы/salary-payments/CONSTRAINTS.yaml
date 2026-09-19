@@ -121,3 +121,12 @@ rules:
     owner: OWNER-001
     expiry: 2027-12-31
     effort_hours: 1
+  - id: C-015
+    name: no_card_data_in_tests
+    type: must_not_contain
+    glob: "tests/**/*.py"
+    pattern: 'PAN'
+    severity: error
+    owner: OWNER-001
+    expiry: 2027-12-31
+    effort_hours: 1
