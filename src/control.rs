@@ -1139,8 +1139,10 @@ pub(crate) enum RuleKind {
 }
 
 impl RuleKind {
-    /// Строковое имя типа (как в YAML) — для таблиц отчётов.
-    fn as_str(self) -> &'static str {
+    /// Строковое имя типа (как в YAML) — для таблиц отчётов. `pub(crate)`:
+    /// по нему же паспорт вердикта (W1) отличает правила, проверяющие
+    /// поведение, от правил на упоминание.
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::MustContain => "must_contain",
             Self::MustNotContain => "must_not_contain",

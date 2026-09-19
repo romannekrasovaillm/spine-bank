@@ -225,13 +225,14 @@ fn handshake_then_tools_list_over_stdio() {
         "model_graph",
         "architect_review",
         "change_impact",
+        "verdict_explain",
     ] {
         assert!(names.contains(&want), "нет инструмента {want}: {names:?}");
     }
     assert_eq!(
         tools.len(),
-        34,
-        "ровно 34 инструмента в ro-режиме (14 ручных + 20 read-only моста; rules_suggest — волна A2)"
+        35,
+        "ровно 35 инструментов в ro-режиме (15 ручных + 20 read-only моста;          verdict_explain — волна W1)"
     );
     // rw-контур и write/exec-принадлежность хоста закрыты в ro-режиме.
     for banned in [
@@ -1573,4 +1574,63 @@ fn legacy_path_argument_names_still_work() {
     assert!(text.contains("неизвестный аргумент"), "{text}");
     assert!(text.contains("'directory'"), "{text}");
     assert!(text.contains("допустимые: path"), "{text}");
+}
+
+/// W1: `verdict_explain` через MCP отдаёт три блока паспорта и вердикт того же
+/// прогона. Проверяется сквозь процесс: паспорт, который в MCP отличается от
+/// CLI, — это два разных ответа на один вопрос.
+#[test]
+fn verdict_explain_returns_the_three_blocks() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let home = tmp.path();
+    let project = home.join("project");
+    std::fs::create_dir_all(project.join("model")).expect("mkdir model");
+    std::fs::write(project.join("ARCHITECTURE-SPINE.md"), "# Spine\n").expect("spine");
+    std::fs::write(
+        project.join("model/CMP-001-core.md"),
+        "---\nid: CMP-001\ntype: cmp\ntitle: \"Core\"\nstatus: \"designed\"\n---\n\nТело.\n",
+    )
+    .expect("entity");
+
+    let resp = mcp_serve(
+        home,
+        &format!(
+            "{}\n",
+            call(
+                1,
+                "verdict_explain",
+                &json!({"path": project.display().to_string(), "route": "fast"})
+            )
+        ),
+    );
+    let passport = structured(&resp[0], 1);
+    assert_eq!(passport["schema"], "arch-be/verdict-passport/v1");
+    assert_eq!(passport["route"], "Fast");
+    assert!(
+        passport["checked"]
+            .as_array()
+            .is_some_and(|a| !a.is_empty()),
+        "блок 1 обязан нести составляющие: {passport}"
+    );
+    assert_eq!(
+        passport["verdict"], passport["verdict_envelope"]["verdict"],
+        "паспорт и вердикт — один прогон, а не два: {passport}"
+    );
+    assert_eq!(
+        passport["attestation"], passport["verdict_envelope"]["attestation"],
+        "аттестация паспорта и вердикта совпадает"
+    );
+    let markdown = passport["report_markdown"].as_str().expect("markdown");
+    assert!(markdown.contains("## 1. Проверено"), "{markdown}");
+    assert!(markdown.contains("## 2. Заявлено"), "{markdown}");
+    assert!(markdown.contains("## 3. Не проверено"), "{markdown}");
+    // Блок 2 называет границу ссылок модели — репозиторий её содержит.
+    assert!(
+        passport["claimed_not_verified"]
+            .as_array()
+            .is_some_and(|a| a.iter().any(|c| c["text"]
+                .as_str()
+                .is_some_and(|t| t.contains("СУЩЕСТВУЮЩУЮ")))),
+        "блок 2 обязан назвать семантику ссылок: {passport}"
+    );
 }

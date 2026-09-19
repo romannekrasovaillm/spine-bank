@@ -196,6 +196,12 @@ enum Cmd {
         /// «состояние изменилось: <что>». Exit 1, если состояние разошлось.
         #[arg(long, value_name = "FILE")]
         verify_envelope: Option<PathBuf>,
+        /// Паспорт вердикта (W1): одна страница markdown — что механика
+        /// проверила, что заявлено, но ею не проверяется, и что не проверено.
+        /// Заменяет обычный вывод; с `--format json` добавляет ключ `passport`
+        /// в конверт вердикта (exit-код и состав конверта не меняются).
+        #[arg(long)]
+        explain: bool,
     },
     /// Метаморфный самотест вердикта (П8 ДКА): свойства ответов гейта на
     /// изолированной песочнице — монотонность по маршруту, достижимость
@@ -830,12 +836,13 @@ enum McpCmd {
         args: String,
     },
     /// MCP-сервер (stdio JSON-RPC, NDJSON): архитектурный контроль кодовым
-    /// агентам (Claude Code и др.), ADR-008. Read-only состав: 34 инструмента
-    /// + 7 промптов-плейбуков spine-* (capability prompts). Ручные (14):
+    /// агентам (Claude Code и др.), ADR-008. Read-only состав: 35 инструментов
+    /// + 7 промптов-плейбуков spine-* (capability prompts). Ручные (15):
     ///   `spine_lint`, `fitness_check`, `significance_score`,
     ///   `significance_from_diff`, `trace_check`, `model_query`, `rubric_run`,
     ///   `rubric_prompt`, `rubric_verify`, `kb_search`, `skill_search`,
-    ///   `skill_load`, `mermaid_render`, `rules_suggest`. Мостовые read-only
+    ///   `skill_load`, `mermaid_render`, `rules_suggest`,
+    ///   `verdict_explain`. Мостовые read-only
     ///   (20): `adr_registry`, `agentsmd_lint`, `archify_validate`,
     ///   `architect_review`, `asyncapi_lint`, `change_impact`, `contract_diff`,
     ///   `delta_guard`, `evidence_verify`, `fleet_audit`, `landscape_report`,
@@ -1673,6 +1680,7 @@ async fn main() -> Result<()> {
             constraints,
             format,
             verify_envelope,
+            explain,
         }) => {
             let repo = repo.unwrap_or_else(|| PathBuf::from("."));
             // Режим сверки конверта: пересчитывает входы на текущем дереве и
@@ -1739,11 +1747,22 @@ async fn main() -> Result<()> {
                 &arch_harness::gate::GateRequirements::from_config(&cfg.gate),
                 &arch_harness::gate::GateOptions::from_config(&cfg),
             )?;
+            // Паспорт вердикта (W1): строится ДО печати, но вердикт не
+            // меняет — страница описывает тот же прогон, а не второй.
+            let passport = explain.then(|| arch_harness::passport::Passport::build(&report, &repo));
             if json_envelope {
-                let envelope = report.envelope_json();
+                let mut envelope = report.envelope_json();
+                if let Some(passport) = &passport {
+                    // Аддитивный ключ: контракт `gate-verdict/v1` не ломается.
+                    envelope["passport"] = passport.to_json();
+                }
                 let text = serde_json::to_string_pretty(&envelope)
                     .unwrap_or_else(|_| envelope.to_string());
                 println!("{text}");
+            } else if let Some(passport) = &passport {
+                // Одна страница вместо отчёта: паспорт — надмножество
+                // (блок 1 несёт те же составляющие с теми же числами).
+                print!("{}", passport.render());
             } else {
                 match format {
                     arch_harness::report_fmt::ReportFormat::Text => {
@@ -3862,6 +3881,13 @@ fn cmd_evidence(cfg: &arch_harness::config::Config, cmd: EvidenceCmd) -> Result<
                 } else {
                     "FAIL — выпуск заблокирован"
                 }
+            );
+            // W1: вердикт бандла — часть вердикта гейта, а тот печатает
+            // паспорт. Ссылка нужна здесь, потому что читатель бандла до
+            // гейта может и не дойти.
+            println!(
+                "Паспорт вердикта (что зелёный НЕ означает): {}",
+                arch_harness::passport::hint_command(&dir)
             );
             if !v.passed {
                 std::process::exit(1);

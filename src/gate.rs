@@ -58,8 +58,9 @@ pub enum GateStatus {
 }
 
 impl GateStatus {
-    /// Метка для отчёта.
-    fn label(self) -> &'static str {
+    /// Метка для отчёта. `pub(crate)`: паспорт вердикта (W1) печатает те же
+    /// три статуса, что и гейт, — своя таблица меток разошлась бы с гейтом.
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Pass => "PASS",
             Self::Fail => "FAIL",
@@ -168,6 +169,16 @@ pub struct GateComponent {
     pub detail: String,
     /// Находки (печатаются отступом под строкой FAIL-составляющей).
     pub findings: Vec<GateFinding>,
+    /// Заявленное, но механикой НЕ проверяемое: границы собственного
+    /// вердикта составляющей (W1, блок 2 паспорта).
+    ///
+    /// Это не находки и не оправдания: зелёная составляющая обязана назвать,
+    /// что именно её зелёный НЕ означает («ссылка разрешена в существующую
+    /// сущность» ≠ «ссылка верна»; «балл рубрики выше порога» ≠ «решение
+    /// верное»). Строки собираются в паспорт вердикта
+    /// ([`crate::passport`]) и в аттестацию не входят: они описывают границу
+    /// проверки, а не её результат.
+    pub not_verified: Vec<String>,
 }
 
 impl GateComponent {
@@ -178,6 +189,7 @@ impl GateComponent {
             status: GateStatus::Pass,
             detail,
             findings: Vec::new(),
+            not_verified: Vec::new(),
         }
     }
 
@@ -190,6 +202,7 @@ impl GateComponent {
             status: GateStatus::Pass,
             detail,
             findings,
+            not_verified: Vec::new(),
         }
     }
 
@@ -200,6 +213,7 @@ impl GateComponent {
             status: GateStatus::Fail,
             detail,
             findings,
+            not_verified: Vec::new(),
         }
     }
 
@@ -210,7 +224,14 @@ impl GateComponent {
             status: GateStatus::Skip,
             detail,
             findings: Vec::new(),
+            not_verified: Vec::new(),
         }
+    }
+
+    /// Дополняет составляющую границей её вердикта (W1, блок 2 паспорта).
+    fn noting(mut self, notes: Vec<String>) -> Self {
+        self.not_verified = notes;
+        self
     }
 }
 
@@ -674,18 +695,52 @@ fn component_fitness(repo: &Path, constraints: &ConstraintsPath) -> GateComponen
             control::constraints_drift_note(&constraints.path, d)
         )
     });
+    let notes = mention_rule_notes(&constraints.path);
     match control::check(repo, &constraints.path) {
         Ok(report) if report.passed => GateComponent::pass(
             "fitness",
             format!("{} — файл: {label}{drift_note}", report.summary),
-        ),
+        )
+        .noting(notes),
         Ok(report) => GateComponent::fail(
             "fitness",
             format!("{} — файл: {label}{drift_note}", report.summary),
             report.issues.iter().map(GateFinding::lint).collect(),
-        ),
+        )
+        .noting(notes),
         Err(e) => GateComponent::fail("fitness", format!("сбой выполнения: {e}"), Vec::new()),
     }
+}
+
+/// Граница вердикта `fitness` (W1, блок 2 паспорта): доля правил реестра,
+/// которые доказывают НАЛИЧИЕ текста, а не поведение системы.
+///
+/// `must_contain`/`must_not_contain`/`each_file_must_contain` — звено
+/// трассировки: они зеленеют и когда инвариант соблюдён, и когда о нём просто
+/// упомянули (Н10, D11 red-team). Считается по реестру; нечитаемый реестр —
+/// пустой список (составляющая и так ответит своей находкой).
+fn mention_rule_notes(constraints: &Path) -> Vec<String> {
+    let Ok(resolved) = control::load_constraints_resolved(constraints) else {
+        return Vec::new();
+    };
+    let total = resolved.rules.len();
+    if total == 0 {
+        return Vec::new();
+    }
+    let behaviour = resolved
+        .rules
+        .iter()
+        .filter(|r| control::BEHAVIOUR_RULE_KINDS.contains(&r.kind.as_str()))
+        .count();
+    let mention = total - behaviour;
+    if mention == 0 {
+        return Vec::new();
+    }
+    vec![format!(
+        "правил, судящих по ТЕКСТУ файла (наличие/запрет слова), — {mention} из \
+         {total}; они зеленеют и когда инвариант соблюдён, и когда о нём просто \
+         написали (исполняемых проверок поведения: {behaviour})"
+    )]
 }
 
 /// Потолок записей покрытия «файл ← дельты» в детали составляющей
@@ -1142,10 +1197,16 @@ fn component_evidence(repo: &Path, cfg: &crate::config::EvidenceConfig) -> GateC
         );
     }
     let mut failed = Vec::new();
+    // Границы вердикта бандла (W1): «подпись заявлена», «семантика решения —
+    // работа ревьюера». Собираются и на зелёном: именно там они и нужны.
+    let mut notes: Vec<String> = Vec::new();
     for dir in &bundles {
         match evidence::verify_with(dir, cfg) {
-            Ok(verdict) if verdict.passed => {}
+            Ok(verdict) if verdict.passed => {
+                notes.extend(verdict.not_verified.iter().cloned());
+            }
             Ok(verdict) => {
+                notes.extend(verdict.not_verified.iter().cloned());
                 let label = dir.strip_prefix(repo).map_or_else(
                     |_| dir.display().to_string(),
                     |p| {
@@ -1190,17 +1251,21 @@ fn component_evidence(repo: &Path, cfg: &crate::config::EvidenceConfig) -> GateC
             }
         }
     }
+    notes.sort();
+    notes.dedup();
     if failed.is_empty() {
         GateComponent::pass(
             "evidence_verify",
             format!("бандлов проверено: {}", bundles.len()),
         )
+        .noting(notes)
     } else {
         GateComponent::fail(
             "evidence_verify",
             format!("бандлов: {}, не прошли: {}", bundles.len(), failed.len()),
             failed,
         )
+        .noting(notes)
     }
 }
 
@@ -1270,17 +1335,27 @@ fn component_model_validate(repo: &Path, route: Route) -> GateComponent {
             ""
         }
     );
+    // W1: зелёный здесь означает «ссылки разрешаются», а не «ссылки верны».
+    // Ссылка на существующую, но не ту сущность (D6 red-team) механикой не
+    // ловится и не должна — это блок 2 паспорта и состязательное ревью.
+    let notes = vec![
+        "ссылка разрешается в СУЩЕСТВУЮЩУЮ сущность; верна ли она по смыслу \
+         (та ли это сущность) — не проверяется"
+            .to_string(),
+    ];
     if errors == 0 {
-        GateComponent::pass("model_validate", detail)
+        GateComponent::pass("model_validate", detail).noting(notes)
     } else {
-        GateComponent::fail("model_validate", detail, findings)
+        GateComponent::fail("model_validate", detail, findings).noting(notes)
     }
 }
 
 /// Статус ADR в прозе: `- Status: Accepted` в любой из принятых форм
 /// (`**Статус**:`, `## Статус`). Толерантность намеренная: ошибка разбора
 /// формата не должна выглядеть как решение архитектора (Н9).
-fn adr_is_accepted(text: &str) -> bool {
+/// `pub(crate)`: тем же признаком паспорт вердикта (W1) отличает решения,
+/// о которых вердикт вообще ничего не говорит.
+pub(crate) fn adr_is_accepted(text: &str) -> bool {
     text.lines().take(40).any(|l| {
         let t = l.trim().trim_start_matches(['-', '*', '#', ' ']).trim();
         let lowered = t.to_lowercase();
@@ -1430,10 +1505,29 @@ fn component_decision_quality(
         findings.len(),
         cfg.min_score
     );
+    // W1: балл — это суждение LLM-судьи, а не свойство решения. Механика
+    // сверяет число с порогом и свежесть отчёта; качество самого суждения и
+    // верность решения она не подтверждает (D10 red-team — блок 2 паспорта).
+    let mut notes = vec![
+        "балл рубрики — суждение LLM-судьи; механика сверяет число с порогом \
+         и привязку отчёта к редакции документа, но не качество суждения и не \
+         верность самого решения"
+            .to_string(),
+    ];
+    if findings
+        .iter()
+        .any(|f| f.rule.as_deref() == Some("judge_is_author"))
+    {
+        notes.push(
+            "независимость судьи не подтверждена: для части документов судья \
+             совпадает с автором либо автор в отчёте не указан (judge_is_author)"
+                .to_string(),
+        );
+    }
     if errors == 0 {
-        GateComponent::pass_with_findings("decision_quality", detail, findings)
+        GateComponent::pass_with_findings("decision_quality", detail, findings).noting(notes)
     } else {
-        GateComponent::fail("decision_quality", detail, findings)
+        GateComponent::fail("decision_quality", detail, findings).noting(notes)
     }
 }
 

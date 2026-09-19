@@ -219,6 +219,13 @@ fn component_contracts(repo: &Path) -> GateComponent {
                 format!("заявленные INT.contract не найдены ({missing}) — см. trace_check")
             },
             findings: Vec::new(),
+            // Контракты проверяются как ФАЙЛЫ (форма и версионирование);
+            // соответствие контракта модели — работа ревьюера, не механики.
+            not_verified: vec![
+                "линт контракта проверяет форму и версионирование файла; \
+                 соответствует ли контракт модели и коду — не проверяется"
+                    .to_string(),
+            ],
         };
     }
     let mut findings: Vec<GateFinding> = Vec::new();
@@ -315,6 +322,11 @@ fn component_contracts(repo: &Path) -> GateComponent {
         },
         detail,
         findings,
+        not_verified: vec![
+            "линт контракта проверяет форму и версионирование файла; \
+             соответствует ли контракт модели и коду — не проверяется"
+                .to_string(),
+        ],
     }
 }
 

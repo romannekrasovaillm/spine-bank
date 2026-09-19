@@ -336,6 +336,7 @@ pub const MANUAL_TOOLS: &[&str] = &[
     "skill_load",
     "mermaid_render",
     "rules_suggest",
+    "verdict_explain",
 ];
 
 /// Режим MCP-сервера: какой срез инструментов отдаётся хосту.
@@ -987,6 +988,11 @@ impl McpServe {
             // эвристики, src/rules_suggest.rs).
             "rules_suggest" => self
                 .tool_rules_suggest(args)
+                .await
+                .map(DispatchOutcome::Structured),
+            // Паспорт вердикта (W1): вердикт гейта + его границы.
+            "verdict_explain" => self
+                .tool_verdict_explain(args)
                 .await
                 .map(DispatchOutcome::Structured),
             // Мост в реестр инструментов харнесса (белые списки режима).
@@ -1817,6 +1823,69 @@ impl McpServe {
             "summary": report.summary,
         }))
     }
+
+    /// Паспорт вердикта (W1): прогон гейта + страница «что зелёный НЕ
+    /// означает». Инструмент чтения: ничего не пишет и решения не принимает —
+    /// возвращает тот же вердикт, что `arch-be gate`, и его границы.
+    async fn tool_verdict_explain(&self, args: Value) -> std::result::Result<Value, CallError> {
+        #[derive(Deserialize)]
+        struct Args {
+            /// Репозиторий (по умолчанию — каталог вызова).
+            path: Option<String>,
+            /// Маршрут: auto (по умолчанию) | fast | standard | critical.
+            route: Option<String>,
+            /// База git для диффа и сравнения правил.
+            base: Option<String>,
+            /// Файл ограничений (по умолчанию <repo>/.arch-handoff/CONSTRAINTS.yaml).
+            constraints: Option<String>,
+            /// Рабочий каталог клиента: относительный `path` резолвится от него.
+            cwd: Option<String>,
+        }
+        let args: Args = parse_args(args, "verdict_explain")?;
+        let raw = args.path.map_or_else(|| PathBuf::from("."), PathBuf::from);
+        let repo = match &args.cwd {
+            Some(cwd) if !raw.is_absolute() => PathBuf::from(cwd).join(raw),
+            _ => raw,
+        };
+        let route = match args.route.as_deref().unwrap_or("auto").trim() {
+            "auto" | "" => None,
+            other => Some(
+                other
+                    .parse::<crate::control::Route>()
+                    .map_err(CallError::invalid_params)?,
+            ),
+        };
+        let base = args.base;
+        let constraints = args.constraints.map(PathBuf::from);
+        let limits = self
+            .cfg
+            .significance
+            .limits()
+            .map_err(|e| CallError::Execution(format!("verdict_explain: {e}")))?;
+        let requirements = crate::gate::GateRequirements::from_config(&self.cfg.gate);
+        let options = crate::gate::GateOptions::from_config(&self.cfg);
+        let repo_for_run = repo.clone();
+        let report = blocking("verdict_explain", move || {
+            crate::gate::run_opts(
+                &repo_for_run,
+                route,
+                base.as_deref(),
+                constraints.as_deref(),
+                limits,
+                &requirements,
+                &options,
+            )
+        })
+        .await?;
+        let passport = crate::passport::Passport::build(&report, &repo);
+        let mut out = passport.to_json();
+        // Вердикт рядом с паспортом — тот же прогон, не второй: паспорт без
+        // вердикта читался бы как самостоятельное суждение.
+        out["verdict_envelope"] = report.envelope_json();
+        out["report_markdown"] = Value::String(passport.render());
+        out["summary"] = Value::String(crate::passport::summary_line(&passport));
+        Ok(out)
+    }
 }
 
 /// Текст и описание плейбука-промпта: сначала пользовательская копия из
@@ -2314,6 +2383,26 @@ fn tool_specs() -> Vec<Value> {
                     "cwd": {"type": "string", "description": "Рабочий каталог клиента: относительный path резолвится от него (по умолчанию — cwd процесса сервера)"},
                 },
                 "required": ["path"],
+            },
+            "annotations": read_only,
+        }),
+        json!({
+            "name": "verdict_explain",
+            "description": "Паспорт вердикта: прогон гейта + страница «что зелёный НЕ означает» \
+                            в трёх блоках — проверено (составляющие с числами), заявлено, но \
+                            механикой не проверяется (подпись A3, семантика ссылок, независимость \
+                            судьи и ревьюера, адекватность решения), не проверено (SKIP с \
+                            причиной). Отвечает тем же вердиктом, что `arch-be gate`, и его \
+                            границами; решения не принимает",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Репозиторий (по умолчанию — каталог вызова)"},
+                    "route": {"type": "string", "description": "auto (по умолчанию) | fast | standard | critical"},
+                    "base": {"type": "string", "description": "База git для диффа (по умолчанию — рабочее дерево против HEAD)"},
+                    "constraints": {"type": "string", "description": "Файл ограничений (по умолчанию <repo>/.arch-handoff/CONSTRAINTS.yaml)"},
+                    "cwd": {"type": "string", "description": "Рабочий каталог клиента: относительный path резолвится от него (по умолчанию — cwd процесса сервера)"},
+                },
             },
             "annotations": read_only,
         }),

@@ -76,6 +76,7 @@ pub mod net;
 pub mod nfr;
 pub mod openapi;
 pub mod openspec;
+pub mod passport;
 pub mod plugin;
 pub mod policy;
 pub mod publish;
