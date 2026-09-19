@@ -705,7 +705,9 @@ arch-be [--config <path>] <command>   # без команды — TUI
 - `docs/failure_memory.md` — память сбоев инструментов («ошибся дважды → урок»).
 - `docs/rubrics_and_benchmarks.md`, `docs/control.md`, `docs/governance.md`,
   `docs/harness_integrations.md`, `docs/handoff_walkthrough.md` (передача
-  контекста кодовому харнессу, кадр за кадром), `docs/mcp.md`, `docs/cron_and_md_pipes.md`,
+  контекста кодовому харнессу, кадр за кадром), `docs/mcp.md`,
+  `docs/mcp_for_architects.md` (MCP для архитекторов: гид по работе из
+  кодового харнесса со скриншотами), `docs/cron_and_md_pipes.md`,
   `docs/web_kb.md`, `docs/agents_md.md`, `docs/evals.md` (continuous evals
   конфигурации харнесса), `docs/archify.md` (контур диаграмм JSON IR →
   HTML/SVG), `docs/SOURCE_BRIEF.md` (источник идей).
@@ -1215,7 +1217,9 @@ Fully commented sample: `config.example.toml`.
   `docs/skills_for_architects.md` (the skills-library tour: all 62 skills in
   9 plugins), `docs/rubrics_and_benchmarks.md`, `docs/harness_integrations.md`,
   `docs/handoff_walkthrough.md` (handing context to a coding harness,
-  frame by frame), `docs/governance.md`, `docs/mcp.md`, `docs/cron_and_md_pipes.md`,
+  frame by frame), `docs/governance.md`, `docs/mcp.md`,
+  `docs/mcp_for_architects.md` (MCP for architects: working from a coding
+  harness, with screenshots), `docs/cron_and_md_pipes.md`,
   `docs/web_kb.md`, `docs/agents_md.md`, `docs/failure_memory.md`, `docs/SOURCE_BRIEF.md` (idea sources).
   The detailed docs are mostly in Russian — the code and CLI speak English.
 

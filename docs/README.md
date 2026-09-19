@@ -32,6 +32,7 @@ Spine Banking Edition — доменный харнесс solution-архите�
 | [slash_commands.md](slash_commands.md) | Слэш-команды TUI |
 | [models.md](models.md) | Модельная матрица, провайдеры, `api_key_env`, thinking-режимы (ADR-012/021) |
 | [mcp.md](mcp.md) | MCP-серверы: подключение, вызовы, server-mode (ADR-001/008) |
+| [mcp_for_architects.md](mcp_for_architects.md) | MCP для архитекторов: практический гид по работе из кодового харнесса — карта инструментов по задачам, плейбуки, живые сессии со скриншотами |
 | [web_kb.md](web_kb.md) | Веб-поиск/фетч и локальная база знаний |
 | [plugins_and_skills.md](plugins_and_skills.md) | Плагины и библиотека скиллов: структура, загрузка, доверие |
 | [skills_for_architects.md](skills_for_architects.md) | Обзор содержимого библиотеки: все 62 скилла в 9 плагинах, разбор самого интересного |

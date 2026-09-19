@@ -277,6 +277,10 @@ MCP-инструмента, а плейбуки работы (`spine-*`) при�
 
 ![Headless-прогоны architect_review: omp · OpenClaw · Qwen](docs/screenshots/harnesses/waves-headless-reviews.png)
 
+Полный гид по каналу MCP — карта всех 33 инструментов по задачам
+архитектора, плейбуки, живые сессии, журнал вызовов, устранение
+неполадок: **[docs/mcp_for_architects.md](docs/mcp_for_architects.md)**.
+
 ## Хуки-гейты для архитекторов
 
 Единая команда `arch-be gate [--route auto]`: fitness + `delta guard` +
@@ -408,6 +412,9 @@ arch-be mcp serve --rw    # + handoff_create (теперь и в core), adr_new,
   харнессов + прокси-прогон GigaCode: MCP, скиллы, хуки, ограничения.
 - **[docs/HARNESS-TESTS.md](docs/HARNESS-TESTS.md)** — живое тестирование
   волн 1–3 на пяти харнессах (архитекторские сценарии, кадры TUI и headless).
+- **[docs/mcp_for_architects.md](docs/mcp_for_architects.md)** — MCP для
+  архитекторов: работа из кодового харнесса, карта инструментов по задачам,
+  живые сессии со скриншотами.
 - [docs/mcp.md](docs/mcp.md) — контракт MCP-сервера и split-judge.
 - [docs/skills_for_architects.md](docs/skills_for_architects.md) — обзор
   библиотеки: все 62 скилла в 9 плагинах, с чего начать.
