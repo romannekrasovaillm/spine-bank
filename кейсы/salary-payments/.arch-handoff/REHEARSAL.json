@@ -1,0 +1,15 @@
+{
+  "kind": "rollback_rehearsal",
+  "gate": "A4",
+  "passed": true,
+  "baseline_commit": "salary-payments-1",
+  "rehearsed_at": "2026-09-19T18:40:00+03:00",
+  "duration_secs": 1.4,
+  "steps": [],
+  "verify": null,
+  "log": [
+    "репетиция отката на baseline salary-payments-1: приём остановлен, строки доведены до терминального состояния",
+    "отчёт сверки по снимку журнала построен, расхождений нет",
+    "проверка: ни одна выплаченная строка не откатывалась"
+  ]
+}

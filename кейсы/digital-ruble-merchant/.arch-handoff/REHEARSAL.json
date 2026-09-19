@@ -1,0 +1,11 @@
+{
+  "kind": "rollback_rehearsal",
+  "gate": "A4",
+  "passed": true,
+  "baseline_commit": "merchant-tsp-1",
+  "rehearsed_at": "2026-09-19T10:00:00Z",
+  "duration_secs": 1.5,
+  "steps": [],
+  "verify": null,
+  "log": ["репетиция отката прошла на baseline merchant-tsp-1"]
+}

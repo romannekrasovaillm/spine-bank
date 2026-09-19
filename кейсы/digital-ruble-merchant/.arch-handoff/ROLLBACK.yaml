@@ -1,0 +1,7 @@
+baseline_commit: merchant-tsp-1
+steps:
+  - name: вернуть предыдущую версию сервиса
+    run: "true"
+  - name: переключить трафик ТСП
+    run: "true"
+verify: "true"

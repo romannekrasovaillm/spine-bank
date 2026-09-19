@@ -27,6 +27,16 @@ target-check/
 # рабочие пакеты handoff (генерируются per-run, не для VCS)
 .arch-handoff/
 
+# ...кроме .arch-handoff КЕЙСА: маршрут (ROUTE.lock), план отката и отчёт
+# репетиции — часть кейса, их требует профиль Evidence Bundle. Без них клон
+# репозитория даёт красный кейс: артефакт «есть» только в рабочем дереве
+# автора. Рабочие артефакты прогонов (журнал вызовов, измерение redteam)
+# остаются вне VCS — они принадлежат тому, кто их снял.
+!кейсы/*/.arch-handoff/
+!кейсы/*/.arch-handoff/**
+кейсы/*/.arch-handoff/mcp-calls.jsonl
+кейсы/*/.arch-handoff/redteam.json
+
 # вывод демо-прогонов (генерируется, не для VCS)
 registry-out/
 banking/demos/cli-from-claude-code/scenario1-headless/stderr.log
