@@ -1,0 +1,13 @@
+{
+  "schema": "arch-be/rubric-report/v1",
+  "rubric": "adr_quality",
+  "target": "docs/adr/ADR-002-append-only-журнал-операций.md",
+  "target_sha256": "8c8ab778fdd5ef05163e1493ff4f436ec55c1d50d39b9862d3c629ed57c714fa",
+  "judge_model": "judge-x",
+  "author_model": "architect-merchant",
+  "weighted_total": 4.1,
+  "verdict": "OK",
+  "unstable": false,
+  "evidence_not_found": 0,
+  "judged_at": "2026-09-19T10:00:00+00:00"
+}

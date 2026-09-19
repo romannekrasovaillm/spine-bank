@@ -1,0 +1,13 @@
+{
+  "schema": "arch-be/rubric-report/v1",
+  "rubric": "adr_quality",
+  "target": "docs/adr/ADR-007-обязательная-сверка-с-платформой.md",
+  "target_sha256": "94341420bf8073dbf6a77b2cd71cf68c175715ee7199a6595d7f117de1a7cf11",
+  "judge_model": "judge-x",
+  "author_model": "architect-merchant",
+  "weighted_total": 4.1,
+  "verdict": "OK",
+  "unstable": false,
+  "evidence_not_found": 0,
+  "judged_at": "2026-09-19T10:00:00+00:00"
+}

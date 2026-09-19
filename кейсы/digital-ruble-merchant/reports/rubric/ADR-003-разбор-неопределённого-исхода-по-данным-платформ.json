@@ -1,0 +1,13 @@
+{
+  "schema": "arch-be/rubric-report/v1",
+  "rubric": "adr_quality",
+  "target": "docs/adr/ADR-003-разбор-неопределённого-исхода-по-данным-платформ.md",
+  "target_sha256": "3a725d89d34854a364f35029514a57d5bfb63c46d17d2236ac7b097e86a0f141",
+  "judge_model": "judge-x",
+  "author_model": "architect-merchant",
+  "weighted_total": 4.1,
+  "verdict": "OK",
+  "unstable": false,
+  "evidence_not_found": 0,
+  "judged_at": "2026-09-19T10:00:00+00:00"
+}

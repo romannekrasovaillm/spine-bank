@@ -1,0 +1,27 @@
+openapi: 3.0.3
+info:
+  title: API приёма цифрового рубля для ТСП
+  version: "1.0.0"
+paths:
+  /merchant/payments:
+    post:
+      operationId: createMerchantPayment
+      summary: Принять поручение ТСП
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amount, merchant_id]
+              properties:
+                amount: {type: integer, minimum: 1}
+                merchant_id: {type: string}
+      responses:
+        "201": {description: Поручение принято}
+        "409": {description: Повтор с тем же ключом}

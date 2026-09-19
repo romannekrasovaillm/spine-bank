@@ -1,0 +1,13 @@
+{
+  "schema": "arch-be/rubric-report/v1",
+  "rubric": "adr_quality",
+  "target": "docs/adr/ADR-001-идемпотентность-приёма-на-каждой-точке-входа.md",
+  "target_sha256": "ad829cee07a50b14021bb5a37bf8a16369ccbd5dc9f974afdd361040cc97157f",
+  "judge_model": "judge-x",
+  "author_model": "architect-merchant",
+  "weighted_total": 4.1,
+  "verdict": "OK",
+  "unstable": false,
+  "evidence_not_found": 0,
+  "judged_at": "2026-09-19T10:00:00+00:00"
+}

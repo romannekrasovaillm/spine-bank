@@ -1,0 +1,13 @@
+{
+  "schema": "arch-be/rubric-report/v1",
+  "rubric": "adr_quality",
+  "target": "docs/adr/ADR-004-запрет-пдн-в-журнале-и-телеметрии.md",
+  "target_sha256": "87ba1ced3c5a583a63afa79145d23bae9cde1978eca1353b6c8e989f6421d135",
+  "judge_model": "judge-x",
+  "author_model": "architect-merchant",
+  "weighted_total": 4.1,
+  "verdict": "OK",
+  "unstable": false,
+  "evidence_not_found": 0,
+  "judged_at": "2026-09-19T10:00:00+00:00"
+}

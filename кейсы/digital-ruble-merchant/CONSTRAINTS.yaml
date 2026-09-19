@@ -1,0 +1,113 @@
+# Реестр правил кейса: приём оплаты цифровым рублём для ТСП
+rules:
+  - id: C-001
+    name: spine_present
+    type: file_exists
+    path: "ARCHITECTURE-SPINE.md"
+    severity: error
+    owner: OWNER-001
+    expiry: 2027-12-31
+    effort_hours: 1
+  - id: C-002
+    name: adr_alternatives
+    type: each_file_must_contain
+    glob: "docs/adr/ADR-*.md"
+    pattern: 'Alternatives'
+    severity: error
+    owner: OWNER-001
+    expiry: 2027-12-31
+    effort_hours: 1
+  - id: C-003
+    name: no_pan_in_tests
+    type: must_not_contain
+    glob: "tests/**/*.py"
+    pattern: 'PAN'
+    severity: error
+    owner: OWNER-001
+    expiry: 2027-12-31
+    effort_hours: 1
+  - id: C-004
+    name: spine_binds
+    type: must_contain
+    glob: "ARCHITECTURE-SPINE.md"
+    pattern: 'Binds'
+    severity: error
+    owner: OWNER-001
+    expiry: 2027-12-31
+    effort_hours: 1
+  - id: C-005
+    name: spec_present
+    type: file_exists
+    path: "docs/spec/merchant-acceptance.md"
+    severity: error
+    owner: OWNER-001
+    expiry: 2027-12-31
+    effort_hours: 1
+  - id: C-006
+    name: problem_present
+    type: file_exists
+    path: "docs/PROBLEM.md"
+    severity: error
+    owner: OWNER-001
+    expiry: 2027-12-31
+    effort_hours: 1
+  - id: C-007
+    name: spec_ears
+    type: must_contain
+    glob: "docs/SPEC.md"
+    pattern: 'shall'
+    severity: error
+    owner: OWNER-001
+    expiry: 2027-12-31
+    effort_hours: 1
+  - id: C-008
+    name: no_todo_in_model
+    type: must_not_contain
+    glob: "model/**/*.md"
+    pattern: 'TODO'
+    severity: error
+    owner: OWNER-001
+    expiry: 2027-12-31
+    effort_hours: 1
+  - id: C-009
+    name: acceptance_present
+    type: file_exists
+    path: "docs/ACCEPTANCE.md"
+    severity: error
+    owner: OWNER-001
+    expiry: 2027-12-31
+    effort_hours: 1
+  - id: C-010
+    name: openapi_present
+    type: file_exists
+    path: "docs/contracts/openapi-merchant.yaml"
+    severity: error
+    owner: OWNER-001
+    expiry: 2027-12-31
+    effort_hours: 1
+  - id: C-011
+    name: spine_prevents
+    type: must_contain
+    glob: "ARCHITECTURE-SPINE.md"
+    pattern: 'Prevents'
+    severity: error
+    owner: OWNER-001
+    expiry: 2027-12-31
+    effort_hours: 1
+  - id: C-012
+    name: spine_rule
+    type: must_contain
+    glob: "ARCHITECTURE-SPINE.md"
+    pattern: 'Rule'
+    severity: error
+    owner: OWNER-001
+    expiry: 2027-12-31
+    effort_hours: 1
+  - id: C-013
+    name: walking_skeleton_present
+    type: file_exists
+    path: "docs/WALKING-SKELETON.md"
+    severity: error
+    owner: OWNER-001
+    expiry: 2027-12-31
+    effort_hours: 1

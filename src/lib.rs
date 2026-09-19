@@ -81,6 +81,7 @@ pub mod policy;
 pub mod publish;
 #[cfg(feature = "harness")]
 pub mod ralph;
+pub mod redteam;
 pub mod rehearsal;
 pub mod report_fmt;
 pub mod retry;

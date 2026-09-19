@@ -206,6 +206,31 @@ enum Cmd {
         /// Машиночитаемый вывод: JSON-отчёт.
         #[arg(long)]
         json: bool,
+        /// Расширенный режим: мутационный прогон по кейсу (`--redteam <кейс>`)
+        /// наравне с метаморфными инвариантами.
+        #[arg(long, value_name = "DIR")]
+        redteam: Option<PathBuf>,
+        /// Порог доли обнаружения для `--redteam`, % (дефолт 78 ≈ 11 из 14).
+        #[arg(long, default_value_t = 78.0)]
+        min_detection: f64,
+    },
+    /// Мутационное тестирование архитектурного пакета: клонирует кейс во
+    /// временный каталог, засеивает по одному дефекту из red-team набора,
+    /// гоняет гейт и печатает карту обнаружения. Read-only к исходному кейсу,
+    /// без сети, детерминированно; exit 1, если доля ниже `--min-detection`.
+    Redteam {
+        /// Кейс (каталог с model/, CONSTRAINTS.yaml, docs/adr, бандлом…).
+        case: PathBuf,
+        /// Формат вывода: text (дефолт, карта обнаружения) | json | markdown.
+        #[arg(long, default_value = "text", value_name = "FORMAT")]
+        format: String,
+        /// Порог доли обнаружения, ниже которого exit 1 (дефолт 0.78).
+        #[arg(long, default_value_t = 0.78)]
+        min_detection: f64,
+        /// Не включать необязательную составляющую `decision_quality`
+        /// (по умолчанию прогон её включает: иначе дефект D9 не проверяем).
+        #[arg(long)]
+        no_decision_quality: bool,
     },
     /// Составное архитектурное ревью репозитория одним ответом (бэклог
     /// волны 3, п.13): маршрут значимости из git-диффа + весь контур
@@ -1737,8 +1762,22 @@ async fn main() -> Result<()> {
                 std::process::exit(code);
             }
         }
-        Some(Cmd::Selftest { json }) => {
+        Some(Cmd::Selftest {
+            json,
+            redteam,
+            min_detection,
+        }) => {
             let report = arch_harness::selftest::run();
+            // Расширенный режим: к метаморфным инвариантам добавляется
+            // мутационный прогон по кейсу (W2).
+            let redteam_report = match redteam.as_deref() {
+                Some(case) => Some(arch_harness::redteam::run(
+                    case,
+                    min_detection / 100.0,
+                    !cfg.gate.required.critical.is_empty(),
+                )?),
+                None => None,
+            };
             if json {
                 let invariants: Vec<serde_json::Value> = report
                     .invariants
@@ -1751,17 +1790,52 @@ async fn main() -> Result<()> {
                         })
                     })
                     .collect();
-                let out = serde_json::json!({
+                let mut out = serde_json::json!({
                     "tool": "arch-be selftest",
-                    "passed": report.passed(),
+                    "passed": report.passed()
+                        && redteam_report.as_ref().is_none_or(
+                            arch_harness::redteam::RedteamReport::passed
+                        ),
                     "invariants": invariants,
                 });
+                if let Some(rt) = &redteam_report {
+                    out["redteam"] = rt.to_json();
+                }
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string())
                 );
             } else {
                 print!("{}", report.render());
+                if let Some(rt) = &redteam_report {
+                    println!();
+                    print!("{}", rt.render());
+                }
+            }
+            let redteam_ok = redteam_report
+                .as_ref()
+                .is_none_or(arch_harness::redteam::RedteamReport::passed);
+            if !report.passed() || !redteam_ok {
+                std::process::exit(1);
+            }
+        }
+        Some(Cmd::Redteam {
+            case,
+            format,
+            min_detection,
+            no_decision_quality,
+        }) => {
+            let report = arch_harness::redteam::run(&case, min_detection, !no_decision_quality)?;
+            match format.trim().to_ascii_lowercase().as_str() {
+                "json" => {
+                    let out = report.to_json();
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string())
+                    );
+                }
+                "markdown" | "md" => print!("{}", arch_harness::redteam::render_markdown(&report)),
+                _ => print!("{}", report.render()),
             }
             if !report.passed() {
                 std::process::exit(1);

@@ -2194,3 +2194,85 @@ fn a4_without_manifest_is_a_finding_not_io_error() {
     assert_eq!(out.status.code(), Some(1), "вывод: {all}");
     assert!(!all.contains("Stack backtrace"), "вывод: {all}");
 }
+
+/// W2: мутационный прогон по кейсу ТСП — карта обнаружения и критерий
+/// приёмки релиза 0.3.4 («не меньше 11 из 14»).
+///
+/// Тест держит ДВА свойства инструмента, а не только число: доля считается по
+/// 14 позициям раздела 7 (R и контроль D14 в неё не входят), и семантические
+/// дефекты (D6, D10, D11) НЕ должны ловиться — если механика начнёт их ловить,
+/// это регресс, а не успех.
+#[test]
+fn redteam_measures_merchant_case_detection_share() {
+    let case = Path::new(env!("CARGO_MANIFEST_DIR")).join("кейсы/digital-ruble-merchant");
+    let tmp = tempfile::tempdir().expect("tmp");
+    let mut cmd = arch_cmd(tmp.path());
+    let out = cmd
+        .arg("redteam")
+        .arg(case.as_os_str())
+        .output()
+        .expect("прогон arch-be");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(out.status.code(), Some(0), "вывод: {text}");
+    assert!(text.contains("11/14"), "ожидалась доля 11 из 14: {text}");
+    assert!(text.contains("контроль аттестации: да"), "{text}");
+    // Семантика обязана остаться невидимой механике.
+    for id in ["D6", "D10", "D11"] {
+        let line = text
+            .lines()
+            .find(|l| l.contains(id) && l.contains("не пойман и не должен"))
+            .unwrap_or_else(|| panic!("{id} обязан быть не пойман: {text}"));
+        assert!(!line.is_empty());
+    }
+    // Дефекты, которые обязаны ловиться, названы с инструментом.
+    for (id, tool) in [
+        ("D1", "nfr"),
+        ("D4", "trace_check"),
+        ("D5", "model_validate"),
+        ("D7", "rule_weakened"),
+        ("D9", "decision_quality"),
+        ("D11b", "fitness"),
+        ("D13", "evidence_verify"),
+    ] {
+        assert!(
+            text.lines().any(|l| l.contains(id) && l.contains(tool)),
+            "{id} обязан ловиться инструментом {tool}: {text}"
+        );
+    }
+    // Порог ниже фактического — красный прогон и exit 1.
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("redteam")
+        .arg(case.as_os_str())
+        .arg("--min-detection")
+        .arg("0.95");
+    cmd.assert()
+        .code(1)
+        .stdout(predicates::str::contains("Итог: FAIL"));
+}
+
+/// W2: машинный формат отчёта — JSON-схема с картой обнаружения.
+#[test]
+fn redteam_json_format_reports_detections() {
+    let case = Path::new(env!("CARGO_MANIFEST_DIR")).join("кейсы/digital-ruble-merchant");
+    let tmp = tempfile::tempdir().expect("tmp");
+    let mut cmd = arch_cmd(tmp.path());
+    let out = cmd
+        .arg("redteam")
+        .arg(case.as_os_str())
+        .arg("--format")
+        .arg("json")
+        .output()
+        .expect("прогон arch-be");
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON-отчёт redteam");
+    assert_eq!(value["schema"], "arch-be/redteam-report/v1");
+    assert_eq!(value["total"], 14);
+    assert_eq!(value["caught"], 11);
+    assert_eq!(value["passed"], true);
+    assert_eq!(value["control_ok"], true);
+    let detections = value["detections"].as_array().expect("detections");
+    assert_eq!(detections.len(), 16);
+}
