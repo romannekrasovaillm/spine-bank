@@ -203,6 +203,11 @@ arch-be gate --format gitlab-codequality > codequality-spine.json
 # в интерфейсе merge request без ручной настройки
 ```
 
+При красном прогоне машинный отчёт несёт **квитанцию ценности** «Гейт поймал
+N нарушений до ревью»: в JUnit — XML-комментарий внутри `testsuites`, в
+SARIF — `runs[0].properties.valueReceipt` и `caughtErrorFindings` (эмитится
+только при FAIL; в зелёном отчёте её нет).
+
 ## 4. Детерминированные команды без LLM
 
 Работают без ключей и сети (сборка + конфиг; archify — ещё Node ≥18);

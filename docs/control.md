@@ -129,7 +129,13 @@ arch-be control sensors examples/specs
 #   [PASS] upstream_coverage examples/specs/ARCHITECTURE-SPINE.example.md — все ссылки валидны (0)
 #   [PASS] required_sections examples/specs/SPEC.example.md — все обязательные секции на месте
 #   [PASS] upstream_coverage examples/specs/SPEC.example.md — все ссылки валидны (0)
+# Итог: FAIL — сенсоров: 4, провалено: 1
 ```
+
+**Exit-код:** провал хотя бы одного сенсора → **exit 1** со строкой
+«Итог: PASS/FAIL — сенсоров: N, провалено: M» (годится для CI); все сенсоры
+зелёные — exit 0. Те же сенсоры входят в единый гейт составляющей `sensors`
+на маршрутах Standard/Critical (см. «Единый гейт» ниже).
 
 (Spine-файл закономерно падает по `required_sections` — он не спека;
 сенсоры применяйте к каталогу функциональных спецификаций.)
@@ -696,6 +702,28 @@ Worktree можно перечислить из git: `--repo <path>` (берут
   нарушений и подсказкой «оформите правку дельтой: arch-be delta new <name>»;
   нет изменений защищённых путей или все покрыты дельтами → PASS, exit 0.
 
+Вывод — **отчёт, а не галочка**: заголовок называет числа («Изменённых
+файлов: N, защищённых среди них: M (активных дельт: K)»), дальше — поимённое
+покрытие каждого изменённого защищённого файла
+(`[ok] model/adr/ADR-003.md — покрыт активной дельтой 'spine-update'` или
+«покрыт активными дельтами: 'a', 'b'»). Нарушения честно различают ситуации:
+«не упоминается ни в одной активной дельте **(активных дельт нет)**»
+(правку нечем покрыть) против «(активных дельт: N)» (дельты есть, но файл в
+них не назван). Машинный вердикт инструмента `delta_guard` несёт те же
+данные: `active_deltas` и `mentions` (все дельты, упомянувшие файл), см.
+`docs/tools.md`.
+
+```bash
+arch-be delta guard            # в репозитории с незакоммиченными правками спайна
+# Гейт прямых правок спайна (база: HEAD)
+# Изменённых файлов: 2, защищённых среди них: 2 (активных дельт: 1)
+#
+# [ok] ARCHITECTURE-SPINE.md — покрыт активной дельтой 'programmable-payments'
+# [ok] CONSTRAINTS.yaml — покрыт активной дельтой 'programmable-payments'
+#
+# Итог: PASS — все правки спайна покрыты активными дельтами
+```
+
 Пример CI-использования (оба гейта в пайплайне):
 
 ```bash
@@ -727,9 +755,9 @@ job summary — `markdown`. Текстовый вывод не меняется;
 
 | Составляющая | Что прогоняет | FAIL, когда |
 |---|---|---|
-| `fitness` | `control check` по `CONSTRAINTS.yaml` (дефолт `<repo>/.arch-handoff/CONSTRAINTS.yaml`, `--constraints` — другой файл) | находки severity error; файл есть, но не читается/не валиден |
-| `delta_guard` | `delta guard` (защищённые пути: `model/`, `ARCHITECTURE-SPINE.md`, `CONSTRAINTS.yaml`) | правки защищённых файлов без активной дельты |
-| `rule_weakened` | анти-ослабление реестра правил относительно git-базы (см. ниже) | правило удалено / `exclude_glob` расширен / severity понижен без активного override |
+| `fitness` | `control check` по `CONSTRAINTS.yaml` (дефолт `<repo>/.arch-handoff/CONSTRAINTS.yaml`, при его отсутствии — fallback на `<repo>/CONSTRAINTS.yaml`; `--constraints` — другой файл; секция печатает использованный путь: `— файл: …`) | находки severity error; файл есть, но не читается/не валиден |
+| `delta_guard` | `delta guard` (защищённые пути: `model/`, `ARCHITECTURE-SPINE.md`, `CONSTRAINTS.yaml`); деталь PASS-секции — покрытие защищённых файлов дельтами (`— покрытие: file ← 'delta'`) | правки защищённых файлов без активной дельты |
+| `rule_weakened` | анти-ослабление реестра правил относительно git-базы (см. ниже); тот же резолв файла, что у fitness, fail-closed | правило удалено / `exclude_glob` расширен / severity понижен без активного override; явный `--constraints` вне репозитория |
 | `spine_lint` | `control spine ARCHITECTURE-SPINE.md` | error-находки линтера |
 | `trace_check` | `trace check` (нужны `model/` и `CONSTRAINTS.yaml` в корне; crosscheck сверяет все ссылки спайна на сущности модели) | error-находки трассировки |
 
@@ -739,6 +767,7 @@ job summary — `markdown`. Текстовый вывод не меняется;
 |---|---|---|
 | `nfr` | все четыре проверки `nfr` (budget/availability/capacity/cost) | error-находка хотя бы одной |
 | `evidence_verify` | `evidence verify` по каждому активному change-dir `changes/<name>/EVIDENCE.yaml` | бандл неполон или хэш сошёлся с дрейфом |
+| `sensors` | `control sensors` по `<repo>/docs/spec` (обязательные секции `required_sections`, живость ссылок `upstream_coverage`); SKIP, если каталога нет или он пуст | провал хотя бы одного сенсора |
 
 **Fail-soft (SKIP, не падение):** у составляющей нет входа — нет
 `CONSTRAINTS.yaml`, не git-репозиторий, нет `model/`, нет активных бандлов.
@@ -766,9 +795,9 @@ git-диффа (`detect_diff_triggers` + `score_with_sources` с пустым de
 arch-be gate --repo ~/work/payment-svc
 # Гейт: ~/work/payment-svc
 # Маршрут: Fast (auto: score 0 (триггеров нет))
-#   [PASS] fitness — Правил: 13, нарушений: 0 (error: 0, warn: 0)
-#   [PASS] delta_guard — изменённых файлов: 2, защищённых среди них: 0
-#   [PASS] rule_weakened — реестр правил не ослаблен относительно HEAD
+#   [PASS] fitness — Правил: 13, нарушений: 0 (error: 0, warn: 0) — файл: .arch-handoff/CONSTRAINTS.yaml
+#   [PASS] delta_guard — изменённых файлов: 2, защищённых среди них: 1 — покрытие: ARCHITECTURE-SPINE.md ← 'spine-update'
+#   [PASS] rule_weakened — реестр правил не ослаблен относительно HEAD — файл: .arch-handoff/CONSTRAINTS.yaml
 #   [PASS] spine_lint — находок: 0 (error: 0)
 #   [SKIP] trace_check — нет каталога model/
 # Итог: PASS
@@ -788,8 +817,20 @@ HEAD). Error-находка с именем правила — за каждое
 override на это правило (по имени или `id`) с ADR — гейт «только через ADR»
 (`docs/corp-spine.md`): `overrides: [{rule, adr, until}]`, срок не истёк.
 Сравнение — по плоскому разбору файла (оба корня `rules:`/`constraints:`),
-`extends` не разворачивается. Входа нет (не git, файла нет в базовой
-ревизии, реестр новый) — SKIP.
+`extends` не разворачивается.
+
+**Какой файл сравнивается** (резолв общий с составляющей `fitness`): явный
+`--constraints`, иначе `.arch-handoff/CONSTRAINTS.yaml`, иначе fallback на
+корневой `<repo>/CONSTRAINTS.yaml` — на кейсах без handoff-пакета защита
+работает, а не зеленеет пропуском. Секция гейта всегда печатает
+использованный путь (`— файл: <относительный путь>`). **Fail-closed:** явный
+`--constraints` внутри репозитория (даже абсолютный путь) сравнивается по
+канонизированному относительному пути — указание реестра руками защиту не
+отключает; явный путь **вне репозитория** — FAIL «анти-ослабление невозможно…
+держите реестр правил внутри репозитория», а не молчаливый SKIP.
+Входа нет (не git, базовой ревизии нет — репозиторий без коммитов, файла нет
+в базовой ревизии — реестр новый) — честный SKIP: сравнивать не с чем, это
+не поломка и не ослабление.
 
 Типовой антикейс: агент под давлением красного гейта «чинит» его удалением
 правила — `rule_weakened` валит прогон, пока ослабление не оформлено через
