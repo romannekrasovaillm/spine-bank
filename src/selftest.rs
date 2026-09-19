@@ -274,5 +274,76 @@ pub fn run() -> SelftestReport {
         _ => record("path_invariance_evidence", false, "сбой pack".into()),
     }
 
+    // 7. Чувствительность аттестации (Н3, ADR-043): вердикт тот же, а
+    //    состояние репозитория другое — аттестация обязана это показать.
+    //    Раньше входом был только реестр правил, и вердикт «удостоверял» не
+    //    то дерево, на котором получен.
+    let git_commit = |msg: &str| {
+        let _ = std::process::Command::new("git")
+            .arg("-C")
+            .arg(fx.path())
+            .args([
+                "-c",
+                "user.email=selftest@example.invalid",
+                "-c",
+                "user.name=selftest",
+            ])
+            .args(["add", "-A"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        let _ = std::process::Command::new("git")
+            .arg("-C")
+            .arg(fx.path())
+            .args([
+                "-c",
+                "user.email=selftest@example.invalid",
+                "-c",
+                "user.name=selftest",
+            ])
+            .args(["commit", "-q", "-m", msg])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    };
+    // Правка коммитится: иначе её поймал бы delta guard и сменился бы не
+    // вход, а статус составляющей — инвариант проверял бы не то.
+    std::fs::create_dir_all(fx.path().join("model")).ok();
+    let entity = |note: &str| {
+        format!(
+            "---\nid: CMP-001\ntype: cmp\ntitle: \"Компонент\"\nstatus: \"designed\"\ndepends_on: []\n---\n\n{note}\n"
+        )
+    };
+    std::fs::write(
+        fx.path().join("model/CMP-001.md"),
+        entity("Первая редакция."),
+    )
+    .ok();
+    git_commit("model v1");
+    let before = gate::run(fx.path(), Some(Route::Fast), None, None, limits);
+    std::fs::write(
+        fx.path().join("model/CMP-001.md"),
+        entity("Вторая редакция: решение уточнено."),
+    )
+    .ok();
+    git_commit("model v2");
+    let after = gate::run(fx.path(), Some(Route::Fast), None, None, limits);
+    match (before, after) {
+        (Ok(a), Ok(b)) => record(
+            "attestation_sensitivity",
+            a.outcome == b.outcome && a.attestation != b.attestation,
+            format!(
+                "итог {} → {}, аттестация {} → {}",
+                a.outcome.label(),
+                b.outcome.label(),
+                &a.attestation[..12],
+                &b.attestation[..12]
+            ),
+        ),
+        _ => record("attestation_sensitivity", false, "сбой прогона".into()),
+    }
+
     SelftestReport { invariants }
 }

@@ -276,6 +276,33 @@ impl GateRequirements {
     }
 }
 
+/// Свёртка находок составляющей: SHA-256 отсортированного списка
+/// `(код находки, путь)` — привязывает аттестацию к СОДЕРЖАНИЮ вердикта, а не
+/// только к имени и статусу составляющей (Н3, ADR-043).
+///
+/// Берётся только код и путь, не текст сообщения: формулировки — часть
+/// представления и могут меняться без смены смысла вердикта.
+#[must_use]
+fn findings_digest(c: &GateComponent) -> String {
+    let mut keys: Vec<(String, String)> = c
+        .findings
+        .iter()
+        .map(|f| {
+            (
+                f.rule.clone().unwrap_or_else(|| f.severity.clone()),
+                f.file.clone().unwrap_or_default(),
+            )
+        })
+        .collect();
+    keys.sort();
+    let mut canon = String::new();
+    for (rule, file) in keys {
+        // Запись в String не может завершиться ошибкой — игнор безопасен.
+        let _ = writeln!(canon, "{rule}\0{file}");
+    }
+    crate::hash::sha256_hex(canon.as_bytes())
+}
+
 /// Настройки гейта, не выражаемые маршрутом (0.3.4): семантика артефактов
 /// бандла (Н1, ADR-041) и порог качества решений (Н7, ADR-042).
 ///
@@ -355,6 +382,16 @@ impl GateReport {
         self.attestation = self.compute_attestation();
     }
 
+    /// Свёртка входов для `--verify-envelope`: вход → значение, без
+    /// абсолютных путей и времени.
+    #[must_use]
+    pub fn inputs_map(&self) -> BTreeMap<String, String> {
+        self.inputs
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+
     /// Канонический конверт вердикта без абсолютных путей и времени: тот же
     /// коммит на той же матрице обязан дать ту же аттестацию во всех каналах.
     fn compute_attestation(&self) -> String {
@@ -368,11 +405,14 @@ impl GateReport {
         }
         for c in &self.components {
             let req = self.required.iter().any(|r| r == c.name);
+            // Н3 (ADR-043): свёртка находок — два РАЗНЫХ FAIL обязаны быть
+            // различимы, а не сливаться в «component=nfr FAIL».
             let _ = writeln!(
                 canon,
-                "component:{}={} required={req}",
+                "component:{}={} required={req} findings={}",
                 c.name,
-                c.status.label()
+                c.status.label(),
+                findings_digest(c)
             );
         }
         for n in &self.not_checked {
@@ -402,6 +442,8 @@ impl GateReport {
                     "required": self.required.iter().any(|r| r == c.name),
                     "detail": c.detail,
                     "findings_total": c.findings.len(),
+                    // Н3 (ADR-043): различимость разных FAIL одной составляющей.
+                    "findings_digest": format!("sha256:{}", findings_digest(c)),
                 })
             })
             .collect();
@@ -1535,11 +1577,6 @@ fn run_inner(
     if let Some(lock) = &route_lock {
         components.push(component_route_lock(repo, base, &git, lock));
     }
-    // Хэш входа «реестр правил» (П7): вердикт привязан к тому, что проверяли.
-    let constraints_hash = match std::fs::read(&constraints.path) {
-        Ok(bytes) => format!("sha256:{}", crate::hash::sha256_hex(&bytes)),
-        Err(_) => "absent".to_string(),
-    };
     let mut report = GateReport {
         repo: repo.to_path_buf(),
         route,
@@ -1549,12 +1586,190 @@ fn run_inner(
         outcome: GateOutcome::Pass,
         required: requirements.for_route(route).to_vec(),
         not_checked: Vec::new(),
-        inputs: vec![("constraints".to_string(), constraints_hash)],
+        inputs: collect_inputs(repo, &constraints.path, base, &git),
         attestation: String::new(),
         passed: true,
     };
     report.recompute();
     Ok(report)
+}
+
+/// Хэши входов вердикта (П7): чем состояние репозитория отличалось при
+/// прогоне — реестр правил, спайн, модель, бандлы доказательств, ROUTE.lock и
+/// коммит базы диффа (Н3, ADR-043).
+///
+/// Только ОТНОСИТЕЛЬНЫЕ пути и никакого времени: тот же коммит, склонированный
+/// в другой каталог, обязан дать ту же аттестацию. Отсутствующий вход —
+/// честное `absent`, а не пустой хэш.
+#[must_use]
+fn collect_inputs(
+    repo: &Path,
+    constraints: &Path,
+    base: Option<&str>,
+    git: &GitProbe,
+) -> Vec<(String, String)> {
+    let mut inputs: Vec<(String, String)> = Vec::new();
+    let mut push = |name: &str, value: String| inputs.push((name.to_string(), value));
+
+    push(
+        "constraints",
+        crate::hash::sha256_file(constraints)
+            .map_or_else(|| "absent".to_string(), |h| format!("sha256:{h}")),
+    );
+    // Спайн: оба исторических расположения (как у `spine_lint`).
+    let spine = ["ARCHITECTURE-SPINE.md", "docs/ARCHITECTURE-SPINE.md"]
+        .iter()
+        .map(|p| repo.join(p))
+        .find(|p| p.is_file());
+    push(
+        "spine",
+        spine
+            .and_then(|p| crate::hash::sha256_file(&p))
+            .map_or_else(|| "absent".to_string(), |h| format!("sha256:{h}")),
+    );
+    push(
+        "model",
+        crate::hash::sha256_tree(&repo.join("model"))
+            .map_or_else(|| "absent".to_string(), |h| format!("sha256:{h}")),
+    );
+    // Каждый проверенный бандл: правка EVIDENCE.yaml обязана менять аттестацию.
+    let bundles = evidence_bundle_dirs(repo);
+    push("evidence_bundles", bundles.len().to_string());
+    for dir in &bundles {
+        let rel = dir.strip_prefix(repo).map_or_else(
+            |_| ".".to_string(),
+            |p| {
+                if p.as_os_str().is_empty() {
+                    ".".to_string()
+                } else {
+                    p.display().to_string()
+                }
+            },
+        );
+        push(
+            &format!("evidence:{rel}"),
+            crate::hash::sha256_file(&dir.join("EVIDENCE.yaml"))
+                .map_or_else(|| "absent".to_string(), |h| format!("sha256:{h}")),
+        );
+    }
+    let lock = route_lock_path(repo);
+    push(
+        "route_lock",
+        lock.and_then(|p| crate::hash::sha256_file(&p))
+            .map_or_else(|| "absent".to_string(), |h| format!("sha256:{h}")),
+    );
+    // База диффа — коммитом, а не строкой аргумента: `HEAD~1` и его SHA
+    // описывают одно состояние и обязаны дать одну аттестацию.
+    let base_commit = if git.repo {
+        git_resolve(repo, base.unwrap_or("HEAD"))
+    } else {
+        None
+    };
+    push("base", base_commit.unwrap_or_else(|| "absent".to_string()));
+    inputs
+}
+
+/// Резолвит git-ревизию в полный SHA коммита (None — не резолвится).
+fn git_resolve(repo: &Path, rev: &str) -> Option<String> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["rev-parse", "--verify", &format!("{rev}^{{commit}}")])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if sha.is_empty() { None } else { Some(sha) }
+}
+
+/// Расхождение между вердиктом из конверта и текущим состоянием дерева.
+#[derive(Debug, Clone)]
+pub struct EnvelopeDrift {
+    /// Входы, изменившиеся с момента вердикта: `(вход, было, стало)`.
+    pub changed: Vec<(String, String, String)>,
+    /// Входы, которые были в вердикте, но пропали с дерева.
+    pub missing: Vec<String>,
+    /// Вердикт относится к текущему состоянию.
+    pub same: bool,
+}
+
+/// Сверяет конверт вердикта с текущим состоянием репозитория: аттестация
+/// привязывает зелёный к ВХОДАМ (Н3, ADR-043), поэтому «воспроизводим по
+/// конверту» — это механическая проверка, а не обещание.
+///
+/// Сравниваются входы (реестр правил, спайн, модель, бандлы, `ROUTE.lock`,
+/// коммит базы). Состав находок не пересчитывается: для этого нужен прогон
+/// `arch-be gate` с теми же флагами.
+///
+/// # Errors
+/// Файл конверта не читается, не JSON или не конверт `gate-verdict`.
+pub fn verify_envelope(
+    repo: &Path,
+    envelope_path: &Path,
+    limits: (usize, usize),
+) -> Result<EnvelopeDrift> {
+    let text =
+        std::fs::read_to_string(envelope_path).map_err(|e| HarnessError::io(envelope_path, e))?;
+    let value: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| HarnessError::Config(format!("{}: не JSON ({e})", envelope_path.display())))?;
+    let declared = value
+        .get("inputs")
+        .and_then(|v| v.as_object())
+        .ok_or_else(|| {
+            HarnessError::Config(format!(
+                "{}: нет секции `inputs` — это не конверт arch-be/gate-verdict",
+                envelope_path.display()
+            ))
+        })?;
+    // Базу диффа берём из самого конверта, если она там сохранена; иначе —
+    // HEAD текущего дерева (конверт и дерево в одном репозитории).
+    let base_ref: Option<String> = match value
+        .get("inputs")
+        .and_then(|i| i.get("base"))
+        .and_then(|b| b.as_str())
+    {
+        Some(sha) if sha != "absent" => Some(sha.to_string()),
+        _ => None,
+    };
+    let current = collect_inputs_for_verify(repo, base_ref.as_deref(), limits);
+    let mut changed = Vec::new();
+    let mut missing = Vec::new();
+    for (name, was) in declared {
+        let was = was.as_str().unwrap_or_default().to_string();
+        match current.get(name) {
+            Some(now) if *now == was => {}
+            Some(now) => {
+                if was == "absent" {
+                    missing.push(name.clone());
+                } else {
+                    changed.push((name.clone(), was, now.clone()));
+                }
+            }
+            None => missing.push(name.clone()),
+        }
+    }
+    Ok(EnvelopeDrift {
+        same: changed.is_empty() && missing.is_empty(),
+        changed,
+        missing,
+    })
+}
+
+/// Входы текущего дерева для сверки с конвертом: те же, что у прогона, с тем
+/// же резолвом `CONSTRAINTS.yaml` (единый резолвер E2).
+fn collect_inputs_for_verify(
+    repo: &Path,
+    base: Option<&str>,
+    _limits: (usize, usize),
+) -> BTreeMap<String, String> {
+    let constraints = control::resolve_constraints_path_detailed(repo, None)
+        .map_or_else(|| repo.join(control::HANDOFF_CONSTRAINTS_PATH), |r| r.path);
+    let git = GitProbe::probe(repo);
+    collect_inputs(repo, &constraints, base, &git)
+        .into_iter()
+        .collect()
 }
 
 /// Текстовый рендер отчёта гейта: строка маршрута, по каждой составляющей
@@ -1683,6 +1898,189 @@ mod tests {
             .find(|c| c.name == name)
             .unwrap_or_else(|| panic!("нет составляющей {name}"))
             .status
+    }
+
+    // --- Н3: аттестация различает состояния репозитория (ADR-043) ----------
+
+    /// Два РАЗНЫХ FAIL одной составляющей дают разные аттестации.
+    #[test]
+    fn attestation_differs_for_different_findings() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        make_gate_repo(dir);
+        let limits = (1, 4);
+        // Два разных нарушения одного и того же правила `no_pan`.
+        std::fs::create_dir_all(dir.join("a")).expect("mkdir");
+        std::fs::write(dir.join("a/one.py"), "PAN").expect("py");
+        git(dir, &["add", "."]);
+        git(dir, &["commit", "-q", "-m", "a"]);
+        let first = run_with(
+            dir,
+            Some(Route::Fast),
+            None,
+            None,
+            limits,
+            &GateRequirements::default(),
+        )
+        .expect("gate");
+        assert!(!first.passed, "{:?}", first.not_checked);
+        std::fs::create_dir_all(dir.join("b")).expect("mkdir");
+        std::fs::write(dir.join("b/two.py"), "PAN").expect("py");
+        git(dir, &["add", "."]);
+        git(dir, &["commit", "-q", "-m", "b"]);
+        let second = run_with(
+            dir,
+            Some(Route::Fast),
+            None,
+            None,
+            limits,
+            &GateRequirements::default(),
+        )
+        .expect("gate");
+        assert!(!second.passed);
+        // Оба — FAIL составляющей fitness, но находки разные.
+        assert_eq!(status_of(&first, "fitness"), GateStatus::Fail);
+        assert_eq!(status_of(&second, "fitness"), GateStatus::Fail);
+        assert_ne!(
+            first.attestation, second.attestation,
+            "разные дефекты обязаны давать разные аттестации"
+        );
+        let d1 = first.envelope_json()["components"]
+            .as_array()
+            .expect("components")
+            .iter()
+            .find(|c| c["name"] == "fitness")
+            .expect("fitness")["findings_digest"]
+            .clone();
+        let d2 = second.envelope_json()["components"]
+            .as_array()
+            .expect("components")
+            .iter()
+            .find(|c| c["name"] == "fitness")
+            .expect("fitness")["findings_digest"]
+            .clone();
+        assert_ne!(d1, d2, "свёртки находок обязаны различаться");
+    }
+
+    /// Правка модели меняет аттестацию — раньше входом был только реестр.
+    #[test]
+    fn attestation_changes_when_model_changes() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        make_gate_repo(dir);
+        write_model(dir, &[("CMP-001", "depends_on: []")]);
+        git(dir, &["add", "."]);
+        git(dir, &["commit", "-q", "-m", "model"]);
+        let limits = (1, 4);
+        let before = run_with(
+            dir,
+            Some(Route::Fast),
+            None,
+            None,
+            limits,
+            &GateRequirements::default(),
+        )
+        .expect("gate");
+        // Безвредная правка ТЕКСТА сущности: вердикт тот же, аттестация — нет.
+        // Правка коммитится, иначе её поймает delta_guard и сменит не вход, а
+        // статус составляющей — сравнение было бы не о том.
+        {
+            use std::io::Write as _;
+            let f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(dir.join("model/CMP-001.md"))
+                .expect("open");
+            let mut f = f;
+            f.write_all("\n\nУточнение формулировки без смены решения.\n".as_bytes())
+                .expect("append");
+        }
+        git(dir, &["add", "."]);
+        git(dir, &["commit", "-q", "-m", "текстовая правка"]);
+        let after = run_with(
+            dir,
+            Some(Route::Fast),
+            None,
+            None,
+            limits,
+            &GateRequirements::default(),
+        )
+        .expect("gate");
+        assert_eq!(before.outcome, after.outcome);
+        assert_ne!(
+            before.attestation, after.attestation,
+            "аттестация обязана следовать за состоянием model/"
+        );
+    }
+
+    /// Аттестация не зависит от того, как записан путь и где лежит репозиторий.
+    #[test]
+    fn attestation_stable_across_path_spelling() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        make_gate_repo(dir);
+        let limits = (1, 4);
+        let abs = run_with(
+            &dir.canonicalize().expect("canonicalize"),
+            Some(Route::Fast),
+            None,
+            None,
+            limits,
+            &GateRequirements::default(),
+        )
+        .expect("gate");
+        let trailing = PathBuf::from(format!("{}/", dir.display()));
+        let rel = run_with(
+            &trailing,
+            Some(Route::Fast),
+            None,
+            None,
+            limits,
+            &GateRequirements::default(),
+        )
+        .expect("gate");
+        assert_eq!(abs.attestation, rel.attestation);
+        assert_eq!(abs.inputs_map(), rel.inputs_map());
+    }
+
+    /// `--verify-envelope`: тот же вход — «относится», правка — «изменилось».
+    #[test]
+    fn verify_envelope_detects_drift() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        make_gate_repo(dir);
+        write_model(dir, &[("CMP-001", "depends_on: []")]);
+        git(dir, &["add", "."]);
+        git(dir, &["commit", "-q", "-m", "model"]);
+        let limits = (1, 4);
+        let report = run_with(
+            dir,
+            Some(Route::Fast),
+            None,
+            None,
+            limits,
+            &GateRequirements::default(),
+        )
+        .expect("gate");
+        let envelope = dir.join("verdict.json");
+        std::fs::write(
+            &envelope,
+            serde_json::to_string_pretty(&report.envelope_json()).expect("json"),
+        )
+        .expect("write");
+        let same = verify_envelope(dir, &envelope, limits).expect("verify");
+        assert!(same.same, "{:?} {:?}", same.changed, same.missing);
+        // Правка спайна — состояние разошлось, вход назван.
+        std::fs::write(dir.join("ARCHITECTURE-SPINE.md"), "# Spine\n\nAD-1 …\n").expect("spine");
+        let drifted = verify_envelope(dir, &envelope, limits).expect("verify");
+        assert!(!drifted.same);
+        assert!(
+            drifted.changed.iter().any(|(name, _, _)| name == "spine"),
+            "{:?}",
+            drifted.changed
+        );
+        // Не конверт — честная ошибка оператора, а не «всё совпало».
+        std::fs::write(&envelope, "{\"hello\":1}").expect("write");
+        assert!(verify_envelope(dir, &envelope, limits).is_err());
     }
 
     /// Н2: битая ссылка модели краснит гейт — без каталога `model/` секция

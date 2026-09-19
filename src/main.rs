@@ -191,6 +191,11 @@ enum Cmd {
         /// меняется (красный гейт — данные отчёта: 1; INCOMPLETE: 3).
         #[arg(long, default_value = "text", value_name = "FORMAT")]
         format: String,
+        /// Сверить ранее сохранённый конверт вердикта с текущим состоянием
+        /// дерева (Н3, ADR-043): «вердикт относится к этому состоянию» либо
+        /// «состояние изменилось: <что>». Exit 1, если состояние разошлось.
+        #[arg(long, value_name = "FILE")]
+        verify_envelope: Option<PathBuf>,
     },
     /// Метаморфный самотест вердикта (П8 ДКА): свойства ответов гейта на
     /// изолированной песочнице — монотонность по маршруту, достижимость
@@ -1633,8 +1638,42 @@ async fn main() -> Result<()> {
             base,
             constraints,
             format,
+            verify_envelope,
         }) => {
             let repo = repo.unwrap_or_else(|| PathBuf::from("."));
+            // Режим сверки конверта: пересчитывает входы на текущем дереве и
+            // отвечает, относится ли вердикт к этому состоянию.
+            if let Some(envelope) = verify_envelope {
+                let limits = cfg
+                    .significance
+                    .limits()
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                let drift = arch_harness::gate::verify_envelope(&repo, &envelope, limits)?;
+                if drift.same {
+                    println!(
+                        "Вердикт относится к этому состоянию: {}",
+                        envelope.display()
+                    );
+                } else {
+                    println!(
+                        "Состояние изменилось с момента вердикта ({}) :",
+                        envelope.display()
+                    );
+                    for (name, was, now) in &drift.changed {
+                        println!("  {name}: {was} → {now}");
+                    }
+                    for name in &drift.missing {
+                        println!("  {name}: был в вердикте, сейчас отсутствует");
+                    }
+                    println!(
+                        "Перепроверьте: arch-be gate --repo {} --format json \
+                         > verdict.json",
+                        repo.display()
+                    );
+                    std::process::exit(1);
+                }
+                return Ok(());
+            }
             let route = match route.trim().to_ascii_lowercase().as_str() {
                 "auto" => None,
                 other => Some(

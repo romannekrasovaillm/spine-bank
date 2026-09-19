@@ -163,6 +163,64 @@ pub fn sha256_hex(data: &[u8]) -> String {
     out
 }
 
+/// SHA-256 содержимого файла; `None` — файла нет или он не читается.
+///
+/// Аттестация вердикта (П7, ADR-043) привязывает вердикт к состоянию
+/// репозитория: нечитаемый вход — это не «пустой хэш», а честное отсутствие.
+#[must_use]
+pub fn sha256_file(path: &std::path::Path) -> Option<String> {
+    std::fs::read(path).ok().map(|b| sha256_hex(&b))
+}
+
+/// Канонический SHA-256 дерева: относительные пути (разделитель `/`) в
+/// порядке возрастания, затем хэш содержимого каждого файла. Каталог `.git`
+/// пропускается.
+///
+/// Каноничность важна для аттестации: тот же коммит, склонированный в другой
+/// каталог, обязан дать тот же хэш — в свёртку идёт путь ОТНОСИТЕЛЬНО корня,
+/// а не абсолютный. `None` — каталога нет.
+#[must_use]
+pub fn sha256_tree(root: &std::path::Path) -> Option<String> {
+    if !root.is_dir() {
+        return None;
+    }
+    let mut files: Vec<(String, std::path::PathBuf)> = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in rd.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if path.is_dir() {
+                if name != ".git" {
+                    stack.push(path);
+                }
+            } else if path.is_file() {
+                let rel = path.strip_prefix(root).map_or_else(
+                    |_| path.display().to_string(),
+                    |p| p.to_string_lossy().replace('\\', "/"),
+                );
+                files.push((rel, path));
+            }
+        }
+    }
+    files.sort();
+    let mut acc = String::new();
+    for (rel, path) in files {
+        let Ok(bytes) = std::fs::read(&path) else {
+            // Файл исчез между обходом и чтением — не повод падать: запись
+            // «не прочитан» всё равно меняет свёртку и видна как дрейф.
+            let _ = std::fmt::Write::write_fmt(&mut acc, format_args!("{rel}\0unreadable\n"));
+            continue;
+        };
+        let _ =
+            std::fmt::Write::write_fmt(&mut acc, format_args!("{rel}\0{}\n", sha256_hex(&bytes)));
+    }
+    Some(sha256_hex(acc.as_bytes()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
