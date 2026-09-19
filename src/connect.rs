@@ -1409,14 +1409,14 @@ fn gitlab_ci_block() -> String {
          \x20 variables:\n\
          \x20   ARCH_BE_VERSION: \"@ARCH_BE_VERSION@\"\n\
          \x20   # Откуда брать бинарь arch-be (linux-x86_64):\n\
-         \x20   #   A) релизы: ${RELEASES_URL}/v${ARCH_BE_VERSION}/arch-be-linux-x86_64.tar.gz\n\
-         \x20   #   B) закрытый контур: офлайн-бандл во внутреннем хранилище артефактов —\n\
-         \x20   #      замените RELEASES_URL на его адрес (тот же tar.gz кладёт релизная процедура).\n\
+         \x20   #   A) релизы: ${RELEASES_URL}/v${ARCH_BE_VERSION}/arch-be-linux-x86_64\n\
+         \x20   #   B) закрытый контур: офлайн-бандл spine-offline-*-linux-x86_64.tar.gz\n\
+         \x20   #      во внутреннем хранилище артефактов (scripts/make_offline_bundle.sh).\n\
          \x20   RELEASES_URL: \"https://github.com/<org>/<repo>/releases/download\"\n\
          \x20   GIT_DEPTH: \"0\"   # полная история: гейту нужна база диффа origin/<целевая ветка>\n\
          \x20 before_script:\n\
          \x20   - apt-get update -qq && apt-get install -y -qq curl ca-certificates git > /dev/null\n\
-         \x20   - curl -fsSL \"${RELEASES_URL}/v${ARCH_BE_VERSION}/arch-be-linux-x86_64.tar.gz\" | tar -xz -C /usr/local/bin\n\
+         \x20   - curl -fsSL -o /usr/local/bin/arch-be \"${RELEASES_URL}/v${ARCH_BE_VERSION}/arch-be-linux-x86_64\" && chmod +x /usr/local/bin/arch-be\n\
          \x20   - arch-be --version\n\
          \x20 script:\n\
          \x20   # Машинный отчёт — в файл артефакта; при провале гейта джоба красная (exit 1).\n\
@@ -1460,7 +1460,7 @@ fn github_workflow_block() -> String {
          \x20         # из внутреннего хранилища артефактов.\n\
          \x20         RELEASES_URL: \"https://github.com/<org>/<repo>/releases/download\"\n\
          \x20       run: |\n\
-         \x20         curl -fsSL \"${RELEASES_URL}/v${ARCH_BE_VERSION}/arch-be-linux-x86_64.tar.gz\" | sudo tar -xz -C /usr/local/bin\n\
+         \x20         sudo curl -fsSL -o /usr/local/bin/arch-be \"${RELEASES_URL}/v${ARCH_BE_VERSION}/arch-be-linux-x86_64\" && sudo chmod +x /usr/local/bin/arch-be\n\
          \x20         arch-be --version\n\
          \x20     - name: Архитектурный гейт\n\
          \x20       run: |\n\
@@ -1501,7 +1501,7 @@ fn jenkinsfile_block() -> String {
          \x20               // (укажите его адрес в RELEASES_URL).\n\
          \x20               sh '''\n\
          \x20                 if ! command -v arch-be >/dev/null 2>&1; then\n\
-         \x20                   curl -fsSL \"${RELEASES_URL:-https://github.com/<org>/<repo>/releases/download}/v@ARCH_BE_VERSION@/arch-be-linux-x86_64.tar.gz\" | tar -xz -C /usr/local/bin\n\
+         \x20                   curl -fsSL -o /tmp/arch-be \"${RELEASES_URL:-https://github.com/<org>/<repo>/releases/download}/v@ARCH_BE_VERSION@/arch-be-linux-x86_64\" && install -m 755 /tmp/arch-be /usr/local/bin/arch-be\n\
          \x20                 fi\n\
          \x20                 arch-be --version\n\
          \x20               '''\n\
@@ -1625,7 +1625,7 @@ pub fn connect_ci(provider: CiProvider, dir: &Path, dry_run: bool) -> Result<Con
                  появится в пайплайне MR"
                     .to_string(),
                 "замените <org>/<repo> в RELEASES_URL на адрес релизов/хранилища, где лежит \
-                 arch-be-linux-x86_64.tar.gz"
+                 arch-be-linux-x86_64"
                     .to_string(),
             ]);
         }
@@ -1641,7 +1641,7 @@ pub fn connect_ci(provider: CiProvider, dir: &Path, dry_run: bool) -> Result<Con
                  на pull_request и push в main"
                     .to_string(),
                 "замените <org>/<repo> в RELEASES_URL на адрес релизов/хранилища, где лежит \
-                 arch-be-linux-x86_64.tar.gz"
+                 arch-be-linux-x86_64"
                     .to_string(),
             ]);
         }
@@ -2910,7 +2910,7 @@ mod tests {
                 provider.name()
             );
             assert!(
-                text.contains("arch-be-linux-x86_64.tar.gz"),
+                text.contains("arch-be-linux-x86_64"),
                 "{}: установка бинаря: {text}",
                 provider.name()
             );
