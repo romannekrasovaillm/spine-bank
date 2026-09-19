@@ -37,7 +37,7 @@ use `AGENTS.md` instead.
 | Contract diff (OpenAPI/proto/Avro/JSON Schema/DDL) | `src/contract_diff.rs` |
 | Model↔code drift, registry import (csv/xlsx/backstage) | `src/model/drift.rs`, `src/model/registry.rs` |
 | CI report formats (SARIF/JUnit/GitLab Code Quality) | `src/report_fmt.rs` |
-| MCP server for coding agents (33 read-only tools + 7 playbook prompts) | `src/mcp_server.rs` |
+| MCP server for coding agents (34 read-only tools + 7 playbook prompts) | `src/mcp_server.rs` |
 | MCP call journal + weekly outcome digest | `src/mcp_journal.rs`, `src/digest.rs` |
 | Host onboarding (`connect`, hooks, CI jobs) | `src/connect.rs` |
 | Anchor/dynamic rubrics, LLM judge with evidence | `src/rubric.rs`, `src/bench.rs` |
