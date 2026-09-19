@@ -729,17 +729,22 @@ impl RedteamSummary {
     }
 }
 
-/// Записывает итог прогона в `.arch-handoff/redteam.json` каталога кейса.
+/// Записывает итог прогона в `<case>/.arch-handoff/redteam.json`.
 ///
 /// # Errors
 /// Каталог не создаётся либо файл не пишется.
-pub fn save_summary(report: &RedteamReport) -> Result<PathBuf> {
-    let dir = report.case.join(".arch-handoff");
+pub fn save_summary(case: &Path, report: &RedteamReport) -> Result<PathBuf> {
+    // Пишем в ИСХОДНЫЙ кейс, а не в `report.case`: прогон идёт в копии, и
+    // сохранение «рядом с измерением» означало бы запись в каталог, который
+    // тут же будет удалён. Метрика доверия читает `.arch-handoff/redteam.json`
+    // именно исходного кейса — иначе `--save` выглядел бы рабочим, а
+    // измерения не было бы ни у кого.
+    let dir = case.join(".arch-handoff");
     std::fs::create_dir_all(&dir).map_err(|e| crate::error::HarnessError::io(&dir, e))?;
     let path = dir.join("redteam.json");
     let summary = RedteamSummary {
         schema: "arch-be/redteam/v1".to_string(),
-        case: report.case.display().to_string(),
+        case: case.display().to_string(),
         measured_at: chrono::Local::now().to_rfc3339(),
         caught: report.scored_caught(),
         total: report.scored_total(),
@@ -1170,6 +1175,31 @@ pub fn run(case: &Path, min_detection: f64, decision_quality: bool) -> Result<Re
 
 #[cfg(test)]
 mod tests {
+    /// W2×W4: `save_summary` пишет в УКАЗАННЫЙ каталог, а не в `report.case`
+    /// (прогон идёт в копии — измерение принадлежит исходному кейсу).
+    #[test]
+    fn save_summary_writes_into_the_given_case() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let case = tmp.path().join("case");
+        std::fs::create_dir_all(&case).expect("mkdir");
+        let measured = tmp.path().join("копия");
+        let report = RedteamReport {
+            case: measured,
+            detections: Vec::new(),
+            min_detection: 0.78,
+            control_ok: true,
+        };
+        let path = save_summary(&case, &report).expect("save");
+        assert!(
+            path.starts_with(&case),
+            "запись в исходный кейс: {}",
+            path.display()
+        );
+        let back = load_summary(&path).expect("load");
+        assert_eq!(back.case, case.display().to_string());
+        assert!(back.control_ok);
+    }
+
     use super::*;
 
     #[test]

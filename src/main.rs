@@ -1935,7 +1935,8 @@ async fn main() -> Result<()> {
         }) => {
             let report = arch_harness::redteam::run(&case, min_detection, !no_decision_quality)?;
             if save {
-                let path = arch_harness::redteam::save_summary(&report)?;
+                // Сохраняем в ИСХОДНЫЙ кейс: прогон шёл в копии.
+                let path = arch_harness::redteam::save_summary(&case, &report)?;
                 eprintln!("Итог измерения сохранён: {}", path.display());
             }
             match format.trim().to_ascii_lowercase().as_str() {

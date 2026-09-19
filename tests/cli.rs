@@ -2330,3 +2330,37 @@ fn bootstrap_walks_a_new_case_towards_green() {
         .failure()
         .stderr(contains("не пуст"));
 }
+
+/// W2×W4: измерение записывается в ИСХОДНЫЙ кейс, а не в копию, и только для
+/// зелёного пакета. Прогон идёт в копии; если писать «рядом с измерением»,
+/// файл уедет вместе с временным каталогом, а метрика доверия (`trust`)
+/// останется без доли обнаружения — `--save` выглядел бы рабочим, ничего не
+/// сохраняя. Красный пакет измерения не даёт вовсе: сохранять «10 %» для
+/// сломанного кейса означало бы выдавать поломку за измеренную защищённость.
+#[test]
+fn redteam_save_refuses_a_broken_case() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let home = tmp.path();
+    let case = home.join("case");
+    std::fs::create_dir_all(&case).expect("mkdir");
+    std::fs::write(case.join("ARCHITECTURE-SPINE.md"), "# Spine\n").expect("spine");
+    std::fs::write(
+        case.join("CONSTRAINTS.yaml"),
+        "rules:\n  - name: spine_present\n    type: file_exists\n    path: \"ARCHITECTURE-SPINE.md\"\n    severity: error\n",
+    )
+    .expect("constraints");
+
+    arch_cmd(home)
+        .args([
+            "redteam",
+            case.to_str().expect("path"),
+            "--save",
+            "--no-decision-quality",
+        ])
+        .assert()
+        .failure();
+    assert!(
+        !case.join(".arch-handoff/redteam.json").exists(),
+        "измерение сломанного пакета не сохраняется"
+    );
+}
