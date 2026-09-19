@@ -1,0 +1,39 @@
+route: Critical
+packed_at: 2026-09-19T10:02:35.730588310+03:00
+items:
+- key: problem
+  path: docs/PROBLEM.md
+  hash: 362f09bd1c1b955e
+  size: 3433
+- key: spec_or_delta
+  path: docs/SPEC.md
+  hash: 1305fa745b928245
+  size: 3106
+- key: risk_level
+  path: docs/RISK.md
+  hash: 0800ff5dd269ee99
+  size: 2845
+- key: acceptance
+  path: docs/ACCEPTANCE.md
+  hash: 17b9595a0413ab1d
+  size: 2540
+- key: rollback
+  path: docs/ROLLBACK.md
+  hash: f6bfbdbef8afb778
+  size: 2826
+- key: adr_or_pattern
+  path: docs/adr
+  hash: c76dfeba28f2e046
+  size: 39463
+- key: spine
+  path: ARCHITECTURE-SPINE.md
+  hash: e1e1bb8e873cda03
+  size: 18429
+- key: adversarial_review
+  path: docs/REVIEW.md
+  hash: ee9b8e4248ca274f
+  size: 4491
+- key: fitness_report
+  path: reports/fitness.md
+  hash: a3d374493f61d241
+  size: 2183

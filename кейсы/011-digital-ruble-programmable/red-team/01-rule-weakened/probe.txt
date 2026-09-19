@@ -1,0 +1,1 @@
+arch-be gate --repo . --constraints CONSTRAINTS.yaml
