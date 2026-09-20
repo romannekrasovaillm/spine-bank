@@ -98,7 +98,7 @@ arch-be redteam кейсы/salary-payments --keep-semantic /tmp/semantic
 
 # 3. Смысловая строка
 arch-be redteam semantic-score /tmp/semantic
-# смысловой слой: поймано 2 из 3; судья: claude-sonnet-5; независим: да
+# смысловой слой: поймано 2 из 4; судья: claude-sonnet-5; независим: да
 ```
 
 Пойман — главный критерий рубрики (`blocking: true`) с баллом ≤ 2 **и**
