@@ -71,6 +71,29 @@ pub struct Candidate {
     /// Готовый YAML-фрагмент для `rules:` файла `CONSTRAINTS.yaml`, когда
     /// проверка механизируема; `None` — честный advisory (механики нет).
     pub yaml: Option<String>,
+    /// Инвариант спайна, к которому привязан кандидат (`AD-004`). Заполняется
+    /// только детектором исполняемых инвариантов; у остальных кандидатов поля
+    /// нет вовсе (аддитивное поле, `skip_serializing_if`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ad: Option<String>,
+    /// Шаблоны-кандидаты на исполняемую проверку этого инварианта, лучшие
+    /// сверху (детектор на каждый инвариант, [`crate::rule_templates`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub templates: Vec<crate::rule_templates::TemplateMatch>,
+}
+
+impl Candidate {
+    /// Кандидат без привязки к инварианту (детекторы 1–5 и легаси-кандидат).
+    fn new(id: &str, rationale: String, source_skill: &str, yaml: Option<String>) -> Self {
+        Self {
+            id: id.to_string(),
+            rationale,
+            source_skill: source_skill.to_string(),
+            yaml,
+            ad: None,
+            templates: Vec::new(),
+        }
+    }
 }
 
 /// Отчёт детекторов: кандидаты + однострочная сводка.
@@ -193,16 +216,16 @@ fn detect_ears(case: &Path) -> Result<Option<Candidate>> {
     if files.iter().any(|(_, t)| ears.is_match(t)) {
         return Ok(None);
     }
-    Ok(Some(Candidate {
-        id: "ears-acceptance-criteria".into(),
-        rationale: format!(
+    Ok(Some(Candidate::new(
+        "ears-acceptance-criteria",
+        format!(
             "спецификаций/документов с критериями приёмки: {} — ни одного \
              EARS-требования (When/While/If/Where): критерии приёмки \
              непроверяемы формально",
             files.len()
         ),
-        source_skill: "readiness-gate".into(),
-        yaml: Some(yaml_must_contain(
+        "readiness-gate",
+        Some(yaml_must_contain(
             "ears_acceptance_criteria",
             "docs/**/*.md",
             EARS_PATTERN,
@@ -210,7 +233,7 @@ fn detect_ears(case: &Path) -> Result<Option<Candidate>> {
             "переписать критерии приёмки в EARS-нотации (When/While/If/Where)",
             "readiness-gate",
         )),
-    }))
+    )))
 }
 
 /// Детектор 2 (таймауты контрактов): файлы `docs/contracts/*`
@@ -232,15 +255,15 @@ fn detect_contract_timeouts(case: &Path) -> Result<Option<Candidate>> {
     if files.iter().any(|(_, t)| numeric.is_match(t)) {
         return Ok(None);
     }
-    Ok(Some(Candidate {
-        id: "contract-timeouts-numeric".into(),
-        rationale: format!(
+    Ok(Some(Candidate::new(
+        "contract-timeouts-numeric",
+        format!(
             "контрактов в docs/contracts: {} — ни одного численного \
              timeout/retry/deadline: временные бюджеты стыков не зафиксированы",
             files.len()
         ),
-        source_skill: "adversarial-review".into(),
-        yaml: Some(yaml_must_contain(
+        "adversarial-review",
+        Some(yaml_must_contain(
             "contract_timeouts_numeric",
             "docs/contracts/*",
             r"(?i)(timeout|retry|retries|deadline|таймаут|дедлайн|повтор)[^\n]{0,48}\d",
@@ -248,7 +271,7 @@ fn detect_contract_timeouts(case: &Path) -> Result<Option<Candidate>> {
             "задать timeout/retry числом в каждом контракте стыка",
             "adversarial-review",
         )),
-    }))
+    )))
 }
 
 /// Детектор 3 (декомпозиция REQ→работы): в `model/` есть REQ-сущности, а
@@ -280,9 +303,9 @@ fn detect_req_task(case: &Path) -> Result<Option<Candidate>> {
     if tasks >= reqs {
         return Ok(None);
     }
-    Ok(Some(Candidate {
-        id: "req-task-decomposition".into(),
-        rationale: format!(
+    Ok(Some(Candidate::new(
+        "req-task-decomposition",
+        format!(
             "требований REQ в model/: {reqs}, пунктов списка в \
              .arch-handoff/TASK.md: {tasks} — декомпозиция «требование → \
              работа» неполная. Механического правила нет: must_contain по \
@@ -290,9 +313,9 @@ fn detect_req_task(case: &Path) -> Result<Option<Candidate>> {
              следите за прослеживаемостью вручную (поиск «сирот» с обеих \
              сторон, скилл readiness-gate)"
         ),
-        source_skill: "readiness-gate".into(),
-        yaml: None,
-    }))
+        "readiness-gate",
+        None,
+    )))
 }
 
 /// Детектор 4 (RTO/RPO → ADR): RTO/RPO упоминаются в документах/модели,
@@ -309,14 +332,14 @@ fn detect_rto_rpo_adr(case: &Path) -> Result<Option<Candidate>> {
     if adrs.iter().any(|(_, t)| rto.is_match(t)) {
         return Ok(None);
     }
-    Ok(Some(Candidate {
-        id: "rto-rpo-adr".into(),
-        rationale: "RTO/RPO заявлены в документах/модели, но не закреплены ни одним ADR — \
+    Ok(Some(Candidate::new(
+        "rto-rpo-adr",
+        "RTO/RPO заявлены в документах/модели, но не закреплены ни одним ADR — \
              показатели восстановления без архитектурного решения (при инциденте \
              нечему отвечать)"
-            .into(),
-        source_skill: "nfr-design".into(),
-        yaml: Some(yaml_must_contain(
+            .to_string(),
+        "nfr-design",
+        Some(yaml_must_contain(
             "rto_rpo_backed_by_adr",
             "docs/adr/*.md",
             r"RTO|RPO",
@@ -324,7 +347,7 @@ fn detect_rto_rpo_adr(case: &Path) -> Result<Option<Candidate>> {
             "принять ADR о целевых RTO/RPO и способе восстановления",
             "nfr-design",
         )),
-    }))
+    )))
 }
 
 /// Детектор 5 (аудит операторских действий): тексты упоминают ручные
@@ -345,14 +368,14 @@ fn detect_operator_audit(case: &Path) -> Result<Option<Candidate>> {
     if docs.iter().any(|(_, t)| audit.is_match(t)) {
         return Ok(None);
     }
-    Ok(Some(Candidate {
-        id: "operator-actions-audit".into(),
-        rationale: "документы упоминают ручные действия (разблокировка/вручную/оператор/\
+    Ok(Some(Candidate::new(
+        "operator-actions-audit",
+        "документы упоминают ручные действия (разблокировка/вручную/оператор/\
              сотрудник/дежурный), но аудит-формулировок (аудит/журнал действий) нет — \
              операторские вмешательства не журналируются, расследовать инциденты будет не по чему"
-            .into(),
-        source_skill: "fitness-functions".into(),
-        yaml: Some(yaml_must_contain(
+            .to_string(),
+        "fitness-functions",
+        Some(yaml_must_contain(
             "operator_actions_audited",
             "docs/**/*.md",
             AUDIT_TRAIL_PATTERN,
@@ -360,7 +383,7 @@ fn detect_operator_audit(case: &Path) -> Result<Option<Candidate>> {
             "добавить требование журналирования операторских действий в эксплуатационные документы",
             "fitness-functions",
         )),
-    }))
+    )))
 }
 
 /// Кандидат `executable-invariants` (Н10 волны C 0.3.4): в репозитории есть
@@ -386,15 +409,15 @@ fn detect_executable_invariants(case_dir: &Path) -> Option<Candidate> {
     if text.contains("command_succeeds") {
         return None;
     }
-    Some(Candidate {
-        id: "executable-invariants".into(),
-        rationale: "в репозитории есть исполняемые тесты, но в CONSTRAINTS.yaml нет ни одного \
+    Some(Candidate::new(
+        "executable-invariants",
+        "в репозитории есть исполняемые тесты, но в CONSTRAINTS.yaml нет ни одного \
              правила `command_succeeds`: реестр проверяет только наличие слов в документах, \
              а инварианты спайна — не исполнением. Правило на упоминание — звено \
              трассировки, а не проверка смысла; добавьте хотя бы одно исполняемое правило"
-            .into(),
-        source_skill: "fitness-functions".into(),
-        yaml: Some(
+            .to_string(),
+        "fitness-functions",
+        Some(
             "# Требуется решение архитектора: какую команду считать исполняемой проверкой.\n\
              # Пример формы (замените command на реальную команду проекта):\n\
              #   - id: C-100\n\
@@ -407,7 +430,103 @@ fn detect_executable_invariants(case_dir: &Path) -> Option<Candidate> {
              #     fix_hint: \"сформулируйте инвариант спайна как тест, который падает при нарушении\"\n"
                 .to_string(),
         ),
-    })
+    ))
+}
+
+/// Детектор 7 (инвариант → исполняемое правило): по каждой сущности
+/// `type: ad` модели — есть ли у неё хоть одно правило, проверяющее
+/// ПОВЕДЕНИЕ ([`BEHAVIOUR_RULE_KINDS`]).
+///
+/// Легаси-кандидат [`detect_executable_invariants`] говорит о кейсе в целом и
+/// замолкает после первого `command_succeeds`; этот — про каждый инвариант
+/// поимённо и называет шаблон, которым пробел закрывается. Свойства:
+///
+/// - инвариант с обоснованным `unverifiable` — не пробел (решение архитектора);
+/// - ни одного правила в `BEHAVIOUR_RULE_KINDS` → кандидат
+///   `executable-invariant:AD-00N` с шаблонами по тексту спайна;
+/// - паттерн не распознан → шаблон-заготовка и честная пометка;
+/// - каталога `model/` нет → детектор молчит (инвариантов не видно).
+///
+/// # Errors
+/// Внутренние регулярные выражения, реестр и модель — см.
+/// [`crate::rule_templates::ad_coverage`].
+fn detect_executable_invariant_per_ad(case_dir: &Path) -> Result<Vec<Candidate>> {
+    use crate::rule_templates as rt;
+    let Some(coverage) = rt::ad_coverage(case_dir)? else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    // Порядок задаёт `uncovered()`: несущие первыми, затем по id инварианта.
+    for entry in coverage.uncovered() {
+        if entry.unverifiable {
+            continue;
+        }
+        let matched = rt::match_templates(&entry.spine_text, 2)?;
+        let unrecognized = matched.is_empty();
+        let templates = if unrecognized {
+            vec![rt::TemplateMatch {
+                id: rt::GENERIC_TEMPLATE_ID.to_string(),
+                score: 0,
+                matched: Vec::new(),
+            }]
+        } else {
+            matched
+        };
+        let best = templates
+            .first()
+            .map(|t| t.id.clone())
+            .unwrap_or_else(|| rt::GENERIC_TEMPLATE_ID.to_string());
+        let rules = if entry.rules.is_empty() {
+            "правил в `verified_by` нет вовсе".to_string()
+        } else {
+            let named: Vec<String> = entry
+                .rules
+                .iter()
+                .map(|r| match r.kind.as_deref() {
+                    Some(kind) => format!("{} ({kind})", r.reference),
+                    None => format!("{} (нет в реестре)", r.reference),
+                })
+                .collect();
+            format!(
+                "все {} его правил проверяют наличие текста: {}",
+                named.len(),
+                named.join(", ")
+            )
+        };
+        let templates_note = if unrecognized {
+            format!(
+                "паттерн не распознан — предложена заготовка `{best}`: сформулируйте свойство \
+                 и напишите тест"
+            )
+        } else {
+            let names: Vec<String> = templates
+                .iter()
+                .map(|t| format!("{} (совпало: {})", t.id, t.matched.join(", ")))
+                .collect();
+            format!("шаблоны исполняемой проверки: {}", names.join("; "))
+        };
+        let bearing = if entry.load_bearing {
+            "несущий инвариант — "
+        } else {
+            ""
+        };
+        let rationale = format!(
+            "{bearing}{} «{}» не проверяется поведением: {rules}. Правило на упоминание — \
+             звено трассировки, а не проверка смысла. {templates_note}. Применение шаблона: \
+             `arch-be rules template apply <id> --ad {} --dir .`",
+            entry.ad, entry.title, entry.ad
+        );
+        let yaml = rt::candidate_fragment(case_dir, &best, &entry.ad).ok();
+        out.push(Candidate {
+            id: format!("executable-invariant:{}", entry.ad),
+            rationale,
+            source_skill: "fitness-functions".to_string(),
+            yaml,
+            ad: Some(entry.ad.clone()),
+            templates,
+        });
+    }
+    Ok(out)
 }
 
 /// Прогоняет все детекторы по кейсу (корень — каталог с `docs/`, `model/`,
@@ -436,15 +555,19 @@ pub fn suggest(case_dir: &Path) -> Result<SuggestReport> {
     {
         candidates.push(candidate);
     }
+    // Детектор на каждый инвариант (Н10/executable-invariants): идёт после
+    // общих детекторов, порядок внутри — несущие первыми, затем по id.
+    candidates.extend(detect_executable_invariant_per_ad(case_dir)?);
     let mechanizable = candidates.iter().filter(|c| c.yaml.is_some()).count();
     let summary = if candidates.is_empty() {
-        "Кандидатов нет: пробелов по 6 детекторам не найдено.".to_string()
+        "Кандидатов нет: пробелов по 7 детекторам не найдено.".to_string()
     } else {
         format!(
-            "Кандидатов: {} (с готовым YAML: {mechanizable}, advisory: {}). \
+            "Кандидатов: {} (с готовым YAML: {mechanizable}, advisory: {}; по инвариантам: {}). \
              Взять правило в CONSTRAINTS.yaml и назначить severity — решение архитектора.",
             candidates.len(),
-            candidates.len() - mechanizable
+            candidates.len() - mechanizable,
+            candidates.iter().filter(|c| c.ad.is_some()).count()
         )
     };
     Ok(SuggestReport {
@@ -465,14 +588,38 @@ pub fn render_markdown(report: &SuggestReport) -> String {
         let _ = writeln!(
             out,
             "Пробелов по детекторам (EARS, таймауты контрактов, REQ→TASK, \
-             RTO/RPO→ADR, аудит операторских действий) не найдено."
+             RTO/RPO→ADR, аудит операторских действий, исполняемые правила, \
+             инвариант→исполняемое правило) не найдено."
         );
         return out;
     }
     for c in &report.candidates {
         let _ = writeln!(out, "\n## {}\n", c.id);
         let _ = writeln!(out, "- Источник методики: скилл `{}`", c.source_skill);
+        if let Some(ad) = &c.ad {
+            let _ = writeln!(out, "- Инвариант: {ad}");
+        }
         let _ = writeln!(out, "- Обоснование: {}", c.rationale);
+        if !c.templates.is_empty() {
+            let list: Vec<String> = c
+                .templates
+                .iter()
+                .map(|t| {
+                    if t.score == 0 {
+                        format!("`{}` (паттерн не распознан)", t.id)
+                    } else {
+                        format!("`{}` (совпадений: {})", t.id, t.score)
+                    }
+                })
+                .collect();
+            let _ = writeln!(out, "- Шаблоны исполняемой проверки: {}", list.join(", "));
+            let _ = writeln!(
+                out,
+                "  Применить: `arch-be rules template apply {} --ad {} --dir <кейс>`",
+                c.templates[0].id,
+                c.ad.as_deref().unwrap_or("AD-N")
+            );
+        }
         match &c.yaml {
             Some(yaml) => {
                 let _ = writeln!(
