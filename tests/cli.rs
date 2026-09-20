@@ -2272,7 +2272,10 @@ fn redteam_json_format_reports_detections() {
     assert_eq!(value["passed"], true);
     assert_eq!(value["control_ok"], true);
     let detections = value["detections"].as_array().expect("detections");
-    assert_eq!(detections.len(), 16);
+    // 17 строк: 14 мутантов в доле + контрольные строки (R, D14) и мутант
+    // «нарушение инварианта в реализации скелета» (ADR-050) — он вне доли,
+    // потому что измеряет зубы применённого шаблона, а не защиту пакета.
+    assert_eq!(detections.len(), 17);
 }
 
 /// Копия кейса для теста: `кейсы/` — часть поставки, и тест не имеет права

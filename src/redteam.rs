@@ -63,9 +63,16 @@ pub struct Mutator {
     /// Ожидание.
     pub expected: Expectation,
     /// Входит ли мутатор в знаменатель доли обнаружения — в набор из 14
-    /// позиций раздела 7 ТЗ (D1…D13 + D11b). `R` (ревью `NOT-READY`) и `D14`
-    /// (контроль аттестации) стоят в таблице отдельными строками: их результат
-    /// виден в карте обнаружения, но в критерий приёмки «≥ 11 из 14» не входит.
+    /// позиций раздела 7 ТЗ (D1…D13 + D11b). `R` (ревью `NOT-READY`), `D14`
+    /// (контроль аттестации) и `D15` (нарушение инварианта в реализации
+    /// скелета) стоят в таблице отдельными строками: их результат виден в карте
+    /// обнаружения, но в критерий приёмки «≥ 11 из 14» не входит.
+    ///
+    /// Для `D15` это не формальность: он проверяет не дефект пакета, а зубы
+    /// применённого шаблона (правило `command_succeeds` обязано упасть на
+    /// нарушающей реализации). Позиции раздела 7 мерят защищённость пакета;
+    /// способность шаблона ловить нарушение — качество реестра, и складывать
+    /// одно с другим значило бы менять смысл критерия приёмки.
     pub in_ratio: bool,
     /// Правка кейса-мутанта.
     pub apply: Mutation,
@@ -75,10 +82,11 @@ pub struct Mutator {
 /// детерминирован.
 ///
 /// Дефекты `D1…D13`, `D11b` образуют набор из 14 позиций раздела 7; `R`
-/// (ревью `NOT-READY`) и `D14` (контроль аттестации) идут отдельными строками
-/// и в долю обнаружения не входят — иначе она была бы несопоставима с
-/// критерием приёмки релиза.
-pub const MUTATORS: [Mutator; 16] = [
+/// (ревью `NOT-READY`), `D14` (контроль аттестации) и `D15` (нарушение
+/// инварианта в реализации скелета) идут отдельными строками и в долю
+/// обнаружения не входят — иначе она была бы несопоставима с критерием
+/// приёмки релиза.
+pub const MUTATORS: [Mutator; 17] = [
     Mutator {
         id: "D1",
         title: "бюджет hop'а больше цели p99",
@@ -162,7 +170,7 @@ pub const MUTATORS: [Mutator; 16] = [
     Mutator {
         id: "D11",
         title: "код нарушает инвариант, правил на код нет",
-        by: "— (кандидат executable-invariants)",
+        by: "— (кандидат executable-invariant:AD-N)",
         expected: Expectation::Semantic,
         in_ratio: true,
         apply: mutate_d11,
@@ -206,6 +214,14 @@ pub const MUTATORS: [Mutator; 16] = [
         expected: Expectation::Control,
         in_ratio: false,
         apply: mutate_d14,
+    },
+    Mutator {
+        id: "D15",
+        title: "нарушение инварианта в реализации скелета",
+        by: "fitness",
+        expected: Expectation::Caught,
+        in_ratio: false,
+        apply: mutate_d15,
     },
 ];
 
@@ -645,6 +661,84 @@ fn mutate_d14(root: &Path) -> std::result::Result<(), String> {
         rel,
         &format!("{text}\nУточнение формулировки без смены решения.\n"),
     )
+}
+
+/// Лок-файл применённых шаблонов, разобранный на стороне мутатора: в
+/// [`crate::rule_templates`] тип лока и его чтение приватны, а править
+/// библиотеку шаблонов ради мутатора нельзя — D15 обязан быть её
+/// потребителем, как и любой другой вызов `arch-be rules template`.
+#[derive(Debug, serde::Deserialize)]
+struct TemplateLock {
+    #[serde(default)]
+    templates: Vec<crate::rule_templates::LockEntry>,
+}
+
+/// D15: нарушение инварианта в реализации скелета.
+///
+/// Вход — применённый шаблон (`.arch-handoff/rule-templates.lock`): кейс взял
+/// библиотечное правило `command_succeeds` и подписался на его зубы. Мутант
+/// делает ровно то, что обязана ловить проверка зубов, но уже в самом кейсе:
+/// подменяет эталонную реализацию (`reference_impl.py`) нарушающей из ТОЙ ЖЕ
+/// библиотеки, взятой по `id`/`version` из лока. Тест шаблона обязан упасть,
+/// правило — стать красным, то есть дефект обязан поймать `fitness`.
+///
+/// Модель при этом не правится: инвариант в `model/` описывает свойство,
+/// которое реализация теперь нарушает, — это и есть засеянный дефект. Правка
+/// модели убрала бы само противоречие, которое мутант сеет.
+///
+/// Честная граница ожидания: правило обязано ПОКРАСНЕТЬ (команда шаблона
+/// падает), но вердикт видит его только в `error`-severity — находка `warn`
+/// не переводит `FitnessReport.passed` в `false`, а гейт считает составляющую
+/// `fitness` упавшей ровно по `passed` (см. `src/gate.rs`). Кейс, оставивший
+/// применённое правило предупреждением (таково умолчание фрагмента `apply`),
+/// получит в карте «не пойман», и это утверждение о решении кейса, а не о
+/// механике: инвариант, взятый шаблоном, там не защищает вердикт.
+///
+/// Без лока вход не найден (шаблоны не применялись — подменять нечего):
+/// `Err(причина)`, мутатор пропускается и в знаменатель доли не входит.
+fn mutate_d15(root: &Path) -> std::result::Result<(), String> {
+    let rel = crate::rule_templates::LOCK_REL;
+    if !root.join(rel).is_file() {
+        return Err(format!("нет {rel} — шаблоны не применены, нарушать нечего"));
+    }
+    let lock: TemplateLock = serde_yaml_ng::from_str(&read(root, rel)?)
+        .map_err(|e| format!("{rel}: не разбирается: {e}"))?;
+    if lock.templates.is_empty() {
+        return Err(format!("{rel}: применённых шаблонов нет"));
+    }
+    let mut applied = 0_usize;
+    for entry in &lock.templates {
+        let lang = crate::rule_templates::Lang::parse(&entry.lang)
+            .map_err(|e| format!("{}: {e}", entry.id))?;
+        let Some(t) =
+            crate::rule_templates::template(&entry.id).map_err(|e| format!("{}: {e}", entry.id))?
+        else {
+            continue; // шаблона нет в этой сборке — подменять нечем
+        };
+        if t.manifest.version != entry.version {
+            continue; // применена другая версия — нарушающая реализация не та
+        }
+        let dir = if entry.dir.is_empty() {
+            format!("{}/{}", crate::rule_templates::TARGET_REL, entry.id)
+        } else {
+            entry.dir.clone()
+        };
+        // Куда `apply` положил файлы, туда же кладётся и подмена (тот же
+        // `dir`, то же `to`, что и у `ViolatingSwap`).
+        for swap in t.violating_for(lang) {
+            let content = t
+                .file(&swap.from)
+                .ok_or_else(|| format!("{}: нет файла '{}'", entry.id, swap.from))?;
+            write(root, &format!("{dir}/{}", swap.to), content)?;
+            applied += 1;
+        }
+    }
+    if applied == 0 {
+        return Err(format!(
+            "{rel}: нет позиции, для которой есть нарушающая реализация"
+        ));
+    }
+    Ok(())
 }
 
 /// Числовое поле цели NFR из первого файла, где оно есть.
@@ -1369,6 +1463,101 @@ mod tests {
         assert!(back.control_ok);
     }
 
+    /// Кладёт в кейс применённый шаблон библиотеки (`files_for(Python)`) и
+    /// возвращает запись лока на него — так выглядит кейс, взявший шаблон
+    /// `arch-be rules template apply`.
+    fn apply_python_template(case: &Path, id: &str) -> String {
+        let t = crate::rule_templates::template(id)
+            .expect("сборка")
+            .expect("шаблон есть в сборке");
+        let dir = format!("{}/{}", crate::rule_templates::TARGET_REL, id);
+        let mut lock = format!(
+            "  - id: {id}\n    version: {}\n    ad: AD-1\n    lang: python\n    dir: {dir}\n    \
+             command: 'python3 -m pytest -q -p no:cacheprovider {dir}/test_idempotency_key.py'\n    \
+             files:\n",
+            t.manifest.version
+        );
+        for f in t.files_for(crate::rule_templates::Lang::Python) {
+            let content = t.file(&f.from).expect("файл шаблона");
+            let rel = format!("{dir}/{}", f.to);
+            std::fs::create_dir_all(case.join(&dir)).expect("mkdir");
+            std::fs::write(case.join(&rel), content).expect("write");
+            lock.push_str(&format!(
+                "      - path: {rel}\n        sha256: {}\n",
+                crate::hash::sha256_hex(content.as_bytes())
+            ));
+        }
+        lock
+    }
+
+    /// D15 (вход): без лока мутатор не применим — шаблоны не применялись,
+    /// нарушать нечего. Пропуск честный: `Err(причина)`, а не «поймано» и не
+    /// «дыра в защите». Ровно этот случай — эталонные кейсы репозитория.
+    #[test]
+    fn d15_is_not_applicable_without_a_lock() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let case = tmp.path().join("case");
+        std::fs::create_dir_all(&case).expect("mkdir");
+        let reason = mutate_d15(&case).expect_err("без лока вход не найден");
+        assert!(reason.contains(crate::rule_templates::LOCK_REL), "{reason}");
+        // Каталог при этом держит позицию вне знаменателя доли: она видна в
+        // карте обнаружения, но критерий приёмки «≥ 11 из 14» не двигает.
+        let d15 = MUTATORS
+            .iter()
+            .find(|m| m.id == "D15")
+            .expect("D15 в каталоге");
+        assert_eq!(d15.expected, Expectation::Caught);
+        assert!(!d15.in_ratio);
+    }
+
+    /// D15 (правка): эталонная реализация применённого шаблона заменяется
+    /// нарушающей из той же библиотеки — тест шаблона обязан на ней упасть,
+    /// то есть правило `command_succeeds` обязано покраснеть (`fitness`).
+    /// Проверяется сама подмена: прогон правила требует интерпретатора.
+    #[test]
+    fn d15_replaces_the_reference_impl_with_the_violating_one() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let case = tmp.path().join("case");
+        std::fs::create_dir_all(&case).expect("mkdir");
+        let entry = apply_python_template(&case, "idempotency-key");
+        let lock_rel = crate::rule_templates::LOCK_REL;
+        let lock_path = case.join(lock_rel);
+        std::fs::create_dir_all(lock_path.parent().expect("каталог лока")).expect("mkdir");
+        std::fs::write(&lock_path, format!("templates:\n{entry}")).expect("lock");
+        let dir = format!("{}/idempotency-key", crate::rule_templates::TARGET_REL);
+        let before =
+            std::fs::read_to_string(case.join(format!("{dir}/reference_impl.py"))).expect("эталон");
+        mutate_d15(&case).expect("мутант D15");
+        let after = std::fs::read_to_string(case.join(format!("{dir}/reference_impl.py")))
+            .expect("подмена");
+        let t = crate::rule_templates::template("idempotency-key")
+            .expect("сборка")
+            .expect("шаблон");
+        let violating = t
+            .file("python/violating_impl.py")
+            .expect("нарушающая реализация");
+        assert_eq!(after, violating, "реализация обязана стать нарушающей");
+        assert_ne!(before, after, "подмена обязана что-то изменить");
+        assert!(
+            after.contains("дедупликации нет"),
+            "взята именная нарушающая реализация, а не любая: {after}"
+        );
+        // Остальные файлы шаблона не тронуты: дефект ровно один.
+        let test = std::fs::read_to_string(case.join(format!("{dir}/test_idempotency_key.py")))
+            .expect("тест");
+        assert_eq!(
+            test,
+            t.file("python/test_idempotency_key.py")
+                .expect("тест шаблона")
+        );
+        // На этом файле тест шаблона обязан упасть — иначе правило беззубое
+        // (та же посылка, что у `executable_rule_toothless`).
+        assert!(
+            violating.contains("send(key, amount)"),
+            "нарушающая реализация шлёт повторный эффект"
+        );
+    }
+
     use super::*;
 
     #[test]
@@ -1415,12 +1604,16 @@ mod tests {
         let ids: Vec<&str> = MUTATORS.iter().map(|m| m.id).collect();
         for expected in [
             "D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8", "D9", "D10", "D11", "D11b", "D12",
-            "D13", "R", "D14",
+            "D13", "R", "D14", "D15",
         ] {
             assert!(ids.contains(&expected), "в каталоге нет {expected}");
         }
         // Доля обнаружения считается по 14 дефектам раздела 7 (D1…D13 + D11b);
-        // R и D14 — отдельные строки.
+        // R, D14 и D15 — отдельные строки. D15 добавлен к таблице, а не к
+        // знаменателю: он проверяет зубы применённого шаблона (обязан ли
+        // краснеть `command_succeeds` на нарушающей реализации), а не
+        // защищённость пакета от дефекта раздела 7. Включи он себя в долю —
+        // критерий приёмки «≥ 11 из 14» перестал бы сравниваться с ТЗ.
         let scored = MUTATORS.iter().filter(|m| m.in_ratio).count();
         assert_eq!(scored, 14, "в наборе обязано быть 14 позиций раздела 7");
         // Обязаны ловиться 11: D1–D5, D7, D8, D9, D11b, D12, D13.
