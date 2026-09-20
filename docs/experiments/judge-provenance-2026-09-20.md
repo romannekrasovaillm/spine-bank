@@ -1,6 +1,6 @@
 # Происхождение оценки рубрики: что сделано (0.3.5, срез J1–J5, J7, J8)
 
-Ветка `feat/judge-provenance` (worktree `/home/roman/spine-bank-034-jp`, база
+Ветка `feat/judge-provenance` (worktree `spine-bank-034-jp`, база
 `a960a17` = `release/0.3.5`). Задание — `CLAUDE-TASK-Spine-Core-judge-provenance.md`
 («кто судил, чем и можно ли это проверить»). Коммиты: `7b5fbdc` (J1),
 `3579834` (J2), `b42b3bd` (J3), `5f48aa0` (J4), `4708444` (J5), `f39866f` (J8),
