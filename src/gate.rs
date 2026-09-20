@@ -656,6 +656,15 @@ struct ConstraintsPath {
     drift: Option<PathBuf>,
 }
 
+/// Есть ли в репозитории хоть одна копия реестра правил — корневая или
+/// пакетная (T-01). Отличает «пользователь указал не тот файл» от «контура в
+/// проекте нет вообще»: во втором случае сообщение обязано назвать оба места
+/// и способ создать каркас.
+fn has_any_registry(repo: &Path) -> bool {
+    repo.join(control::ROOT_CONSTRAINTS_PATH).is_file()
+        || repo.join(control::HANDOFF_CONSTRAINTS_PATH).is_file()
+}
+
 /// Путь к файлу ограничений для отчёта: относительный к репозиторию, когда
 /// файл внутри него (иначе — как передан).
 fn constraints_label(repo: &Path, constraints: &Path) -> String {
@@ -679,13 +688,25 @@ fn canonical_rel(repo: &Path, file: &Path) -> Option<PathBuf> {
 /// Составляющая `fitness`: прогон `CONSTRAINTS.yaml` ([`control::check`]).
 fn component_fitness(repo: &Path, constraints: &ConstraintsPath) -> GateComponent {
     if !constraints.path.is_file() {
-        return GateComponent::skip(
-            "fitness",
+        // T-01: реестра нет НИГДЕ (резолвер пробует корень, затем
+        // `.arch-handoff/`) — это не «нечего прогонять» по недосмотру, а
+        // отсутствующий вход контура. У обязательной составляющей он даёт
+        // INCOMPLETE, а Stop-хук и CI — блокировку с ВНЯТНОЙ причиной, а не
+        // молчаливый зелёный (раньше хук сам проверял `.arch-handoff/` и на
+        // кейсе `bootstrap` — с реестром в корне — пропускал красный гейт).
+        let message = if constraints.explicit || has_any_registry(repo) {
             format!(
                 "нет файла ограничений {} — нечего прогонять",
                 constraints.path.display()
-            ),
-        );
+            )
+        } else {
+            format!(
+                "реестр правил не найден: ни {} в корне, ни {} — создайте каркас: `arch-be bootstrap`",
+                control::ROOT_CONSTRAINTS_PATH,
+                control::HANDOFF_CONSTRAINTS_PATH
+            )
+        };
+        return GateComponent::skip("fitness", message);
     }
     let label = constraints_label(repo, &constraints.path);
     // Пометка дрейфа двух копий реестра (E2): обе существуют и различаются.

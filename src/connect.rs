@@ -74,16 +74,17 @@
 //! - `git-hooks`: `.git/hooks/pre-commit` (быстрый `arch-be control check .`)
 //!   и `pre-push` (полный `arch-be gate --route auto`); блоки между маркерами,
 //!   идемпотентно, чужие хуки не затираются; оба хука fail-soft — при
-//!   отсутствии `arch-be` в PATH (а у pre-commit ещё и при отсутствии
-//!   `.arch-handoff/CONSTRAINTS.yaml`) молча пропускаются, как хуки connect.
+//!   отсутствии `arch-be` в PATH молча пропускаются, как хуки connect.
+//!   Расположение реестра правил в шаблонах не зашито (T-01): его резолвит
+//!   бинарь — корень кейса, затем `.arch-handoff/`.
 //!
 //! Хуки (для `claude` — запись в `settings.json`; для остальных — печать).
 //! События Claude Code: `Stop` (дефолт) и `PostToolUse` с matcher
 //! `Edit|Write|MultiEdit` (только под `--strict-hooks`). Семантика
 //! exit-кодов Claude Code: 0 — ок, 2 — блок с показом stderr агенту.
 //! Консервативный дефолт — fail-soft на инфраструктуру, fail-hard на
-//! вердикт: хук молча пропускается (exit 0), если `arch-be` не в PATH или
-//! в проекте нет `.arch-handoff/CONSTRAINTS.yaml` (гард); блок (exit 2) —
+//! вердикт: хук молча пропускается (exit 0), если `arch-be` не в PATH; блок
+//! (exit 2) —
 //! когда `arch-be gate --route auto` завершился ненулевым кодом (провал
 //! любой составляющей: fitness, delta guard, `rule_weakened`, spine, trace).
 //! Так инфраструктурные сбои (нет входа у составляющих гейта — SKIP внутри
@@ -570,13 +571,21 @@ for anchor in origin/main main origin/master master; do\n\
 done\n";
 
 /// Команда Stop-хука Claude Code: единый архитектурный гейт перед завершением
-/// сессии. Гард `command -v arch-be` + наличие `.arch-handoff/CONSTRAINTS.yaml`
-/// (fail-soft на инфраструктуру: нет бинаря/правил — молча exit 0); блок
-/// (exit 2, stderr агенту) — по коду возврата `arch-be gate` (ненулевой =
-/// провал хотя бы одной составляющей; строки вывода не разбираются).
+/// сессии. Гард — только `command -v arch-be` (fail-soft на инфраструктуру:
+/// нет бинаря — пропуск); блок (exit 2, stderr агенту) — по коду возврата
+/// `arch-be gate` (ненулевой = провал хотя бы одной составляющей; строки
+/// вывода не разбираются).
+///
+/// T-01: раньше шаблон сам проверял наличие `.arch-handoff/CONSTRAINTS.yaml`,
+/// и на кейсе, собранном `bootstrap` (реестр в КОРНЕ), хук молча пропускал
+/// красный гейт — контур молчал там, где обязан остановить. Расположение
+/// реестра знает только бинарь (резолвер `control::resolve_constraints_path`:
+/// корень, затем `.arch-handoff/`), поэтому в shell его больше нет: нет
+/// реестра нигде — `gate` печатает «реестр правил не найден» и отдаёт
+/// INCOMPLETE, хук блокирует.
 fn stop_hook_command() -> String {
     format!(
-        "if command -v arch-be >/dev/null 2>&1 && [ -f .arch-handoff/CONSTRAINTS.yaml ]; then \
+        "if command -v arch-be >/dev/null 2>&1; then \
          {ANCHOR_BASE_SNIPPET}\
          if [ -n \"$BASE\" ]; then \
          if ! out=$(arch-be gate --route auto --base \"$BASE...HEAD\" 2>&1); then \
@@ -595,7 +604,7 @@ fn stop_hook_command() -> String {
 /// правку файла (matcher `Edit|Write|MultiEdit`).
 fn post_tool_use_hook_command() -> String {
     format!(
-        "if command -v arch-be >/dev/null 2>&1 && [ -f .arch-handoff/CONSTRAINTS.yaml ]; then \
+        "if command -v arch-be >/dev/null 2>&1; then \
          {ANCHOR_BASE_SNIPPET}\
          if [ -n \"$BASE\" ]; then \
          if ! out=$(arch-be gate --route auto --base \"$BASE...HEAD\" 2>&1); then \
@@ -702,9 +711,8 @@ fn merge_claude_settings(
         ));
     }
     report.notes.push(
-        "семантика хуков: fail-soft на инфраструктуру (нет arch-be или \
-         .arch-handoff/CONSTRAINTS.yaml — молча пропуск; нет входа у \
-         составляющих — SKIP), блок (exit 2) — по ненулевому коду \
+        "семантика хуков: fail-soft на инфраструктуру (нет arch-be — молча \
+         пропуск; нет входа у составляющих — SKIP), блок (exit 2) — по ненулевому коду \
          `arch-be gate --route auto` (провал любой составляющей: fitness, \
          delta guard, rule_weakened, spine, trace); PostToolUse-гейт на \
          каждую правку — через --strict-hooks (дорого на репозиториях с \
@@ -2057,13 +2065,18 @@ fn substitute_releases_url(block: &str, releases_url: Option<&str>) -> String {
     block.replace("https://github.com/<org>/<repo>/releases/download", url)
 }
 
-/// Блок pre-commit: быстрый гейт fitness-правил. Fail-soft: нет `arch-be`
-/// или `.arch-handoff/CONSTRAINTS.yaml` — молча пропуск (exit 0), как хуки
-/// connect хостов; красный гейт — exit 1 (коммит отменяется).
+/// Блок pre-commit: быстрый гейт fitness-правил. Fail-soft: нет `arch-be` в
+/// PATH — молча пропуск (exit 0), как хуки connect хостов; красный гейт —
+/// exit 1 (коммит отменяется).
+///
+/// T-01: проверки `.arch-handoff/CONSTRAINTS.yaml` в шаблоне нет — реестр
+/// кейса `bootstrap` лежит в корне, и прежний гард глушил хук на таких
+/// проектах. Путь к реестру резолвит бинарь (корень, затем `.arch-handoff/`);
+/// нет реестра нигде — внятное сообщение и ненулевой код.
 fn pre_commit_hook_block() -> String {
     "# spine-connect:begin — быстрый архитектурный гейт перед коммитом (arch-be)\n\
-     # Fail-soft: нет arch-be в PATH или .arch-handoff/CONSTRAINTS.yaml — пропуск.\n\
-     if command -v arch-be >/dev/null 2>&1 && [ -f .arch-handoff/CONSTRAINTS.yaml ]; then\n\
+     # Fail-soft: нет arch-be в PATH — пропуск; где лежит реестр правил, решает бинарь.\n\
+     if command -v arch-be >/dev/null 2>&1; then\n\
      \x20 if ! arch-be control check .; then\n\
      \x20   echo \"spine-connect: pre-commit FAIL — исправьте находки error (отчёт выше)\" >&2\n\
      \x20   exit 1\n\
@@ -2980,13 +2993,20 @@ mod tests {
         assert_eq!(text.matches(SPINE_BEGIN).count(), 1);
     }
 
-    /// Команды хуков: гард по бинарю и CONSTRAINTS.yaml, маркер, exit 2 по
-    /// коду возврата `arch-be gate` (без разбора строк вывода).
+    /// Команды хуков: гард по бинарю, маркер, exit 2 по коду возврата
+    /// `arch-be gate` (без разбора строк вывода).
+    ///
+    /// T-01: расположения реестра в shell-шаблонах НЕТ — на кейсе `bootstrap`
+    /// (реестр в корне) прежний гард `[ -f .arch-handoff/CONSTRAINTS.yaml ]`
+    /// глушил красный гейт. Путь резолвит бинарь.
     #[test]
     fn hook_commands_are_guarded_and_marked() {
         for cmd in [stop_hook_command(), post_tool_use_hook_command()] {
             assert!(cmd.contains("command -v arch-be"), "{cmd}");
-            assert!(cmd.contains(".arch-handoff/CONSTRAINTS.yaml"), "{cmd}");
+            assert!(
+                !cmd.contains("CONSTRAINTS"),
+                "путь к реестру знает только бинарь (T-01): {cmd}"
+            );
             assert!(cmd.contains("arch-be gate --route auto"), "{cmd}");
             assert!(
                 !cmd.contains("Итог: FAIL"),
@@ -2997,6 +3017,27 @@ mod tests {
         }
         assert!(stop_hook_command().contains("# spine-connect:stop"));
         assert!(post_tool_use_hook_command().contains("# spine-connect:post-tool-use"));
+    }
+
+    /// T-01: та же ошибка в git-хуках и CI-шаблонах — гард по
+    /// `.arch-handoff/CONSTRAINTS.yaml` глушил pre-commit на кейсе с реестром
+    /// в корне. Расположение реестра в шаблонах не зашито: его резолвит
+    /// бинарь (корень, затем `.arch-handoff/`).
+    #[test]
+    fn git_and_ci_templates_do_not_encode_registry_location() {
+        for (name, block) in [
+            ("pre-commit", pre_commit_hook_block()),
+            ("pre-push", pre_push_hook_block()),
+        ] {
+            assert!(
+                !block.contains("CONSTRAINTS"),
+                "{name}: путь к реестру знает только бинарь: {block}"
+            );
+            assert!(block.contains("command -v arch-be"), "{name}: {block}");
+            assert!(block.contains("spine-connect"), "{name}: {block}");
+        }
+        assert!(pre_commit_hook_block().contains("arch-be control check ."));
+        assert!(pre_push_hook_block().contains("arch-be gate --route auto"));
     }
 
     /// kimi: пишется проектный `.kimi-code/mcp.json` (без поля cwd), дом не

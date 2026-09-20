@@ -2364,3 +2364,119 @@ fn redteam_save_refuses_a_broken_case() {
         "измерение сломанного пакета не сохраняется"
     );
 }
+
+/// Каталог собранного `arch-be` — хук запускается через `sh` с этим каталогом
+/// в начале PATH (иначе тест проверял бы бинарь из PATH разработчика).
+fn bin_dir() -> PathBuf {
+    assert_cmd::cargo::cargo_bin("arch-be")
+        .parent()
+        .expect("родитель бинаря")
+        .to_path_buf()
+}
+
+/// Команда Stop-хука, записанная `arch-be connect claude` в
+/// `.claude/settings.json` репозитория.
+fn stop_hook_command_of(repo: &Path) -> String {
+    let text = std::fs::read_to_string(repo.join(".claude/settings.json"))
+        .expect("connect claude пишет settings.json");
+    let value: serde_json::Value = serde_json::from_str(&text).expect("settings.json — JSON");
+    value["hooks"]["Stop"][0]["hooks"][0]["command"]
+        .as_str()
+        .expect("команда Stop-хука")
+        .to_string()
+}
+
+/// Прогон shell-команды хука в каталоге репозитория: возвращает (код, stderr).
+fn run_hook(repo: &Path, command: &str) -> (Option<i32>, String) {
+    let path = format!(
+        "{}:{}",
+        bin_dir().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let out = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .current_dir(repo)
+        .env("PATH", path)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("sh");
+    (
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+/// Пропускающая (`PASS`) репозиторий-кейс: реестр правил в КОРНЕ, спайн,
+/// чистое дерево. Маршрут auto из пустого диффа — Fast.
+///
+/// Ветка называется `trunk`, а не `main`: тогда якорная база хука
+/// (`origin/main main origin/master master`) не находится и хук идёт веткой
+/// без `--base`. Это оставляет T-01 независимым от T-03 (нормализация
+/// `--base`): обе ветки шаблона проверяются, ни одна не маскирует другую.
+fn green_root_repo(home: &Path, name: &str) -> PathBuf {
+    let repo = home.join(name);
+    std::fs::create_dir_all(&repo).expect("mkdir");
+    std::fs::write(
+        repo.join("CONSTRAINTS.yaml"),
+        "rules:\n  - id: C-001\n    name: readme_exists\n    type: file_exists\n    path: \"README.md\"\n    severity: error\n",
+    )
+    .expect("реестр");
+    std::fs::write(repo.join("README.md"), "# Проект\n").expect("readme");
+    std::fs::write(
+        repo.join("ARCHITECTURE-SPINE.md"),
+        "# Архитектурный спайн\n\n## AD-1. Журнал append-only\n\nBinds: SYS-001.\n\
+         Prevents: правку задним числом.\nRule: только добавление записей.\n",
+    )
+    .expect("спайн");
+    git(&repo, &["init", "-q", "-b", "trunk"]);
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "init"]);
+    repo
+}
+
+/// T-01: Stop-хук обязан ловить красный кейс `bootstrap`, у которого реестр
+/// лежит в КОРНЕ. Прежний шаблон сам проверял `.arch-handoff/CONSTRAINTS.yaml`
+/// и на таком кейсе молча возвращал exit 0 — контур молчал там, где обязан
+/// остановить. Здесь же — обратная сторона: зелёный кейс пропускается, а
+/// отсутствие реестра даёт ЯВНОЕ сообщение, а не тишину.
+#[test]
+fn stop_hook_blocks_red_root_registry_case_and_names_missing_registry() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let home = tmp.path();
+    let repo = green_root_repo(home, "case");
+    arch_cmd(home)
+        .args([
+            "connect",
+            "claude",
+            "--dir",
+            repo.to_str().expect("path"),
+            "--no-skills",
+        ])
+        .assert()
+        .success();
+    let hook = stop_hook_command_of(&repo);
+    assert!(
+        !hook.contains("CONSTRAINTS"),
+        "расположение реестра в шаблоне не зашито (T-01): {hook}"
+    );
+
+    // Зелёный кейс: реестр в корне, правил не нарушено — хук молчит.
+    let (code, err) = run_hook(&repo, &hook);
+    assert_eq!(code, Some(0), "зелёный кейс: stderr={err}");
+
+    // Красный кейс: нарушено правило корневого реестра.
+    std::fs::remove_file(repo.join("README.md")).expect("нарушение правила");
+    let (code, err) = run_hook(&repo, &hook);
+    assert_eq!(code, Some(2), "красный кейс обязан блокировать: {err}");
+    assert!(err.contains("readme_exists"), "находка названа: {err}");
+
+    // Реестра нет нигде: не тихий exit 0, а причина.
+    std::fs::remove_file(repo.join("CONSTRAINTS.yaml")).expect("снять реестр");
+    let (code, err) = run_hook(&repo, &hook);
+    assert_eq!(code, Some(2), "без реестра хук не молчит: {err}");
+    assert!(
+        err.contains("реестр правил не найден"),
+        "причина названа прямо: {err}"
+    );
+}

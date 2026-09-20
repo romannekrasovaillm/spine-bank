@@ -82,7 +82,7 @@ arch-be connect ci --provider gitlab \
 
 Без флага «Следующие шаги» называют эту команду, а `arch-be doctor` выдаёт
 предупреждение `ci-releases` — молчащая заглушка выглядит как рабочая настройка.
-| `git-hooks` | `.git/hooks/pre-commit` (быстрый `arch-be control check .`) и `pre-push` (полный `arch-be gate --route auto --base <remote sha>...HEAD` — база берётся из stdin git'а, для новой ветки `merge-base` с основной); в worktree — в hooks основного git-каталога | блоки между маркерами, чужие строки хуков сохраняются; fail-soft: нет `arch-be` в PATH (у pre-commit — и `.arch-handoff/CONSTRAINTS.yaml`) — молча пропуск |
+| `git-hooks` | `.git/hooks/pre-commit` (быстрый `arch-be control check .`) и `pre-push` (полный `arch-be gate --route auto --base <remote sha>...HEAD` — база берётся из stdin git'а, для новой ветки `merge-base` с основной); в worktree — в hooks основного git-каталога | блоки между маркерами, чужие строки хуков сохраняются; fail-soft: нет `arch-be` в PATH — молча пропуск; расположение реестра хуки не проверяют (резолвит бинарь) |
 
 Установка бинаря в CI-джобах — curl из релизов (в публичных релизах GitHub
 артефакты — сырые бинари `arch-be-linux-x86_64` + `SHA256SUMS`; tar.gz —
@@ -213,10 +213,14 @@ project-scoped сервер из `.mcp.json` и доверие каталогу 
 
 ![Stop-хук](screenshots/connect/05-stop-hook.png)
 
-Семантика хуков — **fail-soft на инфраструктуру** (нет `arch-be` в PATH или
-нет `.arch-handoff/CONSTRAINTS.yaml` — молча пропуск, exit 0; нет входа у
-составляющих гейта — внутренний SKIP) и **fail-hard на вердикт** (ненулевой
-код `arch-be gate` блокирует; строки вывода хук не разбирает). Дополнительный
+Семантика хуков — **fail-soft на инфраструктуру** (нет `arch-be` в PATH —
+молча пропуск, exit 0; нет входа у составляющих гейта — внутренний SKIP) и
+**fail-hard на вердикт** (ненулевой код `arch-be gate` блокирует; строки
+вывода хук не разбирает). Где лежит реестр правил, хук не знает и не
+проверяет: путь резолвит бинарь (корень кейса, затем `.arch-handoff/`).
+Реестра нет нигде — хук не молчит, а печатает «реестр правил не найден» и
+блокирует завершение (INCOMPLETE): контур, который на отсутствующем входе
+зеленеет, выдаёт поломку за порядок. Дополнительный
 гейт на каждую правку (`PostToolUse` для Edit/Write) включается флагом
 `--strict-hooks` — учтите: если в CONSTRAINTS.yaml есть правила
 `command_succeeds` (например, `cargo test`), такой гейт будет дорогим.

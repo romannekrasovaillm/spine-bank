@@ -3146,7 +3146,19 @@ fn cmd_control(cfg: &arch_harness::config::Config, cmd: ControlCmd) -> Result<()
             format,
             base,
         } => {
+            let explicit = constraints.is_some();
             let c = resolve_constraints_cli(&repo, constraints);
+            // T-01: реестра нет ни в корне, ни в `.arch-handoff/` — раньше
+            // сюда улетал сырой `io: ./.arch-handoff/CONSTRAINTS.yaml: No such
+            // file` (адрес, которого пользователь не выбирал). Pre-commit-хук
+            // читает этот текст, поэтому причина называется прямо.
+            if !explicit && !c.is_file() {
+                anyhow::bail!(
+                    "реестр правил не найден: ни {} в корне, ни {} — создайте каркас: `arch-be bootstrap`",
+                    arch_harness::control::ROOT_CONSTRAINTS_PATH,
+                    arch_harness::control::HANDOFF_CONSTRAINTS_PATH
+                );
+            }
             let options = arch_harness::control::baseline::CheckOptions {
                 baseline,
                 baseline_update,
