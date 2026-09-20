@@ -69,9 +69,110 @@ pub fn run_checks(cfg: &Config) -> Vec<Check> {
         check_cron(cfg),
         check_web(cfg),
         check_archify(cfg),
+        check_judge(cfg),
         check_git(),
         check_ci_releases_url(),
     ]
+}
+
+/// Судья рубрик (J9, ADR-048): настроен ли `kind = "cli"`, отвечает ли
+/// команда на `--version` и отличается ли семейство судьи от семейств авторов
+/// в шапках ADR текущего каталога.
+///
+/// Без CLI-судьи оценку всё равно можно получить (split-judge в хосте), но
+/// уровень независимости будет «заявлена», а не «обеспечена запуском» —
+/// поэтому это предупреждение, а не провал.
+fn check_judge(cfg: &Config) -> Check {
+    let cli_judges: Vec<(&String, &crate::config::ModelConfig)> = cfg
+        .models
+        .iter()
+        .filter(|(_, m)| m.kind.as_deref() == Some("cli"))
+        .collect();
+    if cli_judges.is_empty() {
+        // Подсказка с готовым фрагментом: CLI, найденный в PATH.
+        let found = ["claude", "codex", "qwen", "kimi"]
+            .into_iter()
+            .find(|cmd| crate::judge::cli_version(cmd).is_some());
+        let hint = found.map_or_else(
+            || "добавьте модель с kind = \"cli\" и command = \"<ваш CLI>\"".to_string(),
+            |cmd| {
+                format!(
+                    "например: [models.judge-cli]\n  kind = \"cli\"\n  command = \"{cmd}\"\n  \
+                     args = [\"-p\"]   # ключ для CLI-судьи не нужен"
+                )
+            },
+        );
+        return Check {
+            name: "judge",
+            verdict: Verdict::Warn,
+            text: format!(
+                "судья kind = \"cli\" не настроен: судейство возможно только split-judge в \
+                 хосте (уровень «заявлена»); {hint}"
+            ),
+        };
+    }
+    let authors = project_authors();
+    let mut parts = Vec::new();
+    let mut same_family = Vec::new();
+    let mut verdict = Verdict::Ok;
+    for (name, model) in &cli_judges {
+        let command = model.command.clone().unwrap_or_default();
+        let version = crate::judge::cli_version(&command);
+        let family = crate::judge::family_of(name, &cfg.judge.families);
+        if let Some(v) = &version {
+            parts.push(format!("{name} ({command} → {v}, семейство {family})"));
+        } else {
+            verdict = Verdict::Warn;
+            parts.push(format!("{name} ({command} — не ответил на --version)"));
+        }
+        for author in &authors {
+            if crate::judge::family_key(name, &cfg.judge.families)
+                == crate::judge::family_key(author, &cfg.judge.families)
+            {
+                same_family.push(format!("{author} (судья {name})"));
+            }
+        }
+    }
+    if !same_family.is_empty() {
+        verdict = Verdict::Warn;
+        parts.push(format!(
+            "семейство судьи совпадает с авторами документов: {}",
+            same_family.join(", ")
+        ));
+    }
+    Check {
+        name: "judge",
+        verdict,
+        text: parts.join("; "),
+    }
+}
+
+/// Модели-авторы из шапок ADR текущего каталога (`docs/adr/ADR-*.md`),
+/// без повторов. Каталога нет — пусто: проверка не выдумывает авторов.
+fn project_authors() -> Vec<String> {
+    let Ok(cwd) = std::env::current_dir() else {
+        return Vec::new();
+    };
+    let dir = cwd.join("docs/adr");
+    let Ok(rd) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = Vec::new();
+    for entry in rd.flatten() {
+        let path = entry.path();
+        if !path
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().starts_with("ADR-"))
+        {
+            continue;
+        }
+        if let Some(author) = crate::adr_registry::author_model_of(&path) {
+            if !out.contains(&author) {
+                out.push(author);
+            }
+        }
+    }
+    out
 }
 
 /// Заглушка `<org>/<repo>` в конфигурации CI проекта (волна C 0.3.4):

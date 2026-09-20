@@ -78,7 +78,14 @@ pub struct Mutator {
 /// (ревью `NOT-READY`) и `D14` (контроль аттестации) идут отдельными строками
 /// и в долю обнаружения не входят — иначе она была бы несопоставима с
 /// критерием приёмки релиза.
-pub const MUTATORS: [Mutator; 16] = [
+///
+/// `D15` и `D16` (красный угол 0.3.5, ADR-048) — про происхождение оценки:
+/// поднятый рукой балл в отчёте рубрики и подменённая метка автора в шапке ADR
+/// после оценки. Они применимы только к кейсам, где есть отчёты с сырыми
+/// ответами; там, где их нет, мутатор честно пропускается (как `skipped`), а не
+/// считается пойманным или непойманным. В знаменатель доли не входят: набор
+/// раздела 7 не меняется.
+pub const MUTATORS: [Mutator; 18] = [
     Mutator {
         id: "D1",
         title: "бюджет hop'а больше цели p99",
@@ -206,6 +213,22 @@ pub const MUTATORS: [Mutator; 16] = [
         expected: Expectation::Control,
         in_ratio: false,
         apply: mutate_d14,
+    },
+    Mutator {
+        id: "D15",
+        title: "балл в отчёте рубрики поднят вручную",
+        by: "decision_quality (rubric_report_inconsistent)",
+        expected: Expectation::Caught,
+        in_ratio: false,
+        apply: mutate_d15,
+    },
+    Mutator {
+        id: "D16",
+        title: "метка автора в шапке ADR заменена после оценки",
+        by: "decision_quality (rubric_report_stale)",
+        expected: Expectation::Caught,
+        in_ratio: false,
+        apply: mutate_d16,
     },
 ];
 
@@ -644,6 +667,100 @@ fn mutate_d14(root: &Path) -> std::result::Result<(), String> {
         root,
         rel,
         &format!("{text}\nУточнение формулировки без смены решения.\n"),
+    )
+}
+
+/// D15: балл в отчёте рубрики поднят вручную — ровно то, что до 0.3.5 было
+/// незаметно. Ловится пересборкой отчёта из сырых ответов судьи
+/// (`rubric_report_inconsistent`). Кейс без отчётов и сырых ответов —
+/// неприменим: правка несуществующего отчёта ничего не проверяет.
+fn mutate_d15(root: &Path) -> std::result::Result<(), String> {
+    let reports = root.join("reports/rubric");
+    let Some(rel) = std::fs::read_dir(&reports)
+        .map_err(|e| format!("нет каталога отчётов: {e}"))?
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| {
+            p.extension()
+                .is_some_and(|x| x.eq_ignore_ascii_case("json"))
+        })
+    else {
+        return Err("нет отчётов рубрики".to_string());
+    };
+    let slug = rel
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if !reports.join("raw").join(&slug).is_dir() {
+        return Err("у отчёта нет сырых ответов — сверка неприменима".to_string());
+    }
+    let text = std::fs::read_to_string(&rel).map_err(|e| e.to_string())?;
+    let mut artifact: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    // Поднимаем балл первого критерия и взвешенный итог: отчёт расходится с
+    // ответами, из которых объявлен собранным.
+    if let Some(score) = artifact
+        .get_mut("scores")
+        .and_then(|s| s.as_array_mut())
+        .and_then(|a| a.first_mut())
+    {
+        score["score"] = serde_json::json!(5);
+    } else {
+        return Err("в отчёте нет баллов по критериям".to_string());
+    }
+    artifact["weighted_total"] = serde_json::json!(5.0);
+    let out = serde_json::to_string_pretty(&artifact).map_err(|e| e.to_string())?;
+    std::fs::write(&rel, out).map_err(|e| e.to_string())
+}
+
+/// D16: метка автора в шапке ADR заменена после оценки. Отчёт привязан к
+/// редакции документа, поэтому правка шапки делает его устаревшим
+/// (`rubric_report_stale`) — «вспомнить» автора задним числом нельзя.
+fn mutate_d16(root: &Path) -> std::result::Result<(), String> {
+    let adrs = files_with_prefix(root, "docs/adr", "ADR-");
+    for rel in adrs {
+        let text = read(root, rel.as_str())?;
+        if !text.contains("Модель-автор:") && !text.contains("Author-model:") {
+            continue;
+        }
+        // Меняем ЗНАЧЕНИЕ метки на другую модель: редакция документа другая.
+        // Подстановка по одной строке, а не цепочкой replace — цепочка
+        // превратила бы последовательные замены в одну и уехала бы дальше.
+        let mut replaced = String::with_capacity(text.len());
+        let mut done = false;
+        for line in text.lines() {
+            let is_author = line.contains("Модель-автор:") || line.contains("Author-model:");
+            if is_author && !done {
+                let (head, _) = line.split_once(':').expect("поле с двоеточием");
+                let new_label = if line.contains("human") {
+                    "claude-opus-4"
+                } else {
+                    "glm-5.2"
+                };
+                let _ = write!(replaced, "{head}: {new_label}");
+                done = true;
+            } else {
+                replaced.push_str(line);
+            }
+            replaced.push('\n');
+        }
+        if !done {
+            return Err(format!("метку автора в {rel} заменить не удалось"));
+        }
+        return write(root, rel.as_str(), &replaced);
+    }
+    // Шапки без поля автора: добавляем строку — документ тоже меняется.
+    let adrs = files_with_prefix(root, "docs/adr", "ADR-");
+    let Some(rel) = adrs.first() else {
+        return Err("нет ADR".to_string());
+    };
+    let text = read(root, rel.as_str())?;
+    let Some((head, tail)) = text.split_once("\n\n") else {
+        return Err("шапка ADR не распознана".to_string());
+    };
+    write(
+        root,
+        rel.as_str(),
+        &format!("{head}\n- Модель-автор: claude-opus-4\n\n{tail}"),
     )
 }
 
@@ -1181,6 +1298,99 @@ pub fn run(case: &Path, min_detection: f64, decision_quality: bool) -> Result<Re
         min_detection,
         control_ok,
     })
+}
+
+#[cfg(test)]
+mod corner_tests {
+    use super::*;
+
+    /// Отчёт рубрики с сырыми ответами: ровно то, к чему применимы мутаторы
+    /// красного угла.
+    fn case_with_report(root: &Path) {
+        write(
+            root,
+            "reports/rubric/ADR-001-demo.json",
+            "{\n  \"schema\": \"arch-be/rubric-report/v1\",\n  \"rubric\": \"adr_quality\",\n  \
+             \"judge_model\": \"glm-5.2\",\n  \"weighted_total\": 4.0,\n  \"verdict\": \"годно\",\n  \
+             \"scores\": [{\"criterion_id\": \"context\", \"score\": 4, \"flags\": []}]\n}\n",
+        )
+        .expect("отчёт");
+        write(
+            root,
+            "reports/rubric/raw/ADR-001-demo/sample-1.json",
+            "{\"text\": \"ответ\"}\n",
+        )
+        .expect("сырой ответ");
+    }
+
+    /// D15 поднимает балл критерия и взвешенный итог — расхождение с сырыми
+    /// ответами, из которых отчёт объявлен собранным (ADR-048).
+    #[test]
+    fn d15_raises_the_recorded_score() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path();
+        case_with_report(root);
+        mutate_d15(root).expect("мутация применима");
+        let text =
+            std::fs::read_to_string(root.join("reports/rubric/ADR-001-demo.json")).expect("отчёт");
+        let artifact: serde_json::Value = serde_json::from_str(&text).expect("JSON");
+        assert_eq!(artifact["scores"][0]["score"], 5, "{artifact}");
+        assert_eq!(artifact["weighted_total"], 5.0, "{artifact}");
+    }
+
+    /// Без сырых ответов сверять не с чем: мутатор честно неприменим, а не
+    /// «пойман».
+    #[test]
+    fn d15_is_inapplicable_without_raw_answers() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path();
+        write(
+            root,
+            "reports/rubric/ADR-001-demo.json",
+            "{\"schema\": \"arch-be/rubric-report/v1\", \"weighted_total\": 4.0}\n",
+        )
+        .expect("отчёт");
+        assert!(
+            mutate_d15(root).is_err(),
+            "без сырых ответов мутатор обязан пропускаться"
+        );
+        assert!(
+            mutate_d15(tmp.path()).is_err(),
+            "без отчётов мутатор тоже неприменим"
+        );
+    }
+
+    /// D16 меняет метку автора в шапке ADR: редакция документа другая, отчёт
+    /// от прежней становится устаревшим (ADR-048).
+    #[test]
+    fn d16_rewrites_the_author_header() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path();
+        write(
+            root,
+            "docs/adr/ADR-001-demo.md",
+            "# ADR-001. Решение\n\n- Статус: Accepted\n- Модель-автор: human\n\n## Context\n\nПричина.\n",
+        )
+        .expect("ADR");
+        mutate_d16(root).expect("мутация применима");
+        let text = std::fs::read_to_string(root.join("docs/adr/ADR-001-demo.md")).expect("ADR");
+        assert!(
+            text.contains("Модель-автор: claude-opus-4"),
+            "метка заменена: {text}"
+        );
+        assert!(!text.contains("human"), "старой метки нет: {text}");
+    }
+
+    /// Оба мутатора стоят вне знаменателя доли обнаружения: набор раздела 7
+    /// (11 из 14) не меняется, они видны отдельными строками — как R и D14.
+    #[test]
+    fn corner_mutators_are_outside_the_ratio() {
+        for id in ["D15", "D16"] {
+            let m = MUTATORS.iter().find(|m| m.id == id).expect("мутатор");
+            assert!(!m.in_ratio, "{id} не должен входить в долю обнаружения");
+            assert_eq!(m.expected, Expectation::Caught, "{id} обязан ловиться");
+        }
+    }
 }
 
 #[cfg(test)]

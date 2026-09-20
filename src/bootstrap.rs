@@ -487,6 +487,10 @@ pub fn skeleton(name: &str, domain: &str) -> Vec<(String, String)> {
              ```\n\nДомен: {domain}. Порядок шагов — спайн → правила → модель → бандл.\n"
         ),
     );
+    // Конфиг проекта: всё закомментировано, поэтому поведение — дефолтное.
+    // Здесь же — готовый пример судьи без ключа и порог независимости: путь к
+    // правильному судейству должен быть короче неправильного (J9, ADR-048).
+    push("arch-harness.toml", project_config());
     push("ARCHITECTURE-SPINE.md", spine(name, domain));
     push("CONSTRAINTS.yaml", constraints(domain));
     push(
@@ -523,6 +527,34 @@ pub fn skeleton(name: &str, domain: &str) -> Vec<(String, String)> {
         stub_artifact("Состоятельное ревью", domain),
     );
     files
+}
+
+/// Конфиг проекта: закомментированные примеры того, что чаще всего нужно
+/// кейсу, — судья-`kind = "cli"` (судейство без API-ключа) и порог
+/// независимости. Все строки закомментированы: файл ничего не меняет, пока его
+/// не отредактируют.
+fn project_config() -> String {
+    "# Настройки кейса. Всё закомментировано — действуют дефолты харнесса.\n\
+     # Порядок поиска: --config → ./arch-harness.toml → ~/.config/arch-harness/config.toml.\n\
+     \n\
+     # Судья без API-ключа: Spine запускает уже авторизованный CLI харнесса,\n\
+     # каждый сэмпл — отдельный процесс (уровень «независимость обеспечена\n\
+     # запуском»). Проверьте, что семейство судьи отличается от семейства\n\
+     # авторов решений: `arch-be doctor` (проверка judge).\n\
+     #\n\
+     # [models.judge-cli]\n\
+     # kind = \"cli\"\n\
+     # command = \"claude\"\n\
+     # args = [\"-p\", \"--output-format\", \"json\"]\n\
+     \n\
+     # Порог независимости судьи в гейте (составляющая decision_quality):\n\
+     # none < declared < declared_cross_family < launched < launched_cross_family.\n\
+     # Дефолт none — поведение прежних версий; launched требует, чтобы судью\n\
+     # запускал сам Spine.\n\
+     #\n\
+     # [gate.decision_quality]\n\
+     # min_independence = \"declared\"\n"
+        .to_string()
 }
 
 /// Текст заглушки артефакта: он обязан быть пойман семантикой Н1, поэтому

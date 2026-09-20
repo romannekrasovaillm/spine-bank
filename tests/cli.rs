@@ -2272,7 +2272,13 @@ fn redteam_json_format_reports_detections() {
     assert_eq!(value["passed"], true);
     assert_eq!(value["control_ok"], true);
     let detections = value["detections"].as_array().expect("detections");
-    assert_eq!(detections.len(), 16);
+    // 18 = 16 позиций набора (D1…D13, D11b, R, D14) + красный угол 0.3.5:
+    // D15 (поднятый рукой балл) и D16 (подменённая метка автора, ADR-048).
+    assert_eq!(detections.len(), 18);
+    let ids: Vec<&str> = detections.iter().filter_map(|d| d["id"].as_str()).collect();
+    for extra in ["D15", "D16"] {
+        assert!(ids.contains(&extra), "нет мутатора {extra}: {ids:?}");
+    }
 }
 
 /// W3: `bootstrap` создаёт каркас и называет следующий шаг; `--status` на
