@@ -2261,6 +2261,7 @@ fn judge_response_schema(rubric: &rubric::Rubric) -> Value {
         .iter()
         .flat_map(|c| c.evidence_roles.iter().map(String::as_str))
         .collect();
+    let needs_coverage = rubric.criteria.iter().any(|c| c.coverage.is_some());
     let rationale_hint = if roles.is_empty() {
         "При балле ≥ 2 (или ≤ 2 у критериев с пометкой «цитата при оценке ≤ 2») начинается с «Цитата: \"<дословный фрагмент текста>\"» — цитата проверяется механически".to_string()
     } else {
@@ -2296,6 +2297,15 @@ fn judge_response_schema(rubric: &rubric::Rubric) -> Value {
                         "rationale": {
                             "type": "string",
                             "description": rationale_hint,
+                        },
+                        "checked": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": if needs_coverage {
+                                "Идентификаторы проверенных ссылочных источников досье (AD-1, CMP-002, …) — обязательны при оценке 4 и выше у критериев с пометкой «покрытие»: механика сверяет перечень с составом досье, пропуск исключает критерий"
+                            } else {
+                                "Не используется этой рубрикой; оставьте пустым"
+                            },
                         },
                     },
                     "required": ["criterion_id", "score", "rationale"],

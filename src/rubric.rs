@@ -100,6 +100,30 @@ impl EvidenceOn {
     }
 }
 
+/// Что судья обязан перечислить в ответе при высоком балле (ADR-051, S3).
+///
+/// Отсутствие не цитируется: «противоречий нет» доказать цитатой нельзя. Вместо
+/// цитаты судья называет, что он **проверил**, а механика сверяет список с
+/// составом досье — пропуск становится видимым.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Coverage {
+    /// Перечислить идентификаторы всех ссылочных источников досье
+    /// (`checked: [AD-1, AD-2, …]`).
+    ReferenceIds,
+}
+
+impl Coverage {
+    /// Строковое имя — как в YAML рубрики: строка с одним вариантом, поэтому
+    /// опечатка в значении отвергается разбором, а не молча теряет проверку.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ReferenceIds => "reference_ids",
+        }
+    }
+}
+
 /// Критерий рубрики с весом и якорями уровней.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Criterion {
@@ -121,6 +145,10 @@ pub struct Criterion {
     /// ADR не засчитывается как цитата из спайна. Пусто — любая часть текста.
     #[serde(default)]
     pub evidence_roles: Vec<String>,
+    /// Что судья обязан перечислить при высоком балле (ADR-051, S3);
+    /// `None` — покрытие не проверяется (поведение 0.3.4).
+    #[serde(default)]
+    pub coverage: Option<Coverage>,
 }
 
 impl Criterion {
@@ -182,6 +210,10 @@ pub enum CriterionFlag {
     /// блокирующей находкой **не становится** — выдуманное обвинение наказывает
     /// судью потерей критерия, а не репозиторий.
     AccusationUnconfirmed,
+    /// Высокий балл выставлен без полного перечня проверенных ссылочных
+    /// источников (ADR-051, S3): критерий исключён из взвешенного итога —
+    /// «5 не глядя» не должно читаться как проверка.
+    CoverageIncomplete,
 }
 
 impl CriterionFlag {
@@ -192,13 +224,17 @@ impl CriterionFlag {
             Self::Unstable => "unstable",
             Self::EvidenceNotFound => "evidence_not_found",
             Self::AccusationUnconfirmed => "accusation_unconfirmed",
+            Self::CoverageIncomplete => "coverage_incomplete",
         }
     }
 
     /// Исключает ли метка критерий из взвешенного итога рубрики.
     #[must_use]
     pub fn excludes_from_total(self) -> bool {
-        matches!(self, Self::EvidenceNotFound | Self::AccusationUnconfirmed)
+        matches!(
+            self,
+            Self::EvidenceNotFound | Self::AccusationUnconfirmed | Self::CoverageIncomplete
+        )
     }
 }
 
@@ -229,6 +265,10 @@ pub struct CriterionScore {
     /// аддитивное: отчёты, снятые раньше, читаются (отсутствие = ноль).
     #[serde(default)]
     pub evidence_unconfirmed_ratio: f64,
+    /// Что судья назвал проверенным (ADR-051, S3) — объединение перечней
+    /// `checked` по сэмплам; пусто у критериев без `coverage`.
+    #[serde(default)]
+    pub checked: Vec<String>,
 }
 
 impl CriterionScore {
@@ -536,9 +576,9 @@ impl RubricReport {
                     // `accusation_unconfirmed` — обвинение не подтверждено:
                     // критерий исключён из итога, но гейт этим не красится
                     // (ADR-051): метка печатается своим именем, а не молчит.
-                    CriterionFlag::EvidenceNotFound | CriterionFlag::AccusationUnconfirmed => {
-                        f.as_str().to_string()
-                    }
+                    CriterionFlag::EvidenceNotFound
+                    | CriterionFlag::AccusationUnconfirmed
+                    | CriterionFlag::CoverageIncomplete => f.as_str().to_string(),
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
@@ -573,6 +613,42 @@ impl RubricReport {
                 out,
                 "⚠ — оценка с неподтверждённой цитатой: критерий исключён из взвешенного \
                  итога (штраф учтён выше), а вердикт механически ограничен CONCERNS."
+            );
+        }
+        // Смысловые рубрики (ADR-051): два своих повода исключить критерий —
+        // и оба читателю важно отличить от выдуманной похвалы выше.
+        let by_flag = |flag: CriterionFlag| -> Vec<&str> {
+            self.scores
+                .iter()
+                .filter(|s| s.has_flag(flag))
+                .map(|s| s.criterion_id.as_str())
+                .collect()
+        };
+        let accusations = by_flag(CriterionFlag::AccusationUnconfirmed);
+        if !accusations.is_empty() {
+            let _ = writeln!(
+                out,
+                "**Обвинение не подтверждено (accusation_unconfirmed):** {}",
+                accusations.join(", ")
+            );
+            let _ = writeln!(
+                out,
+                "⚠ — низкий балл без подтверждённых цитат по требуемым ролям: критерий \
+                 исключён из взвешенного итога, но блокирующей находкой не становится — \
+                 выдуманное обвинение наказывает судью, а не документ."
+            );
+        }
+        let uncovered = by_flag(CriterionFlag::CoverageIncomplete);
+        if !uncovered.is_empty() {
+            let _ = writeln!(
+                out,
+                "**Покрытие неполно (coverage_incomplete):** {}",
+                uncovered.join(", ")
+            );
+            let _ = writeln!(
+                out,
+                "⚠ — высокий балл без полного перечня проверенных источников досье: критерий \
+                 исключён из итога — «противоречий нет» должно быть названо поимённо."
             );
         }
         let _ = writeln!(out, "**Вердикт:** {}", self.verdict);
@@ -893,7 +969,8 @@ fn judge_extra_rules(rubric: &Rubric) -> String {
         .iter()
         .flat_map(|c| c.evidence_roles.iter().map(String::as_str))
         .collect();
-    if !needs_low && roles.is_empty() {
+    let needs_coverage = rubric.criteria.iter().any(|c| c.coverage.is_some());
+    if !needs_low && roles.is_empty() && !needs_coverage {
         return String::new();
     }
     let mut out = String::new();
@@ -915,6 +992,16 @@ fn judge_extra_rules(rubric: &Rubric) -> String {
              сверяется только со своим источником (цитата из одного источника не засчитывается \
              как цитата из другого). Формат: «Цитата {list}: \"…\"» для каждой роли, затем \
              пояснение;\n",
+        );
+    }
+    if needs_coverage {
+        out.push_str(
+            "- критерии с пометкой «покрытие»: отсутствие противоречия цитатой не докажешь, \
+             поэтому при оценке 4 и выше ты ОБЯЗАН перечислить в поле \"checked\" \
+             идентификаторы ВСЕХ ссылочных источников досье, которые ты проверил (они видны \
+             в маркерах источников, например AD-1). Короткий перечень механика сверяет с \
+             составом досье: пропуск исключает критерий, поэтому неполный список хуже \
+             честной низкой оценки;\n",
         );
     }
     out
@@ -943,6 +1030,13 @@ pub(crate) fn judge_user_prompt(rubric: &Rubric, target: &str) -> String {
         }
         if !c.evidence_roles.is_empty() {
             proof.push(format!("роли: {}", c.evidence_roles.join(", ")));
+        }
+        if let Some(coverage) = c.coverage {
+            proof.push(format!(
+                "при оценке ≥ {COVERAGE_MIN_SCORE} перечисли в \"checked\" все проверенные \
+                 ссылочные источники ({})",
+                coverage.as_str()
+            ));
         }
         if !proof.is_empty() {
             let _ = writeln!(out, "Доказательство: {}.", proof.join("; "));
@@ -986,6 +1080,10 @@ struct JudgeScore {
     /// Обоснование.
     #[serde(default)]
     rationale: String,
+    /// Перечень проверенных источников досье (ADR-051, S3): заполняется
+    /// критериями с `coverage`; у остальных пусто.
+    #[serde(default)]
+    checked: Vec<String>,
 }
 
 /// Терпимый разбор балла: JSON-число или строка с числом.
@@ -1089,6 +1187,47 @@ impl EvidenceScope<'_> {
             Self::Pack(p) => p.role_texts(role),
         }
     }
+
+    /// Идентификаторы ссылочных источников досье (`AD-1`, `CMP-002`, …);
+    /// `None` — оценка идёт по документу без досье, и сверять покрытие не с чем.
+    fn reference_ids(&self) -> Option<Vec<String>> {
+        match self {
+            Self::Target(_) => None,
+            Self::Pack(p) => Some(p.references().iter().map(|i| i.key().to_string()).collect()),
+        }
+    }
+}
+
+/// С какого балла критерий с `coverage` обязан назвать проверенные источники
+/// (ADR-051, S3): «всё чисто» цитатой не докажешь, но перечень проверенного
+/// требуется — иначе пятёрку можно поставить не глядя.
+const COVERAGE_MIN_SCORE: u8 = 4;
+
+/// Назвал ли судья все ссылочные источники досье: сверяется КАЖДЫЙ сэмпл с
+/// высоким баллом, а не объединение перечней — иначе источники, названные по
+/// одному в разных сэмплах, сошли бы за один полный перечень.
+fn coverage_incomplete(
+    runs: &[JudgeResponse],
+    criterion_id: &str,
+    ids: &[String],
+    scale_max: u8,
+) -> bool {
+    runs.iter().any(|run| {
+        let Some(sample) = run.scores.iter().find(|s| s.criterion_id == criterion_id) else {
+            // Пропуск судьёй — не «не глядя»: балла нет, требовать нечего.
+            return false;
+        };
+        if clamp_score(sample.score, scale_max) < COVERAGE_MIN_SCORE {
+            return false;
+        }
+        ids.iter().any(|id| {
+            let want = id.trim().to_lowercase();
+            !sample
+                .checked
+                .iter()
+                .any(|got| got.trim().to_lowercase() == want)
+        })
+    })
 }
 
 /// Подтверждены ли все требуемые критерием цитаты в одном обосновании.
@@ -1137,6 +1276,24 @@ fn unconfirmed_ratio(
         })
         .count();
     unconfirmed as f64 / runs.len() as f64
+}
+
+/// Перечень названного судьёй проверенным — объединение по сэмплам, в порядке
+/// первого появления (для отчёта: что именно судья перечислил).
+fn checked_ids(runs: &[JudgeResponse], criterion_id: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for run in runs {
+        let Some(sample) = run.scores.iter().find(|s| s.criterion_id == criterion_id) else {
+            continue;
+        };
+        for id in &sample.checked {
+            let id = id.trim();
+            if !id.is_empty() && !out.iter().any(|seen| seen.eq_ignore_ascii_case(id)) {
+                out.push(id.to_string());
+            }
+        }
+    }
+    out
 }
 
 /// Цитата, помеченная ролью: `Цитата subject: "…"` (регистр не важен).
@@ -1203,6 +1360,22 @@ pub(crate) fn build_report(
         {
             flags.push(CriterionFlag::AccusationUnconfirmed);
         }
+        // Покрытие вместо цитаты (ADR-051, S3): «противоречий нет» цитатой не
+        // доказать, поэтому при высоком балле судья называет проверенное, а
+        // механика сверяет перечень с составом досье.
+        if c.coverage.is_some() {
+            let ids = scope.reference_ids().ok_or_else(|| {
+                HarnessError::Rubric(format!(
+                    "coverage_without_dossier: критерий '{}' требует перечня проверенных \
+                     ссылочных источников, а оценка идёт по документу без досье — \
+                     вызывайте с pack/subject (ADR-051)",
+                    c.id
+                ))
+            })?;
+            if !ids.is_empty() && coverage_incomplete(runs, &c.id, &ids, rubric.scale_max) {
+                flags.push(CriterionFlag::CoverageIncomplete);
+            }
+        }
         // Доля сэмплов с неподтверждённой цитатой (ADR-051): считается только
         // там, где цитата обязательна по направлению, — у обычных рубрик поле
         // остаётся нулевым и поведение 0.3.4 не меняется.
@@ -1211,6 +1384,7 @@ pub(crate) fn build_report(
         } else {
             0.0
         };
+        let checked = checked_ids(runs, &c.id);
         scores.push(CriterionScore {
             criterion_id: c.id.clone(),
             weight: c.weight,
@@ -1220,6 +1394,7 @@ pub(crate) fn build_report(
             stdev,
             flags,
             evidence_unconfirmed_ratio,
+            checked,
         });
     }
     let weighted_total = weighted_total(&rubric.criteria, &scores)?;
@@ -1687,6 +1862,7 @@ mod tests {
                 anchors: BTreeMap::new(),
                 evidence_on: EvidenceOn::High,
                 evidence_roles: Vec::new(),
+                coverage: None,
             }],
         };
         let llm = RecLlm(Mutex::new(Vec::new()));
@@ -1777,6 +1953,7 @@ mod tests {
                     anchors: anchors("контекст"),
                     evidence_on: EvidenceOn::High,
                     evidence_roles: Vec::new(),
+                    coverage: None,
                 },
                 Criterion {
                     id: "alternatives".into(),
@@ -1786,6 +1963,7 @@ mod tests {
                     anchors: anchors("альтернативы"),
                     evidence_on: EvidenceOn::High,
                     evidence_roles: Vec::new(),
+                    coverage: None,
                 },
             ],
             origin: "anchor".into(),
@@ -1801,6 +1979,7 @@ mod tests {
             rationale: String::new(),
             samples: vec![score],
             evidence_unconfirmed_ratio: 0.0,
+            checked: Vec::new(),
             stdev: 0.0,
             flags: Vec::new(),
         }
@@ -2339,6 +2518,7 @@ mod tests {
                 stdev: 0.0,
                 flags: Vec::new(),
                 evidence_unconfirmed_ratio: 0.0,
+                checked: Vec::new(),
             }],
             weighted_total: 4.0,
             verdict: "годно".into(),
@@ -2469,6 +2649,7 @@ mod tests {
             anchors: BTreeMap::new(),
             evidence_on: on,
             evidence_roles: roles.iter().map(|r| (*r).to_string()).collect(),
+            coverage: None,
         }
     }
 
@@ -2706,6 +2887,119 @@ mod tests {
             user.contains("Доказательство: цитата при оценке ≤ 2; роли: subject, reference."),
             "пометка у критерия: {user}"
         );
+    }
+
+    // --- S3 (ADR-051): покрытие вместо цитаты для «всё чисто» ---------------
+
+    /// Критерий с требованием покрытия ссылочных источников.
+    fn covering_criterion(id: &str, on: EvidenceOn) -> Criterion {
+        let mut c = criterion(id, 3.0, on, &[]);
+        c.coverage = Some(Coverage::ReferenceIds);
+        c
+    }
+
+    /// Высокий балл с полным перечнем проверенного — критерий засчитан;
+    /// пропуск хотя бы одного источника — флаг и исключение из итога (S3).
+    #[test]
+    fn high_score_with_partial_coverage_is_flagged() {
+        let rubric = rubric_of(vec![
+            covering_criterion("no_contradiction", EvidenceOn::Low),
+            criterion("context", 1.0, EvidenceOn::High, &[]),
+        ]);
+        let cfg = one_sample();
+        let pack = two_source_pack();
+        let scope = EvidenceScope::Pack(&pack);
+
+        // Полный перечень: единственный ссылочный источник досье — AD-2.
+        let full = parse_judge_response(
+            r#"{"scores": [
+                 {"criterion_id": "no_contradiction", "score": 5,
+                  "rationale": "противоречий нет",
+                  "checked": ["AD-2"]},
+                 {"criterion_id": "context", "score": 4,
+                  "rationale": "Цитата: \"Решение: контроль слоя построен без LLM в гейте.\". ок"}
+               ], "verdict": "v"}"#,
+        )
+        .expect("ответ судьи");
+        let report = build_report(&rubric, "judge-x", &[full], &scope, &cfg).expect("отчёт");
+        let main = &report.scores[0];
+        assert!(
+            !main.has_flag(CriterionFlag::CoverageIncomplete),
+            "полный перечень: {:?}",
+            main.flags
+        );
+        assert_eq!(main.checked, vec!["AD-2".to_string()], "перечень в отчёте");
+
+        // Пропуск ссылочного источника — «5 не глядя».
+        let partial = parse_judge_response(
+            r#"{"scores": [
+                 {"criterion_id": "no_contradiction", "score": 5,
+                  "rationale": "противоречий нет", "checked": []},
+                 {"criterion_id": "context", "score": 4,
+                  "rationale": "Цитата: \"Решение: контроль слоя построен без LLM в гейте.\". ок"}
+               ], "verdict": "v"}"#,
+        )
+        .expect("ответ судьи");
+        let report = build_report(&rubric, "judge-x", &[partial], &scope, &cfg).expect("отчёт");
+        let main = &report.scores[0];
+        assert!(
+            main.has_flag(CriterionFlag::CoverageIncomplete),
+            "неполное покрытие: {:?}",
+            main.flags
+        );
+        assert!(
+            report.to_markdown().contains("coverage_incomplete"),
+            "метка видна в отчёте"
+        );
+        assert!(
+            report.verdict.contains("CONCERNS"),
+            "вердикт под потолком: {}",
+            report.verdict
+        );
+
+        // Низкий балл покрытия не требует: обвинение доказывается цитатами.
+        let low = parse_judge_response(
+            r#"{"scores": [
+                 {"criterion_id": "no_contradiction", "score": 2,
+                  "rationale": "Цитата subject: \"Решение: контроль слоя построен без LLM в гейте.\". Цитата reference: \"Rule: механика контроля без LLM.\". слабое место"},
+                 {"criterion_id": "context", "score": 4,
+                  "rationale": "Цитата: \"Решение: контроль слоя построен без LLM в гейте.\". ок"}
+               ], "verdict": "v"}"#,
+        )
+        .expect("ответ судьи");
+        let mut low_rubric = rubric_of(vec![
+            covering_criterion("no_contradiction", EvidenceOn::Low),
+            criterion("context", 1.0, EvidenceOn::High, &[]),
+        ]);
+        low_rubric.criteria[0].evidence_roles = vec!["subject".into(), "reference".into()];
+        let report = build_report(&low_rubric, "judge-x", &[low], &scope, &cfg).expect("отчёт");
+        assert!(
+            !report.scores[0].has_flag(CriterionFlag::CoverageIncomplete),
+            "при балле ниже {COVERAGE_MIN_SCORE} покрытие не требуется: {:?}",
+            report.scores[0].flags
+        );
+    }
+
+    /// Критерий с покрытием без досье — явная ошибка: сверять перечень не с
+    /// чем, и молча пропустить проверку нельзя (S3).
+    #[test]
+    fn coverage_without_dossier_is_explicit_error() {
+        let rubric = rubric_of(vec![covering_criterion(
+            "no_contradiction",
+            EvidenceOn::Low,
+        )]);
+        let scope = EvidenceScope::Target("просто документ");
+        let err = build_report(
+            &rubric,
+            "judge-x",
+            &[run_of("no_contradiction", 5, "противоречий нет")],
+            &scope,
+            &one_sample(),
+        )
+        .expect_err("покрытие без досье");
+        let msg = err.to_string();
+        assert!(msg.contains("coverage_without_dossier"), "{msg}");
+        assert!(msg.contains("pack/subject"), "подсказка что делать: {msg}");
     }
 
     /// Опечатка в имени роли — ошибка загрузки рубрики, а не молчаливый

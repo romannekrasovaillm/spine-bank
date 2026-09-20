@@ -382,6 +382,8 @@ pub async fn run_golden(
                 rationale: String::new(),
                 samples: Vec::new(),
                 stdev: 0.0,
+                evidence_unconfirmed_ratio: 0.0,
+                checked: Vec::new(),
                 flags: Vec::new(),
             });
         }
