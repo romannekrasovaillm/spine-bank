@@ -34,7 +34,10 @@
 
 Тесты: 1354 модульных + 60 интеграционных CLI + 27 MCP, все зелёные;
 `cargo clippy --all-targets -- -D warnings` и `cargo fmt --check` чисты;
-`arch-be control check .` (dogfood) — PASS.
+`arch-be control check .` (dogfood) — PASS: 46 правил, 0 нарушений, ослаблений
+состава нет. Прогон занимает около восьми минут и печатает итог **только в
+конце** — самые медленные правила `no_banking_in_core_structural` (254 с) и
+`no_tui_below_ui` (217 с); молчащий прогон это норма, а не зависание.
 
 ## Что измерено
 
