@@ -351,6 +351,10 @@ pub struct GateOptions {
     /// Глобы детекторов диффа (T-05): что считать контрактом, новым
     /// компонентом и изменением интеграции — из секции `[significance]`.
     pub diff_globs: control::DiffGlobs,
+    /// Требование исполняемой проверки инвариантов (ADR-050): при
+    /// `warn`/`error` составляющая `trace_check` даёт находку `ad-text-only`.
+    /// Дефолт `off` — вердикт не меняется без явного решения проекта.
+    pub executable_required: crate::config::ExecutableRequired,
 }
 
 impl GateOptions {
@@ -362,6 +366,7 @@ impl GateOptions {
             evidence: cfg.evidence.clone(),
             decision_quality: cfg.gate.decision_quality.clone(),
             diff_globs: cfg.significance.diff_globs(),
+            executable_required: cfg.trace.executable_required,
         }
     }
 }
@@ -1098,7 +1103,7 @@ fn component_spine_lint(repo: &Path) -> GateComponent {
 /// Составляющая `trace_check`: позвенная трассируемость кейса
 /// ([`trace::trace_check`]). Контракт `trace check` требует `model/` И
 /// `CONSTRAINTS.yaml` в корне кейса — без любого из них SKIP (не падение).
-fn component_trace(repo: &Path) -> GateComponent {
+fn component_trace(repo: &Path, opts: &GateOptions) -> GateComponent {
     if !repo.join("model").is_dir() {
         return GateComponent::skip("trace_check", "нет каталога model/".to_string());
     }
@@ -1109,7 +1114,7 @@ fn component_trace(repo: &Path) -> GateComponent {
                 .to_string(),
         );
     }
-    match trace::trace_check(repo) {
+    match trace::trace_check_with(repo, opts.executable_required) {
         Ok(report) if !report.has_errors() => GateComponent::pass(
             "trace_check",
             format!(
@@ -1958,7 +1963,7 @@ fn run_inner(
         component_delta_guard(repo, base, &git),
         component_rule_weakened(repo, &constraints, base.unwrap_or("HEAD"), &git),
         component_spine_lint(repo),
-        component_trace(repo),
+        component_trace(repo, options),
         // Н2: целостность модели — часть гейта на ЛЮБОМ маршруте (SKIP без
         // каталога model/); обязательность по маршрутам — в `[gate.required]`.
         component_model_validate(repo, route),
