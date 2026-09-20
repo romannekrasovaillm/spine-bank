@@ -289,17 +289,20 @@ fn check_spine_server_spec(v: &serde_json::Value, path: &Path) -> Check {
         .and_then(|a| a.as_array())
         .map(|a| a.iter().filter_map(|x| x.as_str()).collect())
         .unwrap_or_default();
+    // Режим подключения тремя значениями (J7, ADR-048): `--rw=reports` —
+    // узкая запись только отчётов рубрики, `rw` — полный контур записи.
     let (verdict, mode) = match args.as_slice() {
         ["mcp", "serve"] => (Verdict::Ok, "read-only"),
         ["mcp", "serve", "--rw"] => (Verdict::Ok, "rw"),
+        ["mcp", "serve", "--rw=reports"] => (Verdict::Ok, "rw=reports"),
         other => (
             Verdict::Warn,
             // Нестандартные args — показываем как есть (может быть осознанная
-            // кастомизация; connect пишет ровно `mcp serve [--rw]`).
+            // кастомизация; connect пишет ровно `mcp serve [--rw|--rw=reports]`).
             if other.is_empty() {
                 "без args (ожидалось mcp serve)"
             } else {
-                "нестандартные args (ожидалось mcp serve [--rw])"
+                "нестандартные args (ожидалось mcp serve [--rw|--rw=reports])"
             },
         ),
     };

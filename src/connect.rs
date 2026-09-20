@@ -194,6 +194,10 @@ pub struct ConnectOptions {
     pub dir: PathBuf,
     /// Открыть rw-контур MCP-сервера (`arch-be mcp serve --rw`).
     pub rw: bool,
+    /// Узкий режим записи (`arch-be mcp serve --rw=reports`): запись разрешена
+    /// только отчётам рубрики. Судейскому харнессу не нужны `adr_new`,
+    /// `delta_propose` и `handoff_create`, а широкий `--rw` открывал их разом.
+    pub rw_reports: bool,
     /// Раскладывать скиллы (false = `--no-skills`).
     pub skills: bool,
     /// Встраивать хуки (false = `--no-hooks`).
@@ -225,6 +229,7 @@ impl ConnectOptions {
             host,
             dir,
             rw: false,
+            rw_reports: false,
             skills: true,
             hooks: true,
             agents_md: true,
@@ -426,13 +431,32 @@ fn write_connect_manifest(opts: &ConnectOptions, report: &mut ConnectReport) -> 
 }
 
 /// Описание нашего MCP-сервера для JSON-конфигов хостов.
-fn mcp_server_value(rw: bool) -> Value {
-    let args = if rw {
+fn mcp_server_value(rw: bool, rw_reports: bool) -> Value {
+    json!({"command": "arch-be", "args": mcp_server_args(rw, rw_reports)})
+}
+
+/// Аргументы запуска MCP-сервера: без флага — read-only, `--rw` — полный
+/// контур записи, `--rw=reports` — только отчёты рубрики (J7).
+fn mcp_server_args(rw: bool, rw_reports: bool) -> Vec<&'static str> {
+    if rw_reports {
+        vec!["mcp", "serve", "--rw=reports"]
+    } else if rw {
         vec!["mcp", "serve", "--rw"]
     } else {
         vec!["mcp", "serve"]
-    };
-    json!({"command": "arch-be", "args": args})
+    }
+}
+
+/// Режим подключения одним словом — для подсказок и `doctor --host` (J7).
+#[must_use]
+pub fn mode_label(rw: bool, rw_reports: bool) -> &'static str {
+    if rw_reports {
+        "rw=reports"
+    } else if rw {
+        "rw"
+    } else {
+        "read-only"
+    }
 }
 
 /// Читает JSON-объект из файла: (объект, исходный текст, если файл был).
@@ -512,9 +536,14 @@ fn backup_once(path: &Path, old: &str, dry_run: bool, report: &mut ConnectReport
 /// `~/.kimi-code/mcp.json`): чужие ключи верхнего уровня и чужие серверы
 /// сохраняются, перезаписывается только наш сервер. `backup` — для
 /// пользовательских конфигов (`--apply-global`).
+// Четыре булевых флага подключения (режим записи, бэкап, dry-run) —
+// независимые опции одного шага, а не состояние: их разбор в структуру
+// опций — отдельная задача, здесь это ухудшило бы читаемость вызова.
+#[allow(clippy::fn_params_excessive_bools)]
 fn merge_mcp_servers_json(
     path: &Path,
     rw: bool,
+    rw_reports: bool,
     backup: bool,
     dry_run: bool,
     report: &mut ConnectReport,
@@ -534,7 +563,10 @@ fn merge_mcp_servers_json(
         .filter(|k| k.as_str() != MCP_SERVER_NAME)
         .cloned()
         .collect();
-    servers.insert(MCP_SERVER_NAME.to_string(), mcp_server_value(rw));
+    servers.insert(
+        MCP_SERVER_NAME.to_string(),
+        mcp_server_value(rw, rw_reports),
+    );
     if !foreign.is_empty() {
         report.notes.push(format!(
             "{}: существующие MCP-серверы сохранены: {}",
@@ -1074,6 +1106,7 @@ fn connect_claude(opts: &ConnectOptions, report: &mut ConnectReport) -> Result<(
     merge_mcp_servers_json(
         &opts.dir.join(".mcp.json"),
         opts.rw,
+        opts.rw_reports,
         false,
         opts.dry_run,
         report,
@@ -1107,7 +1140,9 @@ fn connect_claude(opts: &ConnectOptions, report: &mut ConnectReport) -> Result<(
         "проверьте подключение: `claude mcp list` — в списке сервер «spine»".to_string(),
         format!(
             "инструменты видны агенту как `mcp__spine__*`; режим сервера: {}",
-            if opts.rw {
+            if opts.rw_reports {
+                "rw=reports (запись только отчётов рубрики: rubric_verify → reports/rubric/)"
+            } else if opts.rw {
                 "rw (разрешены аддитивные записи: handoff_create, adr_new, …)"
             } else {
                 "read-only"
@@ -1119,8 +1154,8 @@ fn connect_claude(opts: &ConnectOptions, report: &mut ConnectReport) -> Result<(
 }
 
 /// Сниппет `.mcp.json` для печати (generic-потоки).
-fn mcp_json_snippet(rw: bool) -> String {
-    let v = json!({"mcpServers": {MCP_SERVER_NAME: mcp_server_value(rw)}});
+fn mcp_json_snippet(rw: bool, rw_reports: bool) -> String {
+    let v = json!({"mcpServers": {MCP_SERVER_NAME: mcp_server_value(rw, rw_reports)}});
     match serde_json::to_string_pretty(&v) {
         Ok(text) => text,
         // Сериализация Value не падает; запасной вариант — компактная форма.
@@ -1158,8 +1193,10 @@ fn hooks_snippet(strict: bool) -> String {
 }
 
 /// TOML-блок `[mcp_servers.spine]` для Codex (`~/.codex/config.toml`).
-fn codex_toml_block(rw: bool) -> String {
-    let args = if rw {
+fn codex_toml_block(rw: bool, rw_reports: bool) -> String {
+    let args = if rw_reports {
+        "[\"mcp\", \"serve\", \"--rw=reports\"]"
+    } else if rw {
         "[\"mcp\", \"serve\", \"--rw\"]"
     } else {
         "[\"mcp\", \"serve\"]"
@@ -1174,6 +1211,7 @@ fn codex_toml_block(rw: bool) -> String {
 fn merge_codex_config(
     path: &Path,
     rw: bool,
+    rw_reports: bool,
     dry_run: bool,
     report: &mut ConnectReport,
 ) -> Result<()> {
@@ -1223,11 +1261,9 @@ fn merge_codex_config(
         "command".to_string(),
         toml::Value::String("arch-be".to_string()),
     );
-    let args = if rw {
-        vec!["mcp", "serve", "--rw"]
-    } else {
-        vec!["mcp", "serve"]
-    };
+    // Одна функция аргументов на все каналы: кодовая копия логики режима
+    // разошлась бы с остальными при первой же правке (J7).
+    let args = mcp_server_args(rw, rw_reports);
     spine.insert(
         "args".to_string(),
         toml::Value::Array(
@@ -1276,6 +1312,7 @@ fn connect_qwen(opts: &ConnectOptions, report: &mut ConnectReport) -> Result<()>
     merge_mcp_servers_json(
         &opts.dir.join(".qwen/settings.json"),
         opts.rw,
+        opts.rw_reports,
         false,
         opts.dry_run,
         report,
@@ -1377,6 +1414,7 @@ fn connect_gigacode(opts: &ConnectOptions, report: &mut ConnectReport) -> Result
     merge_mcp_servers_json(
         &settings_dir.join("settings.json"),
         opts.rw,
+        opts.rw_reports,
         false,
         opts.dry_run,
         report,
@@ -1426,11 +1464,11 @@ fn connect_gigacode(opts: &ConnectOptions, report: &mut ConnectReport) -> Result
 fn connect_codex(opts: &ConnectOptions, report: &mut ConnectReport) -> Result<()> {
     if opts.apply_global {
         let path = global_config_path(opts, ".codex/config.toml")?;
-        merge_codex_config(&path, opts.rw, opts.dry_run, report)?;
+        merge_codex_config(&path, opts.rw, opts.rw_reports, opts.dry_run, report)?;
     } else {
         report.snippets.push((
             "MCP-сервер для Codex — добавьте в ~/.codex/config.toml:".to_string(),
-            codex_toml_block(opts.rw),
+            codex_toml_block(opts.rw, opts.rw_reports),
         ));
         report.notes.push(
             "в дом пользователя без --apply-global не пишем (перезапуск с флагом \
@@ -1473,13 +1511,14 @@ fn connect_kimi(opts: &ConnectOptions, report: &mut ConnectReport) -> Result<()>
     merge_mcp_servers_json(
         &opts.dir.join(".kimi-code/mcp.json"),
         opts.rw,
+        opts.rw_reports,
         false,
         opts.dry_run,
         report,
     )?;
     if opts.apply_global {
         let path = global_config_path(opts, ".kimi-code/mcp.json")?;
-        merge_mcp_servers_json(&path, opts.rw, true, opts.dry_run, report)?;
+        merge_mcp_servers_json(&path, opts.rw, opts.rw_reports, true, opts.dry_run, report)?;
         report.notes.push(
             "записаны оба уровня; при совпадении имён проектная запись \
              .kimi-code/mcp.json перекрывает пользовательскую (дока Kimi Code)"
@@ -1491,7 +1530,7 @@ fn connect_kimi(opts: &ConnectOptions, report: &mut ConnectReport) -> Result<()>
              ~/.kimi-code/mcp.json, общий для всех проектов (запись с мерджем и \
              бэкапом — перезапуском с --apply-global):"
                 .to_string(),
-            mcp_json_snippet(opts.rw),
+            mcp_json_snippet(opts.rw, opts.rw_reports),
         ));
     }
     if opts.hooks {
@@ -1519,7 +1558,9 @@ fn connect_kimi(opts: &ConnectOptions, report: &mut ConnectReport) -> Result<()>
         "проверьте подключение: команда `/mcp` в TUI — в списке сервер «spine»".to_string(),
         format!(
             "режим сервера: {}",
-            if opts.rw {
+            if opts.rw_reports {
+                "rw=reports (запись только отчётов рубрики: rubric_verify → reports/rubric/)"
+            } else if opts.rw {
                 "rw (разрешены аддитивные записи: handoff_create, adr_new, …)"
             } else {
                 "read-only"
@@ -1568,6 +1609,7 @@ fn connect_omp(opts: &ConnectOptions, report: &mut ConnectReport) -> Result<()> 
     merge_mcp_servers_json(
         &opts.dir.join(".mcp.json"),
         opts.rw,
+        opts.rw_reports,
         false,
         opts.dry_run,
         report,
@@ -1607,7 +1649,9 @@ fn connect_omp(opts: &ConnectOptions, report: &mut ConnectReport) -> Result<()> 
         "перезапустите omp в этом каталоге — сервер «spine» подхватится из .mcp.json".to_string(),
         format!(
             "инструменты видны агенту как инструменты сервера «spine»; режим: {}",
-            if opts.rw {
+            if opts.rw_reports {
+                "rw=reports (запись только отчётов рубрики: rubric_verify → reports/rubric/)"
+            } else if opts.rw {
                 "rw (разрешены аддитивные записи: handoff_create, adr_new, …)"
             } else {
                 "read-only"
@@ -1624,7 +1668,7 @@ fn connect_generic(opts: &ConnectOptions, report: &mut ConnectReport) {
     report.snippets.push((
         "MCP-сервер (формат `.mcp.json` Claude Code — его понимает большинство хостов):"
             .to_string(),
-        mcp_json_snippet(opts.rw),
+        mcp_json_snippet(opts.rw, opts.rw_reports),
     ));
     if opts.hooks {
         report.snippets.push((

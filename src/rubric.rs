@@ -383,6 +383,49 @@ pub fn write_artifact_with(
     author_model: Option<&str>,
     extras: &ArtifactExtras,
 ) -> Result<PathBuf> {
+    let (path, artifact) = build_artifact(repo, report, target, author_model, extras, true)?;
+    let dir = repo.join(RUBRIC_REPORTS_DIR);
+    std::fs::create_dir_all(&dir).map_err(|e| HarnessError::io(&dir, e))?;
+    let text = serde_json::to_string_pretty(&artifact)
+        .map_err(|e| HarnessError::Config(format!("сериализация отчёта рубрики: {e}")))?;
+    std::fs::write(&path, text).map_err(|e| HarnessError::io(&path, e))?;
+    Ok(path)
+}
+
+/// Содержимое отчёта, которое записал бы [`write_artifact_with`], — БЕЗ записи
+/// (J7): контур только для чтения не оставляет следов в рабочем каталоге, но
+/// возвращает хосту готовый файл, чтобы тот сохранил его своими средствами и
+/// гейт увидел отчёт.
+///
+/// Сырые ответы судьи при этом НЕ сохраняются: read-only контур не пишет
+/// ничего, а хэши ответов остаются в самом отчёте (`provenance.samples`).
+///
+/// # Errors
+/// Отчёт не сериализуется.
+pub fn artifact_json(
+    repo: &Path,
+    report: &RubricReport,
+    target: Option<&Path>,
+    author_model: Option<&str>,
+    extras: &ArtifactExtras,
+) -> Result<(PathBuf, String)> {
+    let (path, artifact) = build_artifact(repo, report, target, author_model, extras, false)?;
+    let text = serde_json::to_string_pretty(&artifact)
+        .map_err(|e| HarnessError::Config(format!("сериализация отчёта рубрики: {e}")))?;
+    Ok((path, text))
+}
+
+/// Собирает артефакт отчёта и путь, по которому он лёг бы. `save_raw` —
+/// сохранять ли сырые ответы судьи: при сборке «на возврат» (read-only контур)
+/// следов в рабочем каталоге не остаётся.
+fn build_artifact(
+    repo: &Path,
+    report: &RubricReport,
+    target: Option<&Path>,
+    author_model: Option<&str>,
+    extras: &ArtifactExtras,
+    save_raw: bool,
+) -> Result<(PathBuf, RubricArtifact)> {
     // Путь документа — относительный: аттестация не должна зависеть от того,
     // где склонирован репозиторий.
     let rel = target.map(|p| {
@@ -400,7 +443,7 @@ pub fn write_artifact_with(
     // ответов, на которых он объявлен собранным (J2, ADR-048). Их хэши попадают
     // в происхождение, поэтому пишутся ДО артефакта.
     let mut provenance = extras.provenance.clone();
-    if !extras.raw_answers.is_empty() {
+    if save_raw && !extras.raw_answers.is_empty() {
         let stamps = crate::judge::write_raw_answers(
             repo,
             &slug,
@@ -459,12 +502,7 @@ pub fn write_artifact_with(
         judged_at: chrono::Local::now().to_rfc3339(),
     };
     let dir = repo.join(RUBRIC_REPORTS_DIR);
-    std::fs::create_dir_all(&dir).map_err(|e| HarnessError::io(&dir, e))?;
-    let path = dir.join(format!("{slug}.json"));
-    let text = serde_json::to_string_pretty(&artifact)
-        .map_err(|e| HarnessError::Config(format!("сериализация отчёта рубрики: {e}")))?;
-    std::fs::write(&path, text).map_err(|e| HarnessError::io(&path, e))?;
-    Ok(path)
+    Ok((dir.join(format!("{slug}.json")), artifact))
 }
 
 /// Все машиночитаемые отчёты рубрик репозитория (`reports/rubric/*.json`);

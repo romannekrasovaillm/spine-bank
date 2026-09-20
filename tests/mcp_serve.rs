@@ -2662,3 +2662,113 @@ fn cli_rubric_run_respects_judge_config() {
     // В шапке этого ADR поля автора нет — источник метки честно `none`.
     assert_eq!(artifact["author_source"], "none", "{artifact}");
 }
+
+/// J7 (ADR-048): режим `--rw=reports` открывает запись ТОЛЬКО отчётам рубрики.
+/// Отчёт судьи ложится на место (гейт его видит), а пишущие инструменты моста
+/// остаются закрытыми — судейскому харнессу не нужны `adr_new` и
+/// `delta_propose`, ради которых раньше приходилось открывать весь `--rw`.
+#[test]
+fn rw_reports_mode_allows_only_rubric_reports() {
+    let home = tempfile::tempdir().expect("tmp");
+    let (repo, adr, rubric) = judge_gate_case(home.path());
+    let verify = call(
+        1,
+        "rubric_verify",
+        &json!({
+            "rubric": rubric,
+            "target": adr.display().to_string(),
+            "judge_model": "glm-5.2",
+            "answers": [provenance_answer()],
+        }),
+    );
+    let adr_dir = home.path().join("adr-out");
+    std::fs::create_dir_all(&adr_dir).expect("mkdir");
+    let new_adr = call(
+        2,
+        "adr_new",
+        &json!({"title": "Новый ADR", "path": adr_dir.display().to_string()}),
+    );
+    let responses = mcp_serve_with_args(home.path(), &["--rw=reports"], &batch(&[verify, new_adr]));
+    // Отчёт записан: режим открывает именно то, ради чего он нужен.
+    let verdict = structured(&responses[0], 1);
+    assert!(
+        verdict["artifact_saved"].as_bool().expect("artifact_saved"),
+        "отчёт обязан записаться: {verdict}"
+    );
+    assert!(
+        repo.join("reports/rubric/ADR-001-pilot.json").is_file(),
+        "файл отчёта на месте"
+    );
+    // `adr_new` в этом режиме закрыт.
+    let text = responses[1].to_string();
+    assert!(
+        text.contains("неизвестный инструмент") || text.contains("не разрешён"),
+        "adr_new обязан быть закрыт: {text}"
+    );
+    let created: Vec<_> = std::fs::read_dir(&adr_dir)
+        .expect("чтение каталога")
+        .flatten()
+        .collect();
+    assert!(
+        created.is_empty(),
+        "в режиме rw=reports ADR создавать нельзя: {created:?}"
+    );
+}
+
+/// J7 (ADR-048), критерий успеха 4: в read-only контуре отчёт больше не теряется
+/// молча. Первая строка сводки говорит, что гейт его не увидит и что делать, а
+/// готовое содержимое едет в `artifact_json` — хост сохраняет его своими
+/// средствами, и такой файл проходит ту же сверку с сырыми ответами.
+#[test]
+fn readonly_verify_says_report_not_saved_and_returns_artifact_json() {
+    let home = tempfile::tempdir().expect("tmp");
+    let (repo, adr, rubric) = judge_gate_case(home.path());
+    let verify = call(
+        1,
+        "rubric_verify",
+        &json!({
+            "rubric": rubric,
+            "target": adr.display().to_string(),
+            "judge_model": "glm-5.2",
+            "author_model": "claude-opus-4",
+            "answers": [provenance_answer()],
+        }),
+    );
+    let responses = mcp_serve_with_args(home.path(), &[], &batch(&[verify]));
+    let verdict = structured(&responses[0], 1);
+    assert_eq!(verdict["artifact_saved"], false, "{verdict}");
+    let summary = verdict["summary"].as_str().expect("сводка");
+    assert!(
+        summary.starts_with("Отчёт НЕ сохранён"),
+        "первая строка — про потерянный отчёт: {summary}"
+    );
+    assert!(summary.contains("--rw=reports"), "назван выход: {summary}");
+    assert!(
+        !repo.join("reports/rubric/ADR-001-pilot.json").is_file(),
+        "read-only контур не пишет в рабочий каталог"
+    );
+    // Готовый файл: путь и содержимое.
+    let path = verdict["artifact_path"].as_str().expect("путь").to_string();
+    let json_text = verdict["artifact_json"].as_str().expect("содержимое");
+    assert!(
+        path.ends_with("reports/rubric/ADR-001-pilot.json"),
+        "путь отчёта: {path}"
+    );
+    let artifact: Value = serde_json::from_str(json_text).expect("JSON отчёта");
+    assert_eq!(artifact["schema"], "arch-be/rubric-report/v1", "{artifact}");
+    assert_eq!(
+        artifact["independence"], "declared_cross_family",
+        "{artifact}"
+    );
+    // Хост сохраняет файл сам — гейт видит отчёт и остаётся зелёным.
+    let target = repo.join("reports/rubric");
+    std::fs::create_dir_all(&target).expect("mkdir");
+    std::fs::write(target.join("ADR-001-pilot.json"), json_text).expect("запись отчёта хостом");
+    let gate = gate_output(home.path(), &repo);
+    let stdout = String::from_utf8_lossy(&gate.stdout);
+    assert!(gate.status.success(), "гейт: {stdout}");
+    assert!(
+        stdout.contains("[PASS] decision_quality"),
+        "сохранённый хостом отчёт засчитан: {stdout}"
+    );
+}

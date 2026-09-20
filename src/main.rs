@@ -507,8 +507,11 @@ enum Cmd {
         ///   `agentsmd_generate`, `archify_compare`, `archify_deliver`,
         ///   `archify_show`, `delta_propose`, `evidence_pack`, `handoff_create`,
         ///   `reverse_survey`, `skill_distill`.
-        #[arg(long)]
-        rw: bool,
+        ///
+        /// `--rw=reports` — узкий режим для судейского харнесса: запись
+        /// разрешена только отчётам рубрики, остальной белый список закрыт.
+        #[arg(long, value_name = "full|reports", num_args = 0..=1, default_missing_value = "full")]
+        rw: Option<String>,
         /// Не раскладывать скиллы.
         #[arg(long)]
         no_skills: bool,
@@ -910,8 +913,12 @@ enum McpCmd {
         ///   `archify_deliver`, `archify_show`, `delta_propose`, `evidence_pack`,
         ///   `handoff_create`, `reverse_survey`, `skill_distill`). По умолчанию
         /// сервер строго read-only.
-        #[arg(long)]
-        rw: bool,
+        ///
+        /// `--rw=reports` — узкий режим для судейского харнесса: запись
+        /// разрешена только отчётам рубрики (`rubric_verify` →
+        /// `reports/rubric/`), остальной белый список закрыт.
+        #[arg(long, value_name = "full|reports", num_args = 0..=1, default_missing_value = "full")]
+        rw: Option<String>,
     },
 }
 
@@ -2186,6 +2193,12 @@ async fn main() -> Result<()> {
                 Some(d) => d,
                 None => std::env::current_dir().context("cwd")?,
             };
+            // Режим записи в подключении: без флага — read-only, `--rw` —
+            // полный, `--rw=reports` — только отчёты рубрики (J7).
+            let rw_mode = arch_harness::mcp_server::ServeMode::parse_rw(rw.as_deref())
+                .map_err(anyhow::Error::msg)?;
+            let rw_full = matches!(rw_mode, arch_harness::mcp_server::ServeMode::ReadWrite);
+            let rw_reports = matches!(rw_mode, arch_harness::mcp_server::ServeMode::Reports);
             let special = host.trim().to_ascii_lowercase();
             if special == "ci" || special == "git-hooks" || special == "githooks" {
                 // Гейты, не зависящие от хоста (волна 2, п.8): флаги агентных
@@ -2196,7 +2209,13 @@ async fn main() -> Result<()> {
                         "--releases-url применим только к `connect ci`"
                     ));
                 }
-                if rw || no_skills || no_hooks || no_agents_md || strict_hooks || apply_global {
+                if rw.is_some()
+                    || no_skills
+                    || no_hooks
+                    || no_agents_md
+                    || strict_hooks
+                    || apply_global
+                {
                     return Err(anyhow::anyhow!(
                         "флаги --rw/--no-skills/--no-hooks/--no-agents-md/--strict-hooks/--apply-global применимы только к хостам агентов, не к `connect {special}`"
                     ));
@@ -2242,7 +2261,8 @@ async fn main() -> Result<()> {
             let opts = arch_harness::connect::ConnectOptions {
                 host,
                 dir,
-                rw,
+                rw: rw_full,
+                rw_reports,
                 skills: !no_skills,
                 hooks: !no_hooks,
                 agents_md: !no_agents_md,
@@ -3187,11 +3207,8 @@ async fn cmd_mcp(cfg: &Arc<Config>, cmd: McpCmd) -> Result<()> {
     // Серверный режим (P1-2, ADR-008) обслуживает клиентов и не подключается
     // к серверам: mcp.json для него не требуется, уходим до его загрузки.
     if let McpCmd::Serve { rw } = &cmd {
-        let mode = if *rw {
-            arch_harness::mcp_server::ServeMode::ReadWrite
-        } else {
-            arch_harness::mcp_server::ServeMode::ReadOnly
-        };
+        let mode = arch_harness::mcp_server::ServeMode::parse_rw(rw.as_deref())
+            .map_err(anyhow::Error::msg)?;
         return arch_harness::mcp_server::serve_with_mode(Arc::clone(cfg), mode)
             .await
             .context("MCP-сервер (stdio)");

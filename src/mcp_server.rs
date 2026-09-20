@@ -365,6 +365,11 @@ pub enum ServeMode {
     /// + read-only мост [`BRIDGE_READ_ONLY`].
     #[default]
     ReadOnly,
+    /// `arch-be mcp serve --rw=reports`: запись разрешена ТОЛЬКО отчётам
+    /// рубрики (`rubric_verify` → `reports/rubric/`). Судейскому харнессу не
+    /// нужны `adr_new`, `delta_propose` и `handoff_create`, а широкий `--rw`
+    /// открывал их все разом (J7, ADR-048).
+    Reports,
     /// `arch-be mcp serve --rw`: дополнительно [`BRIDGE_READ_WRITE`]
     /// (аддитивные записи в рабочий каталог клиента). [`BRIDGE_NEVER`]
     /// остаётся закрытым и в этом режиме.
@@ -372,9 +377,45 @@ pub enum ServeMode {
 }
 
 impl ServeMode {
-    /// Открыт ли контур записи (режим `--rw`).
+    /// Открыт ли контур записи (режимы `--rw` и `--rw=reports`).
     fn allows_write(self) -> bool {
-        matches!(self, Self::ReadWrite)
+        matches!(self, Self::ReadWrite | Self::Reports)
+    }
+
+    /// Запись ограничена отчётами рубрики (режим `--rw=reports`): мостовые
+    /// пишущие инструменты закрыты.
+    fn reports_only(self) -> bool {
+        matches!(self, Self::Reports)
+    }
+
+    /// Человекочитаемый режим подключения — для `doctor --host` (J7).
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "read-only",
+            Self::Reports => "rw=reports",
+            Self::ReadWrite => "rw",
+        }
+    }
+
+    /// Разбор значения флага `--rw`: без значения (или `full`) — полный rw,
+    /// `reports` — узкий; иное — ошибка с перечнем допустимых.
+    ///
+    /// # Errors
+    /// Значение флага не распознано.
+    pub fn parse_rw(value: Option<&str>) -> std::result::Result<Self, String> {
+        match value.map(str::trim) {
+            // Флаг НЕ передан — строго read-only: `None` здесь означает
+            // «нет --rw», а не «--rw без значения» (то даёт default_missing_value
+            // clap'а — строку `full`). Спутать эти два случая значило бы
+            // открывать запись там, где её не просили.
+            None => Ok(Self::ReadOnly),
+            Some("" | "full" | "true") => Ok(Self::ReadWrite),
+            Some("reports") => Ok(Self::Reports),
+            Some(other) => Err(format!(
+                "неизвестный режим записи '{other}': ожидается `--rw` (полный) или `--rw=reports`                  (только отчёты рубрики)"
+            )),
+        }
     }
 }
 
@@ -586,7 +627,9 @@ impl McpServe {
             return false;
         }
         BRIDGE_READ_ONLY.contains(&name)
-            || (self.mode.allows_write() && BRIDGE_READ_WRITE.contains(&name))
+            || (self.mode.allows_write()
+                && !self.mode.reports_only()
+                && BRIDGE_READ_WRITE.contains(&name))
     }
 
     /// Обрабатывает одну строку транспорта; `None` — отвечать не нужно
@@ -1694,6 +1737,10 @@ impl McpServe {
         // контур MCP не имеет права оставлять след в рабочем каталоге.
         let mut artifact_note = None;
         let mut provenance_out: Option<crate::judge::RubricProvenance> = None;
+        // Отчёт, который контур только для чтения вернул хосту, а не записал
+        // (J7): готовое содержимое файла и путь, куда его положить.
+        let mut artifact_json_out: Option<String> = None;
+        let mut artifact_path_out: Option<String> = None;
         // Автор — из шапки документа, если он там записан: значение из
         // документа сильнее аргумента вызова (J3, ADR-048). Для inline-текста
         // шапки нет, поэтому решает аргумент.
@@ -1765,8 +1812,40 @@ impl McpServe {
                         }
                     }
                 } else {
-                    artifact_note =
-                        Some("не записан: контур MCP только для чтения (нужен `--rw`)".to_string());
+                    // Read-only (J7): отчёт не записан, но он готов — хост
+                    // сохранит его своими файловыми инструментами, иначе гейт
+                    // скажет `rubric_report_missing`, а агент не поймёт почему.
+                    match crate::rubric::artifact_json(
+                        &repo,
+                        &report,
+                        Some(&abs),
+                        choice.author.as_deref(),
+                        &crate::rubric::ArtifactExtras {
+                            provenance: Some(provenance),
+                            author_source: Some(choice.source.clone()),
+                            author_model_declared: choice.declared.clone(),
+                            families: self.cfg.judge.families.clone(),
+                            judge_config: Some(crate::rubric::JudgeConfigSnapshot {
+                                samples: self.cfg.judge.samples.max(1),
+                                unstable_stdev: self.cfg.judge.unstable_stdev,
+                                evidence_min_similarity: self.cfg.judge.evidence_min_similarity,
+                            }),
+                            raw_answers: Vec::new(),
+                        },
+                    ) {
+                        Ok((path, text)) => {
+                            artifact_note = Some(format!(
+                                "не записан: контур MCP только для чтения — сохраните \
+                                 artifact_json в {}",
+                                path.display()
+                            ));
+                            artifact_path_out = Some(path.display().to_string());
+                            artifact_json_out = Some(text);
+                        }
+                        Err(e) => {
+                            artifact_note = Some(format!("не записан: {e}"));
+                        }
+                    }
                 }
             }
         }
@@ -1776,6 +1855,9 @@ impl McpServe {
             "author_model": choice.author,
             "author_source": choice.source,
             "artifact": artifact_note,
+            "artifact_saved": artifact_json_out.is_none(),
+            "artifact_json": artifact_json_out,
+            "artifact_path": artifact_path_out,
             "provenance": provenance_out,
             "judge_samples": report.judge_samples,
             "weighted_total": report.weighted_total,
@@ -1800,6 +1882,15 @@ impl McpServe {
                 "{dropped} из {total} ответов не разобраны как JSON судьи и отброшены; \
                  отчёт построен по {} валидным",
                 runs.len()
+            ));
+        }
+        // Первая строка сводки — про потерянный отчёт (J7): причина, по которой
+        // гейт не увидит оценку, не должна прятаться в поле `artifact`.
+        if let Some(path) = &artifact_path_out {
+            out["summary"] = json!(format!(
+                "Отчёт НЕ сохранён: гейт его не увидит. Переподключите хост с `--rw=reports` \
+                 или сохраните `artifact_json` в {path}. {}",
+                out["summary"].as_str().unwrap_or_default()
             ));
         }
         Ok(out)
@@ -2757,6 +2848,45 @@ pub async fn serve(cfg: Arc<Config>) -> Result<()> {
 pub async fn serve_with_mode(cfg: Arc<Config>, mode: ServeMode) -> Result<()> {
     let server = McpServe::with_mode(cfg, mode);
     run_loop(&server, tokio::io::stdin(), tokio::io::stdout()).await
+}
+
+#[cfg(test)]
+mod serve_mode_tests {
+    use super::*;
+
+    /// Разбор `--rw`: отсутствие флага — строго read-only. Спутать «нет флага»
+    /// с «флаг без значения» значило бы открывать запись там, где её не просили
+    /// (J7, ADR-048).
+    #[test]
+    fn rw_flag_parsing_keeps_default_read_only() {
+        assert_eq!(
+            ServeMode::parse_rw(None).expect("None"),
+            ServeMode::ReadOnly
+        );
+        assert_eq!(
+            ServeMode::parse_rw(Some("full")).expect("full"),
+            ServeMode::ReadWrite
+        );
+        assert_eq!(
+            ServeMode::parse_rw(Some("")).expect("пустое значение"),
+            ServeMode::ReadWrite
+        );
+        assert_eq!(
+            ServeMode::parse_rw(Some("reports")).expect("reports"),
+            ServeMode::Reports
+        );
+        assert!(
+            ServeMode::parse_rw(Some("всё")).is_err(),
+            "чужое значение — ошибка"
+        );
+        // Режимы записи и их подписи для `doctor --host`.
+        assert!(!ServeMode::ReadOnly.allows_write());
+        assert!(ServeMode::Reports.allows_write() && ServeMode::Reports.reports_only());
+        assert!(ServeMode::ReadWrite.allows_write() && !ServeMode::ReadWrite.reports_only());
+        assert_eq!(ServeMode::ReadOnly.label(), "read-only");
+        assert_eq!(ServeMode::Reports.label(), "rw=reports");
+        assert_eq!(ServeMode::ReadWrite.label(), "rw");
+    }
 }
 
 #[cfg(test)]
