@@ -3986,7 +3986,11 @@ fn cmd_nfr(cmd: NfrCmd) -> Result<()> {
 
 /// `arch-be skills`: библиотека скиллов.
 fn cmd_skills(cfg: &Config, cmd: SkillsCmd) -> Result<()> {
-    let plugins = arch_harness::plugin::discover(&cfg.plugins.dirs);
+    // T-09: индекс — настроенные плагины ПЛЮС скиллы, разложенные в проекте
+    // (`connect`); без второго поиск пуст в свежем проекте.
+    let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let dirs = arch_harness::plugin::skill_search_dirs(&cfg.plugins.dirs, &root);
+    let plugins = arch_harness::plugin::discover(&dirs);
     match cmd {
         SkillsCmd::List => {
             let total: usize = plugins.iter().map(|p| p.skills.len()).sum();
@@ -4006,8 +4010,12 @@ fn cmd_skills(cfg: &Config, cmd: SkillsCmd) -> Result<()> {
             let hits = arch_harness::plugin::search(&plugins, &query, limit);
             if hits.is_empty() {
                 println!(
-                    "Ничего не найдено (скиллов в индексе: {}).",
-                    plugins.iter().map(|p| p.skills.len()).sum::<usize>()
+                    "{}.",
+                    arch_harness::plugin::empty_index_answer(
+                        &query,
+                        plugins.iter().map(|p| p.skills.len()).sum::<usize>(),
+                        &dirs
+                    )
                 );
             }
             for h in &hits {
@@ -4236,8 +4244,12 @@ fn cmd_delta(cmd: DeltaCmd) -> Result<()> {
             }
         }
         DeltaCmd::Archive { name, repo } => {
-            let path = arch_harness::delta::archive(&repo.unwrap_or_else(cwd), &name)?;
+            let root = repo.unwrap_or_else(cwd);
+            let path = arch_harness::delta::archive(&root, &name)?;
             println!("Дельта заархивирована: {}", path.display());
+            if let Some(hint) = arch_harness::delta::archive_order_hint(&root) {
+                println!("  → {hint}");
+            }
         }
         DeltaCmd::Guard {
             repo,

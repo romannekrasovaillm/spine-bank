@@ -1738,14 +1738,17 @@ impl McpServe {
             .limit
             .unwrap_or(SKILL_SEARCH_DEFAULT_LIMIT)
             .min(KNOWLEDGE_MAX_HITS);
-        let dirs = self.cfg.plugins.dirs.clone();
+        // T-09: скиллы, разложенные в проекте (`connect`), — часть индекса,
+        // иначе поиск пуст до `arch-be init`, хотя скиллы на диске есть.
+        let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let dirs = plugin::skill_search_dirs(&self.cfg.plugins.dirs, &root);
         let query = args.query;
         blocking("skill_search", move || -> Result<Value> {
             let plugins = plugin::discover(&dirs);
             let total: usize = plugins.iter().map(|p| p.skills.len()).sum();
             let hits = plugin::search(&plugins, &query, limit);
             let summary = if hits.is_empty() {
-                format!("по запросу '{query}' ничего не найдено (скиллов в индексе: {total})")
+                plugin::empty_index_answer(&query, total, &dirs)
             } else {
                 format!("по запросу '{query}' найдено скиллов: {}", hits.len())
             };
@@ -1775,7 +1778,8 @@ impl McpServe {
             name: String,
         }
         let args: Args = parse_args(args, "skill_load")?;
-        let dirs = self.cfg.plugins.dirs.clone();
+        let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let dirs = plugin::skill_search_dirs(&self.cfg.plugins.dirs, &root);
         let name = args.name;
         blocking("skill_load", move || -> Result<Value> {
             let plugins = plugin::discover(&dirs);

@@ -2329,6 +2329,48 @@ fn redteam_control_survives_delta_archival() {
     );
 }
 
+/// T-09: скиллы, разложенные `connect`, находятся поиском и БЕЗ `arch-be init`.
+///
+/// Библиотека `~/.arch-harness/plugins` появляется только после `init`, поэтому
+/// на проекте сразу после `connect` поиск отвечал «скиллов в индексе: 0», хотя
+/// 63 скилла лежали в `.claude/skills`. Приёмка задачи: `connect` без `init` →
+/// поиск «review» возвращает `adversarial-review`.
+#[test]
+fn connected_skills_are_searchable_without_init() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let home = tmp.path();
+    let proj = home.join("proj");
+    std::fs::create_dir_all(&proj).expect("mkdir proj");
+    arch_cmd(home)
+        .arg("connect")
+        .arg("claude")
+        .arg("--dir")
+        .arg(proj.as_os_str())
+        .assert()
+        .success();
+    assert!(
+        proj.join(".claude/skills/adversarial-review/SKILL.md")
+            .is_file(),
+        "скилл разложен в проект"
+    );
+    // Индекс пуст только пока скиллов нет вовсе: здесь они есть на диске.
+    let mut cmd = arch_cmd(home);
+    cmd.current_dir(&proj).args(["skills", "search", "review"]);
+    cmd.assert()
+        .success()
+        .stdout(contains("adversarial-review"))
+        .stdout(predicates::str::contains("скиллов в индексе: 0").not());
+    // Пустой индекс — не молчаливый ноль, а причина и адрес библиотеки.
+    let empty = home.join("пусто");
+    std::fs::create_dir_all(&empty).expect("mkdir пусто");
+    let mut cmd = arch_cmd(home);
+    cmd.current_dir(&empty).args(["skills", "search", "saga"]);
+    cmd.assert()
+        .success()
+        .stdout(contains("индекс пуст"))
+        .stdout(contains("arch-be init"));
+}
+
 /// W3: `bootstrap` создаёт каркас и называет следующий шаг; `--status` на
 /// существующем кейсе показывает прогресс. Проверяется сквозь процесс —
 /// проводник, который работает только в модульных тестах, архитектору не

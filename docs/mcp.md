@@ -163,7 +163,7 @@ false`; `evidence_pack`/`delta_propose` политика R-уровней кла
 | Инструмент | Аргументы | Возвращает |
 |---|---|---|
 | `kb_search` | `query`, `limit?` | хиты по базе знаний архитектора (`knowledge.dirs` конфига arch-be): `path`, `line`, `score`, `snippet` с контекстом (максимум 20, по умолчанию 10) |
-| `skill_search` | `query`, `limit?` | скиллы из библиотеки плагинов arch-be (`plugins.dirs`): `name`, `plugin`, `score`, `description`, `snippet` (максимум 20, по умолчанию 8) |
+| `skill_search` | `query`, `limit?` | скиллы из библиотеки плагинов arch-be (`plugins.dirs`) и каталогов подключённых харнессов (`.claude/skills` и др., куда их кладёт `connect`): `name`, `plugin`, `score`, `description`, `snippet` (максимум 20, по умолчанию 8) |
 | `skill_load` | `name` | полный текст скилла по точному имени (после `skill_search`); неизвестное имя — `isError` |
 | `mermaid_render` | `code` \| `path` | mermaid-диаграмма (flowchart, sequenceDiagram, erDiagram, C4) в ASCII-арт; `path` — `.mmd`-файл относительно cwd сервера |
 

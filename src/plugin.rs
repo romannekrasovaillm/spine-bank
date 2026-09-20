@@ -130,6 +130,53 @@ pub fn discover(dirs: &[PathBuf]) -> Vec<Plugin> {
     plugins
 }
 
+/// Каталоги харнессов-хостов, которым `arch-be connect <харнесс>` раскладывает
+/// интеграцию: скиллы лежат в `<каталог>/skills/<имя>/SKILL.md` — плоской
+/// раскладкой, без манифеста плагина (в отличие от библиотеки
+/// `plugins/<имя>/skills/…`). Сканируется каталог ХОСТА: [`discover`] обходит
+/// прямых потомков и находит `<каталог>/skills` как плагин-коллекцию.
+pub const HOST_DIRS: [&str; 4] = [".claude", ".qwen", ".gigacode", ".kimi-code"];
+
+/// Каталоги харнессов, подключённых в проект (`connect`). Индекс без них пуст
+/// в свежем проекте, хотя скиллы на диске есть (T-09: библиотека
+/// `~/.arch-harness/plugins` появляется только после `arch-be init`).
+#[must_use]
+pub fn installed_skill_dirs(root: &Path) -> Vec<PathBuf> {
+    HOST_DIRS
+        .iter()
+        .map(|d| root.join(d))
+        .filter(|p| p.is_dir())
+        .collect()
+}
+
+/// Каталоги поиска скиллов: настроенные плагины + установленные в проект, без
+/// дублей (настроенный каталог главнее: он идёт первым и выигрывает дедуп по
+/// имени скилла в [`discover`]).
+#[must_use]
+pub fn skill_search_dirs(configured: &[PathBuf], root: &Path) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = configured.to_vec();
+    for dir in installed_skill_dirs(root) {
+        if !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    }
+    dirs
+}
+
+/// Имя синтетического плагина для каталога хоста: `.claude/skills` →
+/// `claude-skills`. Имя видно в результатах поиска, поэтому называет хост, а не
+/// «skills».
+fn host_dir_name(dir: &Path) -> String {
+    let leaf = dir
+        .file_name()
+        .map_or_else(String::new, |n| n.to_string_lossy().to_string());
+    dir.parent()
+        .and_then(|p| p.file_name())
+        .map_or(leaf.clone(), |host| {
+            format!("{}-{leaf}", host.to_string_lossy().trim_start_matches('.'))
+        })
+}
+
 /// Загружает один плагин: манифест из plugin.json или синтез из каталога.
 fn load_plugin(dir: &Path) -> Option<Plugin> {
     let manifest_path = dir.join("plugin.json");
@@ -148,10 +195,17 @@ fn load_plugin(dir: &Path) -> Option<Plugin> {
         || dir.join("agents").is_dir()
         || dir.join("mcp.json").is_file()
         || dir.join(".mcp.json").is_file()
+        || has_flat_skills(dir)
     {
         // Плагин без манифеста: имя синтезируется из каталога. Признак
-        // плагина — любой носитель: skills/, hooks/hooks.json, agents/, mcp.json.
-        let name = dir.file_name()?.to_string_lossy().to_string();
+        // плагина — любой носитель: skills/, hooks/hooks.json, agents/,
+        // mcp.json, а с T-09 — и каталог хоста со скиллами по подкаталогам
+        // (`.claude/skills/<имя>/SKILL.md`, как их кладёт `connect`).
+        let name = if has_flat_skills(dir) && !dir.join("skills").is_dir() {
+            host_dir_name(dir)
+        } else {
+            dir.file_name()?.to_string_lossy().to_string()
+        };
         PluginManifest {
             name,
             version: "0.0.0".into(),
@@ -160,7 +214,11 @@ fn load_plugin(dir: &Path) -> Option<Plugin> {
     } else {
         return None;
     };
-    let skills_dir = dir.join("skills");
+    let skills_dir = if dir.join("skills").is_dir() {
+        dir.join("skills")
+    } else {
+        dir.to_path_buf()
+    };
     let mut skills = Vec::new();
     if let Ok(rd) = std::fs::read_dir(&skills_dir) {
         let mut entries: Vec<PathBuf> = rd
@@ -189,6 +247,15 @@ fn load_plugin(dir: &Path) -> Option<Plugin> {
         manifest,
         skills,
     })
+}
+
+/// Есть ли в каталоге скиллы «плоской» раскладкой: `<dir>/<имя>/SKILL.md`
+/// (так их кладёт `connect claude|qwen|gigacode|kimi-code`).
+fn has_flat_skills(dir: &Path) -> bool {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    rd.flatten().any(|e| e.path().join("SKILL.md").is_file())
 }
 
 /// Парсит YAML-frontmatter SKILL.md: `---\nname: …\ndescription: …\n---`.
@@ -525,7 +592,7 @@ impl Tool for SkillSearchTool {
     async fn call(
         &self,
         args: serde_json::Value,
-        _ctx: &crate::tool::ToolContext,
+        ctx: &crate::tool::ToolContext,
     ) -> Result<crate::tool::ToolOutput> {
         let query = args
             .get("query")
@@ -536,12 +603,16 @@ impl Tool for SkillSearchTool {
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(8)
             .min(20) as usize;
-        let plugins = discover_dirs(&self.dirs);
+        // T-09: индекс — не только `plugins.dirs` из конфига, но и скиллы,
+        // разложенные харнессом в проекте (`connect`): без этого поиск пуст в
+        // свежем проекте, хотя скиллы на диске есть.
+        let dirs = skill_search_dirs(&self.dirs, &ctx.cwd);
+        let plugins = discover_dirs(&dirs);
+        let total: usize = plugins.iter().map(|p| p.skills.len()).sum();
         let hits = search(&plugins, query, limit);
         if hits.is_empty() {
-            return Ok(crate::tool::ToolOutput::ok(format!(
-                "по запросу '{query}' ничего не найдено (скиллов в индексе: {})",
-                plugins.iter().map(|p| p.skills.len()).sum::<usize>()
+            return Ok(crate::tool::ToolOutput::ok(empty_index_answer(
+                query, total, &dirs,
             )));
         }
         let mut out = String::new();
@@ -562,6 +633,27 @@ impl Tool for SkillSearchTool {
         out.push_str("\nПолный текст: skill_load(name).");
         Ok(crate::tool::ToolOutput::ok(out).truncated(12_000))
     }
+}
+
+/// Ответ на пустой индекс: не молчаливый ноль, а причина и что делать (T-09).
+///
+/// «Ничего не найдено (скиллов в индексе: 0)» читается как «такого скилла нет»,
+/// хотя библиотека могла быть просто не поставлена: скиллы `connect` лежат в
+/// проекте, библиотека — в доме харнесса, и обе точки входа называются честно.
+#[must_use]
+pub fn empty_index_answer(query: &str, total: usize, dirs: &[PathBuf]) -> String {
+    if total > 0 {
+        return format!("по запросу '{query}' ничего не найдено (скиллов в индексе: {total})");
+    }
+    let looked: Vec<String> = dirs.iter().map(|d| d.display().to_string()).collect();
+    format!(
+        "по запросу '{query}' ничего не найдено: индекс пуст (каталогов просмотрено: {}). \
+         Библиотека ставится `arch-be init`, скиллы в проект раскладывает \
+         `arch-be connect <харнесс>` (`.claude/skills`, `.qwen/skills`, `.gigacode/skills`, \
+         `.kimi-code/skills`); свои каталоги — `plugins.dirs` в config.toml. Просмотрены: {}",
+        looked.len(),
+        looked.join(", ")
+    )
 }
 
 /// Инструмент `skill_load`: полный текст скилла.
@@ -590,13 +682,14 @@ impl Tool for SkillLoadTool {
     async fn call(
         &self,
         args: serde_json::Value,
-        _ctx: &crate::tool::ToolContext,
+        ctx: &crate::tool::ToolContext,
     ) -> Result<crate::tool::ToolOutput> {
         let name = args
             .get("name")
             .and_then(|q| q.as_str())
             .ok_or_else(|| HarnessError::Tool("skill_load: нет аргумента name".into()))?;
-        let plugins = discover_dirs(&self.dirs);
+        let dirs = skill_search_dirs(&self.dirs, &ctx.cwd);
+        let plugins = discover_dirs(&dirs);
         let Some(meta) = skill_by_name(&plugins, name) else {
             return Ok(crate::tool::ToolOutput::err(format!(
                 "скилл '{name}' не найден; сначала skill_search"
@@ -713,6 +806,47 @@ mod tests {
         assert_eq!(a.skills[0].name, "adr-authoring");
         assert_eq!(a.skills[0].plugin, "plug-a");
         assert_eq!(plugins[1].manifest.version, "0.0.0", "синтез манифеста");
+    }
+
+    /// T-09: скиллы, разложенные `connect` в проекте, ищутся без `arch-be init`
+    /// — библиотека `~/.arch-harness/plugins` появляется только после init, и до
+    /// неё индекс был пуст, хотя `.claude/skills` уже полон.
+    #[test]
+    fn installed_skills_are_indexed_without_init() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let project = tmp.path().join("proj");
+        put(
+            &project,
+            ".claude/skills/adversarial-review/SKILL.md",
+            "---\nname: adversarial-review\ndescription: Состязательное ревью архитектуры\n---\n\n# Ревью\n\nИщи, что сломается.\n",
+        );
+        put(
+            &project,
+            ".claude/skills/adr-authoring/SKILL.md",
+            "---\nname: adr-authoring\ndescription: Дисциплина ADR до реализации\n---\n\n# ADR\n",
+        );
+        // Конфиг без библиотеки: как в проекте сразу после `connect`.
+        let dirs = skill_search_dirs(&[], &project);
+        assert_eq!(dirs, vec![project.join(".claude")], "каталоги хоста");
+        let plugins = discover(&dirs);
+        let hits = search(&plugins, "review", 8);
+        assert_eq!(
+            hits.first().map(|h| h.meta.name.as_str()),
+            Some("adversarial-review"),
+            "поиск обязан находить установленный скилл: {hits:?}"
+        );
+        assert_eq!(
+            hits[0].meta.plugin, "claude-skills",
+            "имя синтетического плагина"
+        );
+        // Скилл загружается по имени — путь ведёт в каталог хоста, а не в библиотеку.
+        assert!(skill_by_name(&plugins, "adr-authoring").is_some());
+        // Пустой индекс — не молчаливый ноль: причина и что делать.
+        let answer = empty_index_answer("review", 0, &dirs);
+        assert!(answer.contains("arch-be init"), "{answer}");
+        assert!(answer.contains("connect"), "{answer}");
+        let with_hits = empty_index_answer("review", 3, &dirs);
+        assert!(with_hits.contains("в индексе: 3"), "{with_hits}");
     }
 
     #[test]
