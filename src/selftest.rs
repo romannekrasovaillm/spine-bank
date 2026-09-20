@@ -345,5 +345,87 @@ pub fn run() -> SelftestReport {
         _ => record("attestation_sensitivity", false, "сбой прогона".into()),
     }
 
+    // 8. T-01 (0.3.4): хук не должен угадывать, ГДЕ лежит реестр правил.
+    //    Шаблон с гардой `[ -f .arch-handoff/CONSTRAINTS.yaml ]` молчал на
+    //    кейсе, собранном `bootstrap` (реестр в корне), — гейт не вызывался
+    //    вовсе. Свойство проверяется на СГЕНЕРИРОВАННОМ хуке: контур,
+    //    который в 0.3.5 починили в шаблоне, обязан остаться починенным.
+    let hooks_dir = fx.path().join("hooks-case");
+    let _ = std::fs::create_dir_all(&hooks_dir);
+    let connect_opts = crate::connect::ConnectOptions::new(crate::connect::Host::Claude, hooks_dir.clone());
+    match crate::connect::connect(&connect_opts) {
+        Ok(_) => {
+            let settings = std::fs::read_to_string(hooks_dir.join(".claude/settings.json"))
+                .unwrap_or_default();
+            let guarded = settings.contains("[ -f .arch-handoff/CONSTRAINTS.yaml ]")
+                || settings.contains("[ -f CONSTRAINTS.yaml ]");
+            let calls_gate = settings.contains("gate");
+            record(
+                "hook_does_not_guess_registry_location",
+                !guarded && calls_gate,
+                format!(
+                    "хук: гарда по расположению реестра {}, вызов гейта {}",
+                    if guarded { "есть" } else { "нет" },
+                    if calls_gate { "есть" } else { "НЕТ" }
+                ),
+            );
+        }
+        Err(e) => record(
+            "hook_does_not_guess_registry_location",
+            false,
+            format!("connect не отработал: {e}"),
+        ),
+    }
+
+    // 9. T-02 (0.3.4): две копии реестра не переключают гейт молча. Копии
+    //    расходятся — это находка error, а не пометка в тексте PASS-строки.
+    let two = fx.path().join("two-registries");
+    let _ = std::fs::create_dir_all(two.join(".arch-handoff"));
+    let rule = |name: &str| {
+        format!("rules:\n  - name: {name}\n    type: file_exists\n    path: \"docs/ARCHITECTURE-SPINE.md\"\n    severity: error\n")
+    };
+    let _ = std::fs::write(two.join("CONSTRAINTS.yaml"), rule("root_rule"));
+    let _ = std::fs::write(
+        two.join(".arch-handoff/CONSTRAINTS.yaml"),
+        format!("{}{}", rule("pack_rule"), rule("pack_rule_two")),
+    );
+    match gate::run(&two, None, None, None, limits) {
+        Ok(r) => {
+            let diverged = r.components.iter().any(|c| {
+                c.findings
+                    .iter()
+                    .any(|f| f.rule.as_deref() == Some("registry_diverged"))
+            });
+            record(
+                "divergent_registries_are_a_finding",
+                diverged && r.outcome != GateOutcome::Pass,
+                format!(
+                    "две копии реестра: итог {}, находка registry_diverged {}",
+                    r.outcome.label(),
+                    if diverged { "есть" } else { "НЕТ" }
+                ),
+            );
+        }
+        Err(e) => record(
+            "divergent_registries_are_a_finding",
+            false,
+            format!("сбой: {e}"),
+        ),
+    }
+
+    // 10. T-03 (0.3.4): база диффа нормализуется один раз. Шаблоны передавали
+    //     `A...HEAD`, гейт дописывал `...HEAD` второй раз — диапазон не
+    //     вычислялся, и вердикт уходил в fail-safe Critical молча.
+    let plain = crate::control::normalize_base_range("origin/main");
+    let ranged = crate::control::normalize_base_range("origin/main...HEAD");
+    let twice = crate::control::normalize_base_range(&ranged);
+    record(
+        "base_range_is_normalized_once",
+        plain == "origin/main...HEAD" && ranged == plain && twice == plain,
+        format!(
+            "'origin/main' → {plain}; 'origin/main...HEAD' → {ranged}; повтор → {twice}"
+        ),
+    );
+
     SelftestReport { invariants }
 }
