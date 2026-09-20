@@ -118,14 +118,26 @@ fitness functions, handoff-пакеты кодовым агентам.
 независимости судьи («заявлена» или «обеспечена запуском»), хэши сырых ответов
 и находки на правку балла руками; передача судейства во второй харнесс
 (`rubric handover` / `rubric accept`) и узкая запись `--rw=reports`.
-**Что нового в 0.3.5**: инвариант становится исполняемой проверкой
-(`arch-be rules template` — библиотека шаблонов на python и Java, `verify`
-доказывает зубы правила) и появляется смысловой слой рубрик. **Что нового в 0.3.4**: паспорт вердикта (`arch-be gate
---explain` — страница «чего зелёный НЕ означает»), проводник нового кейса
-(`arch-be bootstrap`), метрика доверия к контуру (`arch-be trust`), мутационное
-измерение пакета (`arch-be redteam`), семантика артефактов Evidence Bundle
-(заглушка — находка, а не «файл на месте»). Полный список и раздел «Что может
-покраснеть после обновления» — [CHANGELOG.md](CHANGELOG.md).
+**Что нового в 0.3.5**: релиз про контур, который нельзя выключить случайно —
+убраны стыки, на которых контроль отключался молча. Реестр правил один, а его
+расхождение с копией пакета — находка `registry_diverged`; хук не молчит, когда
+пропускает гейт из-за отсутствия реестра; незнакомое имя триггера значимости —
+ошибка вызова, а не молчаливое занижение маршрута; база диффа разбирается в
+одной форме (`A`, `A..B`, `A...B`); `contract_diff` видит тело ответа и
+обязательность тела запроса (`CD-009`, `CD-010`) и резолвит параметры за `$ref`;
+заготовка репетиции отката честно объявляет себя заготовкой, а цитата судьи
+рубрики сверяется в каждом сэмпле; библиотека шаблонов исполняемых правил
+(`arch-be rules template`) переводит инвариант спайна в падающий на нарушении
+тест (ADR-050), а смысловые рубрики судят досье целиком (ADR-051, ADR-052).
+Полный список и раздел «Что может покраснеть после обновления» —
+[CHANGELOG.md](CHANGELOG.md).
+
+**Что нового в 0.3.4**: паспорт вердикта (`arch-be gate --explain` — страница
+«чего зелёный НЕ означает»), проводник нового кейса (`arch-be bootstrap`),
+метрика доверия к контуру (`arch-be trust`), мутационное измерение пакета
+(`arch-be redteam`), семантика артефактов Evidence Bundle (заглушка — находка,
+а не «файл на месте»). Полный список и раздел «Что может покраснеть после
+обновления» — [CHANGELOG.md](CHANGELOG.md).
 
 Идеи — разбор SDD-харнессов и корпоративных агентных фреймворков
 (`docs/SOURCE_BRIEF.md`, август 2026: AI-Disrupt PDLC, AWS AI-DLC/Kiro,
@@ -757,15 +769,27 @@ invariants, rubrics, fitness functions, handoff packages for coding agents.
 level ("declared" or "ensured by launch"), hashes of the judge's raw answers and
 findings for a hand-edited score; plus `rubric handover` / `rubric accept` for
 handing judging to a second harness and the narrow `--rw=reports` write mode.
-**New in 0.3.5**: an invariant becomes an executable check (`arch-be rules
-template` — a template library for python and Java whose `verify` proves the
-rule has teeth), and a semantic layer of rubrics. **New in 0.3.4**: the verdict passport (`arch-be gate
---explain` — a page stating what a green does NOT mean), a case conductor
-(`arch-be bootstrap`), a trust metric with anchors and evidence (`arch-be
-trust`), mutation testing of the package itself (`arch-be redteam`), and
-artifact semantics for the evidence bundle (a stub is a finding, not "the file
-is there"). See [CHANGELOG.md](CHANGELOG.md) for the full list and the "what may
-turn red" section.
+**New in 0.3.5**: the release about a control loop that cannot be switched off
+silently. There is one rules registry, and a package copy that diverges from it
+is a finding (`registry_diverged`); the stop/pre-commit/pre-push hooks say out
+loud when they skip the gate for want of a registry; an unknown significance
+trigger name is a call error instead of a silent route downgrade; the diff base
+is parsed in one place (`A`, `A..B`, `A...B`); `contract_diff` sees response
+bodies and a request body that became required (`CD-009`, `CD-010`) and resolves
+`$ref` parameters; the rollback rehearsal stub declares itself a stub, and the
+rubric judge's quote is verified in every sample; the executable-rule template
+library (`arch-be rules template`) turns a spine invariant into a test that fails
+on a violating implementation (ADR-050), and semantic rubrics judge a whole
+evidence dossier (ADR-051, ADR-052). See [CHANGELOG.md](CHANGELOG.md) for the
+full list and the "what may turn red" section.
+
+**New in 0.3.4**: the verdict passport (`arch-be gate --explain` — a page
+stating what a green does NOT mean), a case conductor (`arch-be bootstrap`), a
+trust metric with anchors and evidence (`arch-be trust`), mutation testing of
+the package itself (`arch-be redteam`), and artifact semantics for the evidence
+bundle (a stub is a finding, not "the file is there"). See
+[CHANGELOG.md](CHANGELOG.md) for the full list and the "what may turn red"
+section.
 One binary, `arch-be`: TUI, CLI, and library.
 
 The harness is deliberately **thin**: core tools (bash, files) plus a small
