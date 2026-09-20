@@ -1010,6 +1010,293 @@ mod tests {
 }
 
 #[cfg(test)]
+mod tests_executable_invariant_per_ad {
+    //! Детектор «инвариант → исполняемое правило» (E4, ADR-050).
+
+    use super::*;
+
+    /// Кейс: спайн с инвариантами, модель и реестр правил.
+    /// `ads` — (id, заголовок, дополнительные строки frontmatter).
+    fn case_with(root: &Path, ads: &[(&str, &str, &str)], registry: &str) -> PathBuf {
+        let case = root.join("case");
+        std::fs::create_dir_all(case.join("model")).expect("model");
+        let mut spine = String::from("# Спайн\n\n");
+        for (id, title, extra) in ads {
+            let num = id.trim_start_matches("AD-").trim_start_matches('0');
+            std::fs::write(
+                case.join("model").join(format!("{id}.md")),
+                format!(
+                    "---\nid: {id}\ntype: ad\ntitle: \"{title}\"\nstatus: \"ADOPTED\"\n{extra}\n\
+                     ---\n\n- **Binds**: Приём\n- **Prevents**: потерю\n- **Rule**: правило\n"
+                ),
+            )
+            .expect("сущность");
+            spine.push_str(&format!(
+                "## AD-{num}. {title}\n\n- **Binds**: Приём\n- **Prevents**: потерю\n\
+                 - **Rule**: правило\n\n"
+            ));
+        }
+        std::fs::write(case.join("ARCHITECTURE-SPINE.md"), spine).expect("спайн");
+        std::fs::write(case.join("CONSTRAINTS.yaml"), registry).expect("реестр");
+        case
+    }
+
+    /// Реестр: одно правило на упоминание (`must_contain`).
+    const TEXT_ONLY: &str = "rules:\n  - id: C-002\n    name: word_in_doc\n    type: must_contain\n    \
+         glob: 'docs/**/*.md'\n    pattern: 'ключ'\n    severity: error\n";
+    /// Реестр: то же плюс исполняемое правило для второго инварианта.
+    const WITH_BEHAVIOUR: &str = "rules:\n  - id: C-002\n    name: word_in_doc\n    type: must_contain\n    \
+         glob: 'docs/**/*.md'\n    pattern: 'ключ'\n    severity: error\n  \
+         - id: C-003\n    name: behaviour\n    type: command_succeeds\n    command: 'true'\n    \
+         severity: error\n    ad: AD-002\n";
+
+    /// Id кандидатов отчёта (хелпер сообщений).
+    fn ids(report: &SuggestReport) -> Vec<&str> {
+        report.candidates.iter().map(|c| c.id.as_str()).collect()
+    }
+
+    /// Кандидаты по инвариантам (без легаси-кандидата про кейс в целом).
+    fn per_ad(report: &SuggestReport) -> Vec<&Candidate> {
+        report
+            .candidates
+            .iter()
+            .filter(|c| c.ad.is_some())
+            .collect()
+    }
+
+    /// Все правила текстовые — на каждый инвариант по кандидату с шаблоном и
+    /// незакомментированным фрагментом правила.
+    #[test]
+    fn suggests_per_ad_when_all_rules_textual() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let case = case_with(
+            tmp.path(),
+            &[
+                ("AD-001", "Идемпотентность по ключу: повторная доставка", "verified_by: [C-002]"),
+                ("AD-002", "Журнал только на дозапись", "verified_by: [C-002]"),
+            ],
+            TEXT_ONLY,
+        );
+        let report = suggest(&case).expect("suggest");
+        let ads = per_ad(&report);
+        assert_eq!(ads.len(), 2, "{:?}", ids(&report));
+        assert_eq!(ads[0].id, "executable-invariant:AD-001");
+        for c in &ads {
+            assert_eq!(c.ad.as_deref(), Some(c.id.trim_start_matches("executable-invariant:")));
+            assert!(!c.templates.is_empty(), "шаблон предложен: {c:?}");
+            assert!(c.templates[0].score > 0, "паттерн распознан: {c:?}");
+            let yaml = c.yaml.as_deref().expect("фрагмент правила");
+            assert!(yaml.contains("type: command_succeeds"), "{yaml}");
+            assert!(
+                !yaml.trim_start().starts_with('#'),
+                "фрагмент обязан быть незакомментированным: {yaml}"
+            );
+            assert!(yaml.contains(&format!("ad: {}", c.ad.as_deref().unwrap())), "{yaml}");
+            // Свободный id — из реестра кейса: занятый C-002 не переиспользуем,
+            // ниже сотни не занимаем (запас на библиотеку корпоративных правил).
+            assert!(yaml.contains("id: C-100"), "{yaml}");
+            assert!(!yaml.contains("id: C-002"), "{yaml}");
+        }
+    }
+
+    /// Инвариант, у которого есть правило поведения, — не пробел.
+    #[test]
+    fn silent_for_ad_with_behaviour_rule() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let case = case_with(
+            tmp.path(),
+            &[
+                ("AD-001", "Идемпотентность по ключу", "verified_by: [C-002]"),
+                ("AD-002", "Журнал только на дозапись", "verified_by: [C-003]"),
+            ],
+            WITH_BEHAVIOUR,
+        );
+        let report = suggest(&case).expect("suggest");
+        let ads: Vec<&str> = per_ad(&report)
+            .iter()
+            .map(|c| c.ad.as_deref().unwrap())
+            .collect();
+        assert_eq!(ads, vec!["AD-001"], "{:?}", ids(&report));
+    }
+
+    /// Обоснованный отказ от проверки (`unverifiable`) — решение архитектора,
+    /// а не пробел: детектор по такому инварианту молчит.
+    #[test]
+    fn silent_for_unverifiable_ad() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let case = case_with(
+            tmp.path(),
+            &[(
+                "AD-001",
+                "Идемпотентность по ключу",
+                "verified_by: [C-002]\nunverifiable: \"внешняя система не даёт наблюдаемости\"",
+            )],
+            TEXT_ONLY,
+        );
+        let report = suggest(&case).expect("suggest");
+        assert!(per_ad(&report).is_empty(), "{:?}", ids(&report));
+    }
+
+    /// Подбор по тексту спайна: инвариант про идемпотентность получает
+    /// `idempotency-key`, а не «первый по алфавиту».
+    #[test]
+    fn matches_idempotency_template_by_spine_text() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let case = case_with(
+            tmp.path(),
+            &[(
+                "AD-001",
+                "Выплата идемпотентна по ключу (реестр, строка)",
+                "verified_by: [C-002]",
+            )],
+            TEXT_ONLY,
+        );
+        let report = suggest(&case).expect("suggest");
+        let c = per_ad(&report)[0];
+        assert_eq!(c.templates[0].id, "idempotency-key", "{:?}", c.templates);
+        assert!(c.templates[0].matched.iter().any(|m| m.starts_with("идемпотент")));
+    }
+
+    /// Паттерн не распознан — заготовка и честная пометка, а не выдуманный
+    /// шаблон; правило в заготовке закомментировано (механики за ним нет).
+    #[test]
+    fn unknown_pattern_gets_generic_template() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let case = case_with(
+            tmp.path(),
+            &[(
+                "AD-001",
+                "Космический лифт: расписание запусков",
+                "verified_by: [C-002]",
+            )],
+            TEXT_ONLY,
+        );
+        let report = suggest(&case).expect("suggest");
+        let c = per_ad(&report)[0];
+        assert_eq!(
+            c.templates[0].id,
+            crate::rule_templates::GENERIC_TEMPLATE_ID,
+            "{:?}",
+            c.templates
+        );
+        assert_eq!(c.templates[0].score, 0);
+        assert!(c.rationale.contains("паттерн не распознан"), "{}", c.rationale);
+        let yaml = c.yaml.as_deref().expect("фрагмент");
+        assert!(
+            yaml.contains("# Заготовка") && yaml.contains("#   - id:"),
+            "фрагмент заготовки обязан быть закомментирован: {yaml}"
+        );
+    }
+
+    /// Несущие инварианты идут первыми (ADR-050), затем — по id.
+    #[test]
+    fn load_bearing_ads_come_first() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let case = case_with(
+            tmp.path(),
+            &[
+                ("AD-001", "Идемпотентность по ключу", "verified_by: [C-002]"),
+                (
+                    "AD-002",
+                    "Журнал только на дозапись",
+                    "load_bearing: true\nverified_by: [C-002]",
+                ),
+            ],
+            TEXT_ONLY,
+        );
+        let report = suggest(&case).expect("suggest");
+        let ads = per_ad(&report);
+        assert_eq!(ads[0].ad.as_deref(), Some("AD-002"), "несущий — первым");
+        assert!(ads[0].rationale.contains("несущий"), "{}", ads[0].rationale);
+    }
+
+    /// Нет каталога `model/` — детектор молчит (инвариантов не видно).
+    #[test]
+    fn silent_without_model_dir() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let case = tmp.path().join("no-model");
+        std::fs::create_dir_all(&case).expect("кейс");
+        std::fs::write(case.join("CONSTRAINTS.yaml"), TEXT_ONLY).expect("реестр");
+        let report = suggest(&case).expect("suggest");
+        assert!(per_ad(&report).is_empty());
+    }
+
+    /// Легаси-кандидат `executable-invariants` живёт на прежних условиях:
+    /// он про кейс в целом и привязки к инварианту не несёт.
+    #[test]
+    fn legacy_candidate_unchanged() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let case = case_with(
+            tmp.path(),
+            &[("AD-001", "Идемпотентность по ключу", "verified_by: [C-002]")],
+            TEXT_ONLY,
+        );
+        std::fs::create_dir_all(case.join("tests")).expect("tests");
+        let report = suggest(&case).expect("suggest");
+        let legacy = report
+            .candidates
+            .iter()
+            .find(|c| c.id == "executable-invariants")
+            .expect("легаси-кандидат на месте (тесты есть, command_succeeds нет)");
+        assert!(legacy.ad.is_none(), "легаси не привязан к инварианту");
+        assert!(legacy.templates.is_empty(), "и шаблонов не предлагает");
+    }
+
+    /// Снимок на эталонном кейсе: детектор называет КАЖДЫЙ инвариант, а для
+    /// пяти инвариантов `кейсы/salary-payments` ожидаемый шаблон задан
+    /// заданием и сверяется поимённо.
+    #[test]
+    fn salary_payments_snapshot_names_every_ad_with_its_template() {
+        let case = Path::new(env!("CARGO_MANIFEST_DIR")).join("кейсы/salary-payments");
+        let report = suggest(&case).expect("suggest");
+        let mut got: Vec<(String, String)> = per_ad(&report)
+            .iter()
+            .map(|c| {
+                (
+                    c.ad.clone().unwrap_or_default(),
+                    c.templates[0].id.clone(),
+                )
+            })
+            .collect();
+        got.sort();
+        let expect = [
+            ("AD-001", "idempotency-key"),
+            ("AD-002", "append-only-journal"),
+            ("AD-003", "unknown-outcome-no-resend"),
+            ("AD-004", "no-pii-in-logs"),
+            ("AD-005", "validate-before-side-effect"),
+            ("AD-006", "unknown-outcome-no-resend"),
+            ("AD-007", "append-only-journal"),
+        ];
+        assert_eq!(got.len(), expect.len(), "названы все инварианты: {got:?}");
+        for (ad, want) in expect {
+            assert!(
+                got.iter().any(|(a, t)| a == ad && t == want),
+                "{ad} → {want}, получено {got:?}"
+            );
+        }
+    }
+
+    /// Снимок второго эталонного кейса: девять инвариантов, у одного паттерн
+    /// честно не распознан (интеграция через адаптер — не из восьми паттернов).
+    #[test]
+    fn digital_ruble_merchant_snapshot_names_every_ad() {
+        let case = Path::new(env!("CARGO_MANIFEST_DIR")).join("кейсы/digital-ruble-merchant");
+        let report = suggest(&case).expect("suggest");
+        let ads = per_ad(&report);
+        assert_eq!(ads.len(), 9, "девять инвариантов названы: {:?}", ids(&report));
+        let unrecognized = ads
+            .iter()
+            .filter(|c| c.templates[0].id == crate::rule_templates::GENERIC_TEMPLATE_ID)
+            .count();
+        assert_eq!(unrecognized, 1, "ровно один паттерн не распознан");
+        for c in &ads {
+            assert!(c.yaml.is_some(), "{} без фрагмента", c.id);
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests_executable_invariants {
     //! Н10 волны C 0.3.4: кандидат `executable-invariants`.
 

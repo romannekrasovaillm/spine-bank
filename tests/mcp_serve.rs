@@ -227,14 +227,18 @@ fn handshake_then_tools_list_over_stdio() {
         "change_impact",
         "trust_report",
         "verdict_explain",
+        // Библиотека шаблонов исполняемых правил (ADR-050): чтение — в ro,
+        // запись (`rule_template_apply`) — только под `--rw`.
+        "rule_template_list",
+        "rule_template_show",
     ] {
         assert!(names.contains(&want), "нет инструмента {want}: {names:?}");
     }
     assert_eq!(
         tools.len(),
-        36,
-        "ровно 36 инструментов в ro-режиме (16 ручных + 20 read-only моста; \
-         verdict_explain и trust_report — волна W)"
+        38,
+        "ровно 38 инструментов в ro-режиме (16 ручных + 22 read-only моста; \
+         verdict_explain и trust_report — волна W, rule_template_* — ADR-050)"
     );
     // rw-контур и write/exec-принадлежность хоста закрыты в ro-режиме.
     for banned in [
