@@ -137,7 +137,7 @@ arch-be rubric pack adr_vs_spine docs/adr/ADR-042-x.md   # вход судьи: 
 arch-be rubric list                                       # видно и четыре смысловые рубрики
 arch-be bench run --golden --rubric adr_spine_consistency # калибровка по golden-набору
 arch-be redteam кейсы/salary-payments --keep-semantic /tmp/semantic
-arch-be redteam semantic-score /tmp/semantic              # «смысловой слой: поймано k из 3»
+arch-be redteam semantic-score /tmp/semantic              # «смысловой слой: поймано k из n»
 ```
 
 Что важно знать, читая любой зелёный вердикт:
