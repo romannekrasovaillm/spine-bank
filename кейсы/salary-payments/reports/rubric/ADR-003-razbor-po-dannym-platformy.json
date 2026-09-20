@@ -1,0 +1,13 @@
+{
+  "schema": "arch-be/rubric-report/v1",
+  "rubric": "adr_quality",
+  "target": "docs/adr/ADR-003-razbor-po-dannym-platformy.md",
+  "target_sha256": "4dde4a48656a16f6b0a8c15a598a15aa081a680c2c5fa7bc6400ff69ed1b92a0",
+  "judge_model": "deepseek-flash",
+  "author_model": "claude-code-host",
+  "weighted_total": 3.0,
+  "verdict": "Главный риск — слабо проработанные издержки и обратимость: решение названо обратимым только при сохранности снимков окна, но путь отката и последствия задержки закрытия строк не конкретизированы. Контекст и альтернативы проработаны достаточно, но статус-дисциплина без expiry и проверяемой митигации оставляет решение частично неготовым к пересмотру.",
+  "unstable": false,
+  "evidence_not_found": 0,
+  "judged_at": "2026-09-20T09:42:01.864544147+03:00"
+}
