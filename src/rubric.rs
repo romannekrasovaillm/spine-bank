@@ -1280,20 +1280,53 @@ fn coverage_incomplete(
 ///
 /// Для критерия без ролей требование одно и проверяется по всему тексту; для
 /// критерия с ролями — по цитате на роль, каждая только со своего источника.
+/// Метка роли разбирается терпимо (см. ниже), но сама проверка цитаты не
+/// смягчается ни в одном из путей.
 fn quotes_confirmed(
     rationale: &str,
     roles: &[Option<crate::rubric_pack::InputRole>],
     scope: &EvidenceScope<'_>,
     min_similarity: f64,
 ) -> bool {
+    let mut quoted = quoted_spans(rationale);
     roles.iter().all(|role| match role {
         None => evidence_confirmed(rationale, scope.whole(), min_similarity),
-        Some(role) => extract_role_quote(rationale, *role).is_some_and(|q| {
-            scope
-                .role_texts(*role)
-                .iter()
-                .any(|text| verify_quote(&q, text, min_similarity))
-        }),
+        Some(role) => {
+            // Судья обязан пометить цитату ролью, но живые ответы метку
+            // склеивают или переставляют («Цитата reference, subject: "…"»,
+            // «Цитата subject, reference: "…" / "…"» — живой прогон
+            // 2026-09-20). Роль закрывает ПЕРВАЯ цитата, которая
+            // подтверждается её источником; использованная цитата выбывает.
+            // Послабление только в разборе: каждая роль по-прежнему обязана
+            // иметь СВОЮ цитату из СВОЕГО источника, и одна цитата не может
+            // закрыть обе роли.
+            let labelled = extract_role_quote(rationale, *role).filter(|q| {
+                scope
+                    .role_texts(*role)
+                    .iter()
+                    .any(|text| verify_quote(q, text, min_similarity))
+            });
+            if let Some(q) = labelled {
+                // Помеченная цитата тоже выбывает: иначе одна и та же строка
+                // закроет обе роли, если она встречается в обоих источниках.
+                if let Some(n) = quoted.iter().position(|s| *s == q) {
+                    quoted.remove(n);
+                }
+                return true;
+            }
+            let found = quoted.iter().position(|q| {
+                scope
+                    .role_texts(*role)
+                    .iter()
+                    .any(|text| verify_quote(q, text, min_similarity))
+            });
+            if let Some(n) = found {
+                quoted.remove(n);
+                true
+            } else {
+                false
+            }
+        }
     })
 }
 
@@ -1338,6 +1371,33 @@ fn checked_ids(runs: &[JudgeResponse], criterion_id: &str) -> Vec<String> {
                 out.push(id.to_string());
             }
         }
+    }
+    out
+}
+
+/// Все дословные цитаты обоснования в порядке появления.
+///
+/// Нужны как запасной путь, когда судья склеил роли в одну метку: цитаты всё
+/// равно сверяются со своими источниками, поэтому терпимость разбора не
+/// ослабляет правило двух цитат.
+fn quoted_spans(rationale: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cursor = 0usize;
+    while let Some(rel) = rationale
+        .get(cursor..)
+        .and_then(|t| t.find(['«', '"', '\'']))
+    {
+        let open = cursor + rel;
+        let rest = &rationale[open..];
+        let close_ch = rest.chars().next().unwrap_or('"');
+        let close = if close_ch == '«' { '»' } else { close_ch };
+        let after = &rest[close_ch.len_utf8()..];
+        let Some(end) = after.find(close) else { break };
+        let span = after[..end].trim();
+        if span.chars().count() >= MIN_QUOTE_CHARS {
+            out.push(span.to_string());
+        }
+        cursor = open + close_ch.len_utf8() + end + close.len_utf8();
     }
     out
 }
@@ -2855,6 +2915,39 @@ mod tests {
             report.scores[0].flags
         );
 
+        // Живая форма ответа (прогон 2026-09-20): роли склеены в одну метку,
+        // цитаты идут по порядку — каждая сверяется со своим источником.
+        let merged = run_of(
+            "no_contradiction",
+            1,
+            "Цитата subject, reference: \"Решение: контроль слоя построен без LLM в гейте.\" / \
+             \"Rule: механика контроля без LLM.\". противоречие",
+        );
+        let report = build_report(&rubric, "judge-x", &[merged], &scope, &cfg).expect("отчёт");
+        assert!(
+            !report.scores[0].has_flag(CriterionFlag::AccusationUnconfirmed),
+            "склеенная метка не ломает сверку: {:?} — {}",
+            report.scores[0].flags,
+            report.scores[0].rationale
+        );
+
+        // Живая форма ответа (прогон D11, 2026-09-20): склеенная метка ещё и
+        // переставлена — первой идёт цитата СУБЪЕКТА. Роль закрывает первая
+        // цитата, которую подтверждает её источник, а не та, что названа.
+        let reversed = run_of(
+            "no_contradiction",
+            1,
+            "Цитата reference, subject: \"Решение: контроль слоя построен без LLM в гейте.\" / \
+             \"Rule: механика контроля без LLM.\". противоречие",
+        );
+        let report = build_report(&rubric, "judge-x", &[reversed], &scope, &cfg).expect("отчёт");
+        assert!(
+            !report.scores[0].has_flag(CriterionFlag::AccusationUnconfirmed),
+            "переставленная метка не ломает сверку: {:?} — {}",
+            report.scores[0].flags,
+            report.scores[0].rationale
+        );
+
         // Цитата спайна подставлена в роль субъекта — не засчитывается.
         let swapped = run_of(
             "no_contradiction",
@@ -2867,6 +2960,39 @@ mod tests {
         assert!(
             err_text(&report).contains("accusation_unconfirmed"),
             "цитата из чужого источника не закрывает роль: {report}"
+        );
+    }
+
+    /// Одна цитата не закрывает обе роли, даже когда строка встречается в
+    /// обоих источниках: иначе терпимость разбора превратилась бы в «одно
+    /// доказательство на две роли» (S2, живой прогон 2026-09-20).
+    #[test]
+    fn one_quote_cannot_close_both_roles() {
+        let rubric = rubric_of(vec![criterion(
+            "no_contradiction",
+            3.0,
+            EvidenceOn::Low,
+            &["subject", "reference"],
+        )]);
+        let cfg = one_sample();
+        let mut pack = two_source_pack();
+        // Общая строка в обоих источниках — искушение для судьи.
+        let shared = "Решение: контроль слоя построен без LLM в гейте.";
+        pack.text = pack
+            .text
+            .replace("Rule: механика контроля без LLM.", shared);
+        pack.sha256 = crate::hash::sha256_hex(pack.text.as_bytes());
+        let scope = EvidenceScope::Pack(&pack);
+        let one = run_of(
+            "no_contradiction",
+            1,
+            &format!("Цитата subject, reference: \"{shared}\". противоречие"),
+        );
+        let report = build_report(&rubric, "judge-x", &[one], &scope, &cfg)
+            .expect_err("одной цитаты на две роли мало");
+        assert!(
+            err_text(&report).contains("accusation_unconfirmed"),
+            "одна цитата не заменяет две роли: {report}"
         );
     }
 
