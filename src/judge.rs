@@ -619,7 +619,8 @@ fn rebuild(
     if runs.is_empty() {
         return Err("ни один сырой ответ не разобран — пересобрать отчёт не из чего".to_string());
     }
-    crate::rubric::build_report(&rubric, &artifact.judge_model, &runs, &text, cfg)
+    let scope = crate::rubric::EvidenceScope::Target(&text);
+    crate::rubric::build_report(&rubric, &artifact.judge_model, &runs, &scope, cfg)
         .map_err(|e| format!("пересборка отчёта: {e}"))
 }
 

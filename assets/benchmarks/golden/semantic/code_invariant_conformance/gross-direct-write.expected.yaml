@@ -1,0 +1,12 @@
+# Эталонные оценки golden-досье gross-direct-write.md (рубрика code_invariant_conformance).
+# Засеяно грубое нарушение AD-2: оркестратор правит и удаляет строки журнала
+# сырым SQL (`UPDATE payout_journal SET status = 'paid'`, `DELETE FROM
+# payout_journal`) мимо append-API; удаление отказных строк вдобавок снимает
+# защиту от повторной выплаты (AD-1, AD-5). Инвариант назван прямо, нарушение
+# безусловно и доступно в рабочем режиме — низкие баллы по всем трём критериям.
+rubric: code_invariant_conformance
+kind: defective
+scores:
+  no_violation: {min: 1, max: 2}
+  invariant_enforced: {min: 1, max: 2}
+  bypass_paths: {min: 1, max: 2}

@@ -1,0 +1,15 @@
+# Эталонные оценки golden-досье distributed-bypass.md (рубрика code_invariant_conformance).
+# Засеяно распределённое нарушение AD-1: ключ идемпотентности строится в обеих
+# ветках (`row.idempotency_key`) и в `resend_after_review` передаётся в
+# платформу, но в `redeliver_window` в вызове `client.send(amount, ref)` его
+# нет — защита снимается не строкой «забудь ключ», а расхождением двух мест
+# файла (контракт клиента: без ключа поручение считается новым). По отдельности
+# каждая часть выглядит корректной: свойство ключа верное, основной путь
+# ключ передаёт. Проверка соблюдения держится на соглашении вызова, а не на
+# подписи, — отсюда средние, а не минимальные баллы по `invariant_enforced`.
+rubric: code_invariant_conformance
+kind: defective
+scores:
+  no_violation: {min: 1, max: 2}
+  invariant_enforced: {min: 2, max: 3}
+  bypass_paths: {min: 1, max: 2}

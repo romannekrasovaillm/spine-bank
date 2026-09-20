@@ -1,0 +1,14 @@
+# Эталонные оценки golden-досье clean-comment-and-check.md (рубрика code_invariant_conformance).
+# Нарушений не засеяно: досье про то, что соблюдение видно и в коде, и в
+# комментарии. Комментарий здесь не единственная улика — рядом исполняемый
+# перечень `_ALLOWED_JOURNAL`/`_ALLOWED_TAGS`, отказ на запрещённые поля
+# (`_FORBIDDEN_ANYWHERE`), проверка получателя `checks.verify` до `client.send`
+# и ключ идемпотентности в самом вызове. Верх диапазона не гарантирован:
+# журнальная запись собирается литеральным перечнем, а не проверкой
+# `_FORBIDDEN_ANYWHERE` (у строки нет таких атрибутов), поэтому 4..5, а не 5..5.
+rubric: code_invariant_conformance
+kind: clean
+scores:
+  no_violation: {min: 4, max: 5}
+  invariant_enforced: {min: 4, max: 5}
+  bypass_paths: {min: 4, max: 5}

@@ -1,0 +1,9 @@
+# Трудный чистый: отступление от AD-3 выглядит нарушением, но оформлено — срок 2026-10-01…2026-11-15, условие пересмотра, уровень A3, запись в реестре отступлений.
+# no_contradiction 4..5: отступление названо и ограничено, противоречия нет, ложное обвинение здесь — ошибка судьи; exception_discipline 3..5 — кейс намеренно трудный, и 3 не считается провалом.
+rubric: adr_spine_consistency
+kind: clean
+scores:
+  no_contradiction: {min: 4, max: 5}
+  invariant_attribution: {min: 4, max: 5}
+  exception_discipline: {min: 3, max: 5}
+  deferred_respected: {min: 4, max: 5}

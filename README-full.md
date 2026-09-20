@@ -272,7 +272,11 @@ BMAD, Spec Kit, OpenSpec и др.):
 
 <p align="center">
   <a href="docs/skills_for_architects.md"><img src="docs/screenshots/07-skills.png" alt="Библиотека скиллов в действии: skill_search находит методики надёжной интеграции, skill_load грузит transactional-outbox и fitness-functions в контекст, контур гейтов фиксируется в ADR · skills library in action" width="92%"></a><br>
+<<<<<<< HEAD
   <sub>Скиллы в живом ходе: модель сама ищет методики (<code>skill_search</code>), грузит две в контекст (<code>skill_load</code>) и отвечает по методике · Обзор всех 64 скиллов: <a href="docs/skills_for_architects.md">docs/skills_for_architects.md</a></sub>
+=======
+  <sub>Скиллы в живом ходе: модель сама ищет методики (<code>skill_search</code>), грузит две в контекст (<code>skill_load</code>) и отвечает по методике · Обзор всех 65 скиллов: <a href="docs/skills_for_architects.md">docs/skills_for_architects.md</a></sub>
+>>>>>>> origin/main
 </p>
 
 Подробности: `docs/plugins_and_skills.md` (механика: установка, поиск,
@@ -522,7 +526,7 @@ CI-джобой `dogfood` (`arch-be control spine` + `arch-be control check .` +
   знания и судья-механика) наружу кодовым агентам
   (Claude Code и др.) — структурированный verdict (`passed` + находки) в момент написания
   кода; read-only, пути аргументами вызова, `--rw` открывает белый список записей
-  (`docs/mcp.md`); 9 промптов-плейбуков `spine-*` — слэш-команды хоста. Подключение одной командой:
+  (`docs/mcp.md`); 10 промптов-плейбуков `spine-*` — слэш-команды хоста. Подключение одной командой:
   `arch-be connect <claude|qwen|gigacode|codex|kimi|omp|generic>` — MCP-конфиг (мердж, чужие ключи
   сохраняются), пакет скиллов, хуки (`Stop` → `arch-be gate --route auto`, fail-soft на
   инфраструктуру, fail-hard на вердикте); хосто-независимые гейты — `arch-be connect ci`
@@ -683,7 +687,7 @@ arch-be [--config <path>] <command>   # без команды — TUI
 | `kb <query> [--limit]` | Поиск по локальной базе знаний |
 | `web search <query> [--arch]` / `web fetch <url>` / `web sites` | Веб: поиск, фетч, кураторские сайты |
 | `mcp list` / `mcp call <server__tool>` | MCP-серверы и вызовы инструментов |
-| `mcp serve` | MCP-сервер (stdio): архитектурный контроль кодовым агентам — verdict в момент написания кода (ADR-008, `docs/mcp.md`); 40 read-only инструментов + 9 промптов-плейбуков `spine-*`; `--rw` — белый список записей (`handoff_create`, `adr_new`, …); каждый вызов журналируется в `.arch-handoff/mcp-calls.jsonl` |
+| `mcp serve` | MCP-сервер (stdio): архитектурный контроль кодовым агентам — verdict в момент написания кода (ADR-008, `docs/mcp.md`); 40 read-only инструментов + 10 промптов-плейбуков `spine-*`; `--rw` — белый список записей (`handoff_create`, `adr_new`, …); каждый вызов журналируется в `.arch-handoff/mcp-calls.jsonl` |
 | `connect <claude\|qwen\|gigacode\|codex\|kimi\|omp\|generic> [--dir] [--rw] [--no-skills] [--no-hooks] [--no-agents-md] [--strict-hooks] [--apply-global] [--dry-run]` | Подключение Spine к внешнему CLI-агенту: MCP-конфиг (мердж, чужое сохраняется), скиллы, хуки (`arch-be gate --route auto`); `--dry-run` — только план (`docs/CONNECT.md`, `docs/mcp.md`) |
 | `connect ci --provider gitlab\|github\|jenkins` / `connect git-hooks` | Хосто-независимые гейты: джоба `arch-be gate` под площадку CI (нативный формат отчёта: codequality/sarif/junit) / локальные pre-commit + pre-push (`docs/CONNECT.md`) |
 | `handoff <harness> --repo <path> --task <text>` | Handoff-пакет `.arch-handoff/` |
@@ -726,7 +730,11 @@ arch-be [--config <path>] <command>   # без команды — TUI
 - `docs/slash_commands.md` — слэш-команды TUI; `docs/tools.md` — инструменты (карта «база vs архитектурные» + полные параметры).
 - `docs/models.md` — подключение LLM (DeepSeek/Kimi/GLM, свои endpoint'ы).
 - `docs/plugins_and_skills.md` — плагины и библиотека скиллов (механика).
+<<<<<<< HEAD
 - `docs/skills_for_architects.md` — обзор библиотеки: все 64 скилла в 9
+=======
+- `docs/skills_for_architects.md` — обзор библиотеки: все 65 скиллов в 9
+>>>>>>> origin/main
   плагинах, с чего начать.
 - `docs/failure_memory.md` — память сбоев инструментов («ошибся дважды → урок»).
 - `docs/rubrics_and_benchmarks.md`, `docs/control.md`, `docs/governance.md`,

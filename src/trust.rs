@@ -478,9 +478,16 @@ fn judge_is_author(repo: &Path) -> Vec<String> {
                 .is_none_or(|author| author.trim().is_empty() || author == a.judge_model)
         })
         .map(|a| {
+            // У отчёта по досье (ADR-051) `target` пуст, а субъект назван в
+            // `subject`: без этого пятая ступень говорила бы «документ без
+            // пути» вместо того, чей именно отчёт не независим.
+            let what = a
+                .target
+                .as_deref()
+                .or(a.subject.as_deref())
+                .unwrap_or("документ без пути");
             format!(
-                "{}: судья и автор — {} (оценка не независима)",
-                a.target.as_deref().unwrap_or("документ без пути"),
+                "{what}: судья и автор — {} (оценка не независима)",
                 a.judge_model
             )
         })

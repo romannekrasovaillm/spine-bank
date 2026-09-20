@@ -317,6 +317,11 @@ fn stage_fix_hint(component: &str) -> &'static str {
             "прогоните рубрику судьёй, отличным от автора, и положите отчёт в \
              reports/rubric/ (`arch-be rubric run`)"
         }
+        "semantic_quality" => {
+            "прогоните смысловую рубрику по досье (MCP: rubric_prompt с \
+             pack/subject → rubric_verify; CLI: `arch-be rubric run` по \
+             собранному досье) — судья обязан отличаться от автора документа"
+        }
         "route_lock" => {
             "согласуйте заявленный маршрут с его изменением: понижение без \
              `decided_by: ADR-…` — дефект (`.arch-handoff/ROUTE.lock`)"

@@ -234,12 +234,8 @@ pub fn parse_spine_invariants(spine: &Path) -> Vec<SpineInvariant> {
                 rule: String::new(),
             });
         } else if let Some(cur) = &mut current {
-            let rule_marker = t
-                .strip_prefix("Rule:")
-                .or_else(|| t.strip_prefix("- **Rule:**"))
-                .or_else(|| t.strip_prefix("**Rule:**"));
-            if let Some(rule) = rule_marker {
-                cur.rule = rule.trim().trim_end_matches("**").trim().to_string();
+            if let Some(rule) = spine_field(t, "Rule") {
+                cur.rule = rule;
                 in_rule = true;
             } else if in_rule && !t.is_empty() && !t.starts_with("- **") && !t.starts_with("## ") {
                 // Продолжение многострочного Rule.
@@ -254,6 +250,86 @@ pub fn parse_spine_invariants(spine: &Path) -> Vec<SpineInvariant> {
                     current = None;
                 }
             }
+        }
+    }
+    if let Some(cur) = current {
+        out.push(cur);
+    }
+    out
+}
+
+/// Значение поля блока инварианта в любой markdown-форме: `Rule:`, `- Rule:`,
+/// `**Rule**:`, `- **Rule**:`, `**Rule:**`.
+///
+/// Толерантность обязательна: сам спайн репозитория пишет поля как
+/// `- **Rule**: …`, и прежний разбор по трём `strip_prefix`-формам оставлял
+/// `rule` пустым — для генерации AGENTS.md это было незаметно (там нужен
+/// только заголовок), а для досье судьи (ADR-051) формулировка инварианта и
+/// есть предмет сверки. Форма полей держится синхронно с линтером спайна
+/// (`control.rs::lint_spine`, `re_field`) и `handoff.rs::ADR_FIELD_PATTERN`.
+fn spine_field(line: &str, name: &str) -> Option<String> {
+    let t = line.trim();
+    let t = t
+        .strip_prefix("- ")
+        .or_else(|| t.strip_prefix("* "))
+        .unwrap_or(t)
+        .trim_start();
+    let t = t.strip_prefix("**").unwrap_or(t);
+    let rest = t.strip_prefix(name)?;
+    let rest = rest.trim_start();
+    let rest = rest.strip_prefix("**").unwrap_or(rest).trim_start();
+    let rest = rest.strip_prefix(':')?;
+    let rest = rest.trim_start();
+    let rest = rest.strip_prefix("**").unwrap_or(rest);
+    Some(rest.trim().trim_end_matches("**").trim().to_string())
+}
+
+/// Извлекает отложенные решения спайна — блоки `### DEF-n: Заголовок` секции
+/// `Deferred (с условиями возврата)`; тело блока кладётся в поле `rule`.
+///
+/// Тип тот же, что у инвариантов: досье судьи (ADR-051) важно знать не только
+/// что спайн запрещает, но и что он **отложил** — решение, молча принятое
+/// вместо отложенного, это отдельный дефект (`D10`).
+#[must_use]
+pub fn parse_spine_deferred(spine: &Path) -> Vec<SpineInvariant> {
+    let Ok(text) = std::fs::read_to_string(spine) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut current: Option<SpineInvariant> = None;
+    let mut in_section = false;
+    for line in text.lines() {
+        let t = line.trim();
+        if t.starts_with("## ") {
+            // Секция Deferred кончается на следующем заголовке второго уровня.
+            in_section = t.starts_with("## Deferred");
+            if let Some(cur) = current.take() {
+                out.push(cur);
+            }
+            continue;
+        }
+        if !in_section {
+            continue;
+        }
+        if let Some(rest) = t.strip_prefix("### DEF-") {
+            if let Some(cur) = current.take() {
+                out.push(cur);
+            }
+            let sep = rest.find(['.', ':', ' ']).unwrap_or(rest.len());
+            let (num, title) = rest.split_at(sep);
+            current = Some(SpineInvariant {
+                id: format!("DEF-{}", num.trim()),
+                title: title.trim_start_matches(['.', ':', ' ']).trim().to_string(),
+                rule: String::new(),
+            });
+        } else if let Some(cur) = &mut current {
+            if t.is_empty() {
+                continue;
+            }
+            if !cur.rule.is_empty() {
+                cur.rule.push(' ');
+            }
+            cur.rule.push_str(t);
         }
     }
     if let Some(cur) = current {
@@ -737,6 +813,49 @@ mod tests {
         )
         .expect("constraints dir missing");
         repo
+    }
+
+    /// Спайн репозитория пишет поля как `- **Rule**: …` — форма, которую
+    /// прежний разбор по трём `strip_prefix` не узнавал, и `rule` оставался
+    /// пустым. Для генерации AGENTS.md это было незаметно (нужен заголовок),
+    /// для досье судьи (ADR-051) формулировка инварианта — предмет сверки.
+    #[test]
+    fn spine_invariants_parse_bold_rule_field() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let spine = tmp.path().join("ARCHITECTURE-SPINE.md");
+        std::fs::write(
+            &spine,
+            "# Spine\n\n\
+             ## AD-2: Детерминированный слой контроля — без LLM\n\n\
+             - **Binds**: контроль ↔ CI\n\
+             - **Prevents**: «контроль по настроению модели»\n\
+             - **Rule**: механика контроля детерминирована; LLM только в судье.\n\
+             - **Статус**: [ADOPTED]\n\n\
+             ## AD-10: Плагин — единица распространения знаний\n\n\
+             - **Rule**: знания живут в плагинах.\n\n\
+             ## Deferred (с условиями возврата)\n\n\
+             ### DEF-1: Интерактивное подтверждение на R4\n\n\
+             Возврат: когда TUI получит диалоговую шину.\n",
+        )
+        .expect("spine");
+        let inv = parse_spine_invariants(&spine);
+        assert_eq!(inv.len(), 2, "два инварианта: {inv:?}");
+        assert_eq!(inv[0].id, "AD-2");
+        assert!(
+            inv[0].rule.contains("механика контроля детерминирована"),
+            "формулировка из формы `- **Rule**:` прочитана: {:?}",
+            inv[0].rule
+        );
+        assert_eq!(inv[1].id, "AD-10");
+        assert!(inv[1].rule.contains("знания живут в плагинах"));
+        let def = parse_spine_deferred(&spine);
+        assert_eq!(def.len(), 1, "отложенное решение найдено: {def:?}");
+        assert_eq!(def[0].id, "DEF-1");
+        assert!(
+            def[0].rule.contains("диалоговую шину"),
+            "условие возврата — в теле блока: {:?}",
+            def[0].rule
+        );
     }
 
     #[test]

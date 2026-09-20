@@ -899,6 +899,73 @@ pub struct GateConfig {
     /// Составляющая `decision_quality` (Н7 волны B 0.3.4, ADR-042): качество
     /// архитектурных решений по отчёту рубрики-судьи.
     pub decision_quality: DecisionQualityConfig,
+    /// Составляющая `semantic_quality` (ADR-052): смысловые рубрики —
+    /// решение против инварианта, ссылка не на ту сущность, обещание без
+    /// механизма, код против инварианта — по отчётам судьи.
+    pub semantic_quality: SemanticQualityConfig,
+}
+
+/// На что смотрит составляющая `semantic_quality` (ADR-052).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SemanticScope {
+    /// Субъекты, чьё досье затронуто диффом от базы или активной дельтой, —
+    /// дешёвый режим для потока доработок (дефолт).
+    #[default]
+    Changed,
+    /// Весь пакет: все ADR, сущности модели и файлы кода под корнями компонент.
+    All,
+}
+
+/// Составляющая `semantic_quality` (ADR-052).
+///
+/// Пустой список `rubrics` — составляющая ничего не требует, даже будучи
+/// включённой в `[gate.required]`: включать её можно раньше, чем заводить
+/// отчёты. Оценка дорогая (k сэмплов судьи на субъект), поэтому гейт **не
+/// оценивает** — он читает отчёты, которые положил хост, и переиспользует
+/// отчёт с совпавшим хэшем досье (ADR-051).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SemanticQualityConfig {
+    /// Имена рубрик из каталога рубрик (`paths.rubrics_dir`), обязательных к
+    /// отчёту. Пусто — ничего не требуется.
+    #[serde(default)]
+    pub rubrics: Vec<String>,
+    /// Область субъектов.
+    #[serde(default)]
+    pub scope: SemanticScope,
+    /// Минимальный взвешенный итог отчёта.
+    #[serde(default = "default_semantic_min_score")]
+    pub min_score: f64,
+    /// Требовать от судьи модель, отличную от автора документа: `true` —
+    /// `judge_is_author` становится error, `false` — warn.
+    #[serde(default)]
+    pub require_distinct_judge: bool,
+}
+
+/// Порог взвешенного итога смысловой рубрики по умолчанию.
+///
+/// `3.0`, а не `3.5` как у `decision_quality`: порог смысловой рубрики
+/// откалиброван по живому прогону 2026-09-20, а не по аналогии. На четырёх
+/// прогонах `adr_spine_consistency`/`model_link_semantics`/
+/// `code_invariant_conformance` чистый субъект дал 3.43, засеянные дефекты —
+/// 2.12, 2.00 и 1.00. При `3.5` краснел бы единственный чистый контроль
+/// (3.43 < 3.5), то есть порог был бы заведомо ложным; `3.0` разделяет те же
+/// четыре точки с запасом 0.43 снизу и 0.88 сверху. Замер — в
+/// `docs/experiments/semantic-rubrics-2026-09-20.md`; порог настраивается
+/// (`min_score`), потому что выборка мала.
+fn default_semantic_min_score() -> f64 {
+    3.0
+}
+
+impl Default for SemanticQualityConfig {
+    fn default() -> Self {
+        Self {
+            rubrics: Vec::new(),
+            scope: SemanticScope::Changed,
+            min_score: default_semantic_min_score(),
+            require_distinct_judge: false,
+        }
+    }
 }
 
 /// Настройки составляющей гейта `decision_quality` (Н7, ADR-042).

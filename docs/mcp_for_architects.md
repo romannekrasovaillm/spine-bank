@@ -40,7 +40,7 @@ arch-be connect qwen     # GigaCode CLI / Qwen Code; также: claude, kimi, o
 в [CONNECT.md](CONNECT.md).
 
 Живая карточка сервера после подключения (Qwen Code 0.24.0, `/mcp`):
-40 инструментов + 9 промптов — это и есть весь контур:
+40 инструментов + 10 промптов — это и есть весь контур:
 
 ![Qwen Code 0.24: карточка MCP-сервера spine — 33 инструмента, 8 промптов (на момент захвата — 33; актуально — 34)](screenshots/harnesses/waves-qwen-tui-server.png)
 
@@ -105,7 +105,11 @@ arch-be connect qwen     # GigaCode CLI / Qwen Code; также: claude, kimi, o
 | Инструмент | Что даёт |
 |---|---|
 | `kb_search` | поиск по базе знаний архитектора (`knowledge.dirs`) |
+<<<<<<< HEAD
 | `skill_search` / `skill_load` | поиск по библиотеке из 64 скиллов и загрузка полного текста |
+=======
+| `skill_search` / `skill_load` | поиск по библиотеке из 65 скиллов и загрузка полного текста |
+>>>>>>> origin/main
 | `mermaid_render` | mermaid-диаграмма в ASCII (flowchart, sequence, ER, C4) |
 | `rubric_list` / `plugin_list` | что есть из рубрик и плагинов |
 
@@ -128,7 +132,7 @@ arch-be connect qwen     # GigaCode CLI / Qwen Code; также: claude, kimi, o
 
 ## Плейбуки `spine-*` как слэш-команды хоста (MCP prompts)
 
-Кроме инструментов сервер отдаёт capability **prompts**: девять плейбуков
+Кроме инструментов сервер отдаёт capability **prompts**: десять плейбуков
 работы со Spine приезжают в хост как готовые команды — не нужно помнить
 формулировки и не важно, куда хост кладёт файлы скиллов.
 

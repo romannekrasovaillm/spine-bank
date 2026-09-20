@@ -281,12 +281,12 @@ fn prompts_list_and_get_over_stdio() {
     );
     // initialize рекламирует capability prompts.
     assert!(responses[0]["result"]["capabilities"]["prompts"].is_object());
-    // prompts/list: ровно девять плейбуков spine-workflows (дом изолирован —
+    // prompts/list: ровно десять плейбуков spine-workflows (дом изолирован —
     // тексты и описания из встроенных ассетов).
     let prompts = responses[1]["result"]["prompts"]
         .as_array()
         .expect("prompts");
-    assert_eq!(prompts.len(), 9, "девять плейбуков: {prompts:?}");
+    assert_eq!(prompts.len(), 10, "десять плейбуков: {prompts:?}");
     let names: Vec<&str> = prompts.iter().filter_map(|p| p["name"].as_str()).collect();
     for want in [
         "spine-quickstart",

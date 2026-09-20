@@ -2642,3 +2642,79 @@ fn gate_base_forms_agree_and_failsafe_names_the_reason() {
         "причина fail-safe обязана быть названа: {text}"
     );
 }
+
+/// Сквозной сценарий досье (ADR-051): `rubric pack` собирает вход смысловой
+/// рубрики из репозитория, печатает источники с ролями и хэш досье, а
+/// несуществующий субъект отказывает с кодом находки — не пустым досье.
+#[test]
+fn rubric_pack_prints_dossier_sources_and_hash() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let home = tmp.path();
+    let repo = home.join("case");
+    std::fs::create_dir_all(repo.join("docs/adr")).expect("mkdir adr");
+    std::fs::create_dir_all(repo.join("model")).expect("mkdir model");
+    std::fs::write(
+        repo.join("ARCHITECTURE-SPINE.md"),
+        "# Spine\n\n## AD-2: Детерминированный слой контроля\n\n\
+         - **Rule**: механика контроля без LLM.\n",
+    )
+    .expect("spine");
+    std::fs::write(
+        repo.join("docs/adr/ADR-001-x.md"),
+        "# ADR-001\n\nРешение: контроль без LLM в гейте.\n",
+    )
+    .expect("adr");
+    std::fs::write(
+        repo.join("model/CMP-001-core.md"),
+        "---\nid: CMP-001\ntype: cmp\ntitle: Ядро\nstatus: ADOPTED\n---\n\nядро\n",
+    )
+    .expect("cmp");
+
+    let out = arch_cmd(home)
+        .args(["rubric", "pack", "adr_vs_spine", "docs/adr/ADR-001-x.md"])
+        .arg("--root")
+        .arg(repo.as_os_str())
+        .output()
+        .expect("rubric pack");
+    assert!(out.status.success(), "pack: {out:?}");
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        text.contains("=== ИСТОЧНИК subject: docs/adr/ADR-001-x.md ==="),
+        "{text}"
+    );
+    assert!(
+        text.contains("=== ИСТОЧНИК reference: ARCHITECTURE-SPINE.md#AD-2 ==="),
+        "инвариант спайна — источник-ссылка: {text}"
+    );
+    assert!(
+        text.contains("Rule: механика контроля без LLM"),
+        "формулировка инварианта (форма `- **Rule**:`) попала в досье: {text}"
+    );
+    assert!(text.contains("sha256:"), "хэш досье напечатан: {text}");
+    assert!(
+        text.contains("[reference] ARCHITECTURE-SPINE.md#AD-2 AD-2"),
+        "{text}"
+    );
+
+    // Досье по сущности модели: печатается карточка субъекта.
+    let out = arch_cmd(home)
+        .args(["rubric", "pack", "entity_links", "CMP-001"])
+        .arg("--root")
+        .arg(repo.as_os_str())
+        .output()
+        .expect("entity_links");
+    assert!(out.status.success(), "{out:?}");
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(text.contains("CMP-001 · Ядро"), "карточка сущности: {text}");
+
+    // Несуществующий субъект — отказ с кодом находки, а не пустое досье.
+    let out = arch_cmd(home)
+        .args(["rubric", "pack", "adr_vs_spine", "docs/adr/ADR-999-net.md"])
+        .arg("--root")
+        .arg(repo.as_os_str())
+        .output()
+        .expect("pack");
+    assert!(!out.status.success(), "несуществующий субъект: {out:?}");
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(err.contains("pack_subject_not_found"), "{err}");
+}

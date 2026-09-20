@@ -252,6 +252,10 @@ pub struct GuardReport {
     pub base: String,
     /// Всего изменённых файлов по diff.
     pub changed: usize,
+    /// Изменённые файлы (относительные пути, отсортированы) — тем, кому нужен
+    /// не счёт, а состав: составляющая `semantic_quality` (ADR-052) отбирает
+    /// по нему субъектов, чьё досье затронуто.
+    pub changed_files: Vec<String>,
     /// Изменённые защищённые файлы.
     pub protected_changed: Vec<String>,
     /// Покрытые правки: (файл, имя активной дельты) — первая из упомянувших
@@ -520,6 +524,7 @@ pub fn guard(repo: &Path, base: Option<&str>, protect: &[String]) -> Result<Guar
     Ok(GuardReport {
         base,
         changed: changed.len(),
+        changed_files: changed.clone(),
         protected_changed,
         covered,
         violations,
