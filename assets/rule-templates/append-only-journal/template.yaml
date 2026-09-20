@@ -32,7 +32,7 @@ properties:
 rule:
   name: append_only_journal_enforced
   type: command_succeeds
-  severity: warn
+  severity: error
   timeout_secs: 120
   rationale: >-
     инвариант журнала проверяется исполнением: правка не меняет запись,

@@ -35,7 +35,7 @@ properties:
 rule:
   name: consent_before_auto_action
   type: command_succeeds
-  severity: warn
+  severity: error
   timeout_secs: 120
   rationale: >-
     инвариант «согласие раньше автодействия» проверяется исполнением:

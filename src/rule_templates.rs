@@ -119,8 +119,9 @@ pub struct RuleSpec {
     /// Тип правила; библиотека поставляет только `command_succeeds`.
     #[serde(rename = "type")]
     pub kind: String,
-    /// Severity заготовки: по умолчанию `warn` — до `error` поднимает
-    /// архитектор, а не шаблон (П3).
+    /// Severity заготовки: по умолчанию `error` — нарушение инварианта обязано
+    /// краснеть (`control check` → exit 1). Понижает до `warn` архитектор, если
+    /// проверка ещё не перенесена на настоящий код.
     #[serde(default = "default_severity")]
     pub severity: String,
     /// Таймаут прогона команды, секунды.
@@ -196,7 +197,7 @@ fn default_lang() -> String {
 }
 
 fn default_severity() -> String {
-    "warn".to_string()
+    "error".to_string()
 }
 
 fn default_timeout() -> u64 {

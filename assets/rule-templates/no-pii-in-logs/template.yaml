@@ -36,7 +36,7 @@ properties:
 rule:
   name: no_pii_in_logs
   type: command_succeeds
-  severity: warn
+  severity: error
   timeout_secs: 120
   rationale: >-
     инвариант «персональные данные не покидают сценарий» проверяется

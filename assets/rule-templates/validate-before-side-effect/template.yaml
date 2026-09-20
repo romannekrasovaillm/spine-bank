@@ -33,7 +33,7 @@ properties:
 rule:
   name: validate_before_side_effect
   type: command_succeeds
-  severity: warn
+  severity: error
   timeout_secs: 120
   rationale: >-
     инвариант «проверка раньше эффекта» проверяется исполнением: провал

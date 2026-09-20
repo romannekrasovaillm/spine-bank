@@ -35,7 +35,7 @@ properties:
 rule:
   name: unknown_outcome_no_resend
   type: command_succeeds
-  severity: warn
+  severity: error
   timeout_secs: 120
   rationale: >-
     неопределённый исход проверяется исполнением: повторная отправка при

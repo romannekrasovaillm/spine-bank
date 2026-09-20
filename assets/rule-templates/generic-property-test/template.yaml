@@ -20,7 +20,7 @@ properties:
 rule:
   name: generic_property_test
   type: command_succeeds
-  severity: warn
+  severity: error
   timeout_secs: 120
   rationale: >-
     заготовка правила: команда запускает тест-заглушку, которая пропускается,

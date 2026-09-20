@@ -31,7 +31,7 @@ properties:
 rule:
   name: idempotency_key_enforced
   type: command_succeeds
-  severity: warn
+  severity: error
   timeout_secs: 120
   rationale: >-
     инвариант идемпотентности проверяется исполнением: повторная доставка

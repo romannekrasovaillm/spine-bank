@@ -35,7 +35,7 @@ properties:
 rule:
   name: saga_reserve_compensation
   type: command_succeeds
-  severity: warn
+  severity: error
   timeout_secs: 120
   rationale: >-
     компенсация резерва проверяется исполнением: резерв не остаётся
