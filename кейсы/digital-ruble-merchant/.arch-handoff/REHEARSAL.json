@@ -2,10 +2,33 @@
   "kind": "rollback_rehearsal",
   "gate": "A4",
   "passed": true,
-  "baseline_commit": "merchant-tsp-1",
-  "rehearsed_at": "2026-09-19T10:00:00Z",
-  "duration_secs": 1.5,
-  "steps": [],
-  "verify": null,
-  "log": ["репетиция отката прошла на baseline merchant-tsp-1"]
+  "baseline_commit": "ca816b0",
+  "rehearsed_at": "2026-09-20T06:35:06.721187655+00:00",
+  "duration_secs": 0.373938612,
+  "steps": [
+    {
+      "name": "вернуть предыдущую версию сервиса",
+      "status": "pass",
+      "exit_code": 0,
+      "detail": "команда завершилась без вывода"
+    },
+    {
+      "name": "переключить трафик ТСП",
+      "status": "pass",
+      "exit_code": 0,
+      "detail": "команда завершилась без вывода"
+    }
+  ],
+  "verify": {
+    "name": "verify",
+    "status": "pass",
+    "exit_code": 0,
+    "detail": "команда завершилась без вывода"
+  },
+  "log": [
+    "репетиционный worktree: /tmp/arch-rehearsal-298843-2197134 (detached на ca816b0)",
+    "[PASS] вернуть предыдущую версию сервиса — команда завершилась без вывода",
+    "[PASS] переключить трафик ТСП — команда завершилась без вывода",
+    "[PASS] verify — команда завершилась без вывода"
+  ]
 }
