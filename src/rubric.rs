@@ -373,6 +373,12 @@ pub struct RubricArtifact {
     /// Источники досье с их хэшами: правка любого из них — отчёт устарел.
     #[serde(default)]
     pub inputs: Vec<crate::rubric_pack::PackInput>,
+    /// Оценки по критериям — то, по чему гейт (`semantic_quality`) и
+    /// `redteam semantic-score` решают про обвинение: агрегата
+    /// `weighted_total` для этого мало, а главный критерий нужен поимённо.
+    /// Поле аддитивное: отчёты до 0.3.5 читаются (отсутствие = пусто).
+    #[serde(default)]
+    pub scores: Vec<CriterionScore>,
     /// Метка времени оценки (RFC 3339).
     pub judged_at: String,
 }
@@ -485,6 +491,7 @@ pub fn write_artifact_for_subject(
         subject: pack_subject,
         pack_sha256,
         inputs,
+        scores: report.scores.clone(),
         judged_at: chrono::Local::now().to_rfc3339(),
     };
     let dir = repo.join(RUBRIC_REPORTS_DIR);
@@ -767,12 +774,44 @@ pub async fn evaluate_with_options(
     llm: &dyn LlmProvider,
     cfg: &JudgeConfig,
 ) -> Result<RubricReport> {
+    let scope = EvidenceScope::Target(target);
+    evaluate_scope(rubric, &scope, llm, cfg).await
+}
+
+/// Оценивает **досье** смысловой рубрики (ADR-051): текст судье тот же, но
+/// цитаты сверяются по источникам ролей, а покрытие — по составу досье.
+///
+/// Отдельный вход, а не флаг у [`evaluate_with_options`]: без досье ролевые
+/// критерии и покрытие проверить нечем, и молча деградировать до проверки по
+/// одному тексту нельзя.
+///
+/// # Errors
+/// Пустая рубрика, досье длиннее лимита, ни один критерий не засчитан,
+/// ошибка модели или разбора её ответа.
+pub async fn evaluate_pack(
+    rubric: &Rubric,
+    pack: &crate::rubric_pack::ContextPack,
+    llm: &dyn LlmProvider,
+    cfg: &JudgeConfig,
+) -> Result<RubricReport> {
+    let scope = EvidenceScope::Pack(pack);
+    evaluate_scope(rubric, &scope, llm, cfg).await
+}
+
+/// Общий путь оценки: проверка входа, k сэмплов судьи, сборка отчёта.
+async fn evaluate_scope(
+    rubric: &Rubric,
+    scope: &EvidenceScope<'_>,
+    llm: &dyn LlmProvider,
+    cfg: &JudgeConfig,
+) -> Result<RubricReport> {
     if rubric.criteria.is_empty() {
         return Err(HarnessError::Rubric(format!(
             "рубрика '{}' не содержит критериев",
             rubric.name
         )));
     }
+    let target = scope.whole();
     check_target_len(target)?;
     // samples=0 в конфиге — не пустая выборка, а одиночная оценка.
     let samples = cfg.samples.max(1);
@@ -780,13 +819,7 @@ pub async fn evaluate_with_options(
     for _ in 0..samples {
         runs.push(judge_once(rubric, target, llm, cfg.thinking).await?);
     }
-    build_report(
-        rubric,
-        llm.model(),
-        &runs,
-        &EvidenceScope::Target(target),
-        cfg,
-    )
+    build_report(rubric, llm.model(), &runs, scope, cfg)
 }
 
 /// Проверяет лимит длины оцениваемого текста (ADR-004: тихое усечение

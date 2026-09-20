@@ -52,6 +52,23 @@ impl Expectation {
 /// найден (мутатор пропускается, а не считается «пойманным»).
 pub type Mutation = fn(&Path) -> std::result::Result<(), String>;
 
+/// Смысловой субъект мутанта: какую рубрику и какое досье брать, чтобы
+/// дефект, не ловимымй механикой, измерил судья (ADR-051, S5).
+///
+/// Субъект задан парой «каталог + префикс имени», а не готовым путём: путь
+/// зависит от кейса, а каталог мутанта — копия кейса. Резолвер берёт первый
+/// подходящий файл в отсортированном порядке, поэтому прогон детерминирован.
+pub struct SemanticSubject {
+    /// Имя смысловой рубрики (файл в `assets/rubrics`).
+    pub rubric: &'static str,
+    /// Вид досье, которым собирается вход судьи.
+    pub pack: crate::rubric_pack::PackKind,
+    /// Каталог субъекта внутри кейса (`docs/adr`, `model`, `src/legacy`).
+    pub dir: &'static str,
+    /// Префикс имени файла субъекта (`ADR-`, `CMP-`, `payments.py`).
+    pub prefix: &'static str,
+}
+
 /// Один мутатор: идентификатор, описание, ожидание и правка.
 pub struct Mutator {
     /// Идентификатор из red-team набора (`D1`, `D11b`, `R`…).
@@ -67,6 +84,10 @@ pub struct Mutator {
     /// (контроль аттестации) стоят в таблице отдельными строками: их результат
     /// виден в карте обнаружения, но в критерий приёмки «≥ 11 из 14» не входит.
     pub in_ratio: bool,
+    /// Смысловая рубрика, которой этот класс дефекта ловится (ADR-051, S5):
+    /// у `D6`, `D10`, `D11` механика бессильна по построению, и измерение
+    /// смыслового слоя — отдельная строка, в долю обнаружения не входящая.
+    pub semantic: Option<SemanticSubject>,
     /// Правка кейса-мутанта.
     pub apply: Mutation,
 }
@@ -85,6 +106,7 @@ pub const MUTATORS: [Mutator; 16] = [
         by: "nfr (budget)",
         expected: Expectation::Caught,
         in_ratio: true,
+        semantic: None,
         apply: mutate_d1,
     },
     Mutator {
@@ -93,6 +115,7 @@ pub const MUTATORS: [Mutator; 16] = [
         by: "nfr (availability)",
         expected: Expectation::Caught,
         in_ratio: true,
+        semantic: None,
         apply: mutate_d2,
     },
     Mutator {
@@ -101,6 +124,7 @@ pub const MUTATORS: [Mutator; 16] = [
         by: "nfr (capacity)",
         expected: Expectation::Caught,
         in_ratio: true,
+        semantic: None,
         apply: mutate_d3,
     },
     Mutator {
@@ -109,6 +133,7 @@ pub const MUTATORS: [Mutator; 16] = [
         by: "trace_check",
         expected: Expectation::Caught,
         in_ratio: true,
+        semantic: None,
         apply: mutate_d4,
     },
     Mutator {
@@ -117,6 +142,7 @@ pub const MUTATORS: [Mutator; 16] = [
         by: "model_validate",
         expected: Expectation::Caught,
         in_ratio: true,
+        semantic: None,
         apply: mutate_d5,
     },
     Mutator {
@@ -125,6 +151,12 @@ pub const MUTATORS: [Mutator; 16] = [
         by: "— (семантика ссылок)",
         expected: Expectation::Semantic,
         in_ratio: true,
+        semantic: Some(SemanticSubject {
+            rubric: "model_link_semantics",
+            pack: crate::rubric_pack::PackKind::EntityLinks,
+            dir: "model",
+            prefix: "CMP-",
+        }),
         apply: mutate_d6,
     },
     Mutator {
@@ -133,6 +165,7 @@ pub const MUTATORS: [Mutator; 16] = [
         by: "rule_weakened + база",
         expected: Expectation::Caught,
         in_ratio: true,
+        semantic: None,
         apply: mutate_d7,
     },
     Mutator {
@@ -141,6 +174,7 @@ pub const MUTATORS: [Mutator; 16] = [
         by: "fitness",
         expected: Expectation::Caught,
         in_ratio: true,
+        semantic: None,
         apply: mutate_d8,
     },
     Mutator {
@@ -149,6 +183,7 @@ pub const MUTATORS: [Mutator; 16] = [
         by: "decision_quality",
         expected: Expectation::Caught,
         in_ratio: true,
+        semantic: None,
         apply: mutate_d9,
     },
     Mutator {
@@ -157,6 +192,12 @@ pub const MUTATORS: [Mutator; 16] = [
         by: "— (смысл решения)",
         expected: Expectation::Semantic,
         in_ratio: true,
+        semantic: Some(SemanticSubject {
+            rubric: "adr_spine_consistency",
+            pack: crate::rubric_pack::PackKind::AdrVsSpine,
+            dir: "docs/adr",
+            prefix: "ADR-",
+        }),
         apply: mutate_d10,
     },
     Mutator {
@@ -165,6 +206,12 @@ pub const MUTATORS: [Mutator; 16] = [
         by: "— (кандидат executable-invariants)",
         expected: Expectation::Semantic,
         in_ratio: true,
+        semantic: Some(SemanticSubject {
+            rubric: "code_invariant_conformance",
+            pack: crate::rubric_pack::PackKind::CodeVsSpine,
+            dir: "src/legacy",
+            prefix: "payments.py",
+        }),
         apply: mutate_d11,
     },
     Mutator {
@@ -173,6 +220,12 @@ pub const MUTATORS: [Mutator; 16] = [
         by: "fitness",
         expected: Expectation::Caught,
         in_ratio: true,
+        semantic: Some(SemanticSubject {
+            rubric: "code_invariant_conformance",
+            pack: crate::rubric_pack::PackKind::CodeVsSpine,
+            dir: "tests",
+            prefix: "payments_test.py",
+        }),
         apply: mutate_d11b,
     },
     Mutator {
@@ -181,6 +234,7 @@ pub const MUTATORS: [Mutator; 16] = [
         by: "model_validate (Critical)",
         expected: Expectation::Caught,
         in_ratio: true,
+        semantic: None,
         apply: mutate_d12,
     },
     Mutator {
@@ -189,6 +243,7 @@ pub const MUTATORS: [Mutator; 16] = [
         by: "evidence (Н1)",
         expected: Expectation::Caught,
         in_ratio: true,
+        semantic: None,
         apply: mutate_d13,
     },
     Mutator {
@@ -197,6 +252,7 @@ pub const MUTATORS: [Mutator; 16] = [
         by: "evidence (Н1)",
         expected: Expectation::Caught,
         in_ratio: false,
+        semantic: None,
         apply: mutate_r,
     },
     Mutator {
@@ -205,6 +261,7 @@ pub const MUTATORS: [Mutator; 16] = [
         by: "аттестация ≠ эталон, вердикт PASS",
         expected: Expectation::Control,
         in_ratio: false,
+        semantic: None,
         apply: mutate_d14,
     },
 ];
@@ -705,6 +762,9 @@ pub struct RedteamReport {
     pub min_detection: f64,
     /// Контрольный мутатор D14: аттестация изменилась при том же вердикте.
     pub control_ok: bool,
+    /// Клоны смысловых мутантов, сохранённые `--keep-semantic` (ADR-051, S5):
+    /// в них хост кладёт отчёты судьи, их читает `semantic-score`.
+    pub semantic_kept: Vec<PathBuf>,
 }
 
 /// Сохранённый итог мутационного прогона (`.arch-handoff/redteam.json`,
@@ -737,6 +797,258 @@ impl RedteamSummary {
     pub fn passed(&self) -> bool {
         self.ratio >= self.min_detection && self.control_ok
     }
+}
+
+/// Что стало со смысловым мутантом в глазах судьи.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SemanticVerdict {
+    /// Главный критерий ≤ 2 и обвинение подтверждено — дефект пойман судьёй.
+    Caught,
+    /// Главный критерий выше 2: судья противоречия не увидел.
+    Missed,
+    /// Критерий низкий, но цитат нет — обвинение не подтверждено механикой.
+    Unconfirmed,
+    /// Отчёта судьи в клоне нет.
+    NoReport,
+    /// Отчёт есть, но досье изменилось после оценки — судить по нему нельзя.
+    Stale,
+}
+
+impl SemanticVerdict {
+    /// Метка для вывода.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Caught => "пойман",
+            Self::Missed => "не пойман",
+            Self::Unconfirmed => "обвинение не подтверждено",
+            Self::NoReport => "нет отчёта",
+            Self::Stale => "отчёт устарел",
+        }
+    }
+
+    /// Считается ли пойманным (числитель смысловой строки).
+    #[must_use]
+    pub fn caught(self) -> bool {
+        matches!(self, Self::Caught)
+    }
+}
+
+/// Разбор одного смыслового клона.
+#[derive(Debug, Clone)]
+pub struct SemanticCaseScore {
+    /// Мутант (`D10`).
+    pub mutant: String,
+    /// Рубрика, которой судили.
+    pub rubric: String,
+    /// Субъект досье.
+    pub subject: String,
+    /// Вердикт.
+    pub verdict: SemanticVerdict,
+    /// Судья (из отчёта), если он есть.
+    pub judge: Option<String>,
+    /// Судья — автор документа (независимость не подтверждена).
+    pub judge_is_author: bool,
+}
+
+/// Итог смыслового слоя (ADR-051, S5): отдельная строка, **не** входящая
+/// ни в долю обнаружения, ни в порог.
+#[derive(Debug, Clone)]
+pub struct SemanticScore {
+    /// Разбор по клонам.
+    pub cases: Vec<SemanticCaseScore>,
+}
+
+impl SemanticScore {
+    /// Сколько дефектов поймал судья.
+    #[must_use]
+    pub fn caught(&self) -> usize {
+        self.cases.iter().filter(|c| c.verdict.caught()).count()
+    }
+
+    /// Строка отчёта: «смысловой слой: поймано k из n; судья: …; независим: …».
+    #[must_use]
+    pub fn render(&self) -> String {
+        let judges: Vec<&str> = self
+            .cases
+            .iter()
+            .filter_map(|c| c.judge.as_deref())
+            .collect();
+        let judge = if judges.is_empty() {
+            "нет".to_string()
+        } else {
+            let mut uniq: Vec<&str> = judges.clone();
+            uniq.sort_unstable();
+            uniq.dedup();
+            uniq.join(", ")
+        };
+        // Независимость — общее утверждение, а не по кейсу: если хоть где-то
+        // судья совпал с автором, «да» было бы неправдой.
+        let independent = !self.cases.is_empty()
+            && self
+                .cases
+                .iter()
+                .all(|c| c.judge.is_some() && !c.judge_is_author);
+        let mut out = format!(
+            "смысловой слой: поймано {} из {}; судья: {judge}; независим: {}",
+            self.caught(),
+            self.cases.len(),
+            if independent { "да" } else { "нет" }
+        );
+        for c in &self.cases {
+            let _ = std::fmt::Write::write_fmt(
+                &mut out,
+                format_args!(
+                    "\n  {} · {} · {} — {}",
+                    c.mutant,
+                    c.rubric,
+                    c.subject,
+                    c.verdict.label()
+                ),
+            );
+        }
+        out
+    }
+}
+
+/// Читает отчёты судьи из сохранённых клонов и считает смысловую строку.
+///
+/// Пойман — главный критерий рубрики (`blocking`) с баллом ≤ 2 **и**
+/// подтверждённым обвинением: отчёт без цитат механика сама исключает из
+/// итога, и записывать это в поимку значило бы засчитывать выдуманное
+/// свидетельство. Отчёт сверяется с досье по хэшу: изменился — «устарел».
+///
+/// # Errors
+/// Каталог недоступен или задание `SEMANTIC-TODO.json` не разбирается.
+pub fn semantic_score(dir: &Path, rubrics_dir: &Path) -> Result<SemanticScore> {
+    if !dir.is_dir() {
+        return Err(HarnessError::Control(format!(
+            "каталог смысловых клонов недоступен: {}",
+            dir.display()
+        )));
+    }
+    let mut clones: Vec<PathBuf> = std::fs::read_dir(dir)
+        .map_err(|e| HarnessError::io(dir, e))?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.join("SEMANTIC-TODO.json").is_file())
+        .collect();
+    clones.sort();
+    let mut cases = Vec::new();
+    for clone in &clones {
+        let todo_path = clone.join("SEMANTIC-TODO.json");
+        let text =
+            std::fs::read_to_string(&todo_path).map_err(|e| HarnessError::io(&todo_path, e))?;
+        let todo: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
+            HarnessError::Control(format!(
+                "{}: задание не разбирается: {e}",
+                todo_path.display()
+            ))
+        })?;
+        let mutant = todo["mutant"].as_str().unwrap_or("?").to_string();
+        let rubric_name = todo["rubric"].as_str().unwrap_or("").to_string();
+        let subject = todo["subject"].as_str().unwrap_or("").to_string();
+        cases.push(score_one_clone(
+            clone,
+            &mutant,
+            &rubric_name,
+            &subject,
+            rubrics_dir,
+        ));
+    }
+    if cases.is_empty() {
+        return Err(HarnessError::Control(format!(
+            "в {} нет сохранённых клонов с заданием SEMANTIC-TODO.json — \
+             прогоните `redteam --keep-semantic <каталог>`",
+            dir.display()
+        )));
+    }
+    Ok(SemanticScore { cases })
+}
+
+/// Разбор одного клона: отчёт судьи по рубрике и субъекту, сверка с досье.
+fn score_one_clone(
+    clone: &Path,
+    mutant: &str,
+    rubric_name: &str,
+    subject: &str,
+    rubrics_dir: &Path,
+) -> SemanticCaseScore {
+    let base = SemanticCaseScore {
+        mutant: mutant.to_string(),
+        rubric: rubric_name.to_string(),
+        subject: subject.to_string(),
+        verdict: SemanticVerdict::NoReport,
+        judge: None,
+        judge_is_author: false,
+    };
+    let artifacts = crate::rubric::load_artifacts(clone);
+    let Some(artifact) = artifacts
+        .iter()
+        .rev()
+        .find(|a| a.rubric == rubric_name && a.subject.as_deref() == Some(subject))
+    else {
+        return base;
+    };
+    let judge = Some(artifact.judge_model.clone());
+    let judge_is_author = artifact.author_model.as_deref() == Some(artifact.judge_model.as_str());
+    let mut out = SemanticCaseScore {
+        judge,
+        judge_is_author,
+        ..base
+    };
+    // Отчёт привязан к досье: пересобираем его в клоне и сверяем хэш — иначе
+    // отчёт от прежней редакции читался бы как суждение о текущей. Отчёт БЕЗ
+    // хэша досье (снят не по досье) устаревшим не объявляется: это не
+    // расхождение, а отсутствие привязки, и судить о нём нечем.
+    if let Some(want) = artifact.pack_sha256.as_deref() {
+        let fresh =
+            crate::rubric_pack::PackKind::parse(artifact.pack_kind.as_deref().unwrap_or_default())
+                .ok()
+                .and_then(|kind| crate::rubric_pack::build(clone, kind, subject).ok())
+                .map(|packs| packs.iter().any(|p| p.sha256 == want));
+        if fresh == Some(false) {
+            out.verdict = SemanticVerdict::Stale;
+            return out;
+        }
+    }
+    // Главный критерий рубрики: без него измерять нечего.
+    let Ok(rubric) = load_rubric_by_name(rubrics_dir, rubric_name) else {
+        out.verdict = SemanticVerdict::NoReport;
+        return out;
+    };
+    let Some(main) = rubric.criteria.iter().find(|c| c.blocking) else {
+        out.verdict = SemanticVerdict::NoReport;
+        return out;
+    };
+    out.verdict = match artifact_scores(artifact, &main.id) {
+        None => SemanticVerdict::NoReport,
+        Some((score, _)) if score > 2 => SemanticVerdict::Missed,
+        Some((_, true)) => SemanticVerdict::Unconfirmed,
+        Some(_) => SemanticVerdict::Caught,
+    };
+    out
+}
+
+/// Балл главного критерия и признак исключения из отчёта: обвинение без
+/// подтверждённых цитат (`accusation_unconfirmed`) или без полного покрытия
+/// (`coverage_incomplete`) механика исключает из итога — засчитывать это
+/// поимкой значило бы записывать судье в заслугу выдуманное свидетельство.
+fn artifact_scores(
+    artifact: &crate::rubric::RubricArtifact,
+    criterion_id: &str,
+) -> Option<(u8, bool)> {
+    let score = artifact
+        .scores
+        .iter()
+        .find(|s| s.criterion_id == criterion_id)?;
+    let excluded = score.flags.iter().any(|f| f.excludes_from_total());
+    Some((score.score, excluded))
+}
+
+/// Рубрика по имени из каталога рубрик (ассеты конфига).
+fn load_rubric_by_name(dir: &Path, name: &str) -> Result<crate::rubric::Rubric> {
+    crate::rubric::load(&dir.join(format!("{name}.yaml")))
 }
 
 /// Записывает итог прогона в `<case>/.arch-handoff/redteam.json`.
@@ -920,7 +1232,7 @@ pub fn render_markdown(report: &RedteamReport) -> String {
     );
     let _ = writeln!(
         out,
-        "| № | Дефект | Ожидание | Результат |\n|---|---|---|---|"
+        "| № | Дефект | Ожидание | Результат | Смысловая рубрика |\n|---|---|---|---|---|"
     );
     for d in &report.detections {
         let result = match (&d.caught_by, d.skipped.as_deref()) {
@@ -937,13 +1249,31 @@ pub fn render_markdown(report: &RedteamReport) -> String {
             }
             (None, None) => "**не пойман**".to_string(),
         };
+        // Смысловая колонка (ADR-051, S5): у классов, где механика бессильна
+        // по построению, названа рубрика, которой дефект ловится судьёй, —
+        // иначе «не пойман и не должен» читается как приговор без выхода.
+        let semantic = MUTATORS
+            .iter()
+            .find(|m| m.id == d.id)
+            .and_then(|m| m.semantic.as_ref())
+            .map_or_else(|| "—".to_string(), |s| s.rubric.to_string());
         let _ = writeln!(
             out,
-            "| {} | {} | {} | {} |",
+            "| {} | {} | {} | {} | {} |",
             d.id,
             d.title,
             d.expected.label(),
-            result
+            result,
+            semantic
+        );
+    }
+    if !report.semantic_kept.is_empty() {
+        let _ = writeln!(
+            out,
+            "\nСмысловой слой (в долю обнаружения не входит): сохранено клонов — {}. \
+             Прогоните судью по заданию `SEMANTIC-TODO.json` в каждом и затем \
+             `arch-be redteam semantic-score <каталог>`.",
+            report.semantic_kept.len()
         );
     }
     out
@@ -1014,6 +1344,66 @@ fn copy_tree(from: &Path, to: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Первый подходящий субъект смысловой рубрики в клоне — относительный путь.
+/// Порядок сортировки делает выбор детерминированным.
+fn resolve_semantic_subject(root: &Path, subject: &SemanticSubject) -> Option<String> {
+    let rd = std::fs::read_dir(root.join(subject.dir)).ok()?;
+    let mut names: Vec<String> = rd
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with(subject.prefix))
+        .map(|e| format!("{}/{}", subject.dir, e.file_name().to_string_lossy()))
+        .collect();
+    names.sort();
+    names.into_iter().next()
+}
+
+/// Копирует клон смыслового мутанта в `dest_root/<D-n>` и кладёт рядом
+/// `SEMANTIC-TODO.json` — задание хосту (ADR-051, S5).
+///
+/// Смысловой дефект ловит не харнесс, а модель хоста, и ей нужен не только
+/// клон, но и точный вход: вид досье и субъект. Задание собирается из
+/// метаданных мутатора, а не пишется человеком, — иначе прогон судьи и
+/// измерение разъезжались бы.
+fn keep_semantic_clone(
+    root: &Path,
+    dest_root: &Path,
+    m: &Mutator,
+    subject: &SemanticSubject,
+) -> Result<PathBuf> {
+    let resolved = resolve_semantic_subject(root, subject).ok_or_else(|| {
+        HarnessError::Control(format!(
+            "{}: субъект смысловой рубрики '{}' не найден в клоне ({}/{}*) — \
+             измерять нечего",
+            m.id, subject.rubric, subject.dir, subject.prefix
+        ))
+    })?;
+    let dest = dest_root.join(m.id);
+    if dest.exists() {
+        std::fs::remove_dir_all(&dest).map_err(|e| HarnessError::io(&dest, e))?;
+    }
+    std::fs::create_dir_all(&dest).map_err(|e| HarnessError::io(&dest, e))?;
+    copy_tree(root, &dest)?;
+    let todo = serde_json::json!({
+        "schema": "arch-be/semantic-todo/v1",
+        "mutant": m.id,
+        "title": m.title,
+        "expected": m.expected.label(),
+        "rubric": subject.rubric,
+        "pack": subject.pack.as_str(),
+        "subject": resolved,
+        "clone": dest.display().to_string(),
+        "instructions": "Судит модель хоста (в ядре LLM нет): rubric_prompt с pack/subject/root \
+                         → k независимых ответов → rubric_verify под --rw (отчёт ляжет в \
+                         reports/rubric/ клона). Затем `arch-be redteam semantic-score <каталог>`. \
+                         Смысловая строка в долю обнаружения не входит (ADR-051).",
+    });
+    let path = dest.join("SEMANTIC-TODO.json");
+    let text = serde_json::to_string_pretty(&todo)
+        .map_err(|e| HarnessError::Config(format!("redteam: задание семантики: {e}")))?;
+    std::fs::write(&path, text).map_err(|e| HarnessError::io(&path, e))?;
+    Ok(dest)
+}
+
 /// git-команда мутанта (идентичность коммиттера задаём явно: CI без
 /// `user.email` иначе падает на `git commit`).
 fn git(dir: &Path, args: &[&str]) -> std::result::Result<(), String> {
@@ -1066,7 +1456,49 @@ fn gate_report(root: &Path, decision_quality: bool) -> Result<GateReport> {
 ///
 /// # Errors
 /// Кейс недоступен, git недоступен, гейт не смог отработать на эталоне.
+/// Параметры мутационного прогона.
+pub struct RedteamOptions {
+    /// Порог доли обнаружения, ниже которого прогон красный.
+    pub min_detection: f64,
+    /// Учитывать ли составляющую `decision_quality` при прогоне гейта.
+    pub decision_quality: bool,
+    /// Куда сохранить клоны смысловых мутантов (ADR-051, S5): `None` — клоны
+    /// удаляются, как раньше.
+    pub keep_semantic: Option<PathBuf>,
+}
+
+impl Default for RedteamOptions {
+    fn default() -> Self {
+        Self {
+            min_detection: 0.78,
+            decision_quality: true,
+            keep_semantic: None,
+        }
+    }
+}
+
+/// Прогон с параметрами по умолчанию (поведение 0.3.4).
+///
+/// # Errors
+/// Кейс недоступен, не зелёный на маршруте Critical, git или гейт отказали.
 pub fn run(case: &Path, min_detection: f64, decision_quality: bool) -> Result<RedteamReport> {
+    run_with_options(
+        case,
+        &RedteamOptions {
+            min_detection,
+            decision_quality,
+            keep_semantic: None,
+        },
+    )
+}
+
+/// Мутационный прогон с опциями.
+///
+/// # Errors
+/// Кейс недоступен, не зелёный на маршруте Critical, git или гейт отказали.
+pub fn run_with_options(case: &Path, options: &RedteamOptions) -> Result<RedteamReport> {
+    let min_detection = options.min_detection;
+    let decision_quality = options.decision_quality;
     let fixture = Fixture::new(case)?;
     // Эталон: кейс без правок. Нужен и как проверка «кейс вообще зелёный»
     // (иначе доля обнаружения мерила бы сломанный кейс), и как база для
@@ -1099,6 +1531,7 @@ pub fn run(case: &Path, min_detection: f64, decision_quality: bool) -> Result<Re
     }
     let mut detections = Vec::new();
     let mut control_ok = true;
+    let mut kept: Vec<PathBuf> = Vec::new();
     for m in &MUTATORS {
         let root = fixture.mutant(m.id)?;
         if let Err(e) = prepare(&root) {
@@ -1127,6 +1560,12 @@ pub fn run(case: &Path, min_detection: f64, decision_quality: bool) -> Result<Re
             .and_then(|()| git(&root, &["commit", "-q", "-m", &format!("mutant {}", m.id)]))
         {
             return Err(HarnessError::Control(format!("{}: коммит: {e}", m.id)));
+        }
+        // Смысловой мутант: клон сохраняется для хоста вместе с заданием
+        // (ADR-051, S5) — судить его будет модель хоста, а не харнесс.
+        if let (Some(subject), Some(dest_root)) = (&m.semantic, options.keep_semantic.as_deref()) {
+            let dest = keep_semantic_clone(&root, dest_root, m, subject)?;
+            kept.push(dest);
         }
         let report = gate_report(&root, decision_quality)?;
         let failed: Vec<String> = report
@@ -1180,6 +1619,7 @@ pub fn run(case: &Path, min_detection: f64, decision_quality: bool) -> Result<Re
         detections,
         min_detection,
         control_ok,
+        semantic_kept: kept,
     })
 }
 
@@ -1198,6 +1638,7 @@ mod tests {
             detections: Vec::new(),
             min_detection: 0.78,
             control_ok: true,
+            semantic_kept: Vec::new(),
         };
         let path = save_summary(&case, &report).expect("save");
         assert!(
@@ -1313,6 +1754,7 @@ mod tests {
             ],
             min_detection: 0.5,
             control_ok: true,
+            semantic_kept: Vec::new(),
         };
         // Пропущенный (нет входа) выпадает из знаменателя, семантический —
         // остаётся: он обязан НЕ ловиться, и доля это учитывает.
@@ -1332,5 +1774,283 @@ mod tests {
         let mut ncontrol = report.clone();
         ncontrol.control_ok = false;
         assert!(!ncontrol.passed());
+    }
+
+    // --- S5 (ADR-051): смысловой слой отдельной строкой ---------------------
+
+    /// Мутатор по идентификатору из каталога.
+    fn mutator(id: &str) -> &'static Mutator {
+        MUTATORS.iter().find(|m| m.id == id).expect("мутатор")
+    }
+
+    /// Клон смыслового мутанта сохраняется вместе с заданием хосту: в клоне
+    /// лежит правленый субъект, рядом — `SEMANTIC-TODO.json` с рубрикой, видом
+    /// досье и субъектом. Без задания хост не знал бы, чем судить.
+    #[test]
+    fn semantic_clone_keeps_subject_and_todo() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("clone");
+        std::fs::create_dir_all(root.join("model")).expect("mkdir");
+        std::fs::write(
+            root.join("model/CMP-001-jurnal.md"),
+            "---\nid: CMP-001\ntype: cmp\ntitle: Журнал\nstatus: designed\n---\n\nтело\n",
+        )
+        .expect("write");
+        let m = mutator("D6");
+        let subject = m.semantic.as_ref().expect("D6 — смысловой мутант");
+        assert_eq!(subject.rubric, "model_link_semantics");
+
+        let dest_root = tmp.path().join("kept");
+        let dest = keep_semantic_clone(&root, &dest_root, m, subject).expect("клон");
+        assert_eq!(dest, dest_root.join("D6"));
+        assert!(
+            dest.join("model/CMP-001-jurnal.md").is_file(),
+            "правленый субъект в клоне"
+        );
+        let todo: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dest.join("SEMANTIC-TODO.json")).expect("todo"),
+        )
+        .expect("json");
+        assert_eq!(todo["mutant"], "D6");
+        assert_eq!(todo["rubric"], "model_link_semantics");
+        assert_eq!(todo["pack"], "entity_links");
+        assert_eq!(todo["subject"], "model/CMP-001-jurnal.md");
+        assert!(
+            todo["instructions"]
+                .as_str()
+                .expect("инструкция")
+                .contains("rubric_prompt"),
+            "задание говорит, чем судить: {todo}"
+        );
+    }
+
+    /// Резолвер субъекта берёт первый файл в отсортированном порядке — прогон
+    /// детерминирован независимо от порядка файловой системы.
+    #[test]
+    fn semantic_subject_resolution_is_sorted() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("clone");
+        std::fs::create_dir_all(root.join("docs/adr")).expect("mkdir");
+        for name in ["ADR-002-b.md", "ADR-001-a.md"] {
+            std::fs::write(root.join("docs/adr").join(name), "x").expect("write");
+        }
+        let m = mutator("D10");
+        let subject = m.semantic.as_ref().expect("D10 — смысловой мутант");
+        assert_eq!(
+            resolve_semantic_subject(&root, subject).as_deref(),
+            Some("docs/adr/ADR-001-a.md")
+        );
+    }
+
+    /// Что писать в отчёт судьи клона (для тестов смысловой строки).
+    struct ReportSpec<'a> {
+        main_score: u8,
+        flags: &'a [&'a str],
+        pack_sha256: Option<&'a str>,
+        author: Option<&'a str>,
+    }
+
+    /// Отчёт судьи в клоне: пишем минимальный валидный артефакт рубрики.
+    fn write_report(clone: &Path, rubric: &str, subject: &str, spec: &ReportSpec<'_>) {
+        let ReportSpec {
+            main_score,
+            flags,
+            pack_sha256,
+            author,
+        } = *spec;
+        let dir = clone.join(crate::rubric::RUBRIC_REPORTS_DIR);
+        std::fs::create_dir_all(&dir).expect("mkdir reports");
+        let artifact = serde_json::json!({
+            "schema": crate::rubric::RUBRIC_REPORT_SCHEMA,
+            "rubric": rubric,
+            "judge_model": "judge-x",
+            "author_model": author,
+            "weighted_total": 2.0,
+            "verdict": "CONCERNS",
+            "pack_kind": "adr_vs_spine",
+            "subject": subject,
+            "pack_sha256": pack_sha256,
+            "scores": [{
+                "criterion_id": "no_contradiction",
+                "weight": 3.0,
+                "score": main_score,
+                "rationale": "Цитата subject: \"a\". Цитата reference: \"b\".",
+                "samples": [main_score],
+                "stdev": 0.0,
+                "flags": flags,
+                "evidence_unconfirmed_ratio": 0.0,
+                "checked": ["AD-1"],
+            }],
+            "judged_at": "2026-09-20T10:00:00+03:00",
+        });
+        std::fs::write(
+            dir.join("report.json"),
+            serde_json::to_string_pretty(&artifact).expect("json"),
+        )
+        .expect("write report");
+    }
+
+    /// Клон с заданием и скелетом досье (`docs/adr` + спайн), чтобы отчёт
+    /// можно было пересчитать и сверить хэш.
+    fn score_clone(root: &Path) -> PathBuf {
+        let clone = root.join("D10");
+        std::fs::create_dir_all(clone.join("docs/adr")).expect("mkdir");
+        std::fs::write(
+            clone.join(ARCHITECTURE_SPINE_FOR_TEST),
+            "## AD-1: Журнал только дописывается\n\n- **Rule**: строки журнала не правятся.\n",
+        )
+        .expect("spine");
+        std::fs::write(
+            clone.join("docs/adr/ADR-001-x.md"),
+            "# ADR-001\n\nрешение\n",
+        )
+        .expect("adr");
+        std::fs::write(
+            clone.join("SEMANTIC-TODO.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "mutant": "D10",
+                "rubric": "adr_spine_consistency",
+                "pack": "adr_vs_spine",
+                "subject": "docs/adr/ADR-001-x.md",
+            }))
+            .expect("json"),
+        )
+        .expect("todo");
+        clone
+    }
+
+    /// Имя спайна в клоне — как у сборщика досье.
+    const ARCHITECTURE_SPINE_FOR_TEST: &str = "ARCHITECTURE-SPINE.md";
+
+    /// Каталог рубрик с одной смысловой рубрикой (главный критерий — `low`).
+    fn rubrics_dir(root: &Path) -> PathBuf {
+        let dir = root.join("rubrics");
+        std::fs::create_dir_all(&dir).expect("mkdir rubrics");
+        std::fs::write(
+            dir.join("adr_spine_consistency.yaml"),
+            "name: adr_spine_consistency\ndescription: d\nscale_max: 5\norigin: anchor\n\
+             pack: adr_vs_spine\ncriteria:\n  - id: no_contradiction\n    name: n\n    \
+             description: d\n    weight: 3.0\n    blocking: true\n    evidence_on: low\n",
+        )
+        .expect("rubric");
+        dir
+    }
+
+    /// Смысловая строка: пойман — главный критерий ≤ 2 с подтверждённым
+    /// обвинением; выше — пропуск; с меткой исключения — обвинение не
+    /// подтверждено; с чужим хэшем досье — отчёт устарел.
+    #[test]
+    fn semantic_score_reads_verdicts_from_reports() {
+        let cases: [(&str, ReportSpec<'_>, SemanticVerdict); 4] = [
+            (
+                "пойман",
+                ReportSpec {
+                    main_score: 1,
+                    flags: &[],
+                    pack_sha256: None,
+                    author: Some("author-y"),
+                },
+                SemanticVerdict::Caught,
+            ),
+            (
+                "пропуск",
+                ReportSpec {
+                    main_score: 4,
+                    flags: &[],
+                    pack_sha256: None,
+                    author: Some("author-y"),
+                },
+                SemanticVerdict::Missed,
+            ),
+            (
+                "не подтверждено",
+                ReportSpec {
+                    main_score: 1,
+                    flags: &["accusation_unconfirmed"],
+                    pack_sha256: None,
+                    author: Some("author-y"),
+                },
+                SemanticVerdict::Unconfirmed,
+            ),
+            (
+                "устарел",
+                ReportSpec {
+                    main_score: 1,
+                    flags: &[],
+                    pack_sha256: Some(
+                        "0000000000000000000000000000000000000000000000000000000000000000",
+                    ),
+                    author: Some("author-y"),
+                },
+                SemanticVerdict::Stale,
+            ),
+        ];
+        for (name, spec, want) in cases {
+            let tmp = tempfile::tempdir().expect("tmp");
+            let clone = score_clone(tmp.path());
+            write_report(
+                &clone,
+                "adr_spine_consistency",
+                "docs/adr/ADR-001-x.md",
+                &spec,
+            );
+            let scored = semantic_score(tmp.path(), &rubrics_dir(tmp.path())).expect("score");
+            assert_eq!(scored.cases.len(), 1, "{name}");
+            assert_eq!(scored.cases[0].verdict, want, "{name}: {scored:?}");
+            // Человеческая строка называет и судью, и независимость.
+            let text = scored.render();
+            if want == SemanticVerdict::Caught {
+                assert!(text.contains("смысловой слой: поймано 1 из 1"), "{text}");
+                assert!(text.contains("судья: judge-x"), "{text}");
+                assert!(text.contains("независим: да"), "{text}");
+            }
+        }
+    }
+
+    /// Клон без отчёта судьи — «нет отчёта», а не «не пойман»: разница
+    /// принципиальна, иначе непрогнанный кейс считался бы провалом судьи.
+    #[test]
+    fn semantic_score_without_report_says_so() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let _ = score_clone(tmp.path());
+        let scored = semantic_score(tmp.path(), &rubrics_dir(tmp.path())).expect("score");
+        assert_eq!(scored.cases[0].verdict, SemanticVerdict::NoReport);
+        assert_eq!(scored.caught(), 0);
+        assert!(scored.render().contains("независим: нет"));
+    }
+
+    /// Пустой каталог — явная ошибка с подсказкой, а не «поймано 0 из 0».
+    #[test]
+    fn semantic_score_empty_dir_is_error() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let err = semantic_score(tmp.path(), &rubrics_dir(tmp.path())).expect_err("пусто");
+        assert!(err.to_string().contains("keep-semantic"), "{err}");
+    }
+
+    /// Смысловая колонка в карте обнаружения называет рубрику: без неё
+    /// «не пойман и не должен» читается как приговор без выхода.
+    #[test]
+    fn detection_map_names_semantic_rubric() {
+        let report = RedteamReport {
+            case: PathBuf::from("case"),
+            detections: vec![Detection {
+                id: "D10".into(),
+                title: "решение противоречит инварианту".into(),
+                expected: Expectation::Semantic,
+                caught_by: None,
+                skipped: None,
+                expected_by: "—".into(),
+                in_ratio: true,
+            }],
+            min_detection: 0.78,
+            control_ok: true,
+            semantic_kept: Vec::new(),
+        };
+        let md = render_markdown(&report);
+        assert!(
+            md.contains("| D10 |") && md.contains("adr_spine_consistency"),
+            "колонка смысловой рубрики: {md}"
+        );
+        assert!(md.contains("не пойман и не должен"), "{md}");
     }
 }

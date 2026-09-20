@@ -281,6 +281,20 @@ enum Cmd {
         /// должна быть измерена, а не пересказана.
         #[arg(long)]
         save: bool,
+        /// Сохранить клоны смысловых мутантов в каталог и положить рядом
+        /// `SEMANTIC-TODO.json` (ADR-051): судит их модель хоста, а не
+        /// харнесс, — в ядре LLM нет. В долю обнаружения они не входят.
+        #[arg(long, value_name = "КАТАЛОГ")]
+        keep_semantic: Option<PathBuf>,
+    },
+    /// Смысловой слой red-team: что судья увидел в сохранённых клонах
+    /// (ADR-051). Отдельная строка, в порог доли обнаружения не входит.
+    SemanticScore {
+        /// Каталог, переданный `redteam --keep-semantic`.
+        dir: PathBuf,
+        /// Формат вывода: text (дефолт) | json.
+        #[arg(long, default_value = "text", value_name = "FORMAT")]
+        format: String,
     },
     /// Составное архитектурное ревью репозитория одним ответом (бэклог
     /// волны 3, п.13): маршрут значимости из git-диффа + весь контур
@@ -835,6 +849,10 @@ enum BenchCmd {
         /// согласия с эталоном MAE; выше порога `judge.golden_max_mae` — exit 1.
         #[arg(long)]
         golden: bool,
+        /// Прогон одной рубрики: годен только с `--golden` (смысловые рубрики
+        /// калибруются поимённо, ADR-051).
+        #[arg(long)]
+        rubric: Option<String>,
         /// Дописать результат golden-прогона строкой JSON в evidence-журнал
         /// (M-2, история — `bench golden-history`).
         #[arg(long)]
@@ -1961,8 +1979,16 @@ async fn main() -> Result<()> {
             min_detection,
             no_decision_quality,
             save,
+            keep_semantic,
         }) => {
-            let report = arch_harness::redteam::run(&case, min_detection, !no_decision_quality)?;
+            let report = arch_harness::redteam::run_with_options(
+                &case,
+                &arch_harness::redteam::RedteamOptions {
+                    min_detection,
+                    decision_quality: !no_decision_quality,
+                    keep_semantic: keep_semantic.clone(),
+                },
+            )?;
             if save {
                 // Сохраняем в ИСХОДНЫЙ кейс: прогон шёл в копии.
                 let path = arch_harness::redteam::save_summary(&case, &report)?;
@@ -1981,6 +2007,38 @@ async fn main() -> Result<()> {
             }
             if !report.passed() {
                 std::process::exit(1);
+            }
+        }
+        Some(Cmd::SemanticScore { dir, format }) => {
+            let score = arch_harness::redteam::semantic_score(&dir, &cfg.paths.rubrics_dir())?;
+            if format.trim().eq_ignore_ascii_case("json") {
+                let cases: Vec<serde_json::Value> = score
+                    .cases
+                    .iter()
+                    .map(|c| {
+                        serde_json::json!({
+                            "mutant": c.mutant,
+                            "rubric": c.rubric,
+                            "subject": c.subject,
+                            "verdict": c.verdict.label(),
+                            "judge": c.judge,
+                            "judge_is_author": c.judge_is_author,
+                        })
+                    })
+                    .collect();
+                let out = serde_json::json!({
+                    "schema": "arch-be/semantic-score/v1",
+                    "caught": score.caught(),
+                    "total": score.cases.len(),
+                    "cases": cases,
+                    "note": "смысловой слой не входит в долю обнаружения red-team (ADR-051)",
+                });
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string())
+                );
+            } else {
+                println!("{}", score.render());
             }
         }
         Some(Cmd::Adr { cmd }) => cmd_adr(cmd)?,
@@ -2974,10 +3032,14 @@ async fn cmd_bench(cfg: &Arc<Config>, cmd: BenchCmd) -> Result<()> {
             name,
             model,
             golden,
+            rubric,
             record,
         } => {
             if record.is_some() && !golden {
                 anyhow::bail!("`bench run --record` применим только с --golden");
+            }
+            if rubric.is_some() && !golden {
+                anyhow::bail!("`bench run --rubric` применим только с --golden");
             }
             let registry = LlmRegistry::from_config(cfg)?;
             let provider = match &model {
@@ -2990,11 +3052,12 @@ async fn cmd_bench(cfg: &Arc<Config>, cmd: BenchCmd) -> Result<()> {
                 }
                 // Регрессионный гейт качества судьи (ADR-004): согласие с
                 // эталоном ниже порога — exit 1, как у `control check`.
-                let report = arch_harness::bench::run_golden(
+                let report = arch_harness::bench::run_golden_filtered(
                     provider.as_ref(),
                     &cfg.paths.rubrics_dir(),
                     &cfg.paths.benchmarks_dir().join("golden"),
                     &cfg.judge,
+                    rubric.as_deref(),
                 )
                 .await?;
                 println!(
