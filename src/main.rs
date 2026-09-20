@@ -805,6 +805,17 @@ enum RubricCmd {
         #[arg(long)]
         author_model: Option<String>,
     },
+    /// Пересобрать отчёт из сохранённых сырых ответов судьи и сверить с
+    /// записанным: расхождение — ненулевой код (ADR-048).
+    ///
+    /// Отвечает на один вопрос: соответствует ли записанный балл ответам, из
+    /// которых он объявлен собранным. Отчёт без сохранённых ответов
+    /// (до 0.3.5) сверке не подлежит — это не расхождение, а отсутствие
+    /// свидетельства.
+    Reverify {
+        /// Отчёт (`reports/rubric/<slug>.json`) или каталог с отчётами.
+        path: PathBuf,
+    },
 }
 
 /// Подкоманды `arch-be bench` (только сборка `harness`).
@@ -2884,7 +2895,9 @@ async fn cmd_rubric(cfg: &Arc<Config>, cmd: RubricCmd) -> Result<()> {
                 let path = resolve_asset(&cfg.paths.rubrics_dir(), &rubric, "yaml");
                 arch_harness::rubric::load(&path)?
             };
-            let report = arch_harness::rubric::evaluate(&rub, &text, judge.as_ref()).await?;
+            let (report, raw) =
+                arch_harness::rubric::evaluate_collecting(&rub, &text, judge.as_ref(), &cfg.judge)
+                    .await?;
             println!("{}", report.to_markdown());
             let out = cfg
                 .paths
@@ -2912,6 +2925,15 @@ async fn cmd_rubric(cfg: &Arc<Config>, cmd: RubricCmd) -> Result<()> {
             }
             let extras = arch_harness::rubric::ArtifactExtras {
                 provenance: Some(provenance),
+                // Сырые ответы судьи — рядом с отчётом: отчёт обязан
+                // пересобираться из них (J2, ADR-048).
+                raw_answers: raw
+                    .into_iter()
+                    .map(|text| arch_harness::judge::RawAnswerInput {
+                        text,
+                        dropped: false,
+                    })
+                    .collect(),
             };
             match arch_harness::rubric::write_artifact_with(
                 &repo,
@@ -2924,8 +2946,82 @@ async fn cmd_rubric(cfg: &Arc<Config>, cmd: RubricCmd) -> Result<()> {
                 Err(e) => eprintln!("⚠ машиночитаемый отчёт не записан: {e}"),
             }
         }
+        RubricCmd::Reverify { path } => {
+            let reports = collect_artifacts(&path)?;
+            if reports.is_empty() {
+                anyhow::bail!(
+                    "отчётов рубрики не найдено: {} (ожидается reports/rubric/<slug>.json или каталог)",
+                    path.display()
+                );
+            }
+            let rubrics_dir = cfg.paths.rubrics_dir();
+            let mut bad = 0usize;
+            for (artifact_path, artifact) in &reports {
+                let repo = arch_harness::rubric::repo_root_of(artifact_path);
+                let check =
+                    arch_harness::judge::reverify(&repo, artifact, &rubrics_dir, &cfg.judge);
+                let name = artifact_path.file_name().map_or_else(
+                    || artifact_path.display().to_string(),
+                    |n| n.to_string_lossy().into_owned(),
+                );
+                if !check.raw_saved {
+                    println!("~ {name}: сырые ответы не сохранены — отчёт невоспроизводим");
+                    continue;
+                }
+                for file in &check.tampered {
+                    println!("✗ {name}: {file} — текст ответа не сходится с записанным хэшем");
+                }
+                if let Some(reason) = &check.unavailable {
+                    println!("~ {name}: сверка невозможна — {reason}");
+                    continue;
+                }
+                for diff in &check.differences {
+                    println!("✗ {name}: {diff}");
+                }
+                if check.reproduced() {
+                    println!("✓ {name}: отчёт воспроизводится из своих ответов");
+                } else {
+                    bad += 1;
+                    println!("✗ {name}: отчёт не соответствует своим ответам");
+                }
+            }
+            if bad > 0 {
+                anyhow::bail!("отчётов с расхождением: {bad}");
+            }
+        }
     }
     Ok(())
+}
+
+/// Отчёты рубрики для `rubric reverify`: один файл или все `*.json` каталога
+/// (подкаталог сырых ответов `raw/` не читается).
+fn collect_artifacts(path: &Path) -> Result<Vec<(PathBuf, arch_harness::rubric::RubricArtifact)>> {
+    let mut out = Vec::new();
+    let files: Vec<PathBuf> = if path.is_dir() {
+        let mut files: Vec<PathBuf> = std::fs::read_dir(path)
+            .with_context(|| format!("чтение каталога {}", path.display()))?
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.is_file()
+                    && p.extension()
+                        .is_some_and(|x| x.eq_ignore_ascii_case("json"))
+            })
+            .collect();
+        files.sort();
+        files
+    } else {
+        vec![path.to_path_buf()]
+    };
+    for file in files {
+        let text =
+            std::fs::read_to_string(&file).with_context(|| format!("чтение {}", file.display()))?;
+        match serde_json::from_str::<arch_harness::rubric::RubricArtifact>(&text) {
+            Ok(artifact) => out.push((file, artifact)),
+            Err(e) => eprintln!("⚠ {}: не отчёт рубрики ({e})", file.display()),
+        }
+    }
+    Ok(out)
 }
 
 /// `arch-be bench` (только сборка `harness`).

@@ -1659,11 +1659,21 @@ impl McpServe {
         let total = args.answers.len();
         let mut runs = Vec::with_capacity(total);
         let mut dropped = 0usize;
+        // Сырые ответы сохраняются как есть — и разобранные, и отброшенные
+        // (J2, ADR-048): по ним отчёт пересобирается и сверяется, поэтому
+        // «поправить балл в отчёте» перестаёт быть незаметным.
+        let mut raw_inputs = Vec::with_capacity(total);
         for raw in &args.answers {
-            match rubric::parse_judge_response(raw) {
+            let parsed = rubric::parse_judge_response(raw);
+            let is_dropped = parsed.is_err();
+            match parsed {
                 Ok(parsed) => runs.push(parsed),
                 Err(_) => dropped += 1,
             }
+            raw_inputs.push(crate::judge::RawAnswerInput {
+                text: raw.clone(),
+                dropped: is_dropped,
+            });
         }
         if runs.is_empty() {
             return Err(CallError::Execution(format!(
@@ -1718,6 +1728,7 @@ impl McpServe {
                 if self.mode.allows_write() {
                     let extras = crate::rubric::ArtifactExtras {
                         provenance: Some(provenance),
+                        raw_answers: raw_inputs.clone(),
                     };
                     match crate::rubric::write_artifact_with(
                         &repo,

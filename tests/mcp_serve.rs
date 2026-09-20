@@ -1763,8 +1763,11 @@ fn provenance_rubric(home: &Path) -> String {
 fn provenance_case(home: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
     let repo = home.join("case");
     std::fs::create_dir_all(repo.join(".arch-handoff")).expect("mkdir handoff");
-    std::fs::write(repo.join(".arch-handoff/CONSTRAINTS.yaml"), "constraints: []\n")
-        .expect("constraints");
+    std::fs::write(
+        repo.join(".arch-handoff/CONSTRAINTS.yaml"),
+        "constraints: []\n",
+    )
+    .expect("constraints");
     let adr = repo.join("docs/adr/ADR-001-pilot.md");
     std::fs::create_dir_all(adr.parent().expect("каталог ADR")).expect("mkdir adr");
     std::fs::write(
@@ -1883,4 +1886,297 @@ fn verify_without_prompt_in_session_is_recorded_not_rejected() {
     // Версии хост не назвал — поле отсутствует, а не выдумано.
     assert!(prov["host"].get("version").is_none(), "{prov}");
     assert!(prov.get("prompt_sha256").is_none(), "{prov}");
+}
+
+/// Кейс, пригодный для гейта: принимаемый ADR, рубрика в каталоге рубрик
+/// харнесса и конфиг, включающий составляющую `decision_quality`.
+///
+/// Отчёт для него собирается через MCP `rubric_verify` — детерминированно и
+/// без LLM, поэтому «отчёт сходится со своими ответами» проверяется
+/// по-настоящему, а не моком.
+fn judge_gate_case(home: &Path) -> (std::path::PathBuf, std::path::PathBuf, String) {
+    let (repo, adr) = provenance_case(home);
+    // Реестр правил кейса обязан быть непустым: пустой корень — это FAIL
+    // составляющей `fitness`, и гейт краснел бы не из-за того, что проверяем.
+    std::fs::write(
+        repo.join(".arch-handoff/CONSTRAINTS.yaml"),
+        "rules:\n  - name: spine_present\n    type: file_exists\n    path: \"ARCHITECTURE-SPINE.md\"\n    severity: error\n",
+    )
+    .expect("constraints");
+    std::fs::write(repo.join("ARCHITECTURE-SPINE.md"), "# Spine\n").expect("spine");
+    let assets = home.join("assets-test");
+    let rubrics = assets.join("rubrics");
+    std::fs::create_dir_all(&rubrics).expect("mkdir rubrics");
+    let rubric_path = rubrics.join("t-rubric.yaml");
+    std::fs::write(
+        &rubric_path,
+        "name: t-rubric\ndescription: тестовая\nscale_max: 5\norigin: anchor\ncriteria:\n  - id: context\n    name: Контекст\n    description: Описан контекст\n    weight: 1.0\n",
+    )
+    .expect("рубрика");
+    // Рубрика задаётся и путём (для verify), и каталогом (для гейта).
+    std::fs::write(
+        home.join("arch-harness.toml"),
+        format!(
+            "[paths]\nassets_dir = \"{}\"\n\n[gate.required]\nfast = [\"decision_quality\"]\n\
+             standard = [\"decision_quality\"]\ncritical = [\"decision_quality\"]\n",
+            assets.display()
+        ),
+    )
+    .expect("конфиг");
+    vcs_init(&repo);
+    (repo, adr, rubric_path.display().to_string())
+}
+
+/// Инициализирует git-репозиторий кейса (правила гейта читают git-базу).
+fn vcs_init(repo: &Path) {
+    for args in [
+        vec!["init", "-q"],
+        vec!["add", "."],
+        vec!["commit", "-q", "-m", "init"],
+    ] {
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(&args)
+            .env("GIT_AUTHOR_NAME", "judge-test")
+            .env("GIT_AUTHOR_EMAIL", "judge-test@example.invalid")
+            .env("GIT_COMMITTER_NAME", "judge-test")
+            .env("GIT_COMMITTER_EMAIL", "judge-test@example.invalid")
+            .status()
+            .expect("git доступен");
+        assert!(status.success(), "git {args:?}");
+    }
+}
+
+/// Собирает отчёт через split-judge: один валидный ответ → verify под `--rw`
+/// (отчёт и сырые ответы ложатся в репозиторий кейса).
+fn judge_report_via_mcp(home: &Path, adr: &Path, rubric: &str, judge_model: &str) {
+    let verify = call(
+        1,
+        "rubric_verify",
+        &json!({
+            "rubric": rubric,
+            "target": adr.display().to_string(),
+            "judge_model": judge_model,
+            "author_model": "claude-opus-4",
+            "answers": [provenance_answer()],
+        }),
+    );
+    let responses = mcp_serve_with_args(home, &["--rw"], &batch(&[verify]));
+    let verdict = structured(&responses[0], 1);
+    assert_eq!(verdict["answers"]["valid"], 1, "{verdict}");
+}
+
+/// Гейт кейса: `arch-be gate --repo <кейс> --route fast` (составляющая
+/// `decision_quality` включена конфигом).
+fn gate_output(home: &Path, repo: &Path) -> std::process::Output {
+    arch_cmd(home)
+        .arg("gate")
+        .arg("--repo")
+        .arg(repo.as_os_str())
+        .arg("--route")
+        .arg("fast")
+        .output()
+        .expect("запуск arch-be gate")
+}
+
+/// J2 (ADR-048): сырые ответы судьи сохраняются рядом с отчётом, их хэши
+/// попадают в `provenance.samples`, а баллы по критериям — в сам отчёт:
+/// отсюда берётся воспроизводимость, которой раньше не было.
+#[test]
+fn raw_answers_are_saved_with_hashes() {
+    let home = tempfile::tempdir().expect("tmp");
+    let (repo, adr, rubric) = judge_gate_case(home.path());
+    judge_report_via_mcp(home.path(), &adr, &rubric, "glm-5.2");
+    let raw = repo.join("reports/rubric/raw/ADR-001-pilot/sample-1.json");
+    let record: Value =
+        serde_json::from_str(&std::fs::read_to_string(&raw).expect("сырой ответ")).expect("JSON");
+    assert_eq!(record["schema"], "arch-be/rubric-raw/v1", "{record}");
+    assert_eq!(record["sample"], 1, "{record}");
+    assert_eq!(record["judge_model"], "glm-5.2", "{record}");
+    assert_eq!(record["dropped"], false, "{record}");
+    assert_eq!(
+        record["text"],
+        provenance_answer(),
+        "текст ответа сохраняется как есть"
+    );
+    // Хэш в файле и хэш в отчёте — один и тот же, и он же от текста ответа.
+    let sha = arch_harness::hash::sha256_hex(record["text"].as_str().expect("текст").as_bytes());
+    assert_eq!(record["sha256"], json!(sha), "{record}");
+    let artifact: Value = serde_json::from_str(
+        &std::fs::read_to_string(repo.join("reports/rubric/ADR-001-pilot.json")).expect("отчёт"),
+    )
+    .expect("JSON отчёта");
+    assert_eq!(artifact["provenance"]["samples"][0]["sha256"], json!(sha));
+    assert_eq!(artifact["provenance"]["samples"][0]["dropped"], false);
+    assert_eq!(
+        artifact["scores"][0]["criterion_id"], "context",
+        "{artifact}"
+    );
+    assert_eq!(artifact["scores"][0]["score"], 4, "{artifact}");
+    // Отчёт без правок гейт проходит: сверка прошла, расхождений нет.
+    let gate = gate_output(home.path(), &repo);
+    let stdout = String::from_utf8_lossy(&gate.stdout);
+    assert!(gate.status.success(), "гейт: {stdout}");
+    assert!(
+        !stdout.contains("rubric_report_inconsistent"),
+        "воспроизводимый отчёт не должен краснеть: {stdout}"
+    );
+}
+
+/// J2 (ADR-048), критерий успеха 2: балл, поправленный в отчёте руками, ловит
+/// составляющая `decision_quality` — отчёт пересобирается из сырых ответов, а
+/// расхождение становится находкой `rubric_report_inconsistent` (error).
+#[test]
+fn gate_flags_hand_edited_score() {
+    let home = tempfile::tempdir().expect("tmp");
+    let (repo, adr, rubric) = judge_gate_case(home.path());
+    judge_report_via_mcp(home.path(), &adr, &rubric, "glm-5.2");
+    let report = repo.join("reports/rubric/ADR-001-pilot.json");
+    let mut artifact: Value =
+        serde_json::from_str(&std::fs::read_to_string(&report).expect("отчёт")).expect("JSON");
+    // Поднимаем балл руками: ровно то, что задание называет непроверяемым.
+    artifact["scores"][0]["score"] = json!(5);
+    artifact["weighted_total"] = json!(5.0);
+    std::fs::write(
+        &report,
+        serde_json::to_string_pretty(&artifact).expect("JSON"),
+    )
+    .expect("запись отчёта");
+    let gate = gate_output(home.path(), &repo);
+    let stdout = String::from_utf8_lossy(&gate.stdout);
+    assert!(!gate.status.success(), "правка обязана краснеть: {stdout}");
+    assert!(
+        stdout.contains("rubric_report_inconsistent"),
+        "ожидалась находка о несоответствии ответам: {stdout}"
+    );
+    assert!(
+        stdout.contains("критерий 'context'"),
+        "находка называет критерий и числа: {stdout}"
+    );
+}
+
+/// J2 (ADR-048): правка самого сохранённого ответа тоже видна — хэш текста в
+/// файле не сходится с записанным в отчёте (`rubric_raw_tampered`, error).
+#[test]
+fn gate_flags_tampered_raw_answer() {
+    let home = tempfile::tempdir().expect("tmp");
+    let (repo, adr, rubric) = judge_gate_case(home.path());
+    judge_report_via_mcp(home.path(), &adr, &rubric, "glm-5.2");
+    let raw = repo.join("reports/rubric/raw/ADR-001-pilot/sample-1.json");
+    let mut record: Value =
+        serde_json::from_str(&std::fs::read_to_string(&raw).expect("сырой ответ")).expect("JSON");
+    record["text"] = json!(
+        "{\"scores\":[{\"criterion_id\":\"context\",\"score\":5,\"rationale\":\"Цитата: \\\"Контекст описан явно\\\"\"}],\"verdict\":\"годно\"}"
+    );
+    std::fs::write(&raw, serde_json::to_string_pretty(&record).expect("JSON"))
+        .expect("запись сырого ответа");
+    let gate = gate_output(home.path(), &repo);
+    let stdout = String::from_utf8_lossy(&gate.stdout);
+    assert!(
+        !gate.status.success(),
+        "подмена ответа обязана краснеть: {stdout}"
+    );
+    assert!(
+        stdout.contains("rubric_raw_tampered"),
+        "ожидалась находка о подмене сырого ответа: {stdout}"
+    );
+}
+
+/// J2 (ADR-048), обратная совместимость: отчёт старого формата (без
+/// `provenance`, `scores` и сырых ответов) читается и даёт ПРЕЖНИЕ находки —
+/// отсутствие свидетельства не становится находкой, но и не выдаётся за
+/// проверку: паспорт называет границу.
+#[test]
+fn legacy_report_without_provenance_loads_and_passes_as_before() {
+    let home = tempfile::tempdir().expect("tmp");
+    let (repo, adr, _rubric) = judge_gate_case(home.path());
+    let sha = arch_harness::hash::sha256_file(&adr).expect("хэш документа");
+    let reports = repo.join("reports/rubric");
+    std::fs::create_dir_all(&reports).expect("mkdir reports");
+    std::fs::write(
+        reports.join("ADR-001-pilot.json"),
+        serde_json::to_string_pretty(&json!({
+            "schema": "arch-be/rubric-report/v1",
+            "rubric": "t-rubric",
+            "target": "docs/adr/ADR-001-pilot.md",
+            "target_sha256": sha,
+            "judge_model": "glm-5.2",
+            "author_model": "claude-opus-4",
+            "weighted_total": 4.0,
+            "verdict": "годно",
+            "unstable": false,
+            "evidence_not_found": 0,
+            "judged_at": "2026-09-20T10:00:00+03:00",
+        }))
+        .expect("JSON"),
+    )
+    .expect("запись отчёта");
+    let gate = gate_output(home.path(), &repo);
+    let stdout = String::from_utf8_lossy(&gate.stdout);
+    assert!(
+        gate.status.success(),
+        "старый отчёт не должен краснеть: {stdout}"
+    );
+    // Граница проверки называется в паспорте вердикта (блок 2: что зелёный НЕ
+    // означает), а не в обычном выводе гейта.
+    let explain = arch_cmd(home.path())
+        .arg("gate")
+        .arg("--repo")
+        .arg(repo.as_os_str())
+        .arg("--route")
+        .arg("fast")
+        .arg("--explain")
+        .output()
+        .expect("запуск arch-be gate --explain");
+    let text = String::from_utf8_lossy(&explain.stdout);
+    assert!(
+        text.contains("невоспроизводима"),
+        "граница проверки называется, а не выдаётся за проверку: {text}"
+    );
+}
+
+/// `arch-be rubric reverify`: отчёт, собранный из своих ответов, проходит;
+/// отчёт с поднятым рукой баллом — нет (ненулевой код); отчёт без сырых
+/// ответов честно называется невоспроизводимым, но расхождением не считается.
+#[test]
+fn reverify_reproduces_report_and_flags_edits() {
+    let home = tempfile::tempdir().expect("tmp");
+    let (repo, adr, rubric) = judge_gate_case(home.path());
+    judge_report_via_mcp(home.path(), &adr, &rubric, "glm-5.2");
+    let report = repo.join("reports/rubric/ADR-001-pilot.json");
+    let reverify = |path: &Path| {
+        arch_cmd(home.path())
+            .arg("rubric")
+            .arg("reverify")
+            .arg(path.as_os_str())
+            .output()
+            .expect("запуск rubric reverify")
+    };
+    let ok = reverify(&report);
+    let stdout = String::from_utf8_lossy(&ok.stdout);
+    assert!(ok.status.success(), "свой отчёт должен сходиться: {stdout}");
+    assert!(stdout.contains("воспроизводится"), "{stdout}");
+    // Правка балла в отчёте: сверка называет расхождение и выходит с кодом 1.
+    let mut artifact: Value =
+        serde_json::from_str(&std::fs::read_to_string(&report).expect("отчёт")).expect("JSON");
+    artifact["scores"][0]["score"] = json!(5);
+    std::fs::write(
+        &report,
+        serde_json::to_string_pretty(&artifact).expect("JSON"),
+    )
+    .expect("запись отчёта");
+    let bad = reverify(&report);
+    let stdout = String::from_utf8_lossy(&bad.stdout);
+    assert!(
+        !bad.status.success(),
+        "правка обязана дать ненулевой код: {stdout}"
+    );
+    assert!(stdout.contains("критерий 'context'"), "{stdout}");
+    // Отчёт без сырых ответов: невоспроизводим, но это не расхождение.
+    std::fs::remove_dir_all(repo.join("reports/rubric/raw")).expect("удаление сырых ответов");
+    let legacy = reverify(&report);
+    let stdout = String::from_utf8_lossy(&legacy.stdout);
+    assert!(legacy.status.success(), "{stdout}");
+    assert!(stdout.contains("невоспроизводим"), "{stdout}");
 }

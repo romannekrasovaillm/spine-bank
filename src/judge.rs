@@ -16,7 +16,7 @@
 //!   процесс/запрос без истории.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
@@ -361,6 +361,361 @@ pub fn cli_version(command: &str) -> Option<String> {
     rx.recv_timeout(std::time::Duration::from_secs(CLI_VERSION_TIMEOUT_SECS))
         .ok()
         .flatten()
+}
+
+// ---------------------------------------------------------------------------
+// J2: сырые ответы судьи и воспроизводимость отчёта
+// ---------------------------------------------------------------------------
+
+/// Каталог сырых ответов судьи внутри репозитория: `reports/rubric/raw/<slug>/`.
+pub const RUBRIC_RAW_DIR: &str = "reports/rubric/raw";
+
+/// Схема файла сырого ответа судьи.
+pub const RUBRIC_RAW_SCHEMA: &str = "arch-be/rubric-raw/v1";
+
+/// Каталог сырых ответов конкретного отчёта.
+#[must_use]
+pub fn raw_dir(repo: &Path, slug: &str) -> PathBuf {
+    repo.join(RUBRIC_RAW_DIR).join(slug)
+}
+
+/// Имя файла сырого ответа: `sample-<n>.json` (нумерация с 1 — по порядку
+/// ответов в вызове).
+#[must_use]
+pub fn raw_file_name(sample: usize) -> String {
+    format!("sample-{sample}.json")
+}
+
+/// Ответ судьи на входе сохранения: текст как он пришёл и признак того, что
+/// он не разобрался и в расчёт баллов не вошёл.
+#[derive(Debug, Clone)]
+pub struct RawAnswerInput {
+    /// Текст ответа судьи без правок.
+    pub text: String,
+    /// Ответ не разобран (в медиану не входил).
+    pub dropped: bool,
+}
+
+/// Сырой ответ судьи на диске: текст, его хэш и служебные метки.
+///
+/// Хэш считается от `text`: правка текста после сохранения видна сверке
+/// (находка `rubric_raw_tampered`), а балл отчёта пересчитывается из ТЕХ ЖЕ
+/// ответов — «поправить цифру в отчёте» больше не проходит незамеченным.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RawAnswer {
+    /// Схема файла.
+    pub schema: String,
+    /// Имя рубрики, по которой судили.
+    pub rubric: String,
+    /// Путь оценённого документа относительно репозитория.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// SHA-256 документа на момент оценки.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_sha256: Option<String>,
+    /// Номер сэмпла (с 1).
+    pub sample: usize,
+    /// Метка модели-судьи (та же, что в отчёте).
+    pub judge_model: String,
+    /// SHA-256 текста ответа на момент сохранения.
+    pub sha256: String,
+    /// Ответ не разобран и в расчёт баллов не вошёл.
+    #[serde(default)]
+    pub dropped: bool,
+    /// Текст ответа как он пришёл.
+    pub text: String,
+    /// Метка времени сохранения (RFC 3339).
+    pub saved_at: String,
+}
+
+impl RawAnswer {
+    /// Текст ответа не сходится с записанным хэшем — файл правили после
+    /// сохранения. Оценка, собранная из подменённых ответов, невоспроизводима.
+    #[must_use]
+    pub fn tampered(&self) -> bool {
+        crate::hash::sha256_hex(self.text.as_bytes()) != self.sha256
+    }
+}
+
+/// Сохраняет сырые ответы судьи в `reports/rubric/raw/<slug>/` и возвращает
+/// их отпечатки для поля `provenance.samples`.
+///
+/// # Errors
+/// Каталог не создаётся или файл не пишется.
+pub fn write_raw_answers(
+    repo: &Path,
+    slug: &str,
+    rubric_name: &str,
+    target_rel: Option<&str>,
+    target_sha: Option<&str>,
+    judge_model: &str,
+    answers: &[RawAnswerInput],
+) -> crate::error::Result<Vec<SampleStamp>> {
+    if answers.is_empty() {
+        return Ok(Vec::new());
+    }
+    let dir = raw_dir(repo, slug);
+    std::fs::create_dir_all(&dir).map_err(|e| crate::error::HarnessError::io(&dir, e))?;
+    let saved_at = chrono::Local::now().to_rfc3339();
+    let mut stamps = Vec::with_capacity(answers.len());
+    for (idx, answer) in answers.iter().enumerate() {
+        let sample = idx + 1;
+        let sha256 = crate::hash::sha256_hex(answer.text.as_bytes());
+        let record = RawAnswer {
+            schema: RUBRIC_RAW_SCHEMA.to_string(),
+            rubric: rubric_name.to_string(),
+            target: target_rel.map(str::to_string),
+            target_sha256: target_sha.map(str::to_string),
+            sample,
+            judge_model: judge_model.to_string(),
+            sha256: sha256.clone(),
+            dropped: answer.dropped,
+            text: answer.text.clone(),
+            saved_at: saved_at.clone(),
+        };
+        let path = dir.join(raw_file_name(sample));
+        let text = serde_json::to_string_pretty(&record).map_err(|e| {
+            crate::error::HarnessError::Config(format!("сериализация сырого ответа судьи: {e}"))
+        })?;
+        std::fs::write(&path, text).map_err(|e| crate::error::HarnessError::io(&path, e))?;
+        stamps.push(SampleStamp {
+            sha256,
+            dropped: answer.dropped,
+        });
+    }
+    Ok(stamps)
+}
+
+/// Сырые ответы, сохранённые для отчёта (по возрастанию номера сэмпла).
+/// Нечитаемый или чужой JSON пропускается — это свидетельство, а не гейт.
+#[must_use]
+pub fn load_raw_answers(repo: &Path, slug: &str) -> Vec<RawAnswer> {
+    let dir = raw_dir(repo, slug);
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<RawAnswer> = entries
+        .flatten()
+        .filter(|e| {
+            e.path()
+                .extension()
+                .is_some_and(|x| x.eq_ignore_ascii_case("json"))
+        })
+        .filter_map(|e| std::fs::read_to_string(e.path()).ok())
+        .filter_map(|t| serde_json::from_str::<RawAnswer>(&t).ok())
+        .collect();
+    out.sort_by_key(|a| a.sample);
+    out
+}
+
+/// Slug отчёта: имя файла отчёта, посчитанное от цели так же, как при записи.
+#[must_use]
+pub fn artifact_slug_of(artifact: &crate::rubric::RubricArtifact) -> String {
+    crate::rubric::artifact_slug(artifact.target.as_deref().map(Path::new))
+}
+
+/// Итог пересборки отчёта из сырых ответов (`arch-be rubric reverify` и
+/// составляющая гейта `decision_quality`).
+#[derive(Debug, Default)]
+pub struct Reverify {
+    /// Сырые ответы найдены (иначе отчёт невоспроизводим в принципе).
+    pub raw_saved: bool,
+    /// Файлы сырых ответов, чей текст не сходится с записанным хэшем.
+    pub tampered: Vec<String>,
+    /// Пересобранный из сырых ответов отчёт (`None` — пересобрать нельзя).
+    pub rebuilt: Option<crate::rubric::RubricReport>,
+    /// Почему пересборка невозможна (рубрика не найдена, документ недоступен,
+    /// нет валидных ответов). Это НЕ расхождение: механика не смогла
+    /// проверить, а не нашла подлог.
+    pub unavailable: Option<String>,
+    /// Расхождения записанного отчёта с пересобранным.
+    pub differences: Vec<String>,
+}
+
+impl Reverify {
+    /// Отчёт воспроизводится из своих сырых ответов: сверка прошла, расхождений
+    /// нет. Отчёт без сохранённых ответов этот признак НЕ получает — «нечего
+    /// проверять» не то же самое, что «проверено».
+    #[must_use]
+    pub fn reproduced(&self) -> bool {
+        self.raw_saved
+            && self.tampered.is_empty()
+            && self.unavailable.is_none()
+            && self.differences.is_empty()
+    }
+}
+
+/// Пересобирает отчёт из сохранённых сырых ответов тем же [`crate::rubric::build_report`]
+/// и сверяет с записанным: баллы по критериям, метки, взвешенный итог, вердикт.
+///
+/// Дёшево по устройству (разбор JSON и медианы, без LLM) — поэтому это может
+/// делать и гейт. Сверка не «удостоверяет качество суждения»: она отвечает
+/// ровно на один вопрос — соответствует ли записанный балл ответам, из которых
+/// он объявлен собранным.
+#[must_use]
+pub fn reverify(
+    repo: &Path,
+    artifact: &crate::rubric::RubricArtifact,
+    rubrics_dir: &Path,
+    cfg: &crate::config::JudgeConfig,
+) -> Reverify {
+    let slug = artifact_slug_of(artifact);
+    let raw = load_raw_answers(repo, &slug);
+    let mut out = Reverify {
+        raw_saved: !raw.is_empty(),
+        tampered: raw
+            .iter()
+            .filter(|a| a.tampered())
+            .map(|a| raw_file_name(a.sample))
+            .collect(),
+        ..Reverify::default()
+    };
+    if !out.raw_saved {
+        return out;
+    }
+    let rebuilt = match rebuild(repo, artifact, &raw, rubrics_dir, cfg) {
+        Ok(report) => report,
+        Err(reason) => {
+            out.unavailable = Some(reason);
+            return out;
+        }
+    };
+    out.differences = compare(artifact, &rebuilt);
+    out.rebuilt = Some(rebuilt);
+    out
+}
+
+/// Пересобирает отчёт из сырых ответов; `Err` — причина, по которой это
+/// невозможно (не расхождение).
+fn rebuild(
+    repo: &Path,
+    artifact: &crate::rubric::RubricArtifact,
+    raw: &[RawAnswer],
+    rubrics_dir: &Path,
+    cfg: &crate::config::JudgeConfig,
+) -> std::result::Result<crate::rubric::RubricReport, String> {
+    let rubric_path = resolve_rubric_path(rubrics_dir, &artifact.rubric).ok_or_else(|| {
+        format!(
+            "рубрика '{}' не найдена в {}",
+            artifact.rubric,
+            rubrics_dir.display()
+        )
+    })?;
+    let rubric =
+        crate::rubric::load(&rubric_path).map_err(|e| format!("рубрика не читается: {e}"))?;
+    let target_rel = artifact
+        .target
+        .as_deref()
+        .ok_or_else(|| "в отчёте нет пути документа — текст не восстановить".to_string())?;
+    let path = repo.join(target_rel);
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| format!("документ {} не читается: {e}", path.display()))?;
+    let runs: Vec<_> = raw
+        .iter()
+        .filter(|a| !a.dropped)
+        .filter_map(|a| crate::rubric::parse_judge_response(&a.text).ok())
+        .collect();
+    if runs.is_empty() {
+        return Err("ни один сырой ответ не разобран — пересобрать отчёт не из чего".to_string());
+    }
+    crate::rubric::build_report(&rubric, &artifact.judge_model, &runs, &text, cfg)
+        .map_err(|e| format!("пересборка отчёта: {e}"))
+}
+
+/// Путь к рубрике по имени из отчёта: имя в каталоге рубрик (`.yaml`/`.yml`)
+/// либо путь как он записан.
+fn resolve_rubric_path(dir: &Path, name: &str) -> Option<std::path::PathBuf> {
+    let direct = Path::new(name);
+    if direct.is_file() {
+        return Some(direct.to_path_buf());
+    }
+    for ext in ["yaml", "yml"] {
+        let candidate = dir.join(format!("{name}.{ext}"));
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Расхождения записанного отчёта с пересобранным — по одному пункту на
+/// расхождение, с числами (человеку нужно видеть, что именно правили).
+fn compare(
+    artifact: &crate::rubric::RubricArtifact,
+    rebuilt: &crate::rubric::RubricReport,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    if artifact.judge_model != rebuilt.judge_model {
+        out.push(format!(
+            "судья: в отчёте '{}', в сырых ответах '{}'",
+            artifact.judge_model, rebuilt.judge_model
+        ));
+    }
+    for score in &rebuilt.scores {
+        let Some(recorded) = artifact
+            .scores
+            .iter()
+            .find(|s| s.criterion_id == score.criterion_id)
+        else {
+            out.push(format!(
+                "критерий '{}': в отчёте не записан (пересборка дала {})",
+                score.criterion_id, score.score
+            ));
+            continue;
+        };
+        if recorded.score != score.score {
+            out.push(format!(
+                "критерий '{}': в отчёте {}, из сырых ответов {}",
+                score.criterion_id, recorded.score, score.score
+            ));
+        }
+        let mut recorded_flags: Vec<&str> =
+            recorded.flags.iter().map(crate::rubric::CriterionFlag::as_str).collect();
+        let mut rebuilt_flags: Vec<&str> =
+            score.flags.iter().map(crate::rubric::CriterionFlag::as_str).collect();
+        recorded_flags.sort_unstable();
+        rebuilt_flags.sort_unstable();
+        if recorded_flags != rebuilt_flags {
+            out.push(format!(
+                "критерий '{}': метки в отчёте {recorded_flags:?}, из сырых ответов {rebuilt_flags:?}",
+                score.criterion_id
+            ));
+        }
+    }
+    let unstable = rebuilt
+        .scores
+        .iter()
+        .any(|s| s.has_flag(crate::rubric::CriterionFlag::Unstable));
+    if artifact.unstable != unstable {
+        out.push(format!(
+            "метка unstable: в отчёте {}, из сырых ответов {unstable}",
+            artifact.unstable
+        ));
+    }
+    let evidence_not_found = rebuilt
+        .scores
+        .iter()
+        .filter(|s| s.has_flag(crate::rubric::CriterionFlag::EvidenceNotFound))
+        .count();
+    if artifact.evidence_not_found != evidence_not_found {
+        out.push(format!(
+            "evidence_not_found: в отчёте {}, из сырых ответов {evidence_not_found}",
+            artifact.evidence_not_found
+        ));
+    }
+    if (artifact.weighted_total - rebuilt.weighted_total).abs() > 1e-9 {
+        out.push(format!(
+            "взвешенный итог: в отчёте {:.4}, из сырых ответов {:.4}",
+            artifact.weighted_total, rebuilt.weighted_total
+        ));
+    }
+    if artifact.verdict != rebuilt.verdict {
+        out.push(format!(
+            "вердикт: в отчёте '{}', из сырых ответов '{}'",
+            artifact.verdict, rebuilt.verdict
+        ));
+    }
+    out
 }
 
 #[cfg(test)]

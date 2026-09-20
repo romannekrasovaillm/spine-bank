@@ -106,6 +106,28 @@ arch-be rubric run solution_architecture docs/solution.md --model deepseek-pro
 в `reports/rubric-<name>-<timestamp>.md`. В TUI: `/rubric list`,
 `/rubric run <name> <file>` (отчёт — в чат и на вкладку «Рубрика»).
 
+### Происхождение оценки (ADR-048)
+
+Вместе с машиночитаемым отчётом (`reports/rubric/<slug>.json`) сохраняются
+**сырые ответы судьи** — `reports/rubric/raw/<slug>/sample-<n>.json` — и их
+хэши в поле `provenance.samples`. Отчёт дополнительно несёт `provenance`
+(режим `declared` — метки передал хост, `launched` — судью запустил Spine) и
+`scores` (баллы по критериям). Из этих двух свидетельств отчёт пересобирается
+тем же кодом, без LLM:
+
+```bash
+arch-be rubric reverify reports/rubric/ADR-001-kafka.json   # или каталог
+```
+
+Расхождение (`критерий 'x': в отчёте 5, из сырых ответов 3`) — код 1. В гейте
+то же делает составляющая `decision_quality`: `rubric_report_inconsistent`
+(балл правили руками) и `rubric_raw_tampered` (правили сохранённый ответ).
+Отчёт без сырых ответов честно называется невоспроизводимым — это не находка.
+
+Что происхождение **не** удостоверяет: какая модель отвечала, механика не
+знает ни в одном режиме; `operator` — запись из git-конфига, а не подпись.
+Подробности и границы — `docs/adr/ADR-048-…md`.
+
 ## Динамические рубрики
 
 Под предмет оценки, которого нет в якорных, рубрика генерируется моделью

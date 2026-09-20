@@ -156,6 +156,23 @@ impl CriterionScore {
     }
 }
 
+/// Балл критерия на момент сборки отчёта — то, по чему сверяется
+/// воспроизводимость отчёта из сырых ответов судьи (J2, ADR-048).
+///
+/// У отчётов до появления поля его нет: сверка тогда идёт по взвешенному
+/// итогу, метке `unstable` и числу `evidence_not_found` — старый отчёт
+/// не становится подозрительным из-за отсутствия поля.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CriterionSnapshot {
+    /// Идентификатор критерия.
+    pub criterion_id: String,
+    /// Итоговый балл `1..=scale_max`.
+    pub score: u8,
+    /// Метки достоверности критерия.
+    #[serde(default)]
+    pub flags: Vec<CriterionFlag>,
+}
+
 /// Корень репозитория для целевого документа: ближайший вверх каталог с
 /// `.git` или `.arch-handoff`; не найден — каталог самого документа.
 ///
@@ -227,6 +244,11 @@ pub struct RubricArtifact {
     /// блока — это читается как режим `declared` без деталей.
     #[serde(default)]
     pub provenance: Option<crate::judge::RubricProvenance>,
+    /// Баллы по критериям на момент сборки: по ним сверяется воспроизводимость
+    /// отчёта из сырых ответов (J2, ADR-048). Пусто у отчётов до появления
+    /// поля — сверка тогда идёт по итогу и меткам.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scores: Vec<CriterionSnapshot>,
     /// Метка времени оценки (RFC 3339).
     pub judged_at: String,
 }
@@ -276,6 +298,10 @@ pub struct ArtifactExtras {
     /// Происхождение оценки: режим, хост, сессия, запускатель, отпечатки
     /// сырых ответов, оператор.
     pub provenance: Option<crate::judge::RubricProvenance>,
+    /// Сырые ответы судьи: сохраняются рядом с отчётом
+    /// (`reports/rubric/raw/<slug>/sample-<n>.json`), их хэши идут в
+    /// `provenance.samples` (J2, ADR-048). Пусто — ответы не сохранены.
+    pub raw_answers: Vec<crate::judge::RawAnswerInput>,
 }
 
 /// Записывает отчёт рубрики в `<repo>/reports/rubric/<slug>.json` без
@@ -321,6 +347,25 @@ pub fn write_artifact_with(
         Some(p) if p.is_file() => crate::hash::sha256_file(p),
         _ => None,
     };
+    let slug = artifact_slug(target);
+    // Сырые ответы судьи — рядом с отчётом: отчёт обязан быть воспроизводим из
+    // ответов, на которых он объявлен собранным (J2, ADR-048). Их хэши попадают
+    // в происхождение, поэтому пишутся ДО артефакта.
+    let mut provenance = extras.provenance.clone();
+    if !extras.raw_answers.is_empty() {
+        let stamps = crate::judge::write_raw_answers(
+            repo,
+            &slug,
+            &report.rubric_name,
+            rel.as_deref(),
+            sha.as_deref(),
+            &report.judge_model,
+            &extras.raw_answers,
+        )?;
+        let prov =
+            provenance.get_or_insert_with(|| crate::judge::RubricProvenance::declared(None, None));
+        prov.samples = stamps;
+    }
     let artifact = RubricArtifact {
         schema: RUBRIC_REPORT_SCHEMA.to_string(),
         rubric: report.rubric_name.clone(),
@@ -339,12 +384,21 @@ pub fn write_artifact_with(
             .iter()
             .filter(|s| s.has_flag(CriterionFlag::EvidenceNotFound))
             .count(),
-        provenance: extras.provenance.clone(),
+        provenance,
+        scores: report
+            .scores
+            .iter()
+            .map(|s| CriterionSnapshot {
+                criterion_id: s.criterion_id.clone(),
+                score: s.score,
+                flags: s.flags.clone(),
+            })
+            .collect(),
         judged_at: chrono::Local::now().to_rfc3339(),
     };
     let dir = repo.join(RUBRIC_REPORTS_DIR);
     std::fs::create_dir_all(&dir).map_err(|e| HarnessError::io(&dir, e))?;
-    let path = dir.join(format!("{}.json", artifact_slug(target)));
+    let path = dir.join(format!("{slug}.json"));
     let text = serde_json::to_string_pretty(&artifact)
         .map_err(|e| HarnessError::Config(format!("сериализация отчёта рубрики: {e}")))?;
     std::fs::write(&path, text).map_err(|e| HarnessError::io(&path, e))?;
@@ -549,6 +603,25 @@ pub async fn evaluate_with_options(
     llm: &dyn LlmProvider,
     cfg: &JudgeConfig,
 ) -> Result<RubricReport> {
+    evaluate_collecting(rubric, target, llm, cfg)
+        .await
+        .map(|(report, _)| report)
+}
+
+/// Оценка с сохранением сырых ответов судьи: тот же расчёт, что у
+/// [`evaluate_with_options`], плюс тексты ответов, на которых он построен.
+///
+/// Нужна вызывающим, которые пишут отчёт на диск: отчёт обязан быть
+/// воспроизводим из своих ответов, а не только из своего итога (J2, ADR-048).
+///
+/// # Errors
+/// Как у [`evaluate_with_options`].
+pub async fn evaluate_collecting(
+    rubric: &Rubric,
+    target: &str,
+    llm: &dyn LlmProvider,
+    cfg: &JudgeConfig,
+) -> Result<(RubricReport, Vec<String>)> {
     if rubric.criteria.is_empty() {
         return Err(HarnessError::Rubric(format!(
             "рубрика '{}' не содержит критериев",
@@ -559,10 +632,14 @@ pub async fn evaluate_with_options(
     // samples=0 в конфиге — не пустая выборка, а одиночная оценка.
     let samples = cfg.samples.max(1);
     let mut runs = Vec::with_capacity(samples);
+    let mut raw = Vec::with_capacity(samples);
     for _ in 0..samples {
-        runs.push(judge_once(rubric, target, llm, cfg.thinking).await?);
+        let (parsed, text) = judge_once(rubric, target, llm, cfg.thinking).await?;
+        runs.push(parsed);
+        raw.push(text);
     }
-    build_report(rubric, llm.model(), &runs, target, cfg)
+    let report = build_report(rubric, llm.model(), &runs, target, cfg)?;
+    Ok((report, raw))
 }
 
 /// Проверяет лимит длины оцениваемого текста (ADR-004: тихое усечение
@@ -584,6 +661,11 @@ pub fn check_target_len(target: &str) -> Result<()> {
 
 /// Один прогон судьи: запрос + один retry при неразобранном JSON.
 ///
+/// Возвращает разобранный ответ и ТЕКСТ, из которого он разобран, — по нему
+/// отчёт становится воспроизводимым (J2, ADR-048). При повторе сохраняется
+/// текст удавшейся попытки: воспроизводимость считается от того ответа,
+/// который действительно вошёл в расчёт.
+///
 /// `thinking` — из `JudgeConfig`: None трактуется как `Some(false)` —
 /// судья без ризонинга, чтобы thinking-токены не съедали бюджет
 /// `max_tokens` провайдера (обрыв JSON, кейс 2026-09-01).
@@ -592,7 +674,7 @@ async fn judge_once(
     target: &str,
     llm: &dyn LlmProvider,
     thinking: Option<bool>,
-) -> Result<JudgeResponse> {
+) -> Result<(JudgeResponse, String)> {
     let thinking = Some(thinking.unwrap_or(false));
     let mut messages = vec![
         ChatMessage::system(judge_system_prompt(rubric)),
@@ -602,7 +684,7 @@ async fn judge_once(
     request.thinking = thinking;
     let first = complete_idempotent(llm, request).await?;
     if let Ok(parsed) = parse_judge_response(&first.content) {
-        Ok(parsed)
+        Ok((parsed, first.content))
     } else {
         // Один retry с явной инструкцией «только JSON».
         messages.push(ChatMessage::assistant(first.content.clone(), Vec::new()));
@@ -610,12 +692,13 @@ async fn judge_once(
         let mut retry = ChatRequest::chat(messages);
         retry.thinking = thinking;
         let second = complete_idempotent(llm, retry).await?;
-        parse_judge_response(&second.content).map_err(|_| {
-            HarnessError::Rubric(format!(
+        match parse_judge_response(&second.content) {
+            Ok(parsed) => Ok((parsed, second.content)),
+            Err(_) => Err(HarnessError::Rubric(format!(
                 "судья не вернул валидный JSON даже после повторного запроса: {}",
                 fragment(&second.content)
-            ))
-        })
+            ))),
+        }
     }
 }
 

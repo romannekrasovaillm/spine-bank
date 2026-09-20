@@ -351,6 +351,12 @@ pub struct GateOptions {
     /// Глобы детекторов диффа (T-05): что считать контрактом, новым
     /// компонентом и изменением интеграции — из секции `[significance]`.
     pub diff_globs: control::DiffGlobs,
+    /// Настройки судьи рубрик (секция `[judge]`): по ним составляющая
+    /// `decision_quality` пересобирает отчёт из сырых ответов и сверяет балл
+    /// (ADR-048) — теми же порогами, что были при оценке.
+    pub judge: crate::config::JudgeConfig,
+    /// Каталог рубрик: по нему сверка находит определение рубрики отчёта.
+    pub rubrics_dir: PathBuf,
 }
 
 impl GateOptions {
@@ -362,6 +368,8 @@ impl GateOptions {
             evidence: cfg.evidence.clone(),
             decision_quality: cfg.gate.decision_quality.clone(),
             diff_globs: cfg.significance.diff_globs(),
+            judge: cfg.judge.clone(),
+            rubrics_dir: cfg.paths.rubrics_dir(),
         }
     }
 }
@@ -1459,11 +1467,8 @@ pub(crate) fn adr_is_accepted(text: &str) -> bool {
 ///
 /// Составляющая включается только через `[gate.required]`: по умолчанию она
 /// SKIP, иначе ужесточение покраснило бы чужие пайплайны без предупреждения.
-fn component_decision_quality(
-    repo: &Path,
-    cfg: &crate::config::DecisionQualityConfig,
-    enabled: bool,
-) -> GateComponent {
+fn component_decision_quality(repo: &Path, options: &GateOptions, enabled: bool) -> GateComponent {
+    let cfg = &options.decision_quality;
     if !enabled {
         return GateComponent::skip(
             "decision_quality",
@@ -1491,6 +1496,9 @@ fn component_decision_quality(
     let artifacts = crate::rubric::load_artifacts(repo);
     let mut findings = Vec::new();
     let mut judged = 0usize;
+    // Отчёты, у которых нет сырых ответов судьи: сверить балл с ответами
+    // механика не может (это не находка, а граница проверки — ADR-048).
+    let mut not_reproducible = 0usize;
     for adr in &adrs {
         let Ok(text) = std::fs::read_to_string(adr) else {
             continue;
@@ -1546,6 +1554,35 @@ fn component_decision_quality(
                 format!(
                     "{rel}: {:.2}/5 ниже порога {:.2} (судья {})",
                     artifact.weighted_total, cfg.min_score, artifact.judge_model
+                ),
+            ));
+        }
+        // Воспроизводимость отчёта: балл обязан сходиться с ответами, из
+        // которых он объявлен собранным (J2, ADR-048). Сверка дешёвая —
+        // разбор JSON и медианы, без LLM. Правка цифры в отчёте руками даёт
+        // `rubric_report_inconsistent`, правка сохранённого ответа —
+        // `rubric_raw_tampered`. Нет сырых ответов (отчёт до 0.3.5) — сверка
+        // невозможна, и это честно называется, а не выдаётся за проверку.
+        let check = crate::judge::reverify(repo, artifact, &options.rubrics_dir, &options.judge);
+        if !check.raw_saved {
+            not_reproducible += 1;
+        } else if !check.tampered.is_empty() {
+            findings.push(GateFinding::ruled(
+                "error".to_string(),
+                "rubric_raw_tampered".to_string(),
+                format!(
+                    "{rel}: сохранённые ответы судьи правили после записи ({}) — \
+                     отчёт собран из подменённых ответов",
+                    check.tampered.join(", ")
+                ),
+            ));
+        } else if !check.differences.is_empty() {
+            findings.push(GateFinding::ruled(
+                "error".to_string(),
+                "rubric_report_inconsistent".to_string(),
+                format!(
+                    "{rel}: отчёт не соответствует ответам судьи — {}",
+                    check.differences.join("; ")
                 ),
             ));
         }
@@ -1607,6 +1644,12 @@ fn component_decision_quality(
              совпадает с автором либо автор в отчёте не указан (judge_is_author)"
                 .to_string(),
         );
+    }
+    if not_reproducible > 0 {
+        notes.push(format!(
+            "часть отчётов невоспроизводима: сырые ответы судьи не сохранены ({not_reproducible}) \
+             — сверить балл с ответами механика не может, она сверяет только число с порогом"
+        ));
     }
     if errors == 0 {
         GateComponent::pass_with_findings("decision_quality", detail, findings).noting(notes)
@@ -1938,7 +1981,7 @@ fn run_inner(
     let required_names = requirements.for_route(route);
     components.push(component_decision_quality(
         repo,
-        &options.decision_quality,
+        options,
         required_names.iter().any(|r| r == "decision_quality"),
     ));
     let mut report = GateReport {
