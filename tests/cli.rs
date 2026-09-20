@@ -2275,6 +2275,60 @@ fn redteam_json_format_reports_detections() {
     assert_eq!(detections.len(), 16);
 }
 
+/// Копия кейса для теста: `кейсы/` — часть поставки, и тест не имеет права
+/// её править (архивация дельты внутри репозитория кейса — уже правка).
+fn copy_case(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).expect("каталог копии");
+    for entry in std::fs::read_dir(from).expect("чтение кейса").flatten() {
+        let src = entry.path();
+        let dst = to.join(entry.file_name());
+        if src.is_dir() {
+            copy_case(&src, &dst);
+        } else {
+            std::fs::copy(&src, &dst).expect("копирование файла кейса");
+        }
+    }
+}
+
+/// Д8 (T-08): архивация дельты не имеет права ронять контроль аттестации.
+///
+/// Контрольный мутант D14 — безвредная правка тела сущности: вердикт обязан
+/// остаться прежним, аттестация — измениться. На кейсе, где все дельты
+/// заархивированы, правка защищённого пути краснит `delta_guard` — и контроль
+/// падал «сам по себе»: доля выше порога, а прогон красный, измерение уводит
+/// ступень доверия вниз вместе с метрикой.
+#[test]
+fn redteam_control_survives_delta_archival() {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("кейсы/digital-ruble-merchant");
+    let tmp = tempfile::tempdir().expect("tmp");
+    let home = tmp.path();
+    let case = home.join("case");
+    copy_case(&src, &case);
+    arch_cmd(home)
+        .args(["delta", "archive", "merchant-tsp", "--repo"])
+        .arg(case.as_os_str())
+        .assert()
+        .success();
+    let out = arch_cmd(home)
+        .arg("redteam")
+        .arg(case.as_os_str())
+        .arg("--format")
+        .arg("json")
+        .output()
+        .expect("прогон arch-be");
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON-отчёт redteam");
+    assert_eq!(
+        value["control_ok"], true,
+        "контроль аттестации обязан пережить архивацию дельты: {value}"
+    );
+    assert_eq!(value["caught"], 11, "{value}");
+    assert_eq!(value["passed"], true, "{value}");
+    assert!(
+        value["control_note"].is_null(),
+        "пройденный контроль не сопровождается причиной отказа: {value}"
+    );
+}
+
 /// W3: `bootstrap` создаёт каркас и называет следующий шаг; `--status` на
 /// существующем кейсе показывает прогресс. Проверяется сквозь процесс —
 /// проводник, который работает только в модульных тестах, архитектору не

@@ -705,6 +705,11 @@ pub struct RedteamReport {
     pub min_detection: f64,
     /// Контрольный мутатор D14: аттестация изменилась при том же вердикте.
     pub control_ok: bool,
+    /// Почему контроль не прошёл — с различием двух исходов, у которых разные
+    /// выводы: «вердикт изменился» (безвредная правка не должна его менять) и
+    /// «аттестация не изменилась» (вердикт не привязан к состоянию дерева).
+    /// `None` — контроль пройден.
+    pub control_note: Option<String>,
 }
 
 /// Сохранённый итог мутационного прогона (`.arch-handoff/redteam.json`,
@@ -729,6 +734,11 @@ pub struct RedteamSummary {
     pub min_detection: f64,
     /// Контрольный мутатор: аттестация изменилась при том же вердикте.
     pub control_ok: bool,
+    /// Почему контроль не прошёл (аддитивное поле схемы v1: файлы прежних
+    /// редакций читаются, причина просто неизвестна). Метрика доверия
+    /// показывает ИМЕННО её, а не свою догадку о причине.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_note: Option<String>,
 }
 
 impl RedteamSummary {
@@ -761,6 +771,7 @@ pub fn save_summary(case: &Path, report: &RedteamReport) -> Result<PathBuf> {
         ratio: report.detection_ratio(),
         min_detection: report.min_detection,
         control_ok: report.control_ok,
+        control_note: report.control_note.clone(),
     };
     let text = serde_json::to_string_pretty(&summary)
         .map_err(|e| crate::error::HarnessError::Config(format!("redteam: {e}")))?;
@@ -840,6 +851,9 @@ impl RedteamReport {
         for d in &self.detections {
             let (mark, who) = match (&d.caught_by, d.skipped.as_deref()) {
                 (_, Some(reason)) => ("—", format!("пропущен: {reason}")),
+                (Some(by), None) if d.expected == Expectation::Control => {
+                    ("✓", format!("контроль пройден: {by}, вердикт не изменился"))
+                }
                 (Some(by), None) if d.expected == Expectation::Semantic => {
                     ("!", format!("пойман ({by}) — а не должен: это семантика"))
                 }
@@ -849,7 +863,12 @@ impl RedteamReport {
                 }
                 (None, None) if d.expected == Expectation::Control => (
                     "✗",
-                    "контроль не сработал: аттестация не изменилась".to_string(),
+                    format!(
+                        "контроль не сработал: {}",
+                        self.control_note
+                            .as_deref()
+                            .unwrap_or("причина не записана (файл прежней редакции)")
+                    ),
                 ),
                 (None, None) => ("✗", format!("НЕ ПОЙМАН (ожидался: {})", d.expected_by)),
             };
@@ -894,6 +913,7 @@ impl RedteamReport {
             "total": self.scored_total(),
             "min_detection": self.min_detection,
             "control_ok": self.control_ok,
+            "control_note": self.control_note,
             "passed": self.passed(),
         })
     }
@@ -925,6 +945,9 @@ pub fn render_markdown(report: &RedteamReport) -> String {
     for d in &report.detections {
         let result = match (&d.caught_by, d.skipped.as_deref()) {
             (_, Some(reason)) => format!("пропущен: {reason}"),
+            (Some(by), None) if d.expected == Expectation::Control => {
+                format!("контроль пройден: {by}, вердикт не изменился")
+            }
             (Some(by), None) if d.expected == Expectation::Semantic => {
                 format!("пойман ({by}) — не должен")
             }
@@ -932,9 +955,13 @@ pub fn render_markdown(report: &RedteamReport) -> String {
             (None, None) if d.expected == Expectation::Semantic => {
                 "не пойман и не должен".to_string()
             }
-            (None, None) if d.expected == Expectation::Control => {
-                "контроль не сработал".to_string()
-            }
+            (None, None) if d.expected == Expectation::Control => format!(
+                "**контроль не сработал**: {}",
+                report
+                    .control_note
+                    .as_deref()
+                    .unwrap_or("причина не записана (файл прежней редакции)")
+            ),
             (None, None) => "**не пойман**".to_string(),
         };
         let _ = writeln!(
@@ -1035,6 +1062,45 @@ fn git(dir: &Path, args: &[&str]) -> std::result::Result<(), String> {
     }
 }
 
+/// Имя временной дельты, которой прикрывается контрольный мутант (D14).
+const CONTROL_DELTA: &str = "redteam-control";
+
+/// Прикрывает безвредную правку контрольного мутанта временной дельтой.
+///
+/// D14 — контроль: безвредная правка ТЕЛА сущности обязана оставить вердикт
+/// зелёным, а аттестацию — изменить. Но правка защищённого пути без активной
+/// дельты краснит `delta_guard` (и правильно краснит: это его работа), и на
+/// кейсе, где все дельты заархивированы, контроль падал бы не на вердикте, а
+/// на отсутствии дельты в свежей копии мутанта: «контроль аттестации: нет»
+/// при доле выше порога и падение `trust` на ступень. Причина при этом не в
+/// пакете, а в том, что мутант поставлен вне процесса дельт — любая настоящая
+/// доработка приходит ВМЕСТЕ с дельтой (ADR-047).
+///
+/// Поэтому мутант ставится в положение обычной доработки: правка + дельта,
+/// покрывающая изменённые защищённые пути. Дельта временная — живёт в копии
+/// мутанта, гейту её достаточно, и она не касается разбора самих недостатков.
+fn cover_control_mutation(root: &Path) -> std::result::Result<(), String> {
+    let report = crate::delta::guard(root, Some("HEAD"), &[])
+        .map_err(|e| format!("контроль: перечень защищённых правок: {e}"))?;
+    if report.protected_changed.is_empty() {
+        return Ok(());
+    }
+    let dir = root.join("changes").join(CONTROL_DELTA);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("контроль: {}: {e}", dir.display()))?;
+    let mut body = String::from(
+        "# Дельта: redteam-control\n\n\
+         Временная дельта мутационного прогона (D14): покрывает безвредную \
+         правку, чтобы вердикт мерил правку, а не отсутствие дельты. \
+         К делу не относится и в исходный кейс не попадает.\n\n\
+         ## MODIFIED\n\n",
+    );
+    for file in &report.protected_changed {
+        let _ = writeln!(body, "- {file}");
+    }
+    let path = dir.join("DELTA.md");
+    std::fs::write(&path, body).map_err(|e| format!("контроль: {}: {e}", path.display()))
+}
+
 /// Готовит мутанта: свой git-репозиторий, базовый коммит, правка, коммит
 /// правки. База `HEAD~1` нужна, чтобы анти-ослабление правил видело правку
 /// реестра, уже лежащую в коммите (Н5).
@@ -1099,6 +1165,7 @@ pub fn run(case: &Path, min_detection: f64, decision_quality: bool) -> Result<Re
     }
     let mut detections = Vec::new();
     let mut control_ok = true;
+    let mut control_note: Option<String> = None;
     for m in &MUTATORS {
         let root = fixture.mutant(m.id)?;
         if let Err(e) = prepare(&root) {
@@ -1122,6 +1189,11 @@ pub fn run(case: &Path, min_detection: f64, decision_quality: bool) -> Result<Re
         // Бандл переупаковывается ПОСЛЕ правки: иначе любая правка удостоверенного
         // файла краснила бы evidence_verify как «изменён после упаковки», и
         // дефект ловился бы не тем инструментом, который проверяется.
+        if m.expected == Expectation::Control {
+            if let Err(e) = cover_control_mutation(&root) {
+                return Err(HarnessError::Control(format!("{}: {e}", m.id)));
+            }
+        }
         let _ = crate::evidence::pack(&root, Route::Critical);
         if let Err(e) = git(&root, &["add", "-A"])
             .and_then(|()| git(&root, &["commit", "-q", "-m", &format!("mutant {}", m.id)]))
@@ -1137,26 +1209,45 @@ pub fn run(case: &Path, min_detection: f64, decision_quality: bool) -> Result<Re
             .collect();
         if m.expected == Expectation::Control {
             // Контроль: вердикт обязан остаться зелёным, аттестация — смениться.
+            // Два исхода различимы и означают разное, поэтому и текст разный
+            // (раньше «изменился вердикт» показывался как «аттестация X → Y»).
             let same_verdict = report.outcome == reference.outcome;
             let changed = report.attestation != reference.attestation;
             control_ok = control_ok && same_verdict && changed;
+            let caught_by = if !same_verdict {
+                let why = if failed.is_empty() {
+                    "причина не в составляющих — сверьте вердикты".to_string()
+                } else {
+                    failed.join(", ")
+                };
+                control_note = Some(format!(
+                    "безвредная правка изменила вердикт ({} → {}) — правка не должна \
+                     менять вердикт: проверьте составляющие {why}",
+                    reference.outcome.label(),
+                    report.outcome.label()
+                ));
+                Some(format!("вердикт изменился: {why}"))
+            } else if changed {
+                Some(format!(
+                    "аттестация {} → {}",
+                    &reference.attestation[..12],
+                    &report.attestation[..12]
+                ))
+            } else {
+                control_note = Some(
+                    "аттестация не изменилась при том же вердикте — вердикт не привязан \
+                     к состоянию дерева (Н3)"
+                        .to_string(),
+                );
+                None
+            };
             detections.push(Detection {
                 id: m.id.to_string(),
                 title: m.title.to_string(),
                 expected: m.expected,
                 expected_by: m.by.to_string(),
                 in_ratio: m.in_ratio,
-                caught_by: if changed {
-                    Some(format!(
-                        "аттестация {} → {}",
-                        &reference.attestation[..12],
-                        &report.attestation[..12]
-                    ))
-                } else if same_verdict {
-                    None
-                } else {
-                    Some("вердикт изменился".to_string())
-                },
+                caught_by,
                 skipped: None,
             });
             continue;
@@ -1180,11 +1271,78 @@ pub fn run(case: &Path, min_detection: f64, decision_quality: bool) -> Result<Re
         detections,
         min_detection,
         control_ok,
+        control_note,
     })
 }
 
 #[cfg(test)]
 mod tests {
+    /// Н8 (T-08): контрольный мутант прикрыт временной дельтой. Без неё
+    /// безвредная правка защищённого пути краснит `delta_guard` (его работа!),
+    /// вердикт контрольного мутанта меняется — и контроль падает не на
+    /// вердикте, а на отсутствии дельты в свежей копии мутанта: на кейсе с
+    /// заархивированными дельтами «контроль аттестации: нет» при доле выше
+    /// порога.
+    #[test]
+    fn control_mutation_is_covered_by_a_temporary_delta() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("mutant");
+        std::fs::create_dir_all(repo.join("model")).expect("mkdir");
+        let entity = repo.join("model/CMP-001-оркестратор-операций.md");
+        std::fs::write(&entity, "---\nid: CMP-001\n---\n\nкарточка\n").expect("write");
+        git(&repo, &["init", "-q"]).expect("init");
+        git(&repo, &["add", "-A"]).expect("add");
+        git(&repo, &["commit", "-q", "-m", "baseline"]).expect("commit");
+        // Безвредная правка ТЕЛА сущности — то, что делает D14.
+        std::fs::write(
+            &entity,
+            "---\nid: CMP-001\n---\n\nкарточка\n\nУточнение формулировки без смены решения.\n",
+        )
+        .expect("edit");
+        let before = crate::delta::guard(&repo, Some("HEAD"), &[]).expect("guard");
+        assert_eq!(
+            before.violations.len(),
+            1,
+            "до прикрытия — нарушение: {before:?}"
+        );
+        // Вход не найден (нет защищённых правок) — прикрытие не нужно.
+        let clean = tmp.path().join("clean");
+        std::fs::create_dir_all(clean.join("model")).expect("mkdir");
+        std::fs::write(
+            clean.join("model/CMP-001-карточка.md"),
+            "---\nid: CMP-001\n---\n",
+        )
+        .expect("write");
+        git(&clean, &["init", "-q"]).expect("init");
+        git(&clean, &["add", "-A"]).expect("add");
+        git(&clean, &["commit", "-q", "-m", "baseline"]).expect("commit");
+        cover_control_mutation(&clean).expect("cover");
+        assert!(
+            !clean.join("changes").exists(),
+            "пустая дельта в кейсе без правок — мусор"
+        );
+        // Прикрытие: правка приходит вместе с дельтой, как обычная доработка.
+        cover_control_mutation(&repo).expect("cover");
+        let after = crate::delta::guard(&repo, Some("HEAD"), &[]).expect("guard");
+        assert!(after.passed, "прикрытие обязано снять нарушение: {after:?}");
+        assert_eq!(after.protected_changed.len(), 1, "{after:?}");
+        assert!(
+            repo.join("changes")
+                .join(CONTROL_DELTA)
+                .join("DELTA.md")
+                .is_file()
+        );
+        // Прикрытие не «прощает» правку вообще: без упоминания файла —
+        // нарушение на месте (дельта покрывает только то, что названо).
+        std::fs::write(
+            repo.join("changes").join(CONTROL_DELTA).join("DELTA.md"),
+            "# Дельта: redteam-control\n\n## MODIFIED\n\n",
+        )
+        .expect("rewrite");
+        let bare = crate::delta::guard(&repo, Some("HEAD"), &[]).expect("guard");
+        assert_eq!(bare.violations.len(), 1, "{bare:?}");
+    }
+
     /// W2×W4: `save_summary` пишет в УКАЗАННЫЙ каталог, а не в `report.case`
     /// (прогон идёт в копии — измерение принадлежит исходному кейсу).
     #[test]
@@ -1198,6 +1356,7 @@ mod tests {
             detections: Vec::new(),
             min_detection: 0.78,
             control_ok: true,
+            control_note: None,
         };
         let path = save_summary(&case, &report).expect("save");
         assert!(
@@ -1313,6 +1472,7 @@ mod tests {
             ],
             min_detection: 0.5,
             control_ok: true,
+            control_note: None,
         };
         // Пропущенный (нет входа) выпадает из знаменателя, семантический —
         // остаётся: он обязан НЕ ловиться, и доля это учитывает.
