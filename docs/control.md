@@ -46,7 +46,20 @@ Score — число сработавших триггеров:
 [significance]
 fast_max = 1       # score ≤ fast_max → Fast
 standard_max = 4   # fast_max < score ≤ standard_max → Standard; выше → Critical
+# Глобы детекторов диффа (T-05): что считать контрактом, новым компонентом и
+# изменением интеграции. Дефолты — соглашения этого репозитория; СВОЙ список
+# заменяет дефолт целиком.
+contract_globs    = ["docs/contracts/**", "contracts/**"]
+component_globs   = ["model/CMP-*"]
+integration_globs = ["model/INT-*"]
 ```
+
+Контракт распознаётся и **по содержимому** (ключ верхнего уровня
+`openapi:`/`asyncapi:`/`swagger:` или расширение `.proto`), поэтому правка
+`docs/contracts/wallet-api.v1.yaml` без слова «openapi» в имени больше не
+невидима (T-05); удаление контракта — срабатывание `api_contract_change`
+(ломающее изменение). Новый файл `model/CMP-*` даёт `new_component`, появление
+или правка `model/INT-*` — `cross_domain_integration`.
 
 Валидация мягкая: `fast_max >= standard_max` — ошибка с понятным текстом
 при чтении в `control score`/`significance_score`, а не при загрузке конфига.
@@ -84,9 +97,10 @@ git-репозитория — ошибка с понятным текстом.
 
 | Триггер | Механика |
 |---|---|
-| `new_component` | добавлен каталог верхнего/второго уровня с манифестом (`Cargo.toml`/`pom.xml`/`package.json`/`go.mod`) или `src/` |
+| `new_component` | добавлен каталог верхнего/второго уровня с манифестом (`Cargo.toml`/`pom.xml`/`package.json`/`go.mod`), `src/` или сущность модели по `component_globs` |
 | `new_vendor` | в диффе манифеста зависимостей добавлена строка зависимости |
-| `api_contract_change` | изменён/добавлен файл с `openapi`/`asyncapi` в имени (без учёта регистра) |
+| `api_contract_change` | контракт изменён, добавлен или УДАЛЁН: по содержимому (ключ верхнего уровня `openapi:`/`asyncapi:`/`swagger:`, расширение `.proto`), по `contract_globs` или по `openapi`/`asyncapi` в имени (T-05) |
+| `cross_domain_integration` | появилась или изменена сущность интеграции модели по `integration_globs` (T-05) |
 | `irreversible_migration` | в диффе файла миграций (`migrations/` или `*.sql`) есть `DROP TABLE`/`TRUNCATE`/`DROP COLUMN` |
 | `new_datastore` | в конфигах добавлены строки подключения `postgres://`/`mysql://`/`kafka`/`mongodb`/`redis://` |
 

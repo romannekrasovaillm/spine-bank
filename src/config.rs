@@ -766,6 +766,33 @@ pub struct SignificanceConfig {
     /// Верхняя граница маршрута Standard: `fast_max` < score ≤ `standard_max` →
     /// Standard; выше — Critical.
     pub standard_max: usize,
+    /// Глобы детектора контрактов (T-05): что считать контрактом по пути.
+    #[serde(default = "default_contract_globs")]
+    pub contract_globs: Vec<String>,
+    /// Глобы детектора новых сущностей модели (T-05): файлы, появление
+    /// которых означает новый компонент.
+    #[serde(default = "default_component_globs")]
+    pub component_globs: Vec<String>,
+    /// Глобы детектора изменений интеграций (T-05): файлы сущностей
+    /// интеграций модели.
+    #[serde(default = "default_integration_globs")]
+    pub integration_globs: Vec<String>,
+}
+
+/// Дефолтные глобы контрактов (T-05): каталоги, где контракты лежат по
+/// соглашению, — в дополнение к распознаванию по СОДЕРЖИМОМУ файла.
+fn default_contract_globs() -> Vec<String> {
+    vec!["docs/contracts/**".to_string(), "contracts/**".to_string()]
+}
+
+/// Дефолтный глоб новых компонентов модели (T-05).
+fn default_component_globs() -> Vec<String> {
+    vec!["model/CMP-*".to_string()]
+}
+
+/// Дефолтный глоб сущностей интеграций модели (T-05).
+fn default_integration_globs() -> Vec<String> {
+    vec!["model/INT-*".to_string()]
 }
 
 impl Default for SignificanceConfig {
@@ -773,6 +800,9 @@ impl Default for SignificanceConfig {
         Self {
             fast_max: crate::control::DEFAULT_FAST_MAX,
             standard_max: crate::control::DEFAULT_STANDARD_MAX,
+            contract_globs: default_contract_globs(),
+            component_globs: default_component_globs(),
+            integration_globs: default_integration_globs(),
         }
     }
 }
@@ -795,6 +825,16 @@ impl SignificanceConfig {
             )));
         }
         Ok((self.fast_max, self.standard_max))
+    }
+
+    /// Глобы детекторов диффа (T-05) — из секции `[significance]`.
+    #[must_use]
+    pub fn diff_globs(&self) -> crate::control::DiffGlobs {
+        crate::control::DiffGlobs {
+            contracts: self.contract_globs.clone(),
+            components: self.component_globs.clone(),
+            integrations: self.integration_globs.clone(),
+        }
     }
 }
 

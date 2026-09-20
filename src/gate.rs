@@ -342,22 +342,34 @@ fn findings_digest(c: &GateComponent) -> String {
 /// Тесты и встраивающие вызовы без конфига получают [`GateOptions::default`] —
 /// ровно те же значения, что в `Config::default()`, поэтому вердикт не
 /// зависит от того, читал ли вызывающий `config.toml` (AD-7).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct GateOptions {
     /// Семантика артефактов Evidence Bundle.
     pub evidence: crate::config::EvidenceConfig,
     /// Порог качества архитектурных решений (составляющая `decision_quality`).
     pub decision_quality: crate::config::DecisionQualityConfig,
+    /// Глобы детекторов диффа (T-05): что считать контрактом, новым
+    /// компонентом и изменением интеграции — из секции `[significance]`.
+    pub diff_globs: control::DiffGlobs,
 }
 
 impl GateOptions {
-    /// Настройки из секций `[evidence]` и `[gate.decision_quality]` конфига.
+    /// Настройки из секций `[evidence]`, `[gate.decision_quality]` и
+    /// `[significance]` конфига.
     #[must_use]
     pub fn from_config(cfg: &crate::config::Config) -> Self {
         Self {
             evidence: cfg.evidence.clone(),
             decision_quality: cfg.gate.decision_quality.clone(),
+            diff_globs: cfg.significance.diff_globs(),
         }
+    }
+}
+
+impl Default for GateOptions {
+    /// Настройки по умолчанию (те же дефолты, что у [`crate::config::Config`]).
+    fn default() -> Self {
+        Self::from_config(&crate::config::Config::default())
     }
 }
 
@@ -1607,8 +1619,13 @@ fn component_decision_quality(
 /// и [`control::score_with_sources`] с пустым declared (механический минимум
 /// S-1, ADR-034). Дифф недоступен (не git-репозиторий, нет HEAD) — fail-safe
 /// маршрут Critical с пометкой причины.
-fn auto_route(repo: &Path, base: Option<&str>, limits: (usize, usize)) -> (Route, String) {
-    match control::detect_diff_triggers(repo, base) {
+fn auto_route(
+    repo: &Path,
+    base: Option<&str>,
+    limits: (usize, usize),
+    globs: &control::DiffGlobs,
+) -> (Route, String) {
+    match control::detect_diff_triggers_with(repo, base, globs) {
         Ok(diff) => {
             let scored = control::score_with_sources(&BTreeMap::new(), &diff, limits.0, limits.1);
             let fired = if scored.significance.fired.is_empty() {
@@ -1855,7 +1872,7 @@ fn run_inner(
     let (mut route, route_auto, mut route_note) = if let Some(r) = route_override {
         (r, false, format!("явный --route {r}"))
     } else {
-        let (r, note) = auto_route(repo, base, limits);
+        let (r, note) = auto_route(repo, base, limits, &options.diff_globs);
         (r, true, note)
     };
     // П4: храповик маршрута — эффективный маршрут не ниже заявленного в

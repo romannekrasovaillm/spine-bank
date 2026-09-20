@@ -539,6 +539,39 @@ pub fn base_rev(base: &str) -> &str {
     }
 }
 
+/// Глобы детекторов значимости (T-05): задаются секцией `[significance]`
+/// (`arch-harness.toml` проекта или `config.toml` пользователя), чтобы
+/// соглашения репозитория («контракты лежат в `docs/contracts/`») не были
+/// зашиты в бинарь.
+#[derive(Debug, Clone)]
+pub struct DiffGlobs {
+    /// Пути/глобы контрактов.
+    pub contracts: Vec<String>,
+    /// Файлы сущностей модели, появление которых — новый компонент.
+    pub components: Vec<String>,
+    /// Файлы сущностей модели-интеграций.
+    pub integrations: Vec<String>,
+}
+
+impl Default for DiffGlobs {
+    fn default() -> Self {
+        Self {
+            contracts: vec!["docs/contracts/**".to_string(), "contracts/**".to_string()],
+            components: vec!["model/CMP-*".to_string()],
+            integrations: vec!["model/INT-*".to_string()],
+        }
+    }
+}
+
+/// Механический вывод триггеров значимости из git-диффа (S-1, ADR-034)
+/// с дефолтными глобами (T-05) — обратная совместимость.
+///
+/// # Errors
+/// Как у [`detect_diff_triggers_with`].
+pub fn detect_diff_triggers(repo: &Path, git_ref: Option<&str>) -> Result<DiffTriggers> {
+    detect_diff_triggers_with(repo, git_ref, &DiffGlobs::default())
+}
+
 /// Механический вывод триггеров значимости из git-диффа (S-1, ADR-034).
 ///
 /// Диапазон: `git_ref = None` — рабочее дерево против `HEAD` (staged +
@@ -547,11 +580,17 @@ pub fn base_rev(base: &str) -> &str {
 /// (эвристики, fail-safe — только расширяют множество):
 ///
 /// - `new_component` — добавлен каталог верхнего/второго уровня с манифестом
-///   (Cargo.toml/pom.xml/package.json/go.mod) или `src/`;
+///   (Cargo.toml/pom.xml/package.json/go.mod), каталог `src/` или сущность
+///   модели по глобу [`DiffGlobs::components`];
 /// - `new_vendor` — в диффе манифеста зависимостей добавлена строка
 ///   зависимости;
-/// - `api_contract_change` — изменён/добавлен файл с `openapi`/`asyncapi`
-///   в имени (без учёта регистра);
+/// - `api_contract_change` — изменён, добавлен или УДАЛЁН контракт: по
+///   содержимому (`openapi:`/`asyncapi:`/`swagger:` ключом верхнего уровня,
+///   расширение `.proto`) либо по глобу [`DiffGlobs::contracts`] (T-05:
+///   раньше — только по `openapi`/`asyncapi` в имени файла, из-за чего
+///   `docs/contracts/wallet-api.v1.yaml` в дельте был невидим);
+/// - `cross_domain_integration` — появилась или изменена сущность интеграции
+///   модели по глобу [`DiffGlobs::integrations`];
 /// - `irreversible_migration` — в диффе файла миграций (каталог `migrations/`
 ///   или `*.sql`) есть `DROP TABLE`/`TRUNCATE`/`DROP COLUMN`;
 /// - `new_datastore` — в конфигах добавлены строки подключения
@@ -560,7 +599,11 @@ pub fn base_rev(base: &str) -> &str {
 ///
 /// # Errors
 /// Не git-репозиторий, git недоступен, некорректный `GIT_REF`.
-pub fn detect_diff_triggers(repo: &Path, git_ref: Option<&str>) -> Result<DiffTriggers> {
+pub fn detect_diff_triggers_with(
+    repo: &Path,
+    git_ref: Option<&str>,
+    globs: &DiffGlobs,
+) -> Result<DiffTriggers> {
     let range: Vec<String> = match git_ref {
         None => vec!["HEAD".to_string()],
         Some(r) => vec![normalize_base_range(r)],
@@ -664,7 +707,8 @@ pub fn detect_diff_triggers(repo: &Path, git_ref: Option<&str>) -> Result<DiffTr
         let lower_name = file_name.to_ascii_lowercase();
         let lower_path = path.to_ascii_lowercase();
 
-        // new_component: добавлен каталог 1-го/2-го уровня с манифестом или src/.
+        // new_component: добавлен каталог 1-го/2-го уровня с манифестом, src/
+        // или сущность модели по глобу (T-05).
         if *code == 'A' {
             if (2..=3).contains(&segs.len()) && DEP_MANIFESTS.contains(&file_name) {
                 found.fire("new_component", &format!("добавлен манифест {path}"));
@@ -672,6 +716,36 @@ pub fn detect_diff_triggers(repo: &Path, git_ref: Option<&str>) -> Result<DiffTr
             if segs.len() >= 2 && (segs[0] == "src" || (segs.len() >= 3 && segs[1] == "src")) {
                 found.fire("new_component", &format!("добавлены исходники {path}"));
             }
+            if globs
+                .components
+                .iter()
+                .any(|g| glob_match(g, path.as_str()))
+            {
+                found.fire("new_component", &format!("новая сущность модели {path}"));
+            }
+        }
+
+        // cross_domain_integration: появилась или изменилась сущность
+        // интеграции модели (T-05). Новая интеграция — появление связи;
+        // правка существующей — изменение интерфейса, и оба случая значимы
+        // (детектор только расширяет множество, ADR-034).
+        if (*code == 'A' || *code == 'M')
+            && globs
+                .integrations
+                .iter()
+                .any(|g| glob_match(g, path.as_str()))
+        {
+            found.fire(
+                "cross_domain_integration",
+                &format!(
+                    "{} сущность интеграции {path}",
+                    if *code == 'A' {
+                        "новая"
+                    } else {
+                        "изменена"
+                    }
+                ),
+            );
         }
 
         // new_vendor: строка зависимости в диффе манифеста.
@@ -692,9 +766,34 @@ pub fn detect_diff_triggers(repo: &Path, git_ref: Option<&str>) -> Result<DiffTr
             }
         }
 
-        // api_contract_change: openapi/asyncapi в имени файла.
-        if *code != 'D' && (lower_name.contains("openapi") || lower_name.contains("asyncapi")) {
-            found.fire("api_contract_change", &format!("изменён контракт {path}"));
+        // api_contract_change (T-05): контракт по СОДЕРЖИМОМУ, по каталогу
+        // контрактов или по имени файла. Раньше — только имя: правка
+        // `docs/contracts/wallet-api.v1.yaml` (внутри `openapi: 3.0.3`, а в
+        // имени слова «openapi» нет) была для детектора невидима, и дельта с
+        // новым компонентом оценивалась как Fast. Удаление контракта —
+        // ломающее изменение по определению, поэтому тоже срабатывание.
+        let by_name = lower_name.contains("openapi") || lower_name.contains("asyncapi");
+        let by_glob = globs.contracts.iter().any(|g| glob_match(g, path.as_str()));
+        let by_content = *code != 'D' && file_looks_like_contract(&repo.join(path));
+        if by_name || by_glob || by_content {
+            let how = if by_content && !by_name && !by_glob {
+                "по содержимому"
+            } else if by_glob && !by_name {
+                "в каталоге контрактов"
+            } else {
+                "по имени файла"
+            };
+            found.fire(
+                "api_contract_change",
+                &format!(
+                    "{} контракт {path} ({how})",
+                    if *code == 'D' {
+                        "удалён"
+                    } else {
+                        "изменён или добавлен"
+                    }
+                ),
+            );
         }
 
         // irreversible_migration: DDL разрушения в файлах миграций.
@@ -734,6 +833,43 @@ pub fn detect_diff_triggers(repo: &Path, git_ref: Option<&str>) -> Result<DiffTr
     found.excluded = excluded;
     Ok(found)
 }
+
+/// Похож ли файл на контракт по содержимому (T-05): ключ верхнего уровня
+/// `openapi:`/`asyncapi:`/`swagger:` в первых строках (комментарии и
+/// документные разделители YAML пропускаются) либо расширение `.proto`.
+///
+/// Читаются только первые [`CONTRACT_PROBE_BYTES`] байт: контракт опознаётся
+/// по заголовку, а тянуть в память многомегабайтный файл ради одной строки
+/// незачем. Нечитаемый файл (удалён, бинарный, нет прав) — не контракт:
+/// молчаливая догадка хуже пропуска, а имя/каталог всё равно проверяются.
+fn file_looks_like_contract(path: &Path) -> bool {
+    if path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("proto"))
+    {
+        return true;
+    }
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut buf = vec![0u8; CONTRACT_PROBE_BYTES];
+    let Ok(n) = std::io::Read::read(&mut file, &mut buf) else {
+        return false;
+    };
+    let head = String::from_utf8_lossy(&buf[..n]);
+    // Ключ верхнего уровня: без отступа, `openapi:`/`asyncapi:`/`swagger:`
+    // (вложенные `openapi:` внутри схем и JSON-поля не в счёт).
+    head.lines().any(|line| {
+        let line = line.trim_end();
+        !line.starts_with([' ', '\t', '#'])
+            && ["openapi:", "asyncapi:", "swagger:"]
+                .iter()
+                .any(|k| line.starts_with(k))
+    })
+}
+
+/// Сколько байт файла читается при опознании контракта по содержимому (T-05).
+const CONTRACT_PROBE_BYTES: usize = 4096;
 
 /// Источник срабатывания триггера значимости (anti-bypass отчёт, S-1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -6929,6 +7065,124 @@ mod tests {
         assert_eq!(
             unknown_trigger_names(&off),
             vec!["new_components".to_string()]
+        );
+    }
+
+    /// T-05: контракт опознаётся по СОДЕРЖИМОМУ и по каталогу, а не только по
+    /// имени файла. Дельта с новым компонентом модели и правкой
+    /// `docs/contracts/wallet-api.v1.yaml` (внутри `openapi: 3.0.3`, а в имени
+    /// слова «openapi» нет) раньше оценивалась как Fast — спасал только
+    /// храповик ROUTE.lock.
+    #[test]
+    fn diff_detector_sees_contracts_by_content_and_model_entities() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = git_repo(dir.path());
+        write_file(&repo, "README.md", "# Кейс\n");
+        git_in(&repo, &["add", "."]);
+        git_in(&repo, &["commit", "-q", "-m", "baseline"]);
+
+        // Дельта autotopup: новый компонент модели, правка контракта без
+        // «openapi» в имени, новая интеграция.
+        write_file(
+            &repo,
+            "model/CMP-008-autotopup.md",
+            "---\nid: CMP-008\ntype: cmp\ntitle: Автопополнение\nstatus: designed\n---\n\nТело.\n",
+        );
+        write_file(
+            &repo,
+            "model/INT-004-autotopup-api.md",
+            "---\nid: INT-004\ntype: int\ntitle: API автопополнения\nstatus: accepted\ncontract: docs/contracts/wallet-api.v1.yaml\n---\n\nТело.\n",
+        );
+        write_file(
+            &repo,
+            "docs/contracts/wallet-api.v1.yaml",
+            "openapi: 3.0.3\ninfo:\n  title: Wallet API\n  version: 1.0.0\npaths: {}\n",
+        );
+        git_in(&repo, &["add", "."]);
+        git_in(&repo, &["commit", "-q", "-m", "autotopup"]);
+
+        let found = detect_diff_triggers(&repo, Some("HEAD~1")).unwrap();
+        for t in [
+            "new_component",
+            "api_contract_change",
+            "cross_domain_integration",
+        ] {
+            assert!(found.triggers.contains(t), "нет {t}: {:?}", found.triggers);
+        }
+        // Маршрут не ниже Standard (score 3 > fast_max 1).
+        let scored = score_with_sources(
+            &BTreeMap::new(),
+            &found,
+            DEFAULT_FAST_MAX,
+            DEFAULT_STANDARD_MAX,
+        );
+        assert_eq!(scored.significance.route, Route::Standard);
+
+        // Контракт, лежащий ВНЕ каталогов и БЕЗ ключа `openapi:` — не контракт
+        // для детектора (иначе «любой .yaml» поднимал бы маршрут).
+        let dir2 = tempfile::tempdir().unwrap();
+        let repo2 = git_repo(dir2.path());
+        write_file(&repo2, "config/app.yaml", "db: postgres://localhost/x\n");
+        git_in(&repo2, &["add", "."]);
+        git_in(&repo2, &["commit", "-q", "-m", "baseline"]);
+        write_file(&repo2, "config/other.yaml", "key: value\n");
+        git_in(&repo2, &["add", "."]);
+        git_in(&repo2, &["commit", "-q", "-m", "правка конфига"]);
+        let clean = detect_diff_triggers(&repo2, Some("HEAD~1")).unwrap();
+        assert!(
+            !clean.triggers.contains("api_contract_change"),
+            "{:?}",
+            clean.triggers
+        );
+
+        // Удаление контракта — тоже срабатывание: это ломающее изменение.
+        std::fs::remove_file(repo.join("docs/contracts/wallet-api.v1.yaml")).unwrap();
+        git_in(&repo, &["add", "-A"]);
+        git_in(&repo, &["commit", "-q", "-m", "удаление контракта"]);
+        let removed = detect_diff_triggers(&repo, Some("HEAD~1")).unwrap();
+        assert!(
+            removed
+                .evidence
+                .iter()
+                .any(|e| e.starts_with("api_contract_change: удалён контракт")),
+            "{:?}",
+            removed.evidence
+        );
+    }
+
+    /// T-05: глобы настраиваются — соглашение репозитория не зашито в бинарь.
+    #[test]
+    fn diff_detector_globs_are_configurable() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = git_repo(dir.path());
+        write_file(&repo, "README.md", "# Кейс\n");
+        git_in(&repo, &["add", "."]);
+        git_in(&repo, &["commit", "-q", "-m", "baseline"]);
+        write_file(&repo, "spec/wallet.proto", "syntax = \"proto3\";\n");
+        write_file(&repo, "model/CMP-009.md", "---\nid: CMP-009\n---\n");
+        git_in(&repo, &["add", "."]);
+        git_in(&repo, &["commit", "-q", "-m", "delta"]);
+
+        // `.proto` — контракт по расширению даже вне каталогов контрактов;
+        // компонент модели виден по дефолтному глобу.
+        let found = detect_diff_triggers(&repo, Some("HEAD~1")).unwrap();
+        assert!(found.triggers.contains("api_contract_change"), "{found:?}");
+        assert!(found.triggers.contains("new_component"), "{found:?}");
+
+        // Свой глоб заменяет дефолтный: `model/**` вместо `model/CMP-*`.
+        let globs = DiffGlobs {
+            components: vec!["model/**".to_string()],
+            ..DiffGlobs::default()
+        };
+        write_file(&repo, "model/REQ-002.md", "---\nid: REQ-002\n---\n");
+        git_in(&repo, &["add", "."]);
+        git_in(&repo, &["commit", "-q", "-m", "требование"]);
+        let custom = detect_diff_triggers_with(&repo, Some("HEAD~1"), &globs).unwrap();
+        assert!(custom.triggers.contains("new_component"), "{custom:?}");
+        let default_globs = detect_diff_triggers(&repo, Some("HEAD~1")).unwrap();
+        assert!(
+            !default_globs.triggers.contains("new_component"),
+            "дефолтный глоб REQ-* не покрывает: {default_globs:?}"
         );
     }
 

@@ -1228,8 +1228,11 @@ impl McpServe {
             .limits()
             .map_err(|e| CallError::execution("significance_from_diff", e))?;
         let base_ref = args.base_ref;
+        // T-05: глобы контрактов/компонентов — из секции `[significance]`
+        // конфига сервера, а не зашиты в бинарь.
+        let globs = self.cfg.significance.diff_globs();
         let diff = blocking("significance_from_diff", move || {
-            control::detect_diff_triggers(&path, base_ref.as_deref())
+            control::detect_diff_triggers_with(&path, base_ref.as_deref(), &globs)
         })
         .await?;
         let scored = control::score_with_sources(&declared, &diff, fast_max, standard_max);

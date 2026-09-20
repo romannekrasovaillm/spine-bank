@@ -3369,9 +3369,11 @@ fn cmd_control(cfg: &arch_harness::config::Config, cmd: ControlCmd) -> Result<()
                 // S-1 anti-bypass: «HEAD» (дефолт флага) — рабочее дерево
                 // против HEAD; иное значение — GIT_REF...HEAD.
                 let git_ref = (git_ref != "HEAD").then_some(git_ref);
-                let diff = arch_harness::control::detect_diff_triggers(
+                // T-05: глобы детекторов — из `[significance]` конфига.
+                let diff = arch_harness::control::detect_diff_triggers_with(
                     std::path::Path::new("."),
                     git_ref.as_deref(),
+                    &cfg.significance.diff_globs(),
                 )?;
                 let scored = arch_harness::control::score_with_sources(
                     &answers,
