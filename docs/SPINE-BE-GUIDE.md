@@ -152,6 +152,21 @@ ADR не «написан и забыт»: у него статусная маш
 | `arch-be publish confluence/jira` | файловые адаптеры публикации |
 | `arch-be doctor` | диагностика окружения |
 
+## 8.1 Судья рубрик: происхождение оценки
+
+```bash
+arch-be rubric handover --dir .        # что осталось оценить и чем (+ два текста передачи)
+arch-be rubric run adr_quality --all-accepted --model judge-cli   # судью запускает Spine
+arch-be rubric accept --dir .          # приёмка: свежесть отчётов, судья, уровень, ответы
+arch-be rubric reverify reports/rubric/ADR-001.json   # сходится ли балл с сырыми ответами
+```
+
+Уровни независимости в отчёте: `declared` (метки передал хост) и `launched`
+(судью запускал Spine). Порог для гейта — `[gate.decision_quality]
+min_independence`; путь к правильному судейству короче неправильного:
+`rubric run --all-accepted` закрывает все находки о неоценённых решениях
+одной командой.
+
 ## 9. FAQ
 
 - **Это заменит архитектора?** Нет. Машина проверяет, человек решает:
