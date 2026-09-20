@@ -2541,6 +2541,35 @@ fn collect_inputs(
                 .map_or_else(|| "absent".to_string(), |h| format!("sha256:{h}")),
         );
     }
+    // Отчёты рубрик: правивший отчёт меняет вердикт, и аттестация обязана это
+    // видеть — иначе подмена отчёта на «удобный» не отличима от прежнего
+    // состояния. Касается и `decision_quality`, и смысловых рубрик (ADR-052):
+    // отчёт смысловой рубрики входит в конверт тем же правилом.
+    let reports_dir = repo.join(crate::rubric::RUBRIC_REPORTS_DIR);
+    let mut reports: Vec<PathBuf> = std::fs::read_dir(&reports_dir)
+        .map(|rd| {
+            rd.flatten()
+                .map(|e| e.path())
+                .filter(|p| {
+                    p.extension()
+                        .is_some_and(|x| x.eq_ignore_ascii_case("json"))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    reports.sort();
+    push("rubric_reports", reports.len().to_string());
+    for path in &reports {
+        let name = path.file_name().map_or_else(
+            || "report".to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        );
+        push(
+            &format!("rubric_report:{name}"),
+            crate::hash::sha256_file(path)
+                .map_or_else(|| "absent".to_string(), |h| format!("sha256:{h}")),
+        );
+    }
     let lock = route_lock_path(repo);
     push(
         "route_lock",
