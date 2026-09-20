@@ -258,6 +258,8 @@ pub const BRIDGE_READ_ONLY: &[&str] = &[
     "openspec_coverage",
     "plugin_list",
     "rubric_list",
+    "rule_template_list",
+    "rule_template_show",
     "rules_report",
 ];
 
@@ -285,6 +287,7 @@ pub const BRIDGE_READ_WRITE: &[&str] = &[
     "evidence_pack",
     "handoff_create",
     "reverse_survey",
+    "rule_template_apply",
     "skill_distill",
 ];
 

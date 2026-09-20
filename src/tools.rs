@@ -61,6 +61,9 @@ fn domain_tools(cfg: &Config) -> Vec<Arc<dyn Tool>> {
         out.extend(crate::archify::tools());
     }
     out.extend(crate::rubric::tools());
+    // Шаблоны исполняемых правил: list/show — read-only, apply — пишущий
+    // (мост MCP отдаёт его только под `--rw`, ADR-050).
+    out.extend(crate::rule_templates::tools());
     // Egress-дисциплина (AD-BE5, GAP-C1): при `[web].enabled = false` веб-канал
     // выключен конфигом — инструменты не регистрируются, агент их не видит.
     // Гейт живёт на уровне регистрации, сами web-инструменты о нём не знают (AD-4).

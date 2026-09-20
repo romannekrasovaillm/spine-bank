@@ -97,6 +97,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: RubricCmd,
     },
+    /// Правила архитектурного контроля: кандидаты и шаблоны исполняемых правил.
+    Rules {
+        #[command(subcommand)]
+        cmd: RulesCmd,
+    },
     /// Архитектурные бенчмарки. Только сборка `harness`.
     #[cfg(feature = "harness")]
     Bench {
@@ -804,6 +809,70 @@ enum RubricCmd {
         /// работу (метка `judge_is_author` в составляющей `decision_quality`).
         #[arg(long)]
         author_model: Option<String>,
+    },
+}
+
+/// Подкоманды `arch-be rules`.
+#[derive(Subcommand)]
+enum RulesCmd {
+    /// Кандидатные fitness-правила кейса (то же, что `control rules-suggest`).
+    Suggest {
+        /// Корень кейса (каталог с `docs/`, `model/`, `.arch-handoff/`).
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
+    /// Шаблоны исполняемых правил: библиотека, применение, проверка зубов.
+    Template {
+        #[command(subcommand)]
+        cmd: RulesTemplateCmd,
+    },
+}
+
+/// Подкоманды `arch-be rules template`.
+#[derive(Subcommand)]
+enum RulesTemplateCmd {
+    /// Список шаблонов библиотеки.
+    List,
+    /// Показать шаблон: свойства, файлы, команды, словарь подбора.
+    Show {
+        /// Id шаблона.
+        id: String,
+    },
+    /// Положить файлы шаблона в кейс и напечатать фрагмент правила.
+    Apply {
+        /// Id шаблона.
+        id: String,
+        /// Инвариант спайна, к которому привязывается правило (`AD-3`).
+        #[arg(long)]
+        ad: String,
+        /// Корень кейса.
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
+        /// Язык поставки: python | java | both.
+        #[arg(long, default_value = "python")]
+        lang: String,
+        /// Показать, что было бы сделано, ничего не записывая.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Проверка зубов: тест обязан падать на нарушающей реализации.
+    Verify {
+        /// Проверить все шаблоны библиотеки во временных каталогах.
+        #[arg(long)]
+        all: bool,
+        /// Проверить применённые шаблоны кейса (по `.arch-handoff/rule-templates.lock`).
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        /// JUnit-консоль (`junit-platform-console-standalone.jar`) для java-половины
+        /// без Maven.
+        #[arg(long)]
+        java_jar: Option<PathBuf>,
+        /// Язык проверки: python | java | both.
+        #[arg(long, default_value = "both")]
+        lang: String,
+        /// Требовать python3: без него проверка считается проваленной (для CI).
+        #[arg(long)]
+        require_python: bool,
     },
 }
 
@@ -1521,6 +1590,7 @@ async fn main() -> Result<()> {
         }
         Some(Cmd::Archify { cmd }) => cmd_archify(&cfg, cmd).await?,
         Some(Cmd::Rubric { cmd }) => cmd_rubric(&cfg, cmd).await?,
+        Some(Cmd::Rules { cmd }) => cmd_rules(cmd)?,
         #[cfg(feature = "harness")]
         Some(Cmd::Bench { cmd }) => cmd_bench(&cfg, cmd).await?,
         Some(Cmd::Kb { query, limit }) => {
@@ -2848,6 +2918,105 @@ async fn cmd_archify(cfg: &Config, cmd: ArchifyCmd) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Обрабатывает `arch-be rules …`: кандидаты и шаблоны исполняемых правил.
+fn cmd_rules(cmd: RulesCmd) -> Result<()> {
+    match cmd {
+        RulesCmd::Suggest { path } => {
+            let report = arch_harness::rules_suggest::suggest(&path)?;
+            print!("{}", arch_harness::rules_suggest::render_markdown(&report));
+            Ok(())
+        }
+        RulesCmd::Template { cmd } => cmd_rules_template(cmd),
+    }
+}
+
+/// Обрабатывает `arch-be rules template …`.
+fn cmd_rules_template(cmd: RulesTemplateCmd) -> Result<()> {
+    use arch_harness::rule_templates as rt;
+    match cmd {
+        RulesTemplateCmd::List => {
+            print!("{}", rt::render_list()?);
+            Ok(())
+        }
+        RulesTemplateCmd::Show { id } => {
+            print!("{}", rt::render_show(&id)?);
+            Ok(())
+        }
+        RulesTemplateCmd::Apply {
+            id,
+            ad,
+            dir,
+            lang,
+            dry_run,
+        } => {
+            let lang = rt::Lang::parse(&lang)?;
+            let report = rt::apply(&dir, &id, &ad, lang, dry_run)?;
+            println!(
+                "Шаблон: {} v{} → {}",
+                report.template,
+                report.version,
+                report.target_dir.display()
+            );
+            println!(
+                "Файлов {}: {}",
+                if report.dry_run {
+                    "было бы записано"
+                } else {
+                    "записано"
+                },
+                report.written.len()
+            );
+            for path in &report.written {
+                println!("  {}", path.display());
+            }
+            println!(
+                "\nФрагмент для CONSTRAINTS.yaml (под ключом `rules:`) — {}:\n",
+                if report.dry_run {
+                    "печатается, на диск не пишется"
+                } else {
+                    "печатается, НЕ вносится"
+                }
+            );
+            println!("{}", report.fragment);
+            println!(
+                "\nСтрока для сущности инварианта в model/ (вторая строка frontmatter):\n  {}",
+                report.verified_by
+            );
+            if !report.notes.is_empty() {
+                println!("\nЗамечания:");
+                for note in &report.notes {
+                    println!("  - {note}");
+                }
+            }
+            Ok(())
+        }
+        RulesTemplateCmd::Verify {
+            all,
+            dir,
+            java_jar,
+            lang,
+            require_python,
+        } => {
+            let lang = rt::Lang::parse(&lang)?;
+            let runner = rt::Runner::detect(java_jar.as_deref());
+            let report = match (all, dir) {
+                (true, None) => rt::verify_all(&runner, lang, require_python)?,
+                (false, Some(case)) => rt::verify_dir(&case, &runner, lang)?,
+                _ => {
+                    return Err(anyhow::Error::msg(
+                        "укажите ровно одно: --all (шаблоны библиотеки) или --dir <кейс>",
+                    ));
+                }
+            };
+            print!("{}", rt::render_verify(&report));
+            if !report.passed() {
+                std::process::exit(1);
+            }
+            Ok(())
+        }
+    }
 }
 
 async fn cmd_rubric(cfg: &Arc<Config>, cmd: RubricCmd) -> Result<()> {
