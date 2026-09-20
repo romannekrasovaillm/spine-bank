@@ -1482,10 +1482,11 @@ mod tests {
             let rel = format!("{dir}/{}", f.to);
             std::fs::create_dir_all(case.join(&dir)).expect("mkdir");
             std::fs::write(case.join(&rel), content).expect("write");
-            lock.push_str(&format!(
+            let _ = write!(
+                lock,
                 "      - path: {rel}\n        sha256: {}\n",
                 crate::hash::sha256_hex(content.as_bytes())
-            ));
+            );
         }
         lock
     }

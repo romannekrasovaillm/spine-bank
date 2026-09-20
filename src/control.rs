@@ -7097,7 +7097,7 @@ mod tests {
             t.manifest.version
         );
         for (path, sha) in files {
-            out.push_str(&format!("      - path: {path}\n        sha256: {sha}\n"));
+            let _ = write!(out, "      - path: {path}\n        sha256: {sha}\n");
         }
         out
     }
