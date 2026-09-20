@@ -271,6 +271,8 @@ pub const BRIDGE_READ_ONLY: &[&str] = &[
     "rubric_accept",
     "rubric_handover",
     "rubric_list",
+    "rule_template_list",
+    "rule_template_show",
     "rules_report",
 ];
 
@@ -298,6 +300,7 @@ pub const BRIDGE_READ_WRITE: &[&str] = &[
     "evidence_pack",
     "handoff_create",
     "reverse_survey",
+    "rule_template_apply",
     "skill_distill",
 ];
 
@@ -1180,8 +1183,24 @@ impl McpServe {
         if out.is_error {
             return Err(CallError::Execution(out.content));
         }
+        // Разобранный результат (T-12): инструмент отдаёт его полем `data`,
+        // а если структурной формы нет — пробуем разобрать сам текст (часть
+        // инструментов отвечает JSON-вердиктом строкой). Строковое `output`
+        // сохраняется: на него опираются клиенты, написанные раньше.
+        let structured_data = out.data.clone().or_else(|| {
+            serde_json::from_str::<Value>(&out.content)
+                .ok()
+                .filter(Value::is_object)
+        });
         let text = out.truncated(BRIDGE_OUTPUT_MAX_CHARS).content;
-        let structured = json!({"tool": name, "output": text.clone()});
+        let structured = match structured_data {
+            Some(Value::Object(mut map)) => {
+                map.insert("tool".to_string(), json!(name));
+                map.insert("output".to_string(), json!(text.clone()));
+                Value::Object(map)
+            }
+            _ => json!({"tool": name, "output": text.clone()}),
+        };
         Ok(DispatchOutcome::Text { structured, text })
     }
 
@@ -1493,7 +1512,8 @@ impl McpServe {
     async fn tool_model_query(&self, args: Value) -> std::result::Result<Value, CallError> {
         #[derive(Deserialize)]
         struct Args {
-            /// Каталог модели (дефолт `model` от cwd процесса сервера).
+            /// Корень кейса или каталог `model/` (T-13): инструмент находит
+            /// модель сам; дефолт — `model` от cwd процесса сервера.
             #[serde(alias = "path")]
             dir: Option<String>,
             /// ID сущности — карточка (без `id` — список).
@@ -1518,7 +1538,7 @@ impl McpServe {
             }
             None => None,
         };
-        let dir = PathBuf::from(args.dir.unwrap_or_else(|| "model".into()));
+        let dir = model::model_dir_from(&PathBuf::from(args.dir.unwrap_or_else(|| "model".into())));
         let id = args.id;
         blocking("model_query", move || {
             // Толерантная загрузка (E3): ответ по валидному подмножеству +
@@ -1994,14 +2014,17 @@ impl McpServe {
             .limit
             .unwrap_or(SKILL_SEARCH_DEFAULT_LIMIT)
             .min(KNOWLEDGE_MAX_HITS);
-        let dirs = self.cfg.plugins.dirs.clone();
+        // T-09: скиллы, разложенные в проекте (`connect`), — часть индекса,
+        // иначе поиск пуст до `arch-be init`, хотя скиллы на диске есть.
+        let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let dirs = plugin::skill_search_dirs(&self.cfg.plugins.dirs, &root);
         let query = args.query;
         blocking("skill_search", move || -> Result<Value> {
             let plugins = plugin::discover(&dirs);
             let total: usize = plugins.iter().map(|p| p.skills.len()).sum();
             let hits = plugin::search(&plugins, &query, limit);
             let summary = if hits.is_empty() {
-                format!("по запросу '{query}' ничего не найдено (скиллов в индексе: {total})")
+                plugin::empty_index_answer(&query, total, &dirs)
             } else {
                 format!("по запросу '{query}' найдено скиллов: {}", hits.len())
             };
@@ -2031,7 +2054,8 @@ impl McpServe {
             name: String,
         }
         let args: Args = parse_args(args, "skill_load")?;
-        let dirs = self.cfg.plugins.dirs.clone();
+        let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let dirs = plugin::skill_search_dirs(&self.cfg.plugins.dirs, &root);
         let name = args.name;
         blocking("skill_load", move || -> Result<Value> {
             let plugins = plugin::discover(&dirs);
@@ -2522,7 +2546,7 @@ fn tool_specs() -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "Каталог модели (по умолчанию model от cwd сервера)"},
+                    "path": {"type": "string", "description": "Корень кейса или каталог `model/` — инструмент находит модель сам (по умолчанию `model` от cwd сервера)"},
                     "id": {"type": "string", "description": "ID сущности (ADR-001, CMP-002, …): карточка со связями"},
                     "type": {"type": "string", "description": "Фильтр списка по типу (cmp, adr, …)"},
                 },

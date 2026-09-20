@@ -71,6 +71,29 @@ pub struct Candidate {
     /// Готовый YAML-фрагмент для `rules:` файла `CONSTRAINTS.yaml`, когда
     /// проверка механизируема; `None` — честный advisory (механики нет).
     pub yaml: Option<String>,
+    /// Инвариант спайна, к которому привязан кандидат (`AD-004`). Заполняется
+    /// только детектором исполняемых инвариантов; у остальных кандидатов поля
+    /// нет вовсе (аддитивное поле, `skip_serializing_if`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ad: Option<String>,
+    /// Шаблоны-кандидаты на исполняемую проверку этого инварианта, лучшие
+    /// сверху (детектор на каждый инвариант, [`crate::rule_templates`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub templates: Vec<crate::rule_templates::TemplateMatch>,
+}
+
+impl Candidate {
+    /// Кандидат без привязки к инварианту (детекторы 1–5 и легаси-кандидат).
+    fn new(id: &str, rationale: String, source_skill: &str, yaml: Option<String>) -> Self {
+        Self {
+            id: id.to_string(),
+            rationale,
+            source_skill: source_skill.to_string(),
+            yaml,
+            ad: None,
+            templates: Vec::new(),
+        }
+    }
 }
 
 /// Отчёт детекторов: кандидаты + однострочная сводка.
@@ -193,16 +216,16 @@ fn detect_ears(case: &Path) -> Result<Option<Candidate>> {
     if files.iter().any(|(_, t)| ears.is_match(t)) {
         return Ok(None);
     }
-    Ok(Some(Candidate {
-        id: "ears-acceptance-criteria".into(),
-        rationale: format!(
+    Ok(Some(Candidate::new(
+        "ears-acceptance-criteria",
+        format!(
             "спецификаций/документов с критериями приёмки: {} — ни одного \
              EARS-требования (When/While/If/Where): критерии приёмки \
              непроверяемы формально",
             files.len()
         ),
-        source_skill: "readiness-gate".into(),
-        yaml: Some(yaml_must_contain(
+        "readiness-gate",
+        Some(yaml_must_contain(
             "ears_acceptance_criteria",
             "docs/**/*.md",
             EARS_PATTERN,
@@ -210,7 +233,7 @@ fn detect_ears(case: &Path) -> Result<Option<Candidate>> {
             "переписать критерии приёмки в EARS-нотации (When/While/If/Where)",
             "readiness-gate",
         )),
-    }))
+    )))
 }
 
 /// Детектор 2 (таймауты контрактов): файлы `docs/contracts/*`
@@ -232,15 +255,15 @@ fn detect_contract_timeouts(case: &Path) -> Result<Option<Candidate>> {
     if files.iter().any(|(_, t)| numeric.is_match(t)) {
         return Ok(None);
     }
-    Ok(Some(Candidate {
-        id: "contract-timeouts-numeric".into(),
-        rationale: format!(
+    Ok(Some(Candidate::new(
+        "contract-timeouts-numeric",
+        format!(
             "контрактов в docs/contracts: {} — ни одного численного \
              timeout/retry/deadline: временные бюджеты стыков не зафиксированы",
             files.len()
         ),
-        source_skill: "adversarial-review".into(),
-        yaml: Some(yaml_must_contain(
+        "adversarial-review",
+        Some(yaml_must_contain(
             "contract_timeouts_numeric",
             "docs/contracts/*",
             r"(?i)(timeout|retry|retries|deadline|таймаут|дедлайн|повтор)[^\n]{0,48}\d",
@@ -248,7 +271,7 @@ fn detect_contract_timeouts(case: &Path) -> Result<Option<Candidate>> {
             "задать timeout/retry числом в каждом контракте стыка",
             "adversarial-review",
         )),
-    }))
+    )))
 }
 
 /// Детектор 3 (декомпозиция REQ→работы): в `model/` есть REQ-сущности, а
@@ -280,9 +303,9 @@ fn detect_req_task(case: &Path) -> Result<Option<Candidate>> {
     if tasks >= reqs {
         return Ok(None);
     }
-    Ok(Some(Candidate {
-        id: "req-task-decomposition".into(),
-        rationale: format!(
+    Ok(Some(Candidate::new(
+        "req-task-decomposition",
+        format!(
             "требований REQ в model/: {reqs}, пунктов списка в \
              .arch-handoff/TASK.md: {tasks} — декомпозиция «требование → \
              работа» неполная. Механического правила нет: must_contain по \
@@ -290,9 +313,9 @@ fn detect_req_task(case: &Path) -> Result<Option<Candidate>> {
              следите за прослеживаемостью вручную (поиск «сирот» с обеих \
              сторон, скилл readiness-gate)"
         ),
-        source_skill: "readiness-gate".into(),
-        yaml: None,
-    }))
+        "readiness-gate",
+        None,
+    )))
 }
 
 /// Детектор 4 (RTO/RPO → ADR): RTO/RPO упоминаются в документах/модели,
@@ -309,14 +332,14 @@ fn detect_rto_rpo_adr(case: &Path) -> Result<Option<Candidate>> {
     if adrs.iter().any(|(_, t)| rto.is_match(t)) {
         return Ok(None);
     }
-    Ok(Some(Candidate {
-        id: "rto-rpo-adr".into(),
-        rationale: "RTO/RPO заявлены в документах/модели, но не закреплены ни одним ADR — \
+    Ok(Some(Candidate::new(
+        "rto-rpo-adr",
+        "RTO/RPO заявлены в документах/модели, но не закреплены ни одним ADR — \
              показатели восстановления без архитектурного решения (при инциденте \
              нечему отвечать)"
-            .into(),
-        source_skill: "nfr-design".into(),
-        yaml: Some(yaml_must_contain(
+            .to_string(),
+        "nfr-design",
+        Some(yaml_must_contain(
             "rto_rpo_backed_by_adr",
             "docs/adr/*.md",
             r"RTO|RPO",
@@ -324,7 +347,7 @@ fn detect_rto_rpo_adr(case: &Path) -> Result<Option<Candidate>> {
             "принять ADR о целевых RTO/RPO и способе восстановления",
             "nfr-design",
         )),
-    }))
+    )))
 }
 
 /// Детектор 5 (аудит операторских действий): тексты упоминают ручные
@@ -345,14 +368,14 @@ fn detect_operator_audit(case: &Path) -> Result<Option<Candidate>> {
     if docs.iter().any(|(_, t)| audit.is_match(t)) {
         return Ok(None);
     }
-    Ok(Some(Candidate {
-        id: "operator-actions-audit".into(),
-        rationale: "документы упоминают ручные действия (разблокировка/вручную/оператор/\
+    Ok(Some(Candidate::new(
+        "operator-actions-audit",
+        "документы упоминают ручные действия (разблокировка/вручную/оператор/\
              сотрудник/дежурный), но аудит-формулировок (аудит/журнал действий) нет — \
              операторские вмешательства не журналируются, расследовать инциденты будет не по чему"
-            .into(),
-        source_skill: "fitness-functions".into(),
-        yaml: Some(yaml_must_contain(
+            .to_string(),
+        "fitness-functions",
+        Some(yaml_must_contain(
             "operator_actions_audited",
             "docs/**/*.md",
             AUDIT_TRAIL_PATTERN,
@@ -360,7 +383,7 @@ fn detect_operator_audit(case: &Path) -> Result<Option<Candidate>> {
             "добавить требование журналирования операторских действий в эксплуатационные документы",
             "fitness-functions",
         )),
-    }))
+    )))
 }
 
 /// Кандидат `executable-invariants` (Н10 волны C 0.3.4): в репозитории есть
@@ -386,15 +409,15 @@ fn detect_executable_invariants(case_dir: &Path) -> Option<Candidate> {
     if text.contains("command_succeeds") {
         return None;
     }
-    Some(Candidate {
-        id: "executable-invariants".into(),
-        rationale: "в репозитории есть исполняемые тесты, но в CONSTRAINTS.yaml нет ни одного \
+    Some(Candidate::new(
+        "executable-invariants",
+        "в репозитории есть исполняемые тесты, но в CONSTRAINTS.yaml нет ни одного \
              правила `command_succeeds`: реестр проверяет только наличие слов в документах, \
              а инварианты спайна — не исполнением. Правило на упоминание — звено \
              трассировки, а не проверка смысла; добавьте хотя бы одно исполняемое правило"
-            .into(),
-        source_skill: "fitness-functions".into(),
-        yaml: Some(
+            .to_string(),
+        "fitness-functions",
+        Some(
             "# Требуется решение архитектора: какую команду считать исполняемой проверкой.\n\
              # Пример формы (замените command на реальную команду проекта):\n\
              #   - id: C-100\n\
@@ -407,7 +430,103 @@ fn detect_executable_invariants(case_dir: &Path) -> Option<Candidate> {
              #     fix_hint: \"сформулируйте инвариант спайна как тест, который падает при нарушении\"\n"
                 .to_string(),
         ),
-    })
+    ))
+}
+
+/// Детектор 7 (инвариант → исполняемое правило): по каждой сущности
+/// `type: ad` модели — есть ли у неё хоть одно правило, проверяющее
+/// ПОВЕДЕНИЕ ([`BEHAVIOUR_RULE_KINDS`]).
+///
+/// Легаси-кандидат [`detect_executable_invariants`] говорит о кейсе в целом и
+/// замолкает после первого `command_succeeds`; этот — про каждый инвариант
+/// поимённо и называет шаблон, которым пробел закрывается. Свойства:
+///
+/// - инвариант с обоснованным `unverifiable` — не пробел (решение архитектора);
+/// - ни одного правила в `BEHAVIOUR_RULE_KINDS` → кандидат
+///   `executable-invariant:AD-00N` с шаблонами по тексту спайна;
+/// - паттерн не распознан → шаблон-заготовка и честная пометка;
+/// - каталога `model/` нет → детектор молчит (инвариантов не видно).
+///
+/// # Errors
+/// Внутренние регулярные выражения, реестр и модель — см.
+/// [`crate::rule_templates::ad_coverage`].
+fn detect_executable_invariant_per_ad(case_dir: &Path) -> Result<Vec<Candidate>> {
+    use crate::rule_templates as rt;
+    let Some(coverage) = rt::ad_coverage(case_dir)? else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    // Порядок задаёт `uncovered()`: несущие первыми, затем по id инварианта.
+    for entry in coverage.uncovered() {
+        if entry.unverifiable {
+            continue;
+        }
+        let matched = rt::match_templates(&entry.spine_text, 2)?;
+        let unrecognized = matched.is_empty();
+        let templates = if unrecognized {
+            vec![rt::TemplateMatch {
+                id: rt::GENERIC_TEMPLATE_ID.to_string(),
+                score: 0,
+                matched: Vec::new(),
+            }]
+        } else {
+            matched
+        };
+        let best = templates.first().map_or_else(
+            || rt::GENERIC_TEMPLATE_ID.to_string(),
+            |t| t.id.clone(),
+        );
+        let rules = if entry.rules.is_empty() {
+            "правил в `verified_by` нет вовсе".to_string()
+        } else {
+            let named: Vec<String> = entry
+                .rules
+                .iter()
+                .map(|r| match r.kind.as_deref() {
+                    Some(kind) => format!("{} ({kind})", r.reference),
+                    None => format!("{} (нет в реестре)", r.reference),
+                })
+                .collect();
+            format!(
+                "все {} его правил проверяют наличие текста: {}",
+                named.len(),
+                named.join(", ")
+            )
+        };
+        let templates_note = if unrecognized {
+            format!(
+                "паттерн не распознан — предложена заготовка `{best}`: сформулируйте свойство \
+                 и напишите тест"
+            )
+        } else {
+            let names: Vec<String> = templates
+                .iter()
+                .map(|t| format!("{} (совпало: {})", t.id, t.matched.join(", ")))
+                .collect();
+            format!("шаблоны исполняемой проверки: {}", names.join("; "))
+        };
+        let bearing = if entry.load_bearing {
+            "несущий инвариант — "
+        } else {
+            ""
+        };
+        let rationale = format!(
+            "{bearing}{} «{}» не проверяется поведением: {rules}. Правило на упоминание — \
+             звено трассировки, а не проверка смысла. {templates_note}. Применение шаблона: \
+             `arch-be rules template apply <id> --ad {} --dir .`",
+            entry.ad, entry.title, entry.ad
+        );
+        let yaml = rt::candidate_fragment(case_dir, &best, &entry.ad).ok();
+        out.push(Candidate {
+            id: format!("executable-invariant:{}", entry.ad),
+            rationale,
+            source_skill: "fitness-functions".to_string(),
+            yaml,
+            ad: Some(entry.ad.clone()),
+            templates,
+        });
+    }
+    Ok(out)
 }
 
 /// Прогоняет все детекторы по кейсу (корень — каталог с `docs/`, `model/`,
@@ -436,15 +555,19 @@ pub fn suggest(case_dir: &Path) -> Result<SuggestReport> {
     {
         candidates.push(candidate);
     }
+    // Детектор на каждый инвариант (Н10/executable-invariants): идёт после
+    // общих детекторов, порядок внутри — несущие первыми, затем по id.
+    candidates.extend(detect_executable_invariant_per_ad(case_dir)?);
     let mechanizable = candidates.iter().filter(|c| c.yaml.is_some()).count();
     let summary = if candidates.is_empty() {
-        "Кандидатов нет: пробелов по 6 детекторам не найдено.".to_string()
+        "Кандидатов нет: пробелов по 7 детекторам не найдено.".to_string()
     } else {
         format!(
-            "Кандидатов: {} (с готовым YAML: {mechanizable}, advisory: {}). \
+            "Кандидатов: {} (с готовым YAML: {mechanizable}, advisory: {}; по инвариантам: {}). \
              Взять правило в CONSTRAINTS.yaml и назначить severity — решение архитектора.",
             candidates.len(),
-            candidates.len() - mechanizable
+            candidates.len() - mechanizable,
+            candidates.iter().filter(|c| c.ad.is_some()).count()
         )
     };
     Ok(SuggestReport {
@@ -465,14 +588,38 @@ pub fn render_markdown(report: &SuggestReport) -> String {
         let _ = writeln!(
             out,
             "Пробелов по детекторам (EARS, таймауты контрактов, REQ→TASK, \
-             RTO/RPO→ADR, аудит операторских действий) не найдено."
+             RTO/RPO→ADR, аудит операторских действий, исполняемые правила, \
+             инвариант→исполняемое правило) не найдено."
         );
         return out;
     }
     for c in &report.candidates {
         let _ = writeln!(out, "\n## {}\n", c.id);
         let _ = writeln!(out, "- Источник методики: скилл `{}`", c.source_skill);
+        if let Some(ad) = &c.ad {
+            let _ = writeln!(out, "- Инвариант: {ad}");
+        }
         let _ = writeln!(out, "- Обоснование: {}", c.rationale);
+        if !c.templates.is_empty() {
+            let list: Vec<String> = c
+                .templates
+                .iter()
+                .map(|t| {
+                    if t.score == 0 {
+                        format!("`{}` (паттерн не распознан)", t.id)
+                    } else {
+                        format!("`{}` (совпадений: {})", t.id, t.score)
+                    }
+                })
+                .collect();
+            let _ = writeln!(out, "- Шаблоны исполняемой проверки: {}", list.join(", "));
+            let _ = writeln!(
+                out,
+                "  Применить: `arch-be rules template apply {} --ad {} --dir <кейс>`",
+                c.templates[0].id,
+                c.ad.as_deref().unwrap_or("AD-N")
+            );
+        }
         match &c.yaml {
             Some(yaml) => {
                 let _ = writeln!(
@@ -859,6 +1006,321 @@ mod tests {
             !audit.is_match("следует выполнять сверку"),
             "«следует» — шум"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests_executable_invariant_per_ad {
+    //! Детектор «инвариант → исполняемое правило» (E4, ADR-050).
+
+    use super::*;
+
+    /// Кейс: спайн с инвариантами, модель и реестр правил.
+    /// `ads` — (id, заголовок, дополнительные строки frontmatter).
+    fn case_with(root: &Path, ads: &[(&str, &str, &str)], registry: &str) -> PathBuf {
+        let case = root.join("case");
+        std::fs::create_dir_all(case.join("model")).expect("model");
+        let mut spine = String::from("# Спайн\n\n");
+        for (id, title, extra) in ads {
+            let num = id.trim_start_matches("AD-").trim_start_matches('0');
+            std::fs::write(
+                case.join("model").join(format!("{id}.md")),
+                format!(
+                    "---\nid: {id}\ntype: ad\ntitle: \"{title}\"\nstatus: \"ADOPTED\"\n{extra}\n\
+                     ---\n\n- **Binds**: Приём\n- **Prevents**: потерю\n- **Rule**: правило\n"
+                ),
+            )
+            .expect("сущность");
+            let _ = write!(
+                spine,
+                "## AD-{num}. {title}\n\n- **Binds**: Приём\n- **Prevents**: потерю\n\
+                 - **Rule**: правило\n\n"
+            );
+        }
+        std::fs::write(case.join("ARCHITECTURE-SPINE.md"), spine).expect("спайн");
+        std::fs::write(case.join("CONSTRAINTS.yaml"), registry).expect("реестр");
+        case
+    }
+
+    /// Реестр: одно правило на упоминание (`must_contain`).
+    const TEXT_ONLY: &str = "rules:\n  - id: C-002\n    name: word_in_doc\n    type: must_contain\n    \
+         glob: 'docs/**/*.md'\n    pattern: 'ключ'\n    severity: error\n";
+    /// Реестр: то же плюс исполняемое правило для второго инварианта.
+    const WITH_BEHAVIOUR: &str = "rules:\n  - id: C-002\n    name: word_in_doc\n    type: must_contain\n    \
+         glob: 'docs/**/*.md'\n    pattern: 'ключ'\n    severity: error\n  \
+         - id: C-003\n    name: behaviour\n    type: command_succeeds\n    command: 'true'\n    \
+         severity: error\n    ad: AD-002\n";
+
+    /// Id кандидатов отчёта (хелпер сообщений).
+    fn ids(report: &SuggestReport) -> Vec<&str> {
+        report.candidates.iter().map(|c| c.id.as_str()).collect()
+    }
+
+    /// Кандидаты по инвариантам (без легаси-кандидата про кейс в целом).
+    fn per_ad(report: &SuggestReport) -> Vec<&Candidate> {
+        report
+            .candidates
+            .iter()
+            .filter(|c| c.ad.is_some())
+            .collect()
+    }
+
+    /// Все правила текстовые — на каждый инвариант по кандидату с шаблоном и
+    /// незакомментированным фрагментом правила.
+    #[test]
+    fn suggests_per_ad_when_all_rules_textual() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let case = case_with(
+            tmp.path(),
+            &[
+                (
+                    "AD-001",
+                    "Идемпотентность по ключу: повторная доставка",
+                    "verified_by: [C-002]",
+                ),
+                (
+                    "AD-002",
+                    "Журнал только на дозапись",
+                    "verified_by: [C-002]",
+                ),
+            ],
+            TEXT_ONLY,
+        );
+        let report = suggest(&case).expect("suggest");
+        let ads = per_ad(&report);
+        assert_eq!(ads.len(), 2, "{:?}", ids(&report));
+        assert_eq!(ads[0].id, "executable-invariant:AD-001");
+        for c in &ads {
+            assert_eq!(
+                c.ad.as_deref(),
+                Some(c.id.trim_start_matches("executable-invariant:"))
+            );
+            assert!(!c.templates.is_empty(), "шаблон предложен: {c:?}");
+            assert!(c.templates[0].score > 0, "паттерн распознан: {c:?}");
+            let yaml = c.yaml.as_deref().expect("фрагмент правила");
+            assert!(yaml.contains("type: command_succeeds"), "{yaml}");
+            assert!(
+                !yaml.trim_start().starts_with('#'),
+                "фрагмент обязан быть незакомментированным: {yaml}"
+            );
+            assert!(
+                yaml.contains(&format!("ad: {}", c.ad.as_deref().unwrap())),
+                "{yaml}"
+            );
+            // Свободный id — из реестра кейса: занятый C-002 не переиспользуем,
+            // ниже сотни не занимаем (запас на библиотеку корпоративных правил).
+            assert!(yaml.contains("id: C-100"), "{yaml}");
+            assert!(!yaml.contains("id: C-002"), "{yaml}");
+        }
+    }
+
+    /// Инвариант, у которого есть правило поведения, — не пробел.
+    #[test]
+    fn silent_for_ad_with_behaviour_rule() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let case = case_with(
+            tmp.path(),
+            &[
+                ("AD-001", "Идемпотентность по ключу", "verified_by: [C-002]"),
+                (
+                    "AD-002",
+                    "Журнал только на дозапись",
+                    "verified_by: [C-003]",
+                ),
+            ],
+            WITH_BEHAVIOUR,
+        );
+        let report = suggest(&case).expect("suggest");
+        let ads: Vec<&str> = per_ad(&report)
+            .iter()
+            .map(|c| c.ad.as_deref().unwrap())
+            .collect();
+        assert_eq!(ads, vec!["AD-001"], "{:?}", ids(&report));
+    }
+
+    /// Обоснованный отказ от проверки (`unverifiable`) — решение архитектора,
+    /// а не пробел: детектор по такому инварианту молчит.
+    #[test]
+    fn silent_for_unverifiable_ad() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let case = case_with(
+            tmp.path(),
+            &[(
+                "AD-001",
+                "Идемпотентность по ключу",
+                "verified_by: [C-002]\nunverifiable: \"внешняя система не даёт наблюдаемости\"",
+            )],
+            TEXT_ONLY,
+        );
+        let report = suggest(&case).expect("suggest");
+        assert!(per_ad(&report).is_empty(), "{:?}", ids(&report));
+    }
+
+    /// Подбор по тексту спайна: инвариант про идемпотентность получает
+    /// `idempotency-key`, а не «первый по алфавиту».
+    #[test]
+    fn matches_idempotency_template_by_spine_text() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let case = case_with(
+            tmp.path(),
+            &[(
+                "AD-001",
+                "Выплата идемпотентна по ключу (реестр, строка)",
+                "verified_by: [C-002]",
+            )],
+            TEXT_ONLY,
+        );
+        let report = suggest(&case).expect("suggest");
+        let c = per_ad(&report)[0];
+        assert_eq!(c.templates[0].id, "idempotency-key", "{:?}", c.templates);
+        assert!(
+            c.templates[0]
+                .matched
+                .iter()
+                .any(|m| m.starts_with("идемпотент"))
+        );
+    }
+
+    /// Паттерн не распознан — заготовка и честная пометка, а не выдуманный
+    /// шаблон; правило в заготовке закомментировано (механики за ним нет).
+    #[test]
+    fn unknown_pattern_gets_generic_template() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let case = case_with(
+            tmp.path(),
+            &[(
+                "AD-001",
+                "Космический лифт: расписание запусков",
+                "verified_by: [C-002]",
+            )],
+            TEXT_ONLY,
+        );
+        let report = suggest(&case).expect("suggest");
+        let c = per_ad(&report)[0];
+        assert_eq!(
+            c.templates[0].id,
+            crate::rule_templates::GENERIC_TEMPLATE_ID,
+            "{:?}",
+            c.templates
+        );
+        assert_eq!(c.templates[0].score, 0);
+        assert!(
+            c.rationale.contains("паттерн не распознан"),
+            "{}",
+            c.rationale
+        );
+        let yaml = c.yaml.as_deref().expect("фрагмент");
+        assert!(
+            yaml.contains("# Заготовка") && yaml.contains("#   - id:"),
+            "фрагмент заготовки обязан быть закомментирован: {yaml}"
+        );
+    }
+
+    /// Несущие инварианты идут первыми (ADR-050), затем — по id.
+    #[test]
+    fn load_bearing_ads_come_first() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let case = case_with(
+            tmp.path(),
+            &[
+                ("AD-001", "Идемпотентность по ключу", "verified_by: [C-002]"),
+                (
+                    "AD-002",
+                    "Журнал только на дозапись",
+                    "load_bearing: true\nverified_by: [C-002]",
+                ),
+            ],
+            TEXT_ONLY,
+        );
+        let report = suggest(&case).expect("suggest");
+        let ads = per_ad(&report);
+        assert_eq!(ads[0].ad.as_deref(), Some("AD-002"), "несущий — первым");
+        assert!(ads[0].rationale.contains("несущий"), "{}", ads[0].rationale);
+    }
+
+    /// Нет каталога `model/` — детектор молчит (инвариантов не видно).
+    #[test]
+    fn silent_without_model_dir() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let case = tmp.path().join("no-model");
+        std::fs::create_dir_all(&case).expect("кейс");
+        std::fs::write(case.join("CONSTRAINTS.yaml"), TEXT_ONLY).expect("реестр");
+        let report = suggest(&case).expect("suggest");
+        assert!(per_ad(&report).is_empty());
+    }
+
+    /// Легаси-кандидат `executable-invariants` живёт на прежних условиях:
+    /// он про кейс в целом и привязки к инварианту не несёт.
+    #[test]
+    fn legacy_candidate_unchanged() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let case = case_with(
+            tmp.path(),
+            &[("AD-001", "Идемпотентность по ключу", "verified_by: [C-002]")],
+            TEXT_ONLY,
+        );
+        std::fs::create_dir_all(case.join("tests")).expect("tests");
+        let report = suggest(&case).expect("suggest");
+        let legacy = report
+            .candidates
+            .iter()
+            .find(|c| c.id == "executable-invariants")
+            .expect("легаси-кандидат на месте (тесты есть, command_succeeds нет)");
+        assert!(legacy.ad.is_none(), "легаси не привязан к инварианту");
+        assert!(legacy.templates.is_empty(), "и шаблонов не предлагает");
+    }
+
+    /// Снимок на эталонном кейсе: детектор называет КАЖДЫЙ инвариант, а для
+    /// пяти инвариантов `кейсы/salary-payments` ожидаемый шаблон задан
+    /// заданием и сверяется поимённо.
+    #[test]
+    fn salary_payments_snapshot_names_every_ad_with_its_template() {
+        let case = Path::new(env!("CARGO_MANIFEST_DIR")).join("кейсы/salary-payments");
+        let report = suggest(&case).expect("suggest");
+        let mut got: Vec<(String, String)> = per_ad(&report)
+            .iter()
+            .map(|c| (c.ad.clone().unwrap_or_default(), c.templates[0].id.clone()))
+            .collect();
+        got.sort();
+        let expect = [
+            ("AD-001", "idempotency-key"),
+            ("AD-002", "append-only-journal"),
+            ("AD-003", "unknown-outcome-no-resend"),
+            ("AD-004", "no-pii-in-logs"),
+            ("AD-005", "validate-before-side-effect"),
+            ("AD-006", "unknown-outcome-no-resend"),
+            ("AD-007", "append-only-journal"),
+        ];
+        assert_eq!(got.len(), expect.len(), "названы все инварианты: {got:?}");
+        for (ad, want) in expect {
+            assert!(
+                got.iter().any(|(a, t)| a == ad && t == want),
+                "{ad} → {want}, получено {got:?}"
+            );
+        }
+    }
+
+    /// Снимок второго эталонного кейса: девять инвариантов, у одного паттерн
+    /// честно не распознан (интеграция через адаптер — не из восьми паттернов).
+    #[test]
+    fn digital_ruble_merchant_snapshot_names_every_ad() {
+        let case = Path::new(env!("CARGO_MANIFEST_DIR")).join("кейсы/digital-ruble-merchant");
+        let report = suggest(&case).expect("suggest");
+        let ads = per_ad(&report);
+        assert_eq!(
+            ads.len(),
+            9,
+            "девять инвариантов названы: {:?}",
+            ids(&report)
+        );
+        let unrecognized = ads
+            .iter()
+            .filter(|c| c.templates[0].id == crate::rule_templates::GENERIC_TEMPLATE_ID)
+            .count();
+        assert_eq!(unrecognized, 1, "ровно один паттерн не распознан");
+        for c in &ads {
+            assert!(c.yaml.is_some(), "{} без фрагмента", c.id);
+        }
     }
 }
 

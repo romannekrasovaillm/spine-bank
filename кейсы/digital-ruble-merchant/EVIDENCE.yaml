@@ -1,5 +1,5 @@
 route: Critical
-packed_at: 2026-09-19T18:33:34.269214862+03:00
+packed_at: 2026-09-20T09:35:29.277356646+03:00
 hash_alg: sha256
 items:
 - key: problem
@@ -44,8 +44,8 @@ items:
   size: 469
 - key: rollback_rehearsal
   path: .arch-handoff/REHEARSAL.json
-  hash: bee7127cd56ae56f934bd3bf05808c946e5a10a3038e4df3ae439c26925e8087
-  size: 295
+  hash: b02f985e70272c0cb45f93f27440acf2b26927f2edf0473fc43628f8f06db708
+  size: 1235
 - key: validation
   path: docs/VALIDATION.md
   hash: 769890e051f5aa19653bae798132486143bf77f65f470d2b1b6bc3fd546078ea

@@ -1,0 +1,13 @@
+{
+  "schema": "arch-be/rubric-report/v1",
+  "rubric": "adr_quality",
+  "target": "docs/adr/ADR-005-sverka-po-snimku.md",
+  "target_sha256": "17181723175623a85d720700c60cebe3c83e65ca87bc7e933a6bab6f0c444457",
+  "judge_model": "deepseek-flash",
+  "author_model": "claude-code-host",
+  "weighted_total": 3.4,
+  "verdict": "Главный риск — недоказанная статус-дисциплина (нет признаков записи до реализации, связей Superseded и expiry) и поверхностные издержки хранения. Как ADR решение крепко по альтернативам, но не готово к пересмотру и аудиту жизненного цикла.",
+  "unstable": false,
+  "evidence_not_found": 0,
+  "judged_at": "2026-09-20T09:42:28.228307086+03:00"
+}

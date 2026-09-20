@@ -1,6 +1,6 @@
 ---
 name: fitness-function-catalog
-description: Каталог 20 готовых fitness-функций для CONSTRAINTS.yaml (таймауты, ретраи с джиттером, контракты OpenAPI/AsyncAPI, problem+json, идемпотентность, transactional outbox, SLO, телеметрия, IaC, модель угроз, DR, контракты данных) с реальными regex, плюс три волны внедрения библиотеки правил и шаблон карточки дистилляции источника в правило (7 полей). Используй, когда пополняешь CONSTRAINTS.yaml, проектируешь гейты A4/A5, дистиллируешь источник в исполняемое правило или выбираешь порядок внедрения правил.
+description: Каталог 20 готовых fitness-функций для CONSTRAINTS.yaml (таймауты, ретраи с джиттером, контракты OpenAPI/AsyncAPI, problem+json, идемпотентность, transactional outbox, SLO, телеметрия, IaC, модель угроз, DR, контракты данных) с реальными regex, плюс три волны внедрения библиотеки правил, шаблон карточки дистилляции источника в правило (7 полей) и указатели на шаблоны исполняемых проверок (`arch-be rules template`). Используй, когда пополняешь CONSTRAINTS.yaml, проектируешь гейты A4/A5, дистиллируешь источник в исполняемое правило, переходишь от текстовой функции к проверке поведения или выбираешь порядок внедрения правил.
 ---
 
 # Каталог fitness-функций и дистилляция источников в правила
@@ -24,9 +24,9 @@ description: Каталог 20 готовых fitness-функций для CONS
 3. Контракт синхронного интерфейса — `dir_must_have_file` — openapi.yaml в каждом сервисе — OpenAPI.
 4. Контракт событийной интеграции — `dir_must_have_file` — asyncapi.yaml на тему — AsyncAPI.
 5. Единый формат ошибок периметра — `must_contain` — application/problem+json — RFC 9457.
-6. Идемпотентность необратимых операций — `must_contain` — Idempotency-Key + тест на повтор — IETF httpapi draft.
+6. Идемпотентность необратимых операций — `must_contain` — Idempotency-Key + тест на повтор — IETF httpapi draft. → следующий шаг — проверка поведения шаблоном: `arch-be rules template show idempotency-key` (свойство «две доставки с одним ключом → ровно один эффект» на фейке, без сети).
 7. Схемы не ломают потребителей — `command_succeeds` — buf breaking / режим совместимости — Buf, Schema Registry.
-8. Атомарность события и состояния — `command_succeeds` — таблица outbox + релей — microservices.io, EIP.
+8. Атомарность события и состояния — `command_succeeds` — таблица outbox + релей — microservices.io, EIP. → готового шаблона outbox в библиотеке нет: grep-правило сторожит форму, а свойство «событие публикуется тогда и только тогда, когда изменено состояние» ставят на каркас `arch-be rules template show generic-property-test`.
 9. Нет доступа к чужой БД — `must_not_contain` — строки подключения к чужим контекстам — DDD, Debezium.
 10. Сквозная трассировка — `must_contain` — traceparent в заголовках — W3C Trace Context.
 11. Минимум метрик сервиса — `each_file_must_contain` — rate, errors, duration — RED method.

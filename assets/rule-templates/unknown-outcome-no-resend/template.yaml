@@ -1,0 +1,81 @@
+# Шаблон исполняемого правила: неопределённый исход не приводит к повторной отправке.
+#
+# Свойство (П2): таймаут внешней системы — это UNKNOWN, а не успех и не отказ;
+# отправка ровно одна, разрешён только запрос статуса.
+# Проверяется на фейке внешней системы — без сети, без сна, без протокола.
+id: unknown-outcome-no-resend
+version: 1
+title: "Неопределённый исход: UNKNOWN вместо повторной отправки"
+pattern: >-
+  Точка входа отправляет поручение во внешнюю систему и различает три исхода:
+  успех, отказ и неопределённость. Таймаут оставляет операцию в состоянии
+  UNKNOWN — не SUCCESS и не FAILED; повторная отправка при неопределённом
+  исходе запрещена, разрешён только запрос статуса, а терминальный статус
+  закрывает операцию.
+match:
+  ru:
+    - "неопредел"
+    - "неизвестн"
+    - "таймаут"
+    - "повторн"
+    - "отправк"
+    - "статус"
+    - "досыл"
+  en:
+    - "unknown"
+    - "timeout"
+    - "resend"
+    - "redeliver"
+    - "status"
+properties:
+  - "таймаут внешней системы переводит операцию в UNKNOWN, а не в SUCCESS и не в FAILED"
+  - "при неопределённом исходе отправка во внешнюю систему ровно одна"
+  - "после UNKNOWN во внешнюю систему уходит только запрос статуса"
+  - "терминальный статус от внешней системы закрывает операцию — она перестаёт быть UNKNOWN"
+rule:
+  name: unknown_outcome_no_resend
+  type: command_succeeds
+  severity: error
+  timeout_secs: 120
+  rationale: >-
+    неопределённый исход проверяется исполнением: повторная отправка при
+    UNKNOWN запрещена, операция закрывается запросом статуса
+  fix_hint: >-
+    перенести проверку со скелета на настоящую точку входа: команда правила
+    должна прогонять тесты вашего кода, а не эталонной реализации из шаблона
+  skill: fitness-functions
+  commands:
+    python: "python3 -m pytest -q -p no:cacheprovider skeleton/rule_templates/unknown-outcome-no-resend/test_unknown_outcome_no_resend.py"
+    java: "mvn -q -f skeleton/rule_templates/unknown-outcome-no-resend/java test"
+files:
+  - lang: common
+    from: README.md
+    to: README.md
+  - lang: python
+    from: python/fakes.py
+    to: fakes.py
+  - lang: python
+    from: python/reference_impl.py
+    to: reference_impl.py
+  - lang: python
+    from: python/test_unknown_outcome_no_resend.py
+    to: test_unknown_outcome_no_resend.py
+  - lang: java
+    from: java/pom.xml
+    to: java/pom.xml
+  - lang: java
+    from: java/src/main/java/Fakes.java
+    to: java/src/main/java/Fakes.java
+  - lang: java
+    from: java/src/main/java/Subject.java
+    to: java/src/main/java/Subject.java
+  - lang: java
+    from: java/src/test/java/UnknownOutcomeNoResendTest.java
+    to: java/src/test/java/UnknownOutcomeNoResendTest.java
+violating:
+  - lang: python
+    to: reference_impl.py
+    from: python/violating_impl.py
+  - lang: java
+    to: java/src/main/java/Subject.java
+    from: java/violating/Subject.java

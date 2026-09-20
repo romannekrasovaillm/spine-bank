@@ -97,6 +97,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: RubricCmd,
     },
+    /// Правила архитектурного контроля: кандидаты и шаблоны исполняемых правил.
+    Rules {
+        #[command(subcommand)]
+        cmd: RulesCmd,
+    },
     /// Архитектурные бенчмарки. Только сборка `harness`.
     #[cfg(feature = "harness")]
     Bench {
@@ -506,7 +511,7 @@ enum Cmd {
         /// аддитивные записи в рабочий каталог клиента — `adr_new`,
         ///   `agentsmd_generate`, `archify_compare`, `archify_deliver`,
         ///   `archify_show`, `delta_propose`, `evidence_pack`, `handoff_create`,
-        ///   `reverse_survey`, `skill_distill`.
+        ///   `reverse_survey`, `rule_template_apply`, `skill_distill`.
         ///
         /// `--rw=reports` — узкий режим для судейского харнесса: запись
         /// разрешена только отчётам рубрики, остальной белый список закрыт.
@@ -851,6 +856,70 @@ enum RubricCmd {
     },
 }
 
+/// Подкоманды `arch-be rules`.
+#[derive(Subcommand)]
+enum RulesCmd {
+    /// Кандидатные fitness-правила кейса (то же, что `control rules-suggest`).
+    Suggest {
+        /// Корень кейса (каталог с `docs/`, `model/`, `.arch-handoff/`).
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
+    /// Шаблоны исполняемых правил: библиотека, применение, проверка зубов.
+    Template {
+        #[command(subcommand)]
+        cmd: RulesTemplateCmd,
+    },
+}
+
+/// Подкоманды `arch-be rules template`.
+#[derive(Subcommand)]
+enum RulesTemplateCmd {
+    /// Список шаблонов библиотеки.
+    List,
+    /// Показать шаблон: свойства, файлы, команды, словарь подбора.
+    Show {
+        /// Id шаблона.
+        id: String,
+    },
+    /// Положить файлы шаблона в кейс и напечатать фрагмент правила.
+    Apply {
+        /// Id шаблона.
+        id: String,
+        /// Инвариант спайна, к которому привязывается правило (`AD-3`).
+        #[arg(long)]
+        ad: String,
+        /// Корень кейса.
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
+        /// Язык поставки: python | java | both.
+        #[arg(long, default_value = "python")]
+        lang: String,
+        /// Показать, что было бы сделано, ничего не записывая.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Проверка зубов: тест обязан падать на нарушающей реализации.
+    Verify {
+        /// Проверить все шаблоны библиотеки во временных каталогах.
+        #[arg(long)]
+        all: bool,
+        /// Проверить применённые шаблоны кейса (по `.arch-handoff/rule-templates.lock`).
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        /// JUnit-консоль (`junit-platform-console-standalone.jar`) для java-половины
+        /// без Maven.
+        #[arg(long)]
+        java_jar: Option<PathBuf>,
+        /// Язык проверки: python | java | both.
+        #[arg(long, default_value = "both")]
+        lang: String,
+        /// Требовать python3: без него проверка считается проваленной (для CI).
+        #[arg(long)]
+        require_python: bool,
+    },
+}
+
 /// Подкоманды `arch-be bench` (только сборка `harness`).
 #[cfg(feature = "harness")]
 #[derive(Subcommand)]
@@ -924,24 +993,26 @@ enum McpCmd {
         args: String,
     },
     /// MCP-сервер (stdio JSON-RPC, NDJSON): архитектурный контроль кодовым
-    /// агентам (Claude Code и др.), ADR-008. Read-only состав: 38 инструментов
-    /// + 8 промптов-плейбуков spine-* (capability prompts). Ручные (16):
+    /// агентам (Claude Code и др.), ADR-008. Read-only состав: 40 инструментов
+    /// + 9 промптов-плейбуков spine-* (capability prompts). Ручные (16):
     ///   `spine_lint`, `fitness_check`, `significance_score`,
     ///   `significance_from_diff`, `trace_check`, `model_query`, `rubric_run`,
     ///   `rubric_prompt`, `rubric_verify`, `kb_search`, `skill_search`,
     ///   `skill_load`, `mermaid_render`, `rules_suggest`, `trust_report`,
     ///   `verdict_explain`. Мостовые read-only
-    ///   (22): `adr_registry`, `agentsmd_lint`, `archify_validate`,
+    ///   (24): `adr_registry`, `agentsmd_lint`, `archify_validate`,
     ///   `architect_review`, `asyncapi_lint`, `change_impact`, `contract_diff`,
     ///   `delta_guard`, `evidence_verify`, `fleet_audit`, `landscape_report`,
     ///   `model_drift`, `model_graph`, `model_validate`, `nfr_check`,
     ///   `openapi_lint`, `openspec_coverage`, `plugin_list`, `rubric_accept`,
-    ///   `rubric_handover`, `rubric_list`, `rules_report`.
+    ///   `rubric_handover`, `rubric_list`, `rule_template_list`,
+    ///   `rule_template_show`, `rules_report`.
     Serve {
         /// Открыть rw-контур моста (аддитивные записи в рабочий каталог
         /// клиента: `adr_new`, `agentsmd_generate`, `archify_compare`,
         ///   `archify_deliver`, `archify_show`, `delta_propose`, `evidence_pack`,
-        ///   `handoff_create`, `reverse_survey`, `skill_distill`). По умолчанию
+        ///   `handoff_create`, `reverse_survey`, `rule_template_apply`,
+        ///   `skill_distill`). По умолчанию
         /// сервер строго read-only.
         ///
         /// `--rw=reports` — узкий режим для судейского харнесса: запись
@@ -1569,6 +1640,7 @@ async fn main() -> Result<()> {
         }
         Some(Cmd::Archify { cmd }) => cmd_archify(&cfg, cmd).await?,
         Some(Cmd::Rubric { cmd }) => cmd_rubric(&cfg, cmd).await?,
+        Some(Cmd::Rules { cmd }) => cmd_rules(cmd)?,
         #[cfg(feature = "harness")]
         Some(Cmd::Bench { cmd }) => cmd_bench(&cfg, cmd).await?,
         Some(Cmd::Kb { query, limit }) => {
@@ -2105,7 +2177,7 @@ async fn main() -> Result<()> {
             }
         }
         Some(Cmd::Model { cmd }) => cmd_model(cmd)?,
-        Some(Cmd::Trace { cmd }) => cmd_trace(cmd)?,
+        Some(Cmd::Trace { cmd }) => cmd_trace(&cfg, cmd)?,
         Some(Cmd::Nfr { cmd }) => cmd_nfr(cmd)?,
         Some(Cmd::Skills { cmd }) => cmd_skills(&cfg, cmd)?,
         Some(Cmd::Plugins { cmd }) => cmd_plugins(&cfg, cmd)?,
@@ -2909,6 +2981,105 @@ async fn cmd_archify(cfg: &Config, cmd: ArchifyCmd) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Обрабатывает `arch-be rules …`: кандидаты и шаблоны исполняемых правил.
+fn cmd_rules(cmd: RulesCmd) -> Result<()> {
+    match cmd {
+        RulesCmd::Suggest { path } => {
+            let report = arch_harness::rules_suggest::suggest(&path)?;
+            print!("{}", arch_harness::rules_suggest::render_markdown(&report));
+            Ok(())
+        }
+        RulesCmd::Template { cmd } => cmd_rules_template(cmd),
+    }
+}
+
+/// Обрабатывает `arch-be rules template …`.
+fn cmd_rules_template(cmd: RulesTemplateCmd) -> Result<()> {
+    use arch_harness::rule_templates as rt;
+    match cmd {
+        RulesTemplateCmd::List => {
+            print!("{}", rt::render_list()?);
+            Ok(())
+        }
+        RulesTemplateCmd::Show { id } => {
+            print!("{}", rt::render_show(&id)?);
+            Ok(())
+        }
+        RulesTemplateCmd::Apply {
+            id,
+            ad,
+            dir,
+            lang,
+            dry_run,
+        } => {
+            let lang = rt::Lang::parse(&lang)?;
+            let report = rt::apply(&dir, &id, &ad, lang, dry_run)?;
+            println!(
+                "Шаблон: {} v{} → {}",
+                report.template,
+                report.version,
+                report.target_dir.display()
+            );
+            println!(
+                "Файлов {}: {}",
+                if report.dry_run {
+                    "было бы записано"
+                } else {
+                    "записано"
+                },
+                report.written.len()
+            );
+            for path in &report.written {
+                println!("  {}", path.display());
+            }
+            println!(
+                "\nФрагмент для CONSTRAINTS.yaml (под ключом `rules:`) — {}:\n",
+                if report.dry_run {
+                    "печатается, на диск не пишется"
+                } else {
+                    "печатается, НЕ вносится"
+                }
+            );
+            println!("{}", report.fragment);
+            println!(
+                "\nСтрока для сущности инварианта в model/ (вторая строка frontmatter):\n  {}",
+                report.verified_by
+            );
+            if !report.notes.is_empty() {
+                println!("\nЗамечания:");
+                for note in &report.notes {
+                    println!("  - {note}");
+                }
+            }
+            Ok(())
+        }
+        RulesTemplateCmd::Verify {
+            all,
+            dir,
+            java_jar,
+            lang,
+            require_python,
+        } => {
+            let lang = rt::Lang::parse(&lang)?;
+            let runner = rt::Runner::detect(java_jar.as_deref());
+            let report = match (all, dir) {
+                (true, None) => rt::verify_all(&runner, lang, require_python)?,
+                (false, Some(case)) => rt::verify_dir(&case, &runner, lang)?,
+                _ => {
+                    return Err(anyhow::Error::msg(
+                        "укажите ровно одно: --all (шаблоны библиотеки) или --dir <кейс>",
+                    ));
+                }
+            };
+            print!("{}", rt::render_verify(&report));
+            if !report.passed() {
+                std::process::exit(1);
+            }
+            Ok(())
+        }
+    }
 }
 
 async fn cmd_rubric(cfg: &Arc<Config>, cmd: RubricCmd) -> Result<()> {
@@ -3825,6 +3996,8 @@ fn cmd_control(cfg: &arch_harness::config::Config, cmd: ControlCmd) -> Result<()
 fn cmd_model(cmd: ModelCmd) -> Result<()> {
     match cmd {
         ModelCmd::Validate { dir } => {
+            // Аргумент принимает и корень кейса, и каталог `model/` (T-13).
+            let dir = arch_harness::model::model_dir_from(&dir);
             let model = arch_harness::model::load_model_tolerant(&dir)
                 .with_context(|| format!("загрузка модели {}", dir.display()))?;
             let report = arch_harness::model::validate(&model);
@@ -3858,6 +4031,7 @@ fn cmd_model(cmd: ModelCmd) -> Result<()> {
             print!("{}", arch_harness::model::card(&model, entity));
         }
         ModelCmd::Graph { dir, format } => {
+            let dir = arch_harness::model::model_dir_from(&dir);
             let model = arch_harness::model::load_model_tolerant(&dir)
                 .with_context(|| format!("загрузка модели {}", dir.display()))?;
             if let Some(note) = arch_harness::model::load_issues_note(&model.load_issues) {
@@ -3984,6 +4158,7 @@ fn cmd_model(cmd: ModelCmd) -> Result<()> {
             }
         }
         ModelCmd::Drift { dir, json } => {
+            let dir = arch_harness::model::case_root_from(&dir);
             let report = arch_harness::model::drift_check(&dir)
                 .with_context(|| format!("дрейф «модель ↔ код» кейса {}", dir.display()))?;
             if json {
@@ -4029,12 +4204,13 @@ fn cmd_model(cmd: ModelCmd) -> Result<()> {
 }
 
 /// `arch-be trace`: трассируемость модели как fitness-функция (ADR-006).
-fn cmd_trace(cmd: TraceCmd) -> Result<()> {
+fn cmd_trace(cfg: &Config, cmd: TraceCmd) -> Result<()> {
     match cmd {
         TraceCmd::Check { dir, format } => {
             let format = arch_harness::report_fmt::ReportFormat::parse(&format)
                 .map_err(anyhow::Error::msg)?;
-            let report = arch_harness::trace::trace_check(&dir)
+            // Требование исполняемой проверки инвариантов — из `[trace]` (ADR-050).
+            let report = arch_harness::trace::trace_check_with(&dir, cfg.trace.executable_required)
                 .with_context(|| format!("трассировка кейса {}", dir.display()))?;
             match format {
                 arch_harness::report_fmt::ReportFormat::Text => {
@@ -4099,7 +4275,11 @@ fn cmd_nfr(cmd: NfrCmd) -> Result<()> {
 
 /// `arch-be skills`: библиотека скиллов.
 fn cmd_skills(cfg: &Config, cmd: SkillsCmd) -> Result<()> {
-    let plugins = arch_harness::plugin::discover(&cfg.plugins.dirs);
+    // T-09: индекс — настроенные плагины ПЛЮС скиллы, разложенные в проекте
+    // (`connect`); без второго поиск пуст в свежем проекте.
+    let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let dirs = arch_harness::plugin::skill_search_dirs(&cfg.plugins.dirs, &root);
+    let plugins = arch_harness::plugin::discover(&dirs);
     match cmd {
         SkillsCmd::List => {
             let total: usize = plugins.iter().map(|p| p.skills.len()).sum();
@@ -4119,8 +4299,12 @@ fn cmd_skills(cfg: &Config, cmd: SkillsCmd) -> Result<()> {
             let hits = arch_harness::plugin::search(&plugins, &query, limit);
             if hits.is_empty() {
                 println!(
-                    "Ничего не найдено (скиллов в индексе: {}).",
-                    plugins.iter().map(|p| p.skills.len()).sum::<usize>()
+                    "{}.",
+                    arch_harness::plugin::empty_index_answer(
+                        &query,
+                        plugins.iter().map(|p| p.skills.len()).sum::<usize>(),
+                        &dirs
+                    )
                 );
             }
             for h in &hits {
@@ -4349,8 +4533,12 @@ fn cmd_delta(cmd: DeltaCmd) -> Result<()> {
             }
         }
         DeltaCmd::Archive { name, repo } => {
-            let path = arch_harness::delta::archive(&repo.unwrap_or_else(cwd), &name)?;
+            let root = repo.unwrap_or_else(cwd);
+            let path = arch_harness::delta::archive(&root, &name)?;
             println!("Дельта заархивирована: {}", path.display());
+            if let Some(hint) = arch_harness::delta::archive_order_hint(&root) {
+                println!("  → {hint}");
+            }
         }
         DeltaCmd::Guard {
             repo,

@@ -1,0 +1,78 @@
+# Шаблон исполняемого правила: журнал только на дозапись.
+#
+# Свойство (П1): запись нельзя изменить или удалить — исправление возможно
+# только компенсирующей записью со ссылкой на исходную.
+# Проверяется на фейке журнала (append/read, без update/delete) — без сети, без сна.
+id: append-only-journal
+version: 1
+title: "Журнал только на дозапись: запись нельзя изменить или удалить"
+pattern: >-
+  Журнал операций принимает только новые записи: строку нельзя переписать или
+  стереть, а исправление оформляется отдельной компенсирующей записью со
+  ссылкой на исходную. Порядок записей сохраняется, поэтому по журналу
+  восстанавливается вся история, а не только последнее состояние.
+match:
+  ru:
+    - "журнал"
+    - "неизменя"
+    - "компенсир"
+    - "дозапис"
+    - "удалени"
+    - "порядок записей"
+  en:
+    - "append-only"
+    - "journal"
+    - "immutable"
+    - "compensat"
+properties:
+  - "запись нельзя изменить: попытка правки не меняет содержимое"
+  - "запись нельзя удалить: у журнала нет операции удаления"
+  - "исправление оформляется компенсирующей записью со ссылкой на исходную"
+  - "порядок записей сохраняется — история восстанавливается целиком"
+rule:
+  name: append_only_journal_enforced
+  type: command_succeeds
+  severity: error
+  timeout_secs: 120
+  rationale: >-
+    инвариант журнала проверяется исполнением: правка не меняет запись,
+    удаления нет, исправление приходит отдельной компенсирующей записью
+  fix_hint: >-
+    перенести проверку со скелета на настоящий журнал: команда правила должна
+    прогонять тесты вашего кода, а не эталонной реализации из шаблона
+  skill: fitness-functions
+  commands:
+    python: "python3 -m pytest -q -p no:cacheprovider skeleton/rule_templates/append-only-journal/test_append_only_journal.py"
+    java: "mvn -q -f skeleton/rule_templates/append-only-journal/java test"
+files:
+  - lang: common
+    from: README.md
+    to: README.md
+  - lang: python
+    from: python/fakes.py
+    to: fakes.py
+  - lang: python
+    from: python/reference_impl.py
+    to: reference_impl.py
+  - lang: python
+    from: python/test_append_only_journal.py
+    to: test_append_only_journal.py
+  - lang: java
+    from: java/pom.xml
+    to: java/pom.xml
+  - lang: java
+    from: java/src/main/java/Fakes.java
+    to: java/src/main/java/Fakes.java
+  - lang: java
+    from: java/src/main/java/Subject.java
+    to: java/src/main/java/Subject.java
+  - lang: java
+    from: java/src/test/java/AppendOnlyJournalTest.java
+    to: java/src/test/java/AppendOnlyJournalTest.java
+violating:
+  - lang: python
+    to: reference_impl.py
+    from: python/violating_impl.py
+  - lang: java
+    to: java/src/main/java/Subject.java
+    from: java/violating/Subject.java

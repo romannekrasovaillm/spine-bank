@@ -2021,6 +2021,63 @@ pub fn load_fitness_rules_with_skips(
     Ok((rules.into_iter().chain(constraints).collect(), skipped))
 }
 
+/// Карточка правила реестра для читателей вне `control` (детектор
+/// исполняемых инвариантов, проверка зубов шаблонов, паспорт и трассировка):
+/// что за правило, какого оно типа, какую команду запускает и какой инвариант
+/// спайна задевает.
+///
+/// Поля [`FitnessRule`] крейт-видимые, но `pattern`/`command`/`ad`/`covers` —
+/// приватные, поэтому внешние модули читают карточку, а не сам `FitnessRule`.
+#[derive(Debug, Clone, Serialize)]
+pub struct RuleCard {
+    /// Идентификатор правила (`C-12`), если задан.
+    pub id: Option<String>,
+    /// Имя правила (код находки).
+    pub name: String,
+    /// Тип проверки в `snake_case` (`command_succeeds`, `must_contain`, …).
+    pub kind: &'static str,
+    /// Команда (только у `command_succeeds`).
+    pub command: Option<String>,
+    /// Задетый инвариант спайна (`ad: AD-6`), если задан.
+    pub ad: Option<String>,
+    /// Требования, которые правило покрывает (`covers: [...]`).
+    pub covers: Vec<String>,
+}
+
+impl RuleCard {
+    /// Правило проверяет ПОВЕДЕНИЕ, а не наличие текста
+    /// ([`BEHAVIOUR_RULE_KINDS`]).
+    #[must_use]
+    pub fn is_behaviour(&self) -> bool {
+        BEHAVIOUR_RULE_KINDS.contains(&self.kind)
+    }
+
+    /// Ключ правила для сопоставления с `verified_by` сущности: `id`, иначе имя.
+    #[must_use]
+    pub fn key(&self) -> &str {
+        self.id.as_deref().unwrap_or(self.name.as_str())
+    }
+}
+
+/// Загружает карточки правил реестра (плоский список: id, имя, тип, команда,
+/// задетый инвариант) — общий резолвер для читателей вне `control`.
+///
+/// # Errors
+/// Те же, что у [`load_fitness_rules`].
+pub fn rule_cards(constraints: &Path) -> Result<Vec<RuleCard>> {
+    Ok(load_fitness_rules(constraints)?
+        .into_iter()
+        .map(|r| RuleCard {
+            id: r.id,
+            name: r.name,
+            kind: r.kind.as_str(),
+            command: r.command,
+            ad: r.ad,
+            covers: r.covers,
+        })
+        .collect())
+}
+
 /// Переменная окружения с каталогом-реестром родительских
 /// constraint-файлов (резолв непутевых ref в `extends`; без сети,
 /// `docs/corp-spine.md`).
@@ -3333,6 +3390,15 @@ pub fn rules_report(repo: &Path, constraints: &Path) -> Result<String> {
         }
     }
 
+    // Зубы применённых шаблонов (П2): находка `executable_rule_toothless` —
+    // «правило есть» ≠ «правило проверяет». В вердикт гейта находка не входит
+    // (это не нарушение архитектуры, а качество реестра), но архитектор обязан
+    // видеть её там, где смотрит на реестр. Отчёт остаётся отчётом: раздел не
+    // меняет ни вердикт, ни код возврата.
+    if let Some(section) = teeth_section(repo, &crate::rule_templates::Runner::detect(None)) {
+        let _ = write!(out, "{section}");
+    }
+
     let covered = rules.iter().filter(|r| r.effort_hours.is_some()).count();
     // Sum для f64 на пустом множестве даёт -0.0 (особенность std) — +0.0
     // нормализует к «0» в выводе.
@@ -3353,6 +3419,66 @@ pub fn rules_report(repo: &Path, constraints: &Path) -> Result<String> {
         }
     }
     Ok(out)
+}
+
+/// Раздел отчёта о зубах применённых шаблонов исполняемых правил (П2).
+///
+/// `None` — в кейсе нет `.arch-handoff/rule-templates.lock`: шаблоны не
+/// применялись, и отчёт не прибавляет ни строки (кейс, никогда не видевший
+/// `rules template apply`, не должен платить за чужую механику). Кейс с локом
+/// получает раздел; сорвавшаяся проверка (нет прогонщика, нечитаемый lock)
+/// даёт одну строку с причиной, а не падение отчёта — в отличие от
+/// `rules template verify`, где это провал по существу.
+///
+/// Проверяется python-половина: java требует Maven или JUnit-консоли и минуты
+/// компиляции, а отчёт обязан оставаться дешёвым. Непроверенное при этом
+/// видно числом пропусков, а не молчанием.
+fn teeth_section(case: &Path, runner: &crate::rule_templates::Runner) -> Option<String> {
+    let lock = case.join(crate::rule_templates::LOCK_REL);
+    if !lock.is_file() {
+        return None;
+    }
+    let applied = applied_templates_count(&lock);
+    let report = match crate::rule_templates::verify_dir(
+        case,
+        runner,
+        crate::rule_templates::Lang::Python,
+    ) {
+        Ok(report) => report,
+        Err(e) => {
+            return Some(format!(
+                "\n## Зубы применённых шаблонов (П2)\nПроверка не выполнена: {e}\n"
+            ));
+        }
+    };
+    let with_teeth = report.checks.iter().filter(|c| c.ok).count();
+    let mut out = String::from("\n## Зубы применённых шаблонов (П2)\n");
+    let _ = writeln!(
+        out,
+        "Применённых шаблонов: {applied}; с зубами: {with_teeth}, беззубых: {} \
+         (`executable_rule_toothless`), проверок пропущено: {}",
+        report.findings.len(),
+        report.skipped.len()
+    );
+    for finding in &report.findings {
+        let _ = writeln!(out, "- {finding}");
+    }
+    Some(out)
+}
+
+/// Число записей `templates:` в lock-файле применённых шаблонов (0, если файл
+/// не читается или не парсится — причину назовёт сама проверка зубов).
+fn applied_templates_count(lock: &Path) -> usize {
+    let Ok(text) = std::fs::read_to_string(lock) else {
+        return 0;
+    };
+    let Ok(value) = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&text) else {
+        return 0;
+    };
+    value
+        .get("templates")
+        .and_then(serde_yaml_ng::Value::as_sequence)
+        .map_or(0, Vec::len)
 }
 
 /// Просрочено ли правило (expiry в прошлом; невалидная дата — не просрочка,
@@ -6955,6 +7081,117 @@ mod tests {
             report.contains("правил 4, суммарный effort_hours 6.5 (покрыто 2 правил)"),
             "{report}"
         );
+    }
+
+    // --- E7: зубы применённых шаблонов в отчёте реестра (П2) --------------------
+
+    /// Прогонщик с заведомо непустым полем `python`: `verify_dir` берёт его как
+    /// признак «интерпретатор есть», а саму команду читает из лока. Тест кладёт
+    /// в лок тривиальные команды (`true`/`false`), поэтому интерпретатор в PATH
+    /// не нужен — прогон детерминирован и дешёв.
+    fn fake_runner() -> crate::rule_templates::Runner {
+        crate::rule_templates::Runner {
+            python: Some(PathBuf::from("python3")),
+            maven: None,
+            java_jar: None,
+        }
+    }
+
+    /// Раскладывает применённый шаблон библиотеки в кейс и возвращает его
+    /// запись для лока: файлы с хэшами (`apply` пишет те же) и команду. Команду
+    /// тест подменяет нарочно — проверяется раздел отчёта, а не шаблон.
+    fn applied_template_entry(case: &Path, id: &str, command: &str) -> String {
+        let t = crate::rule_templates::template(id)
+            .unwrap()
+            .expect("шаблон есть в этой сборке");
+        let dir = format!("{}/{id}", crate::rule_templates::TARGET_REL);
+        let mut files = Vec::new();
+        for f in t.files_for(crate::rule_templates::Lang::Python) {
+            let content = t.file(&f.from).expect("файл шаблона есть в сборке");
+            let rel = format!("{dir}/{}", f.to);
+            write_file(case, &rel, content);
+            files.push((rel, crate::hash::sha256_hex(content.as_bytes())));
+        }
+        let mut out = format!(
+            "  - id: {id}\n    version: {}\n    ad: AD-1\n    lang: python\n    \
+             dir: {dir}\n    command: '{command}'\n    files:\n",
+            t.manifest.version
+        );
+        for (path, sha) in files {
+            let _ = write!(out, "      - path: {path}\n        sha256: {sha}\n");
+        }
+        out
+    }
+
+    /// Без `.arch-handoff/rule-templates.lock` раздел о зубах не появляется:
+    /// отчёт кейса, не применявшего шаблоны, не обрастает чужой механикой.
+    #[test]
+    fn rules_report_without_lock_has_no_teeth_section() {
+        let dir = tempfile::tempdir().unwrap();
+        let case = dir.path().join("case");
+        std::fs::create_dir_all(&case).unwrap();
+        let constraints = write_file(
+            dir.path(),
+            "CONSTRAINTS.yaml",
+            "rules:\n  - name: r\n    type: file_exists\n    path: README.md\n",
+        );
+        let report = rules_report(&case, &constraints).unwrap();
+        assert!(!report.contains("Зубы применённых шаблонов"), "{report}");
+        assert!(!report.contains("executable_rule_toothless"), "{report}");
+        // Раздел сторожит именно лок-файл, а не «нет шаблонов в кейсе».
+        assert!(teeth_section(&case, &fake_runner()).is_none());
+    }
+
+    /// Лок есть: раздел показывает число применённых шаблонов, зубы и дословные
+    /// находки `executable_rule_toothless`; тело отчёта при этом не меняется —
+    /// отчёт остаётся отчётом.
+    #[test]
+    fn rules_report_prints_teeth_section_from_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let case = dir.path().join("case");
+        std::fs::create_dir_all(&case).unwrap();
+        // Две применённые позиции: команда `true` упасть не может — правило
+        // беззубое; команда `false` пройти не может — зубы на месте.
+        let toothless = applied_template_entry(&case, "idempotency-key", "true");
+        let toothy = applied_template_entry(&case, "no-pii-in-logs", "false");
+        write_file(
+            &case,
+            crate::rule_templates::LOCK_REL,
+            &format!("# применённые шаблоны\ntemplates:\n{toothless}{toothy}"),
+        );
+        // Реестр кейса: имена правил как в шаблонах и те же команды, иначе
+        // `verify_dir` сочтёт применение адаптированным и пропустит проверку.
+        let constraints = write_file(
+            &case,
+            ".arch-handoff/CONSTRAINTS.yaml",
+            "rules:\n  - name: idempotency_key_enforced\n    type: command_succeeds\n    \
+             command: 'true'\n  - name: no_pii_in_logs\n    type: command_succeeds\n    \
+             command: 'false'\n",
+        );
+        let report = rules_report(&case, &constraints).unwrap();
+        let (before, teeth) = report
+            .split_once("## Зубы применённых шаблонов (П2)")
+            .unwrap_or_else(|| panic!("раздел о зубах отсутствует: {report}"));
+        assert!(
+            teeth.contains(
+                "Применённых шаблонов: 2; с зубами: 1, беззубых: 1 \
+                 (`executable_rule_toothless`), проверок пропущено: 0"
+            ),
+            "{teeth}"
+        );
+        assert!(
+            teeth.contains(
+                "- idempotency-key [python]: тест остался зелёным на нарушающей реализации — \
+                 правило беззубое (`executable_rule_toothless`)"
+            ),
+            "{teeth}"
+        );
+        assert!(
+            !teeth.contains("no-pii-in-logs ["),
+            "зубастая позиция находкой не помечается: {teeth}"
+        );
+        // Тело отчёта до раздела не изменилось: сводка реестра на месте.
+        assert!(before.contains("Всего правил: 2"), "{before}");
     }
 
     // --- S-1: anti-bypass floor (триггеры из диффа) -----------------------------

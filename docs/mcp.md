@@ -10,9 +10,9 @@
 
 Stdio-сервер JSON-RPC 2.0 (NDJSON, как у клиента): кодовый агент получает
 architectural verdict (`passed` + находки) **в момент написания кода**, а не
-на приёмке handoff-пакета. Состав read-only режима: **38 инструментов** —
-14 ручных (контроль, знания, split-judge, `rules_suggest`) + 20 мостовых из
-реестра — и 8 промптов-плейбуков `spine-*` (capability `prompts`).
+на приёмке handoff-пакета. Состав read-only режима: **40 инструментов** —
+16 ручных (контроль, знания, split-judge, `rules_suggest`) + 24 мостовых из
+реестра — и 9 промптов-плейбуков `spine-*` (capability `prompts`).
 По умолчанию сервер строго read-only: ничего не
 пишет в репозиторий клиента, все цели — аргументами вызова; write/exec-
 инструменты агента (`bash`, `write_file`, `harness_run`, `subagent_*`,
@@ -68,7 +68,8 @@ claude mcp add arch-spine -- arch-be mcp serve
 
 Запуск из каталога целевого проекта: относительные пути аргументов
 (`model`, `model/` для `model_query` по умолчанию) резолвятся от cwd
-процесса сервера, который задаёт клиент.
+процесса сервера, который задаёт клиент. Инструменты модели принимают и корень
+кейса, и каталог `model/` — модель находится сама (T-13).
 
 ### Подключение одной командой: `arch-be connect <host>`
 
@@ -122,7 +123,8 @@ exit 2, stderr уходит агенту; строки вывода хук не 
 OpenAPI/proto/Avro/JSON Schema/DDL и связка с моделью по `INT.contract`,
 ADR-035), `fleet_audit`, `agentsmd_lint` (`repo`),
 `archify_validate` (`type`, `path`), `rubric_list`, `plugin_list`,
-`nfr_check` (`path`, `kind`), `model_validate` (`dir`), `model_drift` (`dir`),
+`nfr_check` (`path`, `kind`), `model_validate`/`model_drift` (`path` — корень
+кейса или каталог `model/`),
 `delta_guard` (`path`, `base`, `protect`), `evidence_verify` (`change_dir`),
 `architect_review` (`path`, `base`), `change_impact` (`path`, `id` | `paths`).
 
@@ -142,6 +144,13 @@ false`; `evidence_pack`/`delta_propose` политика R-уровней кла
 `load_issues` (E3): сущности `model/`, пропущенные из-за ошибок разбора
 (у `model_validate` они же — error-находки `load-error`).
 
+Мостовой ответ несёт **разобранный** объект (T-12): поля вердикта
+(`passed`, `summary`, `findings`, …) лежат в `structuredContent` рядом с
+`tool` и строковым `output` — читать JSON из строки не нужно. Строка `output`
+сохранена для клиентов, написанных до этой правки; у инструментов, чей текст —
+человеко-читаемый отчёт (`contract_diff`), разобранный вердикт приходит из
+`data` инструмента, у остальных — разбором JSON-текста.
+
 Отчёты транша 2 (read-only; JSON со счётчиками в том же контуре моста):
 
 | Инструмент | Аргументы | Возвращает |
@@ -157,14 +166,14 @@ false`; `evidence_pack`/`delta_propose` политика R-уровней кла
 | Инструмент | Аргументы | Возвращает |
 |---|---|---|
 | `architect_review` | `path?`, `base?` | единое ревью репозитория одним вызовом: маршрут значимости из git-диффа + весь контур гейта (fitness, delta_guard, rule_weakened, spine_lint, trace_check; на Standard/Critical — nfr, evidence, sensors) + секции `model_validate` и `contracts` (линт OpenAPI/AsyncAPI из `INT.contract` и `contracts/`). JSON: `passed` + `route` + `components` (status/detail/findings) + `summary`; `passed=false` — основание отказать изменению |
-| `change_impact` | `path?`, `id` \| `paths` | радиус изменения по графу модели: `seeds`, `affected` (сущности по типам), `rules` (C-NNN с владельцами), `contracts`, `owners`, `gaps` (пути без CMP-покрытия), `summary` + `load_issues` (битые сущности, E3). Отчёт, не гейт — `passed` не применим; неизвестный `id` — `isError` |
+| `change_impact` | `path?`, `id` \| `paths` | радиус изменения по графу модели: `seeds`, `affected` (сущности по типам), `rules` (C-NNN с владельцами), `contracts`, `owners` (достигнутые `OWNER-*` и владельцы карточек затронутых правил; реестр ищется и в `.arch-handoff/`), `owners_note` (почему список пуст), `gaps` (пути без CMP-покрытия), `summary` + `load_issues` (битые сущности, E3). Отчёт, не гейт — `passed` не применим; неизвестный `id` — `isError` |
 
 Чтение знаний (транш T4, ADR-015; все — read-only, без verdict `passed`):
 
 | Инструмент | Аргументы | Возвращает |
 |---|---|---|
 | `kb_search` | `query`, `limit?` | хиты по базе знаний архитектора (`knowledge.dirs` конфига arch-be): `path`, `line`, `score`, `snippet` с контекстом (максимум 20, по умолчанию 10) |
-| `skill_search` | `query`, `limit?` | скиллы из библиотеки плагинов arch-be (`plugins.dirs`): `name`, `plugin`, `score`, `description`, `snippet` (максимум 20, по умолчанию 8) |
+| `skill_search` | `query`, `limit?` | скиллы из библиотеки плагинов arch-be (`plugins.dirs`) и каталогов подключённых харнессов (`.claude/skills` и др., куда их кладёт `connect`): `name`, `plugin`, `score`, `description`, `snippet` (максимум 20, по умолчанию 8) |
 | `skill_load` | `name` | полный текст скилла по точному имени (после `skill_search`); неизвестное имя — `isError` |
 | `mermaid_render` | `code` \| `path` | mermaid-диаграмма (flowchart, sequenceDiagram, erDiagram, C4) в ASCII-арт; `path` — `.mmd`-файл относительно cwd сервера |
 

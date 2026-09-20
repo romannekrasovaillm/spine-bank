@@ -113,6 +113,10 @@ pub enum CriterionFlag {
     /// Цитата-свидетельство из rationale не подтверждена оцениваемым текстом;
     /// критерий исключён из взвешенного итога.
     EvidenceNotFound,
+    /// Часть сэмплов судьи пришла с неподтверждённой цитатой (Д10): в медиану
+    /// критерия они не вошли, но подтверждённых сэмплов хватило — балл
+    /// засчитан с оговоркой.
+    EvidencePartial,
 }
 
 impl CriterionFlag {
@@ -122,6 +126,7 @@ impl CriterionFlag {
         match self {
             Self::Unstable => "unstable",
             Self::EvidenceNotFound => "evidence_not_found",
+            Self::EvidencePartial => "evidence_partial",
         }
     }
 }
@@ -144,9 +149,14 @@ pub struct CriterionScore {
     /// Population-σ сэмплов (0 при одном сэмпле).
     #[serde(default)]
     pub stdev: f64,
-    /// Метки достоверности: `unstable`, `evidence_not_found`.
+    /// Метки достоверности: `unstable`, `evidence_not_found`, `evidence_partial`.
     #[serde(default)]
     pub flags: Vec<CriterionFlag>,
+    /// Доля сэмплов критерия, чья цитата не подтвердилась (Д10). Такие сэмплы
+    /// в медиану не входят; `0.0` — все подтверждены. Поле аддитивное:
+    /// отчёты, снятые до 0.3.5, читаются (отсутствие = ноль).
+    #[serde(default)]
+    pub evidence_unconfirmed_ratio: f64,
 }
 
 impl CriterionScore {
@@ -559,6 +569,12 @@ pub struct RubricReport {
     pub weighted_total: f64,
     /// Общий вердикт судьи (из последнего сэмпла).
     pub verdict: String,
+    /// Доля сэмплов судьи с неподтверждённой цитатой (Д10): сколько
+    /// свидетельств из присланных не подтвердилось оцениваемым текстом.
+    /// `0.0` — все цитаты подтверждены (в том числе у отчётов, снятых до 0.3.5:
+    /// поле аддитивное, отсутствие читается как ноль).
+    #[serde(default)]
+    pub evidence_unconfirmed_ratio: f64,
 }
 
 impl RubricReport {
@@ -579,7 +595,13 @@ impl RubricReport {
                 .iter()
                 .map(|f| match f {
                     CriterionFlag::Unstable => format!("unstable (σ={:.2})", s.stdev),
-                    CriterionFlag::EvidenceNotFound => f.as_str().to_string(),
+                    // `evidence_not_found` — критерий исключён из итога;
+                    // `evidence_partial` (Д10) — балл засчитан, но часть
+                    // сэмплов пришла с неподтверждённой цитатой. Обе метки
+                    // печатаются своим именем: читателю важна разница.
+                    CriterionFlag::EvidenceNotFound | CriterionFlag::EvidencePartial => {
+                        f.as_str().to_string()
+                    }
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
@@ -614,6 +636,27 @@ impl RubricReport {
                 out,
                 "⚠ — оценка с неподтверждённой цитатой: критерий исключён из взвешенного \
                  итога (штраф учтён выше), а вердикт механически ограничен CONCERNS."
+            );
+        }
+        // Д10: часть сэмплов не подтвердилась, но балл засчитан по остальным —
+        // отдельная строка: «засчитано» и «подтверждено» здесь расходятся.
+        let partial: Vec<String> = self
+            .scores
+            .iter()
+            .filter(|s| s.has_flag(CriterionFlag::EvidencePartial))
+            .map(|s| {
+                format!(
+                    "{} (не подтвердилось {:.0}% сэмплов)",
+                    s.criterion_id,
+                    s.evidence_unconfirmed_ratio * 100.0
+                )
+            })
+            .collect();
+        if !partial.is_empty() {
+            let _ = writeln!(
+                out,
+                "**Свидетельства частично не подтвердились (evidence_partial):** {}",
+                partial.join(", ")
             );
         }
         let _ = writeln!(out, "**Вердикт:** {}", self.verdict);
@@ -1061,30 +1104,60 @@ pub(crate) fn build_report(
     cfg: &JudgeConfig,
 ) -> Result<RubricReport> {
     let mut scores = Vec::with_capacity(rubric.criteria.len());
+    let mut unconfirmed_samples = 0usize;
+    let mut counted_samples = 0usize;
     for c in &rubric.criteria {
-        let samples: Vec<u8> = runs
-            .iter()
-            .map(|run| {
-                run.scores
-                    .iter()
-                    .find(|s| s.criterion_id == c.id)
-                    .map_or(1, |s| clamp_score(s.score, rubric.scale_max))
-            })
-            .collect();
+        let mut samples: Vec<u8> = Vec::with_capacity(runs.len());
+        // Д10: цитата сверяется в КАЖДОМ сэмпле, а не только у обоснования,
+        // выбранного под медиану. Сэмпл, чья цитата не подтвердилась, в медиану
+        // критерия не входит: выдуманное свидетельство не голосует за балл.
+        // Балл 1 — «свидетельства нет», цитировать нечего (контракт промпта) —
+        // остаётся, как раньше.
+        let mut kept: Vec<u8> = Vec::with_capacity(runs.len());
+        let mut fabricated = 0usize;
+        for run in runs {
+            let sample = run.scores.iter().find(|s| s.criterion_id == c.id);
+            let value = sample.map_or(1, |s| clamp_score(s.score, rubric.scale_max));
+            samples.push(value);
+            let confirmed = value < 2
+                || sample.is_some_and(|s| {
+                    evidence_confirmed(&s.rationale, target, cfg.evidence_min_similarity)
+                });
+            if confirmed {
+                kept.push(value);
+            } else {
+                fabricated += 1;
+            }
+        }
+        let samples_count = samples.len();
+        counted_samples += samples_count;
+        unconfirmed_samples += fabricated;
+        // Подтверждённых сэмплов меньше половины — свидетельств у критерия
+        // нет: критерий исключается из взвешенного итога (поведение 0.3.4).
+        // Иначе балл считается по подтверждённым.
+        let evidence_missing = kept.len() * 2 < samples_count;
         // Медиана значений из 1..=scale_max после округления остаётся в
-        // диапазоне — приведение к u8 безопасно.
-        let score = median(&samples).round() as u8;
+        // диапазоне — приведение к u8 безопасно. При `evidence_missing` балл
+        // считается по всем сэмплам: отчёт обязан показать, что судья ставил.
+        let score = if evidence_missing {
+            median(&samples).round() as u8
+        } else {
+            debug_assert!(!kept.is_empty(), "иначе evidence_missing был бы истинным");
+            median(&kept).round() as u8
+        };
         let stdev = stdev(&samples);
         let mut flags = Vec::new();
         if stdev > cfg.unstable_stdev {
             flags.push(CriterionFlag::Unstable);
         }
-        let rationale = pick_rationale(runs, &c.id, rubric.scale_max, score);
-        // Балл ≥ 2 требует подтверждённой цитаты; 1 — это «свидетельство
-        // отсутствует», цитировать нечего (контракт промпта).
-        if score >= 2 && !evidence_confirmed(&rationale, target, cfg.evidence_min_similarity) {
+        if evidence_missing {
             flags.push(CriterionFlag::EvidenceNotFound);
+        } else if fabricated > 0 {
+            // Балл засчитан по подтверждённым сэмплам, но часть свидетельств
+            // не подтвердилась — читателю это нужно знать (Д10).
+            flags.push(CriterionFlag::EvidencePartial);
         }
+        let rationale = pick_rationale(runs, &c.id, rubric.scale_max, score, target, cfg);
         scores.push(CriterionScore {
             criterion_id: c.id.clone(),
             weight: c.weight,
@@ -1093,6 +1166,11 @@ pub(crate) fn build_report(
             samples,
             stdev,
             flags,
+            evidence_unconfirmed_ratio: if samples_count == 0 {
+                0.0
+            } else {
+                fabricated as f64 / samples_count as f64
+            },
         });
     }
     let weighted_total = weighted_total(&rubric.criteria, &scores)?;
@@ -1108,6 +1186,11 @@ pub(crate) fn build_report(
         scores,
         weighted_total,
         verdict: cap_verdict_at_concerns(judge_verdict, unconfirmed),
+        evidence_unconfirmed_ratio: if counted_samples == 0 {
+            0.0
+        } else {
+            unconfirmed_samples as f64 / counted_samples as f64
+        },
     })
 }
 
@@ -1165,14 +1248,22 @@ fn stdev(samples: &[u8]) -> f64 {
 }
 
 /// Обоснование для отчёта: из первого сэмпла, чей (клэмпнутый) балл совпал с
-/// итоговым медианным, иначе первое непустое; судья ни разу не оценил —
-/// явная пометка.
+/// итоговым медианным И цитата подтверждена; иначе — первое подтверждённое,
+/// иначе первое непустое (тогда критерий уже помечен `evidence_not_found` или
+/// `evidence_partial`); судья ни разу не оценил — явная пометка.
+///
+/// Предпочтение подтверждённой цитаты — часть Д10: показывать в отчёте
+/// выдуманное свидетельство, когда рядом есть подтверждённое, значит вводить
+/// читателя в заблуждение ровно тем, что проверка и ловит.
 fn pick_rationale(
     runs: &[JudgeResponse],
     criterion_id: &str,
     scale_max: u8,
     final_score: u8,
+    target: &str,
+    cfg: &JudgeConfig,
 ) -> String {
+    let mut first_confirmed: Option<&str> = None;
     let mut first_non_empty: Option<&str> = None;
     for run in runs {
         let Some(s) = run.scores.iter().find(|s| s.criterion_id == criterion_id) else {
@@ -1184,11 +1275,22 @@ fn pick_rationale(
         if first_non_empty.is_none() {
             first_non_empty = Some(s.rationale.as_str());
         }
-        if clamp_score(s.score, scale_max) == final_score {
+        let score = clamp_score(s.score, scale_max);
+        let confirmed =
+            score < 2 || evidence_confirmed(&s.rationale, target, cfg.evidence_min_similarity);
+        if !confirmed {
+            continue;
+        }
+        if first_confirmed.is_none() {
+            first_confirmed = Some(s.rationale.as_str());
+        }
+        if score == final_score {
             return s.rationale.clone();
         }
     }
-    first_non_empty.map_or_else(|| "судья не оценил".to_string(), str::to_string)
+    first_confirmed
+        .or(first_non_empty)
+        .map_or_else(|| "судья не оценил".to_string(), str::to_string)
 }
 
 /// Цитата из rationale подтверждена оцениваемым текстом: цитата извлекается
@@ -1665,6 +1767,7 @@ mod tests {
             samples: vec![score],
             stdev: 0.0,
             flags: Vec::new(),
+            evidence_unconfirmed_ratio: 0.0,
         }
     }
 
@@ -2055,6 +2158,202 @@ mod tests {
         );
     }
 
+    /// Три сэмпла судьи на критерий.
+    fn three_samples() -> JudgeConfig {
+        JudgeConfig {
+            samples: 3,
+            ..JudgeConfig::default()
+        }
+    }
+
+    /// Сэмпл судьи с заданным баллом по `context` и цитатой; `alternatives`
+    /// всегда подтверждён.
+    fn judge_run(context: u8, rationale: &str) -> JudgeResponse {
+        JudgeResponse {
+            scores: vec![
+                JudgeScore {
+                    criterion_id: "context".into(),
+                    score: f64::from(context),
+                    rationale: rationale.into(),
+                },
+                JudgeScore {
+                    criterion_id: "alternatives".into(),
+                    score: 3.0,
+                    rationale: "Цитата: \"альтернативы перечислены\" — частично".into(),
+                },
+            ],
+            verdict: "ok".into(),
+        }
+    }
+
+    /// Д10: выдуманная цитата в ОДНОМ сэмпле из трёх не проходит незамеченной.
+    /// До 0.3.5 цитата сверялась только у обоснования, выбранного под медиану:
+    /// сэмпл с баллом 5 и выдуманным свидетельством не влиял ни на балл, ни на
+    /// метку — `[3, 5, 3]` давало 3 без флага.
+    #[test]
+    fn single_fabricated_quote_is_flagged_and_excluded() {
+        let runs = vec![
+            judge_run(3, "Цитата: \"контекст описан кратко\" — средне"),
+            judge_run(
+                5,
+                "Цитата: \"этой фразы в документе нет вообще\" — якобы образцово",
+            ),
+            judge_run(3, "Цитата: \"контекст описан кратко\" — средне"),
+        ];
+        let report = build_report(
+            &sample_rubric(),
+            "fake",
+            &runs,
+            "контекст описан кратко; альтернативы перечислены",
+            &three_samples(),
+        )
+        .expect("отчёт");
+        let context = &report.scores[0];
+        assert_eq!(context.samples, vec![3, 5, 3], "сырые баллы сохранены");
+        assert_eq!(context.score, 3, "медиана считается по подтверждённым");
+        assert!(
+            context.has_flag(CriterionFlag::EvidencePartial),
+            "неподтверждённый сэмпл помечен: {:?}",
+            context.flags
+        );
+        assert!(
+            !context.has_flag(CriterionFlag::EvidenceNotFound),
+            "подтверждённых большинство — критерий засчитан"
+        );
+        assert!(
+            (context.evidence_unconfirmed_ratio - 1.0 / 3.0).abs() < 1e-9,
+            "доля неподтверждённых: {}",
+            context.evidence_unconfirmed_ratio
+        );
+        assert!(
+            context.rationale.contains("средне"),
+            "в отчёт идёт подтверждённое обоснование: {}",
+            context.rationale
+        );
+        assert!(report.evidence_unconfirmed_ratio > 0.0);
+        // Критерий засчитан — вердикт механическим потолком не прижат.
+        assert_eq!(report.verdict, "ok", "{}", report.verdict);
+    }
+
+    /// Д10: выдумка в большинстве сэмплов — свидетельств у критерия нет.
+    /// Критерий исключается из взвешенного итога, как и раньше при одной
+    /// выдуманной цитате, а в балле отчёта видно, что ставил судья.
+    #[test]
+    fn majority_fabricated_is_evidence_not_found() {
+        let runs = vec![
+            judge_run(3, "Цитата: \"контекст описан кратко\" — средне"),
+            judge_run(5, "Цитата: \"выдуманная фраза раз\" — якобы образцово"),
+            judge_run(5, "Цитата: \"выдуманная фраза два\" — якобы образцово"),
+        ];
+        let report = build_report(
+            &sample_rubric(),
+            "fake",
+            &runs,
+            "контекст описан кратко; альтернативы перечислены",
+            &three_samples(),
+        )
+        .expect("отчёт");
+        let context = &report.scores[0];
+        assert!(context.has_flag(CriterionFlag::EvidenceNotFound));
+        assert!(!context.has_flag(CriterionFlag::EvidencePartial));
+        assert_eq!(
+            context.score, 5,
+            "балл в отчёте — то, что ставил судья (медиана всех сэмплов)"
+        );
+        // Итог — только alternatives: 3*3/3 = 3.0 (context исключён).
+        assert!((report.weighted_total - 3.0).abs() < 1e-9);
+    }
+
+    /// Д10 (обратная сторона): эталонный набор даёт прежние баллы, когда
+    /// цитаты настоящие. Проверка каждого сэмпла не должна сдвигать оценки —
+    /// иначе «усиление» превратилось бы в переоценку всех прошлых отчётов.
+    ///
+    /// Прогон офлайновый: вместо вызова судьи берутся объявленные эталоном
+    /// баллы, а обоснования цитируют реальные фрагменты документа.
+    #[test]
+    fn golden_scores_unchanged() {
+        #[derive(serde::Deserialize)]
+        struct Expected {
+            #[serde(default)]
+            rubric: String,
+            scores: BTreeMap<String, u8>,
+        }
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/benchmarks/golden");
+        let rubric: Rubric = serde_yaml_ng::from_str(crate::assets::RUBRIC_ADR_QUALITY)
+            .expect("рубрика adr_quality из ассетов");
+        let mut checked = 0usize;
+        let mut entries: Vec<PathBuf> = std::fs::read_dir(&dir)
+            .expect("каталог golden")
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|e| e == "yaml"))
+            .collect();
+        entries.sort();
+        for expected_path in entries {
+            let stem = expected_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .expect("имя")
+                .trim_end_matches(".expected")
+                .to_string();
+            let doc_path = dir.join(format!("{stem}.md"));
+            if !doc_path.is_file() {
+                continue;
+            }
+            let expected: Expected = serde_yaml_ng::from_str(
+                &std::fs::read_to_string(&expected_path).expect("эталон читается"),
+            )
+            .expect("эталон разбирается");
+            assert_eq!(
+                expected.rubric, rubric.name,
+                "{stem}: эталон снят с другой рубрики"
+            );
+            let target = std::fs::read_to_string(&doc_path).expect("документ читается");
+            // Цитата — реальный фрагмент документа (первая достаточно длинная
+            // строка): свидетельство подтверждается точным вхождением.
+            let fragment = target
+                .lines()
+                .map(str::trim)
+                .find(|l| l.chars().count() >= MIN_QUOTE_CHARS)
+                .map(|l| l.chars().take(60).collect::<String>())
+                .expect("в документе есть строка для цитаты");
+            let runs: Vec<JudgeResponse> = (0..3)
+                .map(|_| JudgeResponse {
+                    scores: expected
+                        .scores
+                        .iter()
+                        .map(|(id, score)| JudgeScore {
+                            criterion_id: id.clone(),
+                            score: f64::from(*score),
+                            rationale: format!("Цитата: \"{fragment}\" — по тексту"),
+                        })
+                        .collect(),
+                    verdict: "ok".into(),
+                })
+                .collect();
+            let report =
+                build_report(&rubric, "fake", &runs, &target, &three_samples()).expect("отчёт");
+            for (id, want) in &expected.scores {
+                let got = report
+                    .scores
+                    .iter()
+                    .find(|s| s.criterion_id == *id)
+                    .unwrap_or_else(|| panic!("{stem}: критерий {id} в отчёте"));
+                assert_eq!(got.score, *want, "{stem}/{id}: эталонный балл не сдвинулся");
+                assert!(
+                    got.flags.is_empty(),
+                    "{stem}/{id}: подтверждённые цитаты не дают меток: {:?}",
+                    got.flags
+                );
+            }
+            assert_eq!(
+                report.evidence_unconfirmed_ratio, 0.0,
+                "{stem}: все цитаты подтверждены"
+            );
+            checked += 1;
+        }
+        assert!(checked >= 8, "эталонных документов проверено: {checked}");
+    }
+
     #[tokio::test]
     async fn fabricated_quote_is_rejected() {
         let judge = "{\"scores\": [\
@@ -2202,9 +2501,11 @@ mod tests {
                 samples: vec![4, 4, 4],
                 stdev: 0.0,
                 flags: Vec::new(),
+                evidence_unconfirmed_ratio: 0.0,
             }],
             weighted_total: 4.0,
             verdict: "годно".into(),
+            evidence_unconfirmed_ratio: 0.0,
         };
         let md = report.to_markdown();
         assert!(md.contains("# Оценка по рубрике «adr-quality»"));

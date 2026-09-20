@@ -271,6 +271,20 @@ fn anchor_rules(repo: &Path) -> Anchor {
     // Регистр FP — доказательство, что правила ревизуют, а не только завели.
     let marks = crate::digest::fp_register_read(&crate::digest::fp_register_path(repo));
     let _ = write!(evidence, "; пометок FP: {}", marks.len());
+    // Покрытие инвариантов исполняемыми проверками (ADR-050): условие ступени
+    // не меняется (`behaviour > 0`), но деталь показывает, сколько инвариантов
+    // реально проверяется поведением — иначе «правила сопровождаются» читается
+    // как «инварианты проверяются», а это разные утверждения.
+    if let Ok(Some(coverage)) = crate::rule_templates::ad_coverage(repo) {
+        let total_ads = coverage.total();
+        if total_ads > 0 {
+            let _ = write!(
+                evidence,
+                "; инвариантов с проверкой поведения: {} из {total_ads}",
+                coverage.covered().len()
+            );
+        }
+    }
     let why_not = (!met).then(|| {
         let mut reasons: Vec<String> = Vec::new();
         if total == 0 {
@@ -340,9 +354,13 @@ fn anchor_redteam(repo: &Path) -> Anchor {
                     summary.min_detection * 100.0
                 )
             } else {
-                "контроль аттестации не сработал: безвредная правка не изменила \
-                 аттестацию — вердикт не привязан к состоянию дерева (Н3)"
-                    .to_string()
+                // Причина — из самого измерения, а не догадка метрики: исходов у
+                // контроля два, и означают они разное (ADR-047).
+                summary.control_note.clone().unwrap_or_else(|| {
+                    "контроль аттестации не сработал (причина в файле измерения не \
+                     записана — перемерьте: `arch-be redteam . --save`)"
+                        .to_string()
+                })
             }
         }),
     }
@@ -790,6 +808,36 @@ mod tests {
                 .as_deref()
                 .unwrap_or_default()
                 .contains("контроль")
+        );
+    }
+
+    /// Якорь 4 показывает причину отказа ИЗ ИЗМЕРЕНИЯ, а не свою догадку:
+    /// исходов у контроля два, и «вердикт изменился» — не то же самое, что
+    /// «аттестация не изменилась» (T-08). Метрика, называющая не ту причину,
+    /// отправляет архитектора чинить несуществующее.
+    #[test]
+    fn anchor_four_shows_the_measured_reason() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        repo_with_rules(dir, true);
+        std::fs::write(
+            dir.join(REDTEAM_RESULT_REL),
+            "{\"schema\":\"arch-be/redteam/v1\",\"case\":\"кейс\",\
+             \"measured_at\":\"2026-09-20T00:00:00+00:00\",\"caught\":11,\"total\":14,\
+             \"ratio\":0.79,\"min_detection\":0.78,\"control_ok\":false,\
+             \"control_note\":\"безвредная правка изменила вердикт (PASS → FAIL) — \
+             правка не должна менять вердикт: проверьте составляющие delta_guard\"}",
+        )
+        .expect("redteam.json");
+        let trust = assess(dir, &Config::default()).expect("trust");
+        let why = trust.anchors[3].why_not.clone().unwrap_or_default();
+        assert!(
+            why.contains("delta_guard"),
+            "причина обязана прийти из измерения: {why}"
+        );
+        assert!(
+            !why.contains("не изменила аттестацию"),
+            "догадка метрики не подменяет измеренную причину: {why}"
         );
     }
 

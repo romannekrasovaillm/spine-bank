@@ -63,9 +63,16 @@ pub struct Mutator {
     /// Ожидание.
     pub expected: Expectation,
     /// Входит ли мутатор в знаменатель доли обнаружения — в набор из 14
-    /// позиций раздела 7 ТЗ (D1…D13 + D11b). `R` (ревью `NOT-READY`) и `D14`
-    /// (контроль аттестации) стоят в таблице отдельными строками: их результат
-    /// виден в карте обнаружения, но в критерий приёмки «≥ 11 из 14» не входит.
+    /// позиций раздела 7 ТЗ (D1…D13 + D11b). `R` (ревью `NOT-READY`), `D14`
+    /// (контроль аттестации) и `D15` (нарушение инварианта в реализации
+    /// скелета) стоят в таблице отдельными строками: их результат виден в карте
+    /// обнаружения, но в критерий приёмки «≥ 11 из 14» не входит.
+    ///
+    /// Для `D15` это не формальность: он проверяет не дефект пакета, а зубы
+    /// применённого шаблона (правило `command_succeeds` обязано упасть на
+    /// нарушающей реализации). Позиции раздела 7 мерят защищённость пакета;
+    /// способность шаблона ловить нарушение — качество реестра, и складывать
+    /// одно с другим значило бы менять смысл критерия приёмки.
     pub in_ratio: bool,
     /// Правка кейса-мутанта.
     pub apply: Mutation,
@@ -75,17 +82,23 @@ pub struct Mutator {
 /// детерминирован.
 ///
 /// Дефекты `D1…D13`, `D11b` образуют набор из 14 позиций раздела 7; `R`
-/// (ревью `NOT-READY`) и `D14` (контроль аттестации) идут отдельными строками
-/// и в долю обнаружения не входят — иначе она была бы несопоставима с
-/// критерием приёмки релиза.
+/// (ревью `NOT-READY`), `D14` (контроль аттестации) и `D15` (нарушение
+/// инварианта в реализации скелета) идут отдельными строками и в долю
+/// обнаружения не входят — иначе она была бы несопоставима с критерием
+/// приёмки релиза.
 ///
-/// `D15` и `D16` (красный угол 0.3.5, ADR-048) — про происхождение оценки:
+/// `D16` и `D17` (красный угол 0.3.5, ADR-048) — про происхождение оценки:
 /// поднятый рукой балл в отчёте рубрики и подменённая метка автора в шапке ADR
 /// после оценки. Они применимы только к кейсам, где есть отчёты с сырыми
 /// ответами; там, где их нет, мутатор честно пропускается (как `skipped`), а не
 /// считается пойманным или непойманным. В знаменатель доли не входят: набор
 /// раздела 7 не меняется.
-pub const MUTATORS: [Mutator; 18] = [
+///
+/// Номера `D16`/`D17`, а не `D15`/`D16`: `D15` в этом каталоге занят
+/// нарушением инварианта в скелете (ADR-050) — при слиянии ветка среза
+/// происхождения уступила занятый номер, чтобы не переименовывать уже
+/// влитый мутатор.
+pub const MUTATORS: [Mutator; 19] = [
     Mutator {
         id: "D1",
         title: "бюджет hop'а больше цели p99",
@@ -169,7 +182,7 @@ pub const MUTATORS: [Mutator; 18] = [
     Mutator {
         id: "D11",
         title: "код нарушает инвариант, правил на код нет",
-        by: "— (кандидат executable-invariants)",
+        by: "— (кандидат executable-invariant:AD-N)",
         expected: Expectation::Semantic,
         in_ratio: true,
         apply: mutate_d11,
@@ -216,19 +229,27 @@ pub const MUTATORS: [Mutator; 18] = [
     },
     Mutator {
         id: "D15",
-        title: "балл в отчёте рубрики поднят вручную",
-        by: "decision_quality (rubric_report_inconsistent)",
+        title: "нарушение инварианта в реализации скелета",
+        by: "fitness",
         expected: Expectation::Caught,
         in_ratio: false,
         apply: mutate_d15,
     },
     Mutator {
         id: "D16",
+        title: "балл в отчёте рубрики поднят вручную",
+        by: "decision_quality (rubric_report_inconsistent)",
+        expected: Expectation::Caught,
+        in_ratio: false,
+        apply: mutate_d16,
+    },
+    Mutator {
+        id: "D17",
         title: "метка автора в шапке ADR заменена после оценки",
         by: "decision_quality (rubric_report_stale)",
         expected: Expectation::Caught,
         in_ratio: false,
-        apply: mutate_d16,
+        apply: mutate_d17,
     },
 ];
 
@@ -670,11 +691,11 @@ fn mutate_d14(root: &Path) -> std::result::Result<(), String> {
     )
 }
 
-/// D15: балл в отчёте рубрики поднят вручную — ровно то, что до 0.3.5 было
+/// D16: балл в отчёте рубрики поднят вручную — ровно то, что до 0.3.5 было
 /// незаметно. Ловится пересборкой отчёта из сырых ответов судьи
 /// (`rubric_report_inconsistent`). Кейс без отчётов и сырых ответов —
 /// неприменим: правка несуществующего отчёта ничего не проверяет.
-fn mutate_d15(root: &Path) -> std::result::Result<(), String> {
+fn mutate_d16(root: &Path) -> std::result::Result<(), String> {
     let reports = root.join("reports/rubric");
     let Some(rel) = std::fs::read_dir(&reports)
         .map_err(|e| format!("нет каталога отчётов: {e}"))?
@@ -712,10 +733,10 @@ fn mutate_d15(root: &Path) -> std::result::Result<(), String> {
     std::fs::write(&rel, out).map_err(|e| e.to_string())
 }
 
-/// D16: метка автора в шапке ADR заменена после оценки. Отчёт привязан к
+/// D17: метка автора в шапке ADR заменена после оценки. Отчёт привязан к
 /// редакции документа, поэтому правка шапки делает его устаревшим
 /// (`rubric_report_stale`) — «вспомнить» автора задним числом нельзя.
-fn mutate_d16(root: &Path) -> std::result::Result<(), String> {
+fn mutate_d17(root: &Path) -> std::result::Result<(), String> {
     let adrs = files_with_prefix(root, "docs/adr", "ADR-");
     for rel in adrs {
         let text = read(root, rel.as_str())?;
@@ -762,6 +783,84 @@ fn mutate_d16(root: &Path) -> std::result::Result<(), String> {
         rel.as_str(),
         &format!("{head}\n- Модель-автор: claude-opus-4\n\n{tail}"),
     )
+}
+
+/// Лок-файл применённых шаблонов, разобранный на стороне мутатора: в
+/// [`crate::rule_templates`] тип лока и его чтение приватны, а править
+/// библиотеку шаблонов ради мутатора нельзя — D15 обязан быть её
+/// потребителем, как и любой другой вызов `arch-be rules template`.
+#[derive(Debug, serde::Deserialize)]
+struct TemplateLock {
+    #[serde(default)]
+    templates: Vec<crate::rule_templates::LockEntry>,
+}
+
+/// D15: нарушение инварианта в реализации скелета.
+///
+/// Вход — применённый шаблон (`.arch-handoff/rule-templates.lock`): кейс взял
+/// библиотечное правило `command_succeeds` и подписался на его зубы. Мутант
+/// делает ровно то, что обязана ловить проверка зубов, но уже в самом кейсе:
+/// подменяет эталонную реализацию (`reference_impl.py`) нарушающей из ТОЙ ЖЕ
+/// библиотеки, взятой по `id`/`version` из лока. Тест шаблона обязан упасть,
+/// правило — стать красным, то есть дефект обязан поймать `fitness`.
+///
+/// Модель при этом не правится: инвариант в `model/` описывает свойство,
+/// которое реализация теперь нарушает, — это и есть засеянный дефект. Правка
+/// модели убрала бы само противоречие, которое мутант сеет.
+///
+/// Честная граница ожидания: правило обязано ПОКРАСНЕТЬ (команда шаблона
+/// падает), но вердикт видит его только в `error`-severity — находка `warn`
+/// не переводит `FitnessReport.passed` в `false`, а гейт считает составляющую
+/// `fitness` упавшей ровно по `passed` (см. `src/gate.rs`). Кейс, оставивший
+/// применённое правило предупреждением (таково умолчание фрагмента `apply`),
+/// получит в карте «не пойман», и это утверждение о решении кейса, а не о
+/// механике: инвариант, взятый шаблоном, там не защищает вердикт.
+///
+/// Без лока вход не найден (шаблоны не применялись — подменять нечего):
+/// `Err(причина)`, мутатор пропускается и в знаменатель доли не входит.
+fn mutate_d15(root: &Path) -> std::result::Result<(), String> {
+    let rel = crate::rule_templates::LOCK_REL;
+    if !root.join(rel).is_file() {
+        return Err(format!("нет {rel} — шаблоны не применены, нарушать нечего"));
+    }
+    let lock: TemplateLock = serde_yaml_ng::from_str(&read(root, rel)?)
+        .map_err(|e| format!("{rel}: не разбирается: {e}"))?;
+    if lock.templates.is_empty() {
+        return Err(format!("{rel}: применённых шаблонов нет"));
+    }
+    let mut applied = 0_usize;
+    for entry in &lock.templates {
+        let lang = crate::rule_templates::Lang::parse(&entry.lang)
+            .map_err(|e| format!("{}: {e}", entry.id))?;
+        let Some(t) =
+            crate::rule_templates::template(&entry.id).map_err(|e| format!("{}: {e}", entry.id))?
+        else {
+            continue; // шаблона нет в этой сборке — подменять нечем
+        };
+        if t.manifest.version != entry.version {
+            continue; // применена другая версия — нарушающая реализация не та
+        }
+        let dir = if entry.dir.is_empty() {
+            format!("{}/{}", crate::rule_templates::TARGET_REL, entry.id)
+        } else {
+            entry.dir.clone()
+        };
+        // Куда `apply` положил файлы, туда же кладётся и подмена (тот же
+        // `dir`, то же `to`, что и у `ViolatingSwap`).
+        for swap in t.violating_for(lang) {
+            let content = t
+                .file(&swap.from)
+                .ok_or_else(|| format!("{}: нет файла '{}'", entry.id, swap.from))?;
+            write(root, &format!("{dir}/{}", swap.to), content)?;
+            applied += 1;
+        }
+    }
+    if applied == 0 {
+        return Err(format!(
+            "{rel}: нет позиции, для которой есть нарушающая реализация"
+        ));
+    }
+    Ok(())
 }
 
 /// Числовое поле цели NFR из первого файла, где оно есть.
@@ -822,6 +921,11 @@ pub struct RedteamReport {
     pub min_detection: f64,
     /// Контрольный мутатор D14: аттестация изменилась при том же вердикте.
     pub control_ok: bool,
+    /// Почему контроль не прошёл — с различием двух исходов, у которых разные
+    /// выводы: «вердикт изменился» (безвредная правка не должна его менять) и
+    /// «аттестация не изменилась» (вердикт не привязан к состоянию дерева).
+    /// `None` — контроль пройден.
+    pub control_note: Option<String>,
 }
 
 /// Сохранённый итог мутационного прогона (`.arch-handoff/redteam.json`,
@@ -846,6 +950,11 @@ pub struct RedteamSummary {
     pub min_detection: f64,
     /// Контрольный мутатор: аттестация изменилась при том же вердикте.
     pub control_ok: bool,
+    /// Почему контроль не прошёл (аддитивное поле схемы v1: файлы прежних
+    /// редакций читаются, причина просто неизвестна). Метрика доверия
+    /// показывает ИМЕННО её, а не свою догадку о причине.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_note: Option<String>,
 }
 
 impl RedteamSummary {
@@ -878,6 +987,7 @@ pub fn save_summary(case: &Path, report: &RedteamReport) -> Result<PathBuf> {
         ratio: report.detection_ratio(),
         min_detection: report.min_detection,
         control_ok: report.control_ok,
+        control_note: report.control_note.clone(),
     };
     let text = serde_json::to_string_pretty(&summary)
         .map_err(|e| crate::error::HarnessError::Config(format!("redteam: {e}")))?;
@@ -957,6 +1067,9 @@ impl RedteamReport {
         for d in &self.detections {
             let (mark, who) = match (&d.caught_by, d.skipped.as_deref()) {
                 (_, Some(reason)) => ("—", format!("пропущен: {reason}")),
+                (Some(by), None) if d.expected == Expectation::Control => {
+                    ("✓", format!("контроль пройден: {by}, вердикт не изменился"))
+                }
                 (Some(by), None) if d.expected == Expectation::Semantic => {
                     ("!", format!("пойман ({by}) — а не должен: это семантика"))
                 }
@@ -966,7 +1079,12 @@ impl RedteamReport {
                 }
                 (None, None) if d.expected == Expectation::Control => (
                     "✗",
-                    "контроль не сработал: аттестация не изменилась".to_string(),
+                    format!(
+                        "контроль не сработал: {}",
+                        self.control_note
+                            .as_deref()
+                            .unwrap_or("причина не записана (файл прежней редакции)")
+                    ),
                 ),
                 (None, None) => ("✗", format!("НЕ ПОЙМАН (ожидался: {})", d.expected_by)),
             };
@@ -1011,6 +1129,7 @@ impl RedteamReport {
             "total": self.scored_total(),
             "min_detection": self.min_detection,
             "control_ok": self.control_ok,
+            "control_note": self.control_note,
             "passed": self.passed(),
         })
     }
@@ -1042,6 +1161,9 @@ pub fn render_markdown(report: &RedteamReport) -> String {
     for d in &report.detections {
         let result = match (&d.caught_by, d.skipped.as_deref()) {
             (_, Some(reason)) => format!("пропущен: {reason}"),
+            (Some(by), None) if d.expected == Expectation::Control => {
+                format!("контроль пройден: {by}, вердикт не изменился")
+            }
             (Some(by), None) if d.expected == Expectation::Semantic => {
                 format!("пойман ({by}) — не должен")
             }
@@ -1049,9 +1171,13 @@ pub fn render_markdown(report: &RedteamReport) -> String {
             (None, None) if d.expected == Expectation::Semantic => {
                 "не пойман и не должен".to_string()
             }
-            (None, None) if d.expected == Expectation::Control => {
-                "контроль не сработал".to_string()
-            }
+            (None, None) if d.expected == Expectation::Control => format!(
+                "**контроль не сработал**: {}",
+                report
+                    .control_note
+                    .as_deref()
+                    .unwrap_or("причина не записана (файл прежней редакции)")
+            ),
             (None, None) => "**не пойман**".to_string(),
         };
         let _ = writeln!(
@@ -1152,6 +1278,45 @@ fn git(dir: &Path, args: &[&str]) -> std::result::Result<(), String> {
     }
 }
 
+/// Имя временной дельты, которой прикрывается контрольный мутант (D14).
+const CONTROL_DELTA: &str = "redteam-control";
+
+/// Прикрывает безвредную правку контрольного мутанта временной дельтой.
+///
+/// D14 — контроль: безвредная правка ТЕЛА сущности обязана оставить вердикт
+/// зелёным, а аттестацию — изменить. Но правка защищённого пути без активной
+/// дельты краснит `delta_guard` (и правильно краснит: это его работа), и на
+/// кейсе, где все дельты заархивированы, контроль падал бы не на вердикте, а
+/// на отсутствии дельты в свежей копии мутанта: «контроль аттестации: нет»
+/// при доле выше порога и падение `trust` на ступень. Причина при этом не в
+/// пакете, а в том, что мутант поставлен вне процесса дельт — любая настоящая
+/// доработка приходит ВМЕСТЕ с дельтой (ADR-047).
+///
+/// Поэтому мутант ставится в положение обычной доработки: правка + дельта,
+/// покрывающая изменённые защищённые пути. Дельта временная — живёт в копии
+/// мутанта, гейту её достаточно, и она не касается разбора самих недостатков.
+fn cover_control_mutation(root: &Path) -> std::result::Result<(), String> {
+    let report = crate::delta::guard(root, Some("HEAD"), &[])
+        .map_err(|e| format!("контроль: перечень защищённых правок: {e}"))?;
+    if report.protected_changed.is_empty() {
+        return Ok(());
+    }
+    let dir = root.join("changes").join(CONTROL_DELTA);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("контроль: {}: {e}", dir.display()))?;
+    let mut body = String::from(
+        "# Дельта: redteam-control\n\n\
+         Временная дельта мутационного прогона (D14): покрывает безвредную \
+         правку, чтобы вердикт мерил правку, а не отсутствие дельты. \
+         К делу не относится и в исходный кейс не попадает.\n\n\
+         ## MODIFIED\n\n",
+    );
+    for file in &report.protected_changed {
+        let _ = writeln!(body, "- {file}");
+    }
+    let path = dir.join("DELTA.md");
+    std::fs::write(&path, body).map_err(|e| format!("контроль: {}: {e}", path.display()))
+}
+
 /// Готовит мутанта: свой git-репозиторий, базовый коммит, правка, коммит
 /// правки. База `HEAD~1` нужна, чтобы анти-ослабление правил видело правку
 /// реестра, уже лежащую в коммите (Н5).
@@ -1216,6 +1381,7 @@ pub fn run(case: &Path, min_detection: f64, decision_quality: bool) -> Result<Re
     }
     let mut detections = Vec::new();
     let mut control_ok = true;
+    let mut control_note: Option<String> = None;
     for m in &MUTATORS {
         let root = fixture.mutant(m.id)?;
         if let Err(e) = prepare(&root) {
@@ -1239,6 +1405,11 @@ pub fn run(case: &Path, min_detection: f64, decision_quality: bool) -> Result<Re
         // Бандл переупаковывается ПОСЛЕ правки: иначе любая правка удостоверенного
         // файла краснила бы evidence_verify как «изменён после упаковки», и
         // дефект ловился бы не тем инструментом, который проверяется.
+        if m.expected == Expectation::Control {
+            if let Err(e) = cover_control_mutation(&root) {
+                return Err(HarnessError::Control(format!("{}: {e}", m.id)));
+            }
+        }
         let _ = crate::evidence::pack(&root, Route::Critical);
         if let Err(e) = git(&root, &["add", "-A"])
             .and_then(|()| git(&root, &["commit", "-q", "-m", &format!("mutant {}", m.id)]))
@@ -1254,26 +1425,45 @@ pub fn run(case: &Path, min_detection: f64, decision_quality: bool) -> Result<Re
             .collect();
         if m.expected == Expectation::Control {
             // Контроль: вердикт обязан остаться зелёным, аттестация — смениться.
+            // Два исхода различимы и означают разное, поэтому и текст разный
+            // (раньше «изменился вердикт» показывался как «аттестация X → Y»).
             let same_verdict = report.outcome == reference.outcome;
             let changed = report.attestation != reference.attestation;
             control_ok = control_ok && same_verdict && changed;
+            let caught_by = if !same_verdict {
+                let why = if failed.is_empty() {
+                    "причина не в составляющих — сверьте вердикты".to_string()
+                } else {
+                    failed.join(", ")
+                };
+                control_note = Some(format!(
+                    "безвредная правка изменила вердикт ({} → {}) — правка не должна \
+                     менять вердикт: проверьте составляющие {why}",
+                    reference.outcome.label(),
+                    report.outcome.label()
+                ));
+                Some(format!("вердикт изменился: {why}"))
+            } else if changed {
+                Some(format!(
+                    "аттестация {} → {}",
+                    &reference.attestation[..12],
+                    &report.attestation[..12]
+                ))
+            } else {
+                control_note = Some(
+                    "аттестация не изменилась при том же вердикте — вердикт не привязан \
+                     к состоянию дерева (Н3)"
+                        .to_string(),
+                );
+                None
+            };
             detections.push(Detection {
                 id: m.id.to_string(),
                 title: m.title.to_string(),
                 expected: m.expected,
                 expected_by: m.by.to_string(),
                 in_ratio: m.in_ratio,
-                caught_by: if changed {
-                    Some(format!(
-                        "аттестация {} → {}",
-                        &reference.attestation[..12],
-                        &report.attestation[..12]
-                    ))
-                } else if same_verdict {
-                    None
-                } else {
-                    Some("вердикт изменился".to_string())
-                },
+                caught_by,
                 skipped: None,
             });
             continue;
@@ -1297,6 +1487,7 @@ pub fn run(case: &Path, min_detection: f64, decision_quality: bool) -> Result<Re
         detections,
         min_detection,
         control_ok,
+        control_note,
     })
 }
 
@@ -1323,14 +1514,14 @@ mod corner_tests {
         .expect("сырой ответ");
     }
 
-    /// D15 поднимает балл критерия и взвешенный итог — расхождение с сырыми
+    /// D16 поднимает балл критерия и взвешенный итог — расхождение с сырыми
     /// ответами, из которых отчёт объявлен собранным (ADR-048).
     #[test]
-    fn d15_raises_the_recorded_score() {
+    fn d16_raises_the_recorded_score() {
         let tmp = tempfile::tempdir().expect("tmp");
         let root = tmp.path();
         case_with_report(root);
-        mutate_d15(root).expect("мутация применима");
+        mutate_d16(root).expect("мутация применима");
         let text =
             std::fs::read_to_string(root.join("reports/rubric/ADR-001-demo.json")).expect("отчёт");
         let artifact: serde_json::Value = serde_json::from_str(&text).expect("JSON");
@@ -1341,7 +1532,7 @@ mod corner_tests {
     /// Без сырых ответов сверять не с чем: мутатор честно неприменим, а не
     /// «пойман».
     #[test]
-    fn d15_is_inapplicable_without_raw_answers() {
+    fn d16_is_inapplicable_without_raw_answers() {
         let tmp = tempfile::tempdir().expect("tmp");
         let root = tmp.path();
         write(
@@ -1351,19 +1542,19 @@ mod corner_tests {
         )
         .expect("отчёт");
         assert!(
-            mutate_d15(root).is_err(),
+            mutate_d16(root).is_err(),
             "без сырых ответов мутатор обязан пропускаться"
         );
         assert!(
-            mutate_d15(tmp.path()).is_err(),
+            mutate_d16(tmp.path()).is_err(),
             "без отчётов мутатор тоже неприменим"
         );
     }
 
-    /// D16 меняет метку автора в шапке ADR: редакция документа другая, отчёт
+    /// D17 меняет метку автора в шапке ADR: редакция документа другая, отчёт
     /// от прежней становится устаревшим (ADR-048).
     #[test]
-    fn d16_rewrites_the_author_header() {
+    fn d17_rewrites_the_author_header() {
         let tmp = tempfile::tempdir().expect("tmp");
         let root = tmp.path();
         write(
@@ -1372,7 +1563,7 @@ mod corner_tests {
             "# ADR-001. Решение\n\n- Статус: Accepted\n- Модель-автор: human\n\n## Context\n\nПричина.\n",
         )
         .expect("ADR");
-        mutate_d16(root).expect("мутация применима");
+        mutate_d17(root).expect("мутация применима");
         let text = std::fs::read_to_string(root.join("docs/adr/ADR-001-demo.md")).expect("ADR");
         assert!(
             text.contains("Модель-автор: claude-opus-4"),
@@ -1385,7 +1576,7 @@ mod corner_tests {
     /// (11 из 14) не меняется, они видны отдельными строками — как R и D14.
     #[test]
     fn corner_mutators_are_outside_the_ratio() {
-        for id in ["D15", "D16"] {
+        for id in ["D16", "D17"] {
             let m = MUTATORS.iter().find(|m| m.id == id).expect("мутатор");
             assert!(!m.in_ratio, "{id} не должен входить в долю обнаружения");
             assert_eq!(m.expected, Expectation::Caught, "{id} обязан ловиться");
@@ -1395,6 +1586,72 @@ mod corner_tests {
 
 #[cfg(test)]
 mod tests {
+    /// Н8 (T-08): контрольный мутант прикрыт временной дельтой. Без неё
+    /// безвредная правка защищённого пути краснит `delta_guard` (его работа!),
+    /// вердикт контрольного мутанта меняется — и контроль падает не на
+    /// вердикте, а на отсутствии дельты в свежей копии мутанта: на кейсе с
+    /// заархивированными дельтами «контроль аттестации: нет» при доле выше
+    /// порога.
+    #[test]
+    fn control_mutation_is_covered_by_a_temporary_delta() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("mutant");
+        std::fs::create_dir_all(repo.join("model")).expect("mkdir");
+        let entity = repo.join("model/CMP-001-оркестратор-операций.md");
+        std::fs::write(&entity, "---\nid: CMP-001\n---\n\nкарточка\n").expect("write");
+        git(&repo, &["init", "-q"]).expect("init");
+        git(&repo, &["add", "-A"]).expect("add");
+        git(&repo, &["commit", "-q", "-m", "baseline"]).expect("commit");
+        // Безвредная правка ТЕЛА сущности — то, что делает D14.
+        std::fs::write(
+            &entity,
+            "---\nid: CMP-001\n---\n\nкарточка\n\nУточнение формулировки без смены решения.\n",
+        )
+        .expect("edit");
+        let before = crate::delta::guard(&repo, Some("HEAD"), &[]).expect("guard");
+        assert_eq!(
+            before.violations.len(),
+            1,
+            "до прикрытия — нарушение: {before:?}"
+        );
+        // Вход не найден (нет защищённых правок) — прикрытие не нужно.
+        let clean = tmp.path().join("clean");
+        std::fs::create_dir_all(clean.join("model")).expect("mkdir");
+        std::fs::write(
+            clean.join("model/CMP-001-карточка.md"),
+            "---\nid: CMP-001\n---\n",
+        )
+        .expect("write");
+        git(&clean, &["init", "-q"]).expect("init");
+        git(&clean, &["add", "-A"]).expect("add");
+        git(&clean, &["commit", "-q", "-m", "baseline"]).expect("commit");
+        cover_control_mutation(&clean).expect("cover");
+        assert!(
+            !clean.join("changes").exists(),
+            "пустая дельта в кейсе без правок — мусор"
+        );
+        // Прикрытие: правка приходит вместе с дельтой, как обычная доработка.
+        cover_control_mutation(&repo).expect("cover");
+        let after = crate::delta::guard(&repo, Some("HEAD"), &[]).expect("guard");
+        assert!(after.passed, "прикрытие обязано снять нарушение: {after:?}");
+        assert_eq!(after.protected_changed.len(), 1, "{after:?}");
+        assert!(
+            repo.join("changes")
+                .join(CONTROL_DELTA)
+                .join("DELTA.md")
+                .is_file()
+        );
+        // Прикрытие не «прощает» правку вообще: без упоминания файла —
+        // нарушение на месте (дельта покрывает только то, что названо).
+        std::fs::write(
+            repo.join("changes").join(CONTROL_DELTA).join("DELTA.md"),
+            "# Дельта: redteam-control\n\n## MODIFIED\n\n",
+        )
+        .expect("rewrite");
+        let bare = crate::delta::guard(&repo, Some("HEAD"), &[]).expect("guard");
+        assert_eq!(bare.violations.len(), 1, "{bare:?}");
+    }
+
     /// W2×W4: `save_summary` пишет в УКАЗАННЫЙ каталог, а не в `report.case`
     /// (прогон идёт в копии — измерение принадлежит исходному кейсу).
     #[test]
@@ -1408,6 +1665,7 @@ mod tests {
             detections: Vec::new(),
             min_detection: 0.78,
             control_ok: true,
+            control_note: None,
         };
         let path = save_summary(&case, &report).expect("save");
         assert!(
@@ -1418,6 +1676,102 @@ mod tests {
         let back = load_summary(&path).expect("load");
         assert_eq!(back.case, case.display().to_string());
         assert!(back.control_ok);
+    }
+
+    /// Кладёт в кейс применённый шаблон библиотеки (`files_for(Python)`) и
+    /// возвращает запись лока на него — так выглядит кейс, взявший шаблон
+    /// `arch-be rules template apply`.
+    fn apply_python_template(case: &Path, id: &str) -> String {
+        let t = crate::rule_templates::template(id)
+            .expect("сборка")
+            .expect("шаблон есть в сборке");
+        let dir = format!("{}/{}", crate::rule_templates::TARGET_REL, id);
+        let mut lock = format!(
+            "  - id: {id}\n    version: {}\n    ad: AD-1\n    lang: python\n    dir: {dir}\n    \
+             command: 'python3 -m pytest -q -p no:cacheprovider {dir}/test_idempotency_key.py'\n    \
+             files:\n",
+            t.manifest.version
+        );
+        for f in t.files_for(crate::rule_templates::Lang::Python) {
+            let content = t.file(&f.from).expect("файл шаблона");
+            let rel = format!("{dir}/{}", f.to);
+            std::fs::create_dir_all(case.join(&dir)).expect("mkdir");
+            std::fs::write(case.join(&rel), content).expect("write");
+            let _ = write!(
+                lock,
+                "      - path: {rel}\n        sha256: {}\n",
+                crate::hash::sha256_hex(content.as_bytes())
+            );
+        }
+        lock
+    }
+
+    /// D15 (вход): без лока мутатор не применим — шаблоны не применялись,
+    /// нарушать нечего. Пропуск честный: `Err(причина)`, а не «поймано» и не
+    /// «дыра в защите». Ровно этот случай — эталонные кейсы репозитория.
+    #[test]
+    fn d15_is_not_applicable_without_a_lock() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let case = tmp.path().join("case");
+        std::fs::create_dir_all(&case).expect("mkdir");
+        let reason = mutate_d15(&case).expect_err("без лока вход не найден");
+        assert!(reason.contains(crate::rule_templates::LOCK_REL), "{reason}");
+        // Каталог при этом держит позицию вне знаменателя доли: она видна в
+        // карте обнаружения, но критерий приёмки «≥ 11 из 14» не двигает.
+        let d15 = MUTATORS
+            .iter()
+            .find(|m| m.id == "D15")
+            .expect("D15 в каталоге");
+        assert_eq!(d15.expected, Expectation::Caught);
+        assert!(!d15.in_ratio);
+    }
+
+    /// D15 (правка): эталонная реализация применённого шаблона заменяется
+    /// нарушающей из той же библиотеки — тест шаблона обязан на ней упасть,
+    /// то есть правило `command_succeeds` обязано покраснеть (`fitness`).
+    /// Проверяется сама подмена: прогон правила требует интерпретатора.
+    #[test]
+    fn d15_replaces_the_reference_impl_with_the_violating_one() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let case = tmp.path().join("case");
+        std::fs::create_dir_all(&case).expect("mkdir");
+        let entry = apply_python_template(&case, "idempotency-key");
+        let lock_rel = crate::rule_templates::LOCK_REL;
+        let lock_path = case.join(lock_rel);
+        std::fs::create_dir_all(lock_path.parent().expect("каталог лока")).expect("mkdir");
+        std::fs::write(&lock_path, format!("templates:\n{entry}")).expect("lock");
+        let dir = format!("{}/idempotency-key", crate::rule_templates::TARGET_REL);
+        let before =
+            std::fs::read_to_string(case.join(format!("{dir}/reference_impl.py"))).expect("эталон");
+        mutate_d15(&case).expect("мутант D15");
+        let after = std::fs::read_to_string(case.join(format!("{dir}/reference_impl.py")))
+            .expect("подмена");
+        let t = crate::rule_templates::template("idempotency-key")
+            .expect("сборка")
+            .expect("шаблон");
+        let violating = t
+            .file("python/violating_impl.py")
+            .expect("нарушающая реализация");
+        assert_eq!(after, violating, "реализация обязана стать нарушающей");
+        assert_ne!(before, after, "подмена обязана что-то изменить");
+        assert!(
+            after.contains("дедупликации нет"),
+            "взята именная нарушающая реализация, а не любая: {after}"
+        );
+        // Остальные файлы шаблона не тронуты: дефект ровно один.
+        let test = std::fs::read_to_string(case.join(format!("{dir}/test_idempotency_key.py")))
+            .expect("тест");
+        assert_eq!(
+            test,
+            t.file("python/test_idempotency_key.py")
+                .expect("тест шаблона")
+        );
+        // На этом файле тест шаблона обязан упасть — иначе правило беззубое
+        // (та же посылка, что у `executable_rule_toothless`).
+        assert!(
+            violating.contains("send(key, amount)"),
+            "нарушающая реализация шлёт повторный эффект"
+        );
     }
 
     use super::*;
@@ -1466,12 +1820,16 @@ mod tests {
         let ids: Vec<&str> = MUTATORS.iter().map(|m| m.id).collect();
         for expected in [
             "D1", "D2", "D3", "D4", "D5", "D6", "D7", "D8", "D9", "D10", "D11", "D11b", "D12",
-            "D13", "R", "D14",
+            "D13", "R", "D14", "D15",
         ] {
             assert!(ids.contains(&expected), "в каталоге нет {expected}");
         }
         // Доля обнаружения считается по 14 дефектам раздела 7 (D1…D13 + D11b);
-        // R и D14 — отдельные строки.
+        // R, D14 и D15 — отдельные строки. D15 добавлен к таблице, а не к
+        // знаменателю: он проверяет зубы применённого шаблона (обязан ли
+        // краснеть `command_succeeds` на нарушающей реализации), а не
+        // защищённость пакета от дефекта раздела 7. Включи он себя в долю —
+        // критерий приёмки «≥ 11 из 14» перестал бы сравниваться с ТЗ.
         let scored = MUTATORS.iter().filter(|m| m.in_ratio).count();
         assert_eq!(scored, 14, "в наборе обязано быть 14 позиций раздела 7");
         // Обязаны ловиться 11: D1–D5, D7, D8, D9, D11b, D12, D13.
@@ -1523,6 +1881,7 @@ mod tests {
             ],
             min_detection: 0.5,
             control_ok: true,
+            control_note: None,
         };
         // Пропущенный (нет входа) выпадает из знаменателя, семантический —
         // остаётся: он обязан НЕ ловиться, и доля это учитывает.

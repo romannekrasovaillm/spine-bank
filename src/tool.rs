@@ -130,6 +130,12 @@ pub struct ToolOutput {
     /// Изображения, которые инструмент вернул модели (base64 data-URL).
     /// Агентный цикл прикрепляет их к user-сообщению (мультимодальность).
     pub images: Vec<String>,
+    /// Разобранный результат для машинного контура (T-12): вердикт/отчёт
+    /// инструмента как ОБЪЕКТ, а не JSON-строка внутри `content`. Заполняют
+    /// инструменты, у которых текстовый вывод — человеко-читаемый рендер того
+    /// же отчёта (`contract_diff`); мост MCP кладёт это в `structuredContent`.
+    /// `None` — структурной формы у инструмента нет (текст и есть результат).
+    pub data: Option<serde_json::Value>,
 }
 
 impl ToolOutput {
@@ -139,6 +145,7 @@ impl ToolOutput {
             content: content.into(),
             is_error: false,
             images: Vec::new(),
+            data: None,
         }
     }
 
@@ -148,7 +155,16 @@ impl ToolOutput {
             content: content.into(),
             is_error: true,
             images: Vec::new(),
+            data: None,
         }
+    }
+
+    /// Прикрепить разобранный результат (T-12): его увидят машинные клиенты
+    /// моста (`structuredContent`), текст `content` остаётся как есть.
+    #[must_use]
+    pub fn with_data(mut self, data: serde_json::Value) -> Self {
+        self.data = Some(data);
+        self
     }
 
     /// Прикрепить изображения к результату (base64 data-URL).

@@ -1095,6 +1095,7 @@ async fn execute_run(
                 content,
                 is_error,
                 images: Vec::new(),
+                data: None,
             }
             .truncated(HARNESS_RUN_MAX_CHARS)
         }

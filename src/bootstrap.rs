@@ -15,6 +15,16 @@
 //! Проводник ничего не решает за человека: он не подписывает A3, не пишет
 //! решение вместо архитектора и не включает составляющие гейта. Он называет
 //! работу и её порядок.
+//!
+//! Каркас несёт ОДНО исполняемое правило (E7, AD-2 «Журнал операций
+//! append-only»): файлы python-половины шаблона `append-only-journal` лежат в
+//! `skeleton/rule_templates/`, правило `command_succeeds` прогоняет их тесты,
+//! а `.arch-handoff/rule-templates.lock` фиксирует поставку. Отсюда «зелёное»
+//! до первой строки своего кода: свежий кейс показывает не только «чего не
+//! хватает», но и работающую поведенческую проверку. Файлы и текст правила
+//! берутся из встроенных ассетов (`crate::rule_templates`), а не переписываются
+//! литералами, — иначе каркас разошёлся бы с `arch-be rules template apply`
+//! при первой же правке шаблона.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -23,6 +33,7 @@ use crate::config::Config;
 use crate::control::Route;
 use crate::error::{HarnessError, Result};
 use crate::gate::{self, GateReport, GateStatus};
+use crate::rule_templates::{Lang, LockEntry, LockFile};
 
 /// Стадия «дорожки до зелёного»: человеческое имя и итог по составляющим.
 #[derive(Debug, Clone)]
@@ -114,6 +125,135 @@ const STAGES: [(&str, &str, &[&str]); 4] = [
     ("model", "модель", &["model_validate", "trace_check"]),
     ("bundle", "бандл", &["evidence_verify"]),
 ];
+
+// ---------------------------------------------------------------------------
+// Исполняемое правило каркаса (E7)
+// ---------------------------------------------------------------------------
+
+/// Шаблон исполняемого правила каркаса: пример инварианта `AD-2`.
+const SKELETON_RULE_TEMPLATE: &str = "append-only-journal";
+/// Инвариант спайна, который закрывает исполняемое правило каркаса.
+const SKELETON_RULE_AD: &str = "AD-2";
+/// Id правила каркаса: `C-001`…`C-003` заняты текстовыми правилами реестра.
+const SKELETON_RULE_ID: &str = "C-004";
+/// Владелец правила — тот же, что у соседних правил реестра.
+const SKELETON_RULE_OWNER: &str = "OWNER-001";
+/// Срок ревизии правила — тот же, что у соседних правил реестра.
+const SKELETON_RULE_EXPIRY: &str = "2027-12-31";
+/// Оценка сопровождения правила, часов — та же, что у соседних правил.
+const SKELETON_RULE_EFFORT_HOURS: u32 = 1;
+
+/// Исполняемое правило каркаса: файлы поставки, текст правила и lock-запись.
+struct SkeletonRule {
+    /// Путь в кейсе → содержимое: python-половина шаблона.
+    files: Vec<(String, String)>,
+    /// Фрагмент правила для `CONSTRAINTS.yaml` (с владельцем и сроком).
+    fragment: String,
+    /// Запись lock-файла: что применено, куда и с какими хэшами.
+    entry: LockEntry,
+}
+
+impl SkeletonRule {
+    /// Текст lock-файла в форме, которую читает `rule_templates::read_lock`.
+    ///
+    /// Порядок ключей повторяет `rules template apply`: каркас и ручное
+    /// применение обязаны оставлять одинаковый след, иначе проверка зубов
+    /// увидит в свежем кейсе «адаптацию».
+    fn lock_text(&self) -> String {
+        let mut out = String::from(
+            "# Применённые шаблоны исполняемых правил — записано `arch-be bootstrap`.\n\
+             # Не редактируйте вручную: проверка зубов сверяет хэши файлов с этой записью.\n\
+             templates:\n",
+        );
+        let _ = writeln!(out, "  - id: {}", self.entry.id);
+        let _ = writeln!(out, "    version: {}", self.entry.version);
+        let _ = writeln!(out, "    ad: {}", self.entry.ad);
+        let _ = writeln!(out, "    lang: {}", self.entry.lang);
+        let _ = writeln!(out, "    dir: {}", self.entry.dir);
+        let _ = writeln!(out, "    command: {}", yaml_sq(&self.entry.command));
+        let _ = writeln!(out, "    files:");
+        for f in &self.entry.files {
+            let _ = writeln!(out, "      - path: {}", f.path);
+            let _ = writeln!(out, "        sha256: {}", yaml_sq(&f.sha256));
+        }
+        out
+    }
+}
+
+/// Скаляр YAML в одинарных кавычках: внутри них нет escape-последовательностей,
+/// поэтому путь и хэш доезжают до парсера литерально (тот же приём, что в
+/// `rule_templates::write_lock`).
+fn yaml_sq(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+/// Собирает правило каркаса из встроенного шаблона.
+///
+/// `None` — шаблона нет в этой сборке либо он не исполняемый (битый ассет).
+/// Каркас тогда остаётся связным, но без поведенческой проверки: выдумывать
+/// её текст вместо шаблона нельзя — правило разошлось бы с библиотекой.
+fn skeleton_rule() -> Option<SkeletonRule> {
+    let t = crate::rule_templates::template(SKELETON_RULE_TEMPLATE)
+        .ok()
+        .flatten()?;
+    if !t.manifest.executable {
+        return None;
+    }
+    let command = t.command_for("python")?.to_string();
+    let dir = format!("{}/{}", crate::rule_templates::TARGET_REL, t.manifest.id);
+    let mut files: Vec<(String, String)> = Vec::new();
+    for spec in t.files_for(Lang::Python) {
+        let body = t.file(&spec.from)?;
+        files.push((format!("{dir}/{}", spec.to), body.to_string()));
+    }
+    if files.is_empty() {
+        return None;
+    }
+    let mut entry_files: Vec<LockFile> = files
+        .iter()
+        .map(|(rel, body)| LockFile {
+            path: rel.clone(),
+            sha256: crate::hash::sha256_hex(body.as_bytes()),
+        })
+        .collect();
+    entry_files.sort_by(|a, b| a.path.cmp(&b.path));
+    let fragment = splice_owner_and_expiry(&crate::rule_templates::rule_fragment(
+        &t,
+        SKELETON_RULE_AD,
+        SKELETON_RULE_ID,
+    ));
+    Some(SkeletonRule {
+        files,
+        fragment,
+        entry: LockEntry {
+            id: t.manifest.id.clone(),
+            version: t.manifest.version,
+            ad: SKELETON_RULE_AD.to_string(),
+            lang: Lang::Python.as_str().to_string(),
+            dir,
+            command,
+            files: entry_files,
+        },
+    })
+}
+
+/// Дописывает к фрагменту правила `owner`/`expiry`/`effort_hours`.
+///
+/// `rule_templates::rule_fragment` намеренно их не печатает (П3: владельца и
+/// срок назначает архитектор), но у каркаса они уже есть — те же, что у
+/// соседних правил реестра, и правило без них неполно.
+fn splice_owner_and_expiry(fragment: &str) -> String {
+    let mut out = String::new();
+    for line in fragment.lines() {
+        let _ = writeln!(out, "{line}");
+        if line.trim_start().starts_with("severity:") {
+            let _ = writeln!(out, "    owner: {SKELETON_RULE_OWNER}");
+            let _ = writeln!(out, "    expiry: {SKELETON_RULE_EXPIRY}");
+            let _ = writeln!(out, "    effort_hours: {SKELETON_RULE_EFFORT_HOURS}");
+        }
+    }
+    out
+}
 
 /// «1 находка · 2 находки · 5 находок» — строка прогресса читается человеком,
 /// а «2 находок» режет глаз ровно там, где проводник должен выглядеть
@@ -477,6 +617,11 @@ pub fn skeleton(name: &str, domain: &str) -> Vec<(String, String)> {
     let mut files: Vec<(String, String)> = Vec::new();
     let mut push = |rel: &str, body: String| files.push((rel.to_string(), body));
 
+    // Исполняемое правило каркаса: без него свежий кейс не может показать
+    // ни одной зелёной проверки ПОВЕДЕНИЯ — только текстовые правила и
+    // красный бандл.
+    let rule = skeleton_rule();
+
     push(
         "README.md",
         format!(
@@ -492,15 +637,24 @@ pub fn skeleton(name: &str, domain: &str) -> Vec<(String, String)> {
     // правильному судейству должен быть короче неправильного (J9, ADR-048).
     push("arch-harness.toml", project_config());
     push("ARCHITECTURE-SPINE.md", spine(name, domain));
-    push("CONSTRAINTS.yaml", constraints(domain));
+    push("CONSTRAINTS.yaml", constraints(domain, rule.as_ref()));
     push(
         ".arch-handoff/ROUTE.lock",
         "route: critical\ndecided_by: bootstrap\n".to_string(),
     );
     push(".arch-handoff/ROLLBACK.yaml", rollback_plan(&slug));
     push(".arch-handoff/REHEARSAL.json", rehearsal(&slug));
-    for (rel, body) in model(name, domain) {
+    for (rel, body) in model(name, domain, rule.is_some()) {
         push(&rel, body);
+    }
+    // Поставка шаблона и её lock-запись: файлы те же, что кладёт
+    // `arch-be rules template apply`, поэтому проверка зубов видит свежий
+    // кейс как «применено», а не «адаптировано».
+    if let Some(r) = &rule {
+        for (rel, body) in &r.files {
+            push(rel, body.clone());
+        }
+        push(crate::rule_templates::LOCK_REL, r.lock_text());
     }
     push(&format!("docs/adr/ADR-001-{slug}.md"), adr(name, domain));
     push(
@@ -588,10 +742,14 @@ fn spine(name: &str, domain: &str) -> String {
     )
 }
 
-/// Два правила — по одному на пример инварианта, плюс правило на форму ADR
-/// (третий пример; его же требует первый ADR каркаса).
-fn constraints(domain: &str) -> String {
-    format!(
+/// Три текстовых правила — по одному на пример инварианта, плюс правило на
+/// форму ADR (третий пример; его же требует первый ADR каркаса).
+///
+/// Четвёртым идёт ИСПОЛНЯЕМОЕ правило шаблона (`command_succeeds`), если
+/// шаблон доступен: оно и делает каркас зелёным по поведению. Текст правила —
+/// фрагмент шаблона, без переписывания литералом.
+fn constraints(domain: &str, rule: Option<&SkeletonRule>) -> String {
+    let base = format!(
         "# Реестр правил кейса: {domain}\n\
          rules:\n\
          \x20 - id: C-001\n\
@@ -620,13 +778,31 @@ fn constraints(domain: &str) -> String {
          \x20   owner: OWNER-001\n\
          \x20   expiry: 2027-12-31\n\
          \x20   effort_hours: 1\n"
-    )
+    );
+    match rule {
+        Some(r) => format!(
+            "{base}  # Исполняемое правило: прогоняет тесты поставленного шаблона\n\
+             {}\n",
+            r.fragment
+        ),
+        None => base,
+    }
 }
 
 /// Скелет модели: минимальный связный набор, на котором звено трассировки
 /// проходит (REQ → NFR → AD/ADR → CMP, у каждого AD — правило).
-fn model(name: &str, domain: &str) -> Vec<(String, String)> {
+///
+/// `behavioural` — каркас несёт исполняемое правило: тогда у AD-002 (журнал
+/// append-only) появляется второй, ПОВЕДЕНЧЕСКИЙ свидетель `verified_by`.
+/// Без шаблона карточка остаётся как раньше: ссылаться на несуществующее
+/// правило нельзя — трассировка справедливо сочтёт это сиротой.
+fn model(name: &str, domain: &str, behavioural: bool) -> Vec<(String, String)> {
     let body = |text: &str| format!("\n{text}\n");
+    let verified_by = if behavioural {
+        "verified_by: [C-002, C-004]\n"
+    } else {
+        "verified_by: [C-002]\n"
+    };
     vec![
         (
             "model/SYS-001-servis.md".to_string(),
@@ -703,7 +879,7 @@ fn model(name: &str, domain: &str) -> Vec<(String, String)> {
             "model/AD-002-append-only.md".to_string(),
             format!(
                 "---\nid: AD-002\ntype: ad\ntitle: \"Журнал операций append-only\"\n\
-                 status: \"ADOPTED\"\naffects: [CMP-001]\nverified_by: [C-002]\n---\n{}",
+                 status: \"ADOPTED\"\naffects: [CMP-001]\n{verified_by}---\n{}",
                 body(
                     "- **Binds**: журнал операций, ядро\n- **Prevents**: подмену \
                      истории при разборе расхождения\n- **Rule**: журнал только \
@@ -801,14 +977,21 @@ fn rollback_plan(slug: &str) -> String {
     )
 }
 
-/// Отчёт репетиции отката: PASS, иначе бандл краснеет по `rehearsal_not_passed`.
+/// Отчёт репетиции отката — ЗАГОТОВКА, а не пройденная проверка (Д8):
+/// `"passed": false`, пустой список шагов и честная строка в `log`.
+///
+/// Заготовка с `"passed": true` и `steps: []` выглядела как аттестация: гейт A4
+/// на свежем каркасе не краснел по репетиции, хотя репетиции не было. Пустой
+/// список шагов не подтверждает ничего — отчёт обязан это сказать.
 fn rehearsal(slug: &str) -> String {
     format!(
         "{{\n  \"kind\": \"rollback_rehearsal\",\n  \"gate\": \"A4\",\n  \
-         \"passed\": true,\n  \"baseline_commit\": \"{slug}-1\",\n  \
-         \"rehearsed_at\": \"{now}\",\n  \"duration_secs\": 1.0,\n  \
+         \"passed\": false,\n  \"baseline_commit\": \"{slug}-1\",\n  \
+         \"rehearsed_at\": \"{now}\",\n  \"duration_secs\": 0.0,\n  \
          \"steps\": [],\n  \"verify\": null,\n  \
-         \"log\": [\"каркас: репетиция отката пройдена на baseline {slug}-1\"]\n}}\n",
+         \"log\": [\"каркас: репетиция отката НЕ проводилась — это заготовка \
+         отчёта, а не результат прогона; заполните .arch-handoff/ROLLBACK.yaml \
+         и прогоните `arch-be rehearsal run`\"]\n}}\n",
         now = chrono::Local::now().to_rfc3339()
     )
 }
@@ -997,6 +1180,109 @@ mod tests {
         assert_eq!(next.component, "evidence_verify");
     }
 
+    /// E7: каркас несёт ОДНО исполняемое правило. Без него свежий кейс умеет
+    /// показывать только «чего не хватает»: зелёную проверку ПОВЕДЕНИЯ до
+    /// первой строки своего кода увидеть не на чем.
+    #[test]
+    fn bootstrap_skeleton_carries_a_working_behavioural_rule() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path().join("case");
+        bootstrapped(&dir, "Зарплатные выплаты");
+        let registry_path = dir.join("CONSTRAINTS.yaml");
+
+        // 1. Правило в реестре: тип, команда шаблона, задетый инвариант.
+        let cards = crate::control::rule_cards(&registry_path).expect("реестр читается");
+        let ids: Vec<&str> = cards
+            .iter()
+            .map(|c| c.id.as_deref().unwrap_or(""))
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["C-001", "C-002", "C-003", "C-004"],
+            "текстовые правила каркаса обязаны остаться на месте"
+        );
+        let card = cards
+            .iter()
+            .find(|c| c.id.as_deref() == Some("C-004"))
+            .expect("исполняемое правило каркаса");
+        let template = crate::rule_templates::template("append-only-journal")
+            .expect("шаблон читается")
+            .expect("шаблон встроен в сборку");
+        assert!(card.is_behaviour(), "правило обязано проверять поведение");
+        assert_eq!(card.kind, "command_succeeds");
+        assert_eq!(card.ad.as_deref(), Some("AD-2"));
+        assert_eq!(
+            card.command.as_deref(),
+            template.command_for("python"),
+            "команда правила — команда шаблона, а не её пересказ"
+        );
+
+        // 2. Владелец, срок и оценка сопровождения — как у соседних правил.
+        let registry = std::fs::read_to_string(&registry_path).expect("реестр читается");
+        let tail = registry
+            .split("id: C-004")
+            .nth(1)
+            .unwrap_or_else(|| panic!("правило C-004: {registry}"));
+        for field in ["owner: OWNER-001", "expiry: 2027-12-31", "effort_hours: 1"] {
+            assert!(tail.contains(field), "у C-004 нет поля '{field}': {tail}");
+        }
+
+        // 3. Поставка шаблона: файлы совпадают с встроенными, их хэши — в lock.
+        let lock_text = std::fs::read_to_string(dir.join(crate::rule_templates::LOCK_REL))
+            .expect("lock-запись поставки");
+        for spec in template.files_for(Lang::Python) {
+            let rel = format!(
+                "{}/{}/{}",
+                crate::rule_templates::TARGET_REL,
+                template.manifest.id,
+                spec.to
+            );
+            let body = std::fs::read_to_string(dir.join(&rel)).expect("файл поставки");
+            assert_eq!(
+                body,
+                template.file(&spec.from).expect("ассет шаблона"),
+                "{rel}: файл обязан совпасть с встроенным шаблоном"
+            );
+            let sha = crate::hash::sha256_hex(body.as_bytes());
+            assert!(
+                lock_text.contains(&sha),
+                "lock обязан фиксировать хэш {rel}: {lock_text}"
+            );
+        }
+
+        // 4. Инвариант AD-2 ссылается и на текстовое, и на исполняемое правило.
+        let ad = std::fs::read_to_string(dir.join("model/AD-002-append-only.md"))
+            .expect("карточка AD-002");
+        assert!(
+            ad.contains("verified_by: [C-002, C-004]"),
+            "у AD-2 обязан быть поведенческий свидетель: {ad}"
+        );
+
+        // 5. Проверка зубов видит свежий каркас применённым, а не адаптированным:
+        // иначе поставка бесполезна — «адаптировано» означает «проверяйте вручную».
+        let report = crate::rule_templates::verify_dir(
+            &dir,
+            &crate::rule_templates::Runner::detect(None),
+            Lang::Python,
+        )
+        .expect("lock читается");
+        assert!(
+            !report.skipped.iter().any(|s| s.contains("адаптирован")),
+            "свежий каркас обязан выглядеть применённым: {:?}",
+            report.skipped
+        );
+        assert!(
+            !report.skipped.iter().any(|s| s.contains("отсутствует")),
+            "файлы поставки обязаны существовать: {:?}",
+            report.skipped
+        );
+        assert!(
+            report.findings.is_empty(),
+            "тест шаблона обязан падать на нарушающей реализации: {:?}",
+            report.findings
+        );
+    }
+
     /// ГРАНИЦА ПРОВОДНИКА: заглушки каркаса обязаны ловиться семантикой Н1.
     /// Проводник, производящий ложнозелёные пакеты, хуже отсутствия
     /// проводника — он выдаёт «выпуск разрешён» за «ничего не написано».
@@ -1026,6 +1312,41 @@ mod tests {
         assert!(
             stubs.iter().all(|f| !f.fix_hint.is_empty()),
             "у каждой находки есть подсказка"
+        );
+    }
+
+    /// Д8: заготовка репетиции отката не имеет права выглядеть пройденной.
+    /// `passed: true` при пустом списке шагов — аттестация без предмета: гейт A4
+    /// на каркасе молчал, а архитектор считал откат отрепетированным.
+    #[test]
+    fn bootstrap_rehearsal_stub_is_not_passed() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path().join("case");
+        bootstrapped(&dir, "Зарплатные выплаты");
+
+        let text = std::fs::read_to_string(dir.join(".arch-handoff/REHEARSAL.json"))
+            .expect("отчёт репетиции записан");
+        let report: serde_json::Value = serde_json::from_str(&text).expect("REHEARSAL.json — JSON");
+        assert_eq!(
+            report["passed"], false,
+            "заготовка не подтверждает откат: {text}"
+        );
+        assert_eq!(report["steps"].as_array().map(Vec::len), Some(0));
+        let log = report["log"].to_string();
+        assert!(
+            log.contains("НЕ проводилась"),
+            "лог обязан сказать, что репетиции не было: {log}"
+        );
+        // Следствие: семантика бандла ловит непройденную репетицию сама.
+        let verdict = crate::evidence::verify_with(&dir, &crate::config::EvidenceConfig::default())
+            .expect("бандл каркаса читается");
+        assert!(
+            verdict
+                .semantics
+                .iter()
+                .any(|f| f.rule == "rehearsal_not_passed"),
+            "непройденная репетиция — находка, а не тишина: {:?}",
+            verdict.semantics
         );
     }
 
@@ -1093,6 +1414,34 @@ mod tests {
             std::fs::write(&path, text.replace("<оценка>", "две недели и один релиз"))
                 .expect("adr filled");
         }
+        // Репетиция отката — часть пути до зелёного на Critical (гейт A4).
+        // Д8: заготовка отчёта не считается пройденной репетицией, поэтому
+        // каркас доводится так же, как это делает архитектор: репозиторий,
+        // якорь отката, прогон шагов.
+        git_init(&dir).expect("git init каркаса");
+        let head = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&dir)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .expect("git rev-parse");
+        let baseline = String::from_utf8_lossy(&head.stdout).trim().to_string();
+        std::fs::write(
+            dir.join(".arch-handoff/ROLLBACK.yaml"),
+            format!(
+                "baseline_commit: {baseline}\nsteps:\n  - name: вернуть предыдущую версию\n    \
+                 run: \"true\"\nverify: \"true\"\n"
+            ),
+        )
+        .expect("план отката");
+        let report =
+            crate::rehearsal::rehearse(&dir, &dir.join(".arch-handoff")).expect("репетиция отката");
+        assert!(
+            report.passed,
+            "шаги каркаса обязаны пройти: {:?}",
+            report.log
+        );
+
         crate::evidence::pack(&dir, Route::Critical).expect("pack");
         let progress = status(&dir, &Config::default()).expect("status");
         assert_eq!(

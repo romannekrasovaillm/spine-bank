@@ -1,0 +1,13 @@
+{
+  "schema": "arch-be/rubric-report/v1",
+  "rubric": "adr_quality",
+  "target": "docs/adr/ADR-004-postrochnaya-atomarnost.md",
+  "target_sha256": "8c41b10c911c699728cd82cdf7b27582526f1a4d9accc5ea7f5df86713608722",
+  "judge_model": "deepseek-flash",
+  "author_model": "claude-code-host",
+  "weighted_total": 3.3,
+  "verdict": "Главный риск — отсутствие честной декомпозиции издержек и плана отката для объявленного низкообратимого решения, а также неполный контекст и картонные обоснования альтернатив. Как черновик ADR приемлем, но до готовности к пересмотру через год не дотягивает.",
+  "unstable": false,
+  "evidence_not_found": 0,
+  "judged_at": "2026-09-20T09:42:14.392714103+03:00"
+}

@@ -1,0 +1,81 @@
+# Шаблон исполняемого правила: единственный источник истины.
+#
+# Свойство (П1): показанное значение равно последнему ответу источника, а
+# устаревший ответ помечается устаревшим, а не выдаётся молча за текущий.
+# Проверяется на фейке источника истины — без сети, без сна, без протокола.
+id: single-source-of-truth
+version: 1
+title: "Единственный источник истины: устаревший ответ не выдаётся за актуальный"
+pattern: >-
+  Локальная проекция читает состояние из источника истины и показывает его
+  как есть: значение не меняется само по себе (проекция не «додумывает»
+  состояние), показанное значение равно последнему ответу источника, а у
+  ответа есть версия и признак свежести — задержавшийся ответ помечается
+  устаревшим.
+match:
+  ru:
+    - "источник истины"
+    - "проекц"
+    - "актуал"
+    - "устарев"
+    - "свежест"
+    - "рассинхрон"
+    - "кэш"
+  en:
+    - "source of truth"
+    - "projection"
+    - "stale"
+    - "freshness"
+properties:
+  - "локальное значение не меняется само по себе — проекция не «додумывает» состояние"
+  - "показанное значение равно последнему ответу источника истины"
+  - "устаревший ответ помечается устаревшим, а не выдаётся за текущий"
+  - "свежий ответ снимает признак устаревания"
+rule:
+  name: single_source_of_truth_enforced
+  type: command_succeeds
+  severity: error
+  timeout_secs: 120
+  rationale: >-
+    инвариант единственного источника истины проверяется исполнением:
+    проекция показывает ровно то, что ответил источник, и не выдаёт
+    устаревший ответ за актуальный
+  fix_hint: >-
+    перенести проверку со скелета на настоящую проекцию: команда правила
+    должна прогонять тесты вашего кода, а не эталонной реализации из шаблона
+  skill: fitness-functions
+  commands:
+    python: "python3 -m pytest -q -p no:cacheprovider skeleton/rule_templates/single-source-of-truth/test_single_source_of_truth.py"
+    java: "mvn -q -f skeleton/rule_templates/single-source-of-truth/java test"
+files:
+  - lang: common
+    from: README.md
+    to: README.md
+  - lang: python
+    from: python/fakes.py
+    to: fakes.py
+  - lang: python
+    from: python/reference_impl.py
+    to: reference_impl.py
+  - lang: python
+    from: python/test_single_source_of_truth.py
+    to: test_single_source_of_truth.py
+  - lang: java
+    from: java/pom.xml
+    to: java/pom.xml
+  - lang: java
+    from: java/src/main/java/Fakes.java
+    to: java/src/main/java/Fakes.java
+  - lang: java
+    from: java/src/main/java/Subject.java
+    to: java/src/main/java/Subject.java
+  - lang: java
+    from: java/src/test/java/SingleSourceOfTruthTest.java
+    to: java/src/test/java/SingleSourceOfTruthTest.java
+violating:
+  - lang: python
+    to: reference_impl.py
+    from: python/violating_impl.py
+  - lang: java
+    to: java/src/main/java/Subject.java
+    from: java/violating/Subject.java

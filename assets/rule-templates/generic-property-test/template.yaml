@@ -1,0 +1,43 @@
+# Шаблон-заготовка свойства: НЕ исполняется, пока свойство не сформулировано.
+#
+# `executable: false` — у шаблона нет ни эталонной, ни нарушающей реализации,
+# поэтому проверка зубов к нему неприменима, а тест-заглушка пропускается (skip).
+# Заготовка нужна, когда инвариант уже признан важным, но ещё не выражен
+# в исполняемой форме: она даёт место, куда его положить.
+id: generic-property-test
+version: 1
+executable: false
+title: "Заготовка свойства: сформулируйте инвариант и замените тест-заглушку"
+pattern: >-
+  Пустой каркас правила: тест пропускается, пока свойство не сформулировано.
+  Автор описывает свойство своими словами, строит фейк со счётчиком и заменяет
+  заглушку проверками — после этого шаблон перестаёт быть заготовкой.
+match:
+  ru: []
+  en: []
+properties:
+  - "свойство не сформулировано: замените тест-заглушку и перечислите свойства инварианта"
+rule:
+  name: generic_property_test
+  type: command_succeeds
+  severity: error
+  timeout_secs: 120
+  rationale: >-
+    заготовка правила: команда запускает тест-заглушку, которая пропускается,
+    пока свойство не сформулировано — правило не краснит репозиторий впустую
+  fix_hint: >-
+    сформулируйте свойство в docstring теста, постройте фейк со счётчиком,
+    уберите pytest.skip и продублируйте засеянное нарушение отдельным файлом
+  skill: fitness-functions
+  commands:
+    python: "python3 -m pytest -q -p no:cacheprovider skeleton/rule_templates/generic-property-test/test_invariant.py"
+files:
+  - lang: common
+    from: README.md
+    to: README.md
+  - lang: python
+    from: python/fakes.py
+    to: fakes.py
+  - lang: python
+    from: python/test_invariant.py
+    to: test_invariant.py

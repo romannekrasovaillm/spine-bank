@@ -227,13 +227,18 @@ fn handshake_then_tools_list_over_stdio() {
         "change_impact",
         "trust_report",
         "verdict_explain",
+        // Библиотека шаблонов исполняемых правил (ADR-050): чтение — в ro,
+        // запись (`rule_template_apply`) — только под `--rw`.
+        "rule_template_list",
+        "rule_template_show",
     ] {
         assert!(names.contains(&want), "нет инструмента {want}: {names:?}");
     }
     assert_eq!(
         tools.len(),
-        38,
-        "ровно 38 инструментов в ro-режиме (16 ручных + 22 read-only моста; \
+        40,
+        "ровно 40 инструментов в ro-режиме (16 ручных + 24 read-only моста; \
+         verdict_explain и trust_report — волна W, rule_template_* — ADR-050, \
          rubric_handover и rubric_accept — передача судейства, ADR-048)"
     );
     // rw-контур и write/exec-принадлежность хоста закрыты в ro-режиме.
@@ -1056,6 +1061,111 @@ fn tool_calls_are_journaled_to_project_journal() {
     assert!(
         !text.contains("repo-ok"),
         "пути-аргументы не журналируются: {text}"
+    );
+}
+
+/// T-13: аргумент `path` значит одно и то же — принимается и корень кейса, и
+/// каталог `model/`. Проверяется на `model_validate` (ждал каталог модели) и
+/// `model_drift` (ждал корень кейса): оба обязаны дать ОДИНАКОВЫЙ результат на
+/// обоих вариантах аргумента.
+#[test]
+fn bridge_model_tools_accept_case_root_and_model_dir() {
+    let home = tempfile::tempdir().expect("tmp");
+    let case = home.path().join("case");
+    let model = case.join("model");
+    std::fs::create_dir_all(&model).expect("mkdir model");
+    std::fs::write(
+        model.join("CMP-001.md"),
+        "---\nid: CMP-001\ntype: cmp\ntitle: Шлюз\nstatus: designed\ndepends_on: [CMP-404]\n---\n\nТело.\n",
+    )
+    .expect("сущность");
+    let root = case.display().to_string();
+    let model_dir = model.display().to_string();
+    let responses = mcp_serve(
+        home.path(),
+        &batch(&[
+            call(1, "model_validate", &json!({"path": root})),
+            call(2, "model_validate", &json!({"path": model_dir})),
+            call(3, "model_drift", &json!({"path": root})),
+            call(4, "model_drift", &json!({"path": model_dir})),
+        ]),
+    );
+    let by_root = structured(&responses[0], 1);
+    let by_model = structured(&responses[1], 2);
+    // Битая ссылка CMP-404: находка есть, и она одна и та же в обоих вариантах.
+    assert_eq!(by_root["passed"], false, "{by_root}");
+    assert_eq!(
+        by_root["issue_count"], by_model["issue_count"],
+        "{by_root} / {by_model}"
+    );
+    assert_eq!(
+        by_root["issues"], by_model["issues"],
+        "{by_root} / {by_model}"
+    );
+    assert_eq!(
+        by_root["summary"], by_model["summary"],
+        "{by_root} / {by_model}"
+    );
+    let drift_root = structured(&responses[2], 3);
+    let drift_model = structured(&responses[3], 4);
+    assert_eq!(
+        drift_root["passed"], drift_model["passed"],
+        "{drift_root} / {drift_model}"
+    );
+    assert_eq!(
+        drift_root["summary"], drift_model["summary"],
+        "{drift_root} / {drift_model}"
+    );
+}
+
+/// T-12: мостовой инструмент отдаёт РАЗОБРАННЫЙ объект, а не только JSON
+/// строкой внутри `output`. Проверяется на `contract_diff`: вердикт читается
+/// как `structuredContent.passed` / `structuredContent.breaking`, а строковое
+/// поле `output` остаётся для совместимости клиентов, написанных до правки.
+#[test]
+fn bridge_contract_diff_returns_parsed_verdict() {
+    let home = tempfile::tempdir().expect("tmp");
+    let old = home.path().join("old.yaml");
+    let new = home.path().join("new.yaml");
+    std::fs::write(
+        &old,
+        "openapi: 3.0.3\ninfo:\n  title: wallet\n  version: 1.0.0\npaths:\n  /v1/topup:\n    post:\n      requestBody:\n        content:\n          application/json:\n            schema:\n              type: object\n              properties:\n                amount: {type: integer}\n",
+    )
+    .expect("old");
+    std::fs::write(
+        &new,
+        "openapi: 3.0.3\ninfo:\n  title: wallet\n  version: 1.0.0\npaths:\n  /v1/topup:\n    post:\n      requestBody:\n        content:\n          application/json:\n            schema:\n              type: object\n              required: [source]\n              properties:\n                amount: {type: integer}\n                source: {type: string}\n",
+    )
+    .expect("new");
+    let responses = mcp_serve(
+        home.path(),
+        &batch(&[call(1, "contract_diff", &json!({"old": old, "new": new}))]),
+    );
+    let sc = structured(&responses[0], 1);
+    // Текстовое поле сохраняется (совместимость клиентов): в нём — тот же
+    // человеко-читаемый отчёт, что и в `content[0].text`.
+    let output = sc["output"]
+        .as_str()
+        .unwrap_or_else(|| panic!("output — строка: {sc}"));
+    assert!(
+        output.contains("CD-008"),
+        "output — отчёт инструмента: {output}"
+    );
+    // И тот же вердикт лежит РАЗОБРАННЫМ: числа и находки читаются полями, а
+    // не разбором JSON из строки (T-12).
+    assert_eq!(sc["tool"], "contract_diff");
+    assert_eq!(sc["passed"], false, "ломающее изменение — {sc}");
+    assert!(
+        sc["breaking"].as_u64().expect("breaking — число") >= 1,
+        "breaking читается числом, а не строкой: {sc}"
+    );
+    assert!(
+        sc["findings"].as_array().is_some_and(|f| !f.is_empty()),
+        "findings — массив находок, а не строка: {sc}"
+    );
+    assert_eq!(
+        sc["findings"][0]["rule"], "CD-008",
+        "находка разобрана полями: {sc}"
     );
 }
 

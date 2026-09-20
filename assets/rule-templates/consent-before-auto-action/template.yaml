@@ -1,0 +1,83 @@
+# Шаблон исполняемого правила: согласие раньше автодействия.
+#
+# Свойство: автодействие по событию клиента создаётся только при действующей
+# записи о согласии и только когда у клиента нет незавершённой операции.
+# Проверяется на фейках реестра согласий, операций и счётчика автодействий —
+# без сети, без сна, без протокола.
+id: consent-before-auto-action
+version: 1
+title: "Согласие до автодействия: без записи о согласии действие не создаётся"
+pattern: >-
+  Автоматическое действие по событию клиента выполняется только после
+  проверки записи о согласии: без действующей записи действие не создаётся,
+  отзыв согласия останавливает следующее срабатывание, а незавершённая
+  операция клиента блокирует старт нового автодействия.
+match:
+  ru:
+    - "соглас"
+    - "автодейств"
+    - "автоматическ"
+    - "отзыв"
+    - "опек"
+    - "автоплатёж"
+    - "автоплатеж"
+    - "триггер"
+  en:
+    - "consent"
+    - "opt-in"
+    - "revoke"
+    - "auto-action"
+properties:
+  - "без записи о согласии автодействие не создаётся"
+  - "отзыв согласия останавливает следующее срабатывание"
+  - "при незавершённой операции клиента новое автодействие не стартует"
+  - "при действующем согласии и завершённой операции создаётся ровно одно автодействие"
+rule:
+  name: consent_before_auto_action
+  type: command_succeeds
+  severity: error
+  timeout_secs: 120
+  rationale: >-
+    инвариант «согласие раньше автодействия» проверяется исполнением:
+    счётчик созданных автодействий не растёт без действующей записи
+    о согласии и при незавершённой операции клиента
+  fix_hint: >-
+    перенести проверку со скелета на настоящий сервис автодействий: команда
+    правила должна прогонять тесты вашего кода, а не эталонной реализации
+    из шаблона
+  skill: fitness-functions
+  commands:
+    python: "python3 -m pytest -q -p no:cacheprovider skeleton/rule_templates/consent-before-auto-action/test_consent_before_auto_action.py"
+    java: "mvn -q -f skeleton/rule_templates/consent-before-auto-action/java test"
+files:
+  - lang: common
+    from: README.md
+    to: README.md
+  - lang: python
+    from: python/fakes.py
+    to: fakes.py
+  - lang: python
+    from: python/reference_impl.py
+    to: reference_impl.py
+  - lang: python
+    from: python/test_consent_before_auto_action.py
+    to: test_consent_before_auto_action.py
+  - lang: java
+    from: java/pom.xml
+    to: java/pom.xml
+  - lang: java
+    from: java/src/main/java/Fakes.java
+    to: java/src/main/java/Fakes.java
+  - lang: java
+    from: java/src/main/java/Subject.java
+    to: java/src/main/java/Subject.java
+  - lang: java
+    from: java/src/test/java/ConsentBeforeAutoActionTest.java
+    to: java/src/test/java/ConsentBeforeAutoActionTest.java
+violating:
+  - lang: python
+    to: reference_impl.py
+    from: python/violating_impl.py
+  - lang: java
+    to: java/src/main/java/Subject.java
+    from: java/violating/Subject.java

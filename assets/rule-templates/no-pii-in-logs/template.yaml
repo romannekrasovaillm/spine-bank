@@ -1,0 +1,84 @@
+# Шаблон исполняемого правила: персональные данные не попадают в телеметрию.
+#
+# Свойство: после прогона сценария в захваченных журналах и метках метрик нет
+# форматов персональных данных — номера карты, телефона, ФИО. Проверяются
+# РЕГУЛЯРНЫЕ ВЫРАЖЕНИЯ ФОРМАТОВ, а не слова «ФИО»/«карта»; прогон идёт на
+# фейке-сборщике строк — без сети, без сна, без протокола.
+id: no-pii-in-logs
+version: 1
+title: "Персональные данные не попадают в журналы и метки метрик"
+pattern: >-
+  Сценарий пишет телеметрию только идентификаторами: после его прогона
+  захваченные строки журнала и метки метрик не содержат форматов
+  персональных данных — последовательности цифр карты, телефонного
+  шаблона, шаблона ФИО.
+match:
+  ru:
+    - "персональн"
+    - "пдн"
+    - "журнал"
+    - "лог"
+    - "телеметр"
+    - "метрик"
+    - "карт"
+    - "маскир"
+  en:
+    - "pii"
+    - "log"
+    - "telemetry"
+    - "redact"
+    - "mask"
+properties:
+  - "в захваченных журналах и метках метрик нет формата номера карты"
+  - "в захваченных журналах и метках метрик нет телефонного формата"
+  - "в захваченных журналах и метках метрик нет формата ФИО"
+  - "телеметрия не пуста и содержит идентификатор клиента — проверка не проходит вхолостую"
+rule:
+  name: no_pii_in_logs
+  type: command_succeeds
+  severity: error
+  timeout_secs: 120
+  rationale: >-
+    инвариант «персональные данные не покидают сценарий» проверяется
+    исполнением: захваченная телеметрия сканируется регулярными выражениями
+    форматов после прогона сценария
+  fix_hint: >-
+    перенести проверку со скелета на настоящий сценарий: команда правила
+    должна прогонять ваш сценарий и сканировать его телеметрию, а не
+    эталонную реализацию из шаблона
+  skill: fitness-functions
+  commands:
+    python: "python3 -m pytest -q -p no:cacheprovider skeleton/rule_templates/no-pii-in-logs/test_no_pii_in_logs.py"
+    java: "mvn -q -f skeleton/rule_templates/no-pii-in-logs/java test"
+files:
+  - lang: common
+    from: README.md
+    to: README.md
+  - lang: python
+    from: python/fakes.py
+    to: fakes.py
+  - lang: python
+    from: python/reference_impl.py
+    to: reference_impl.py
+  - lang: python
+    from: python/test_no_pii_in_logs.py
+    to: test_no_pii_in_logs.py
+  - lang: java
+    from: java/pom.xml
+    to: java/pom.xml
+  - lang: java
+    from: java/src/main/java/Fakes.java
+    to: java/src/main/java/Fakes.java
+  - lang: java
+    from: java/src/main/java/Subject.java
+    to: java/src/main/java/Subject.java
+  - lang: java
+    from: java/src/test/java/NoPiiInLogsTest.java
+    to: java/src/test/java/NoPiiInLogsTest.java
+violating:
+  - lang: python
+    to: reference_impl.py
+    from: python/violating_impl.py
+  - lang: java
+    to: java/src/main/java/Subject.java
+    from: java/violating/Subject.java

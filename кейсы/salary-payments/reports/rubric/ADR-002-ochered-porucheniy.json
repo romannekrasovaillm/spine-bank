@@ -1,0 +1,13 @@
+{
+  "schema": "arch-be/rubric-report/v1",
+  "rubric": "adr_quality",
+  "target": "docs/adr/ADR-002-ochered-porucheniy.md",
+  "target_sha256": "459cdea6b2ceda2b3e22225f49dfd2d171c06d5caeaac10d21477461ed32b52a",
+  "judge_model": "deepseek-flash",
+  "author_model": "claude-code-host",
+  "weighted_total": 3.2,
+  "verdict": "Сильная сторона — честная таблица альтернатив с реальными причинами отказа; главные риски — отсутствие статус-дисциплины (нет expiry, связей и истории статуса) и абстрактные, без митигации, отрицательные последствия. ADR пригоден как рабочая запись решения, но требует доработки под пересмотр и сопровождение.",
+  "unstable": false,
+  "evidence_not_found": 0,
+  "judged_at": "2026-09-20T09:41:25.659486568+03:00"
+}

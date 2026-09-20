@@ -2272,13 +2272,114 @@ fn redteam_json_format_reports_detections() {
     assert_eq!(value["passed"], true);
     assert_eq!(value["control_ok"], true);
     let detections = value["detections"].as_array().expect("detections");
-    // 18 = 16 позиций набора (D1…D13, D11b, R, D14) + красный угол 0.3.5:
-    // D15 (поднятый рукой балл) и D16 (подменённая метка автора, ADR-048).
-    assert_eq!(detections.len(), 18);
+    // 19 = 17 строк релиза 0.3.5 (14 долевых мутантов + R, D14, D15-скелет)
+    // + красный угол среза происхождения: D16 (поднятый рукой балл) и
+    // D17 (подменённая метка автора, ADR-048).
+    assert_eq!(detections.len(), 19);
     let ids: Vec<&str> = detections.iter().filter_map(|d| d["id"].as_str()).collect();
-    for extra in ["D15", "D16"] {
+    for extra in ["D16", "D17"] {
         assert!(ids.contains(&extra), "нет мутатора {extra}: {ids:?}");
     }
+    // 19 = 14 долевых мутантов + контрольные строки (R, D14) + D15 (нарушение
+    // инварианта в реализации скелета, ADR-050) + красный угол происхождения
+    // D16/D17 (ADR-048). В знаменателе доли по-прежнему 14 позиций.
+    assert_eq!(value["total"], 14);
+}
+
+/// Копия кейса для теста: `кейсы/` — часть поставки, и тест не имеет права
+/// её править (архивация дельты внутри репозитория кейса — уже правка).
+fn copy_case(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).expect("каталог копии");
+    for entry in std::fs::read_dir(from).expect("чтение кейса").flatten() {
+        let src = entry.path();
+        let dst = to.join(entry.file_name());
+        if src.is_dir() {
+            copy_case(&src, &dst);
+        } else {
+            std::fs::copy(&src, &dst).expect("копирование файла кейса");
+        }
+    }
+}
+
+/// Д8 (T-08): архивация дельты не имеет права ронять контроль аттестации.
+///
+/// Контрольный мутант D14 — безвредная правка тела сущности: вердикт обязан
+/// остаться прежним, аттестация — измениться. На кейсе, где все дельты
+/// заархивированы, правка защищённого пути краснит `delta_guard` — и контроль
+/// падал «сам по себе»: доля выше порога, а прогон красный, измерение уводит
+/// ступень доверия вниз вместе с метрикой.
+#[test]
+fn redteam_control_survives_delta_archival() {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("кейсы/digital-ruble-merchant");
+    let tmp = tempfile::tempdir().expect("tmp");
+    let home = tmp.path();
+    let case = home.join("case");
+    copy_case(&src, &case);
+    arch_cmd(home)
+        .args(["delta", "archive", "merchant-tsp", "--repo"])
+        .arg(case.as_os_str())
+        .assert()
+        .success();
+    let out = arch_cmd(home)
+        .arg("redteam")
+        .arg(case.as_os_str())
+        .arg("--format")
+        .arg("json")
+        .output()
+        .expect("прогон arch-be");
+    let value: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON-отчёт redteam");
+    assert_eq!(
+        value["control_ok"], true,
+        "контроль аттестации обязан пережить архивацию дельты: {value}"
+    );
+    assert_eq!(value["caught"], 11, "{value}");
+    assert_eq!(value["passed"], true, "{value}");
+    assert!(
+        value["control_note"].is_null(),
+        "пройденный контроль не сопровождается причиной отказа: {value}"
+    );
+}
+
+/// T-09: скиллы, разложенные `connect`, находятся поиском и БЕЗ `arch-be init`.
+///
+/// Библиотека `~/.arch-harness/plugins` появляется только после `init`, поэтому
+/// на проекте сразу после `connect` поиск отвечал «скиллов в индексе: 0», хотя
+/// 63 скилла лежали в `.claude/skills`. Приёмка задачи: `connect` без `init` →
+/// поиск «review» возвращает `adversarial-review`.
+#[test]
+fn connected_skills_are_searchable_without_init() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let home = tmp.path();
+    let proj = home.join("proj");
+    std::fs::create_dir_all(&proj).expect("mkdir proj");
+    arch_cmd(home)
+        .arg("connect")
+        .arg("claude")
+        .arg("--dir")
+        .arg(proj.as_os_str())
+        .assert()
+        .success();
+    assert!(
+        proj.join(".claude/skills/adversarial-review/SKILL.md")
+            .is_file(),
+        "скилл разложен в проект"
+    );
+    // Индекс пуст только пока скиллов нет вовсе: здесь они есть на диске.
+    let mut cmd = arch_cmd(home);
+    cmd.current_dir(&proj).args(["skills", "search", "review"]);
+    cmd.assert()
+        .success()
+        .stdout(contains("adversarial-review"))
+        .stdout(predicates::str::contains("скиллов в индексе: 0").not());
+    // Пустой индекс — не молчаливый ноль, а причина и адрес библиотеки.
+    let empty = home.join("пусто");
+    std::fs::create_dir_all(&empty).expect("mkdir пусто");
+    let mut cmd = arch_cmd(home);
+    cmd.current_dir(&empty).args(["skills", "search", "saga"]);
+    cmd.assert()
+        .success()
+        .stdout(contains("индекс пуст"))
+        .stdout(contains("arch-be init"));
 }
 
 /// W3: `bootstrap` создаёт каркас и называет следующий шаг; `--status` на
