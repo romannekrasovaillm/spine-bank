@@ -105,7 +105,7 @@ arch-be connect qwen     # GigaCode CLI / Qwen Code; также: claude, kimi, o
 | Инструмент | Что даёт |
 |---|---|
 | `kb_search` | поиск по базе знаний архитектора (`knowledge.dirs`) |
-| `skill_search` / `skill_load` | поиск по библиотеке из 63 скиллов и загрузка полного текста |
+| `skill_search` / `skill_load` | поиск по библиотеке из 65 скиллов и загрузка полного текста |
 | `mermaid_render` | mermaid-диаграмма в ASCII (flowchart, sequence, ER, C4) |
 | `rubric_list` / `plugin_list` | что есть из рубрик и плагинов |
 
@@ -128,7 +128,7 @@ arch-be connect qwen     # GigaCode CLI / Qwen Code; также: claude, kimi, o
 
 ## Плейбуки `spine-*` как слэш-команды хоста (MCP prompts)
 
-Кроме инструментов сервер отдаёт capability **prompts**: восемь плейбуков
+Кроме инструментов сервер отдаёт capability **prompts**: девять плейбуков
 работы со Spine приезжают в хост как готовые команды — не нужно помнить
 формулировки и не важно, куда хост кладёт файлы скиллов.
 

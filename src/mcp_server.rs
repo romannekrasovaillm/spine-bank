@@ -188,6 +188,15 @@ const PLAYBOOK_PROMPTS: &[PlaybookPrompt] = &[
         ],
     },
     PlaybookPrompt {
+        name: "spine-semantic-judge",
+        embedded:
+            crate::assets::PLUGIN_SPINE_WORKFLOWS_SKILLS_SPINE_SEMANTIC_JUDGE_SKILL_MD,
+        arguments: &[(
+            "subject",
+            "субъект досье: путь к ADR или файлу кода либо идентификатор сущности модели",
+        )],
+    },
+    PlaybookPrompt {
         name: "spine-contracts-gate",
         embedded: crate::assets::PLUGIN_SPINE_WORKFLOWS_SKILLS_SPINE_CONTRACTS_GATE_SKILL_MD,
         arguments: &[
@@ -3536,7 +3545,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prompts_list_has_eight_playbooks_with_frontmatter_descriptions() {
+    async fn prompts_list_has_nine_playbooks_with_frontmatter_descriptions() {
         // Пустой plugins-каталог → встроенные ассеты (чистая машина).
         let tmp = tempfile::tempdir().expect("tmp");
         let server = server_with_dirs(tmp.path(), tmp.path());
@@ -3559,12 +3568,13 @@ mod tests {
                 "spine-content-bootstrap",
                 "spine-architect-review",
                 "spine-adr-judge",
+                "spine-semantic-judge",
                 "spine-contracts-gate",
                 "spine-archify-viz",
                 "spine-fitness-gate",
                 "spine-bundle",
             ],
-            "восемь плейбуков в зафиксированном порядке"
+            "девять плейбуков в зафиксированном порядке"
         );
         for p in prompts {
             assert!(

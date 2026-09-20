@@ -567,6 +567,13 @@ pub const PLUGIN_SPINE_WORKFLOWS_SKILLS_SPINE_ARCHITECT_REVIEW_SKILL_MD: &str =
 /// Встроенный файл `skills/spine-adr-judge/SKILL.md`.
 pub const PLUGIN_SPINE_WORKFLOWS_SKILLS_SPINE_ADR_JUDGE_SKILL_MD: &str =
     include_str!("../assets/plugins/spine-workflows/skills/spine-adr-judge/SKILL.md");
+
+/// Встроенный файл `assets/plugins/arch-core/skills/semantic-review/SKILL.md`.
+pub const PLUGIN_ARCH_CORE_SKILLS_SEMANTIC_REVIEW_SKILL_MD: &str =
+    include_str!("../assets/plugins/arch-core/skills/semantic-review/SKILL.md");
+/// Встроенный плейбук `assets/plugins/spine-workflows/skills/spine-semantic-judge/SKILL.md`.
+pub const PLUGIN_SPINE_WORKFLOWS_SKILLS_SPINE_SEMANTIC_JUDGE_SKILL_MD: &str =
+    include_str!("../assets/plugins/spine-workflows/skills/spine-semantic-judge/SKILL.md");
 /// Встроенный файл `skills/spine-contracts-gate/SKILL.md`.
 pub const PLUGIN_SPINE_WORKFLOWS_SKILLS_SPINE_CONTRACTS_GATE_SKILL_MD: &str =
     include_str!("../assets/plugins/spine-workflows/skills/spine-contracts-gate/SKILL.md");
@@ -683,7 +690,9 @@ const PLUGIN_FILES: &[(&str, &str)] = &[
     ("plugins/spine-workflows/skills/spine-fitness-gate/SKILL.md", PLUGIN_SPINE_WORKFLOWS_SKILLS_SPINE_FITNESS_GATE_SKILL_MD),
     ("plugins/spine-workflows/skills/spine-architect-review/SKILL.md", PLUGIN_SPINE_WORKFLOWS_SKILLS_SPINE_ARCHITECT_REVIEW_SKILL_MD),
     ("plugins/spine-workflows/skills/spine-adr-judge/SKILL.md", PLUGIN_SPINE_WORKFLOWS_SKILLS_SPINE_ADR_JUDGE_SKILL_MD),
-    ("plugins/spine-workflows/skills/spine-contracts-gate/SKILL.md", PLUGIN_SPINE_WORKFLOWS_SKILLS_SPINE_CONTRACTS_GATE_SKILL_MD),
+
+    ("plugins/arch-core/skills/semantic-review/SKILL.md", PLUGIN_ARCH_CORE_SKILLS_SEMANTIC_REVIEW_SKILL_MD),
+    ("plugins/spine-workflows/skills/spine-semantic-judge/SKILL.md", PLUGIN_SPINE_WORKFLOWS_SKILLS_SPINE_SEMANTIC_JUDGE_SKILL_MD),    ("plugins/spine-workflows/skills/spine-contracts-gate/SKILL.md", PLUGIN_SPINE_WORKFLOWS_SKILLS_SPINE_CONTRACTS_GATE_SKILL_MD),
     ("plugins/spine-workflows/skills/spine-content-bootstrap/SKILL.md", PLUGIN_SPINE_WORKFLOWS_SKILLS_SPINE_CONTENT_BOOTSTRAP_SKILL_MD),
     ("plugins/spine-workflows/skills/spine-archify-viz/SKILL.md", PLUGIN_SPINE_WORKFLOWS_SKILLS_SPINE_ARCHIFY_VIZ_SKILL_MD),
 ];

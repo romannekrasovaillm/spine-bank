@@ -197,7 +197,7 @@ project-scoped сервер из `.mcp.json` и доверие каталогу 
 ![fitness FAIL → fix → PASS](screenshots/connect/04-fitness.png)
 
 Готовые сценарии работы со Spine доступны как **слэш-команды хоста**: сервер
-отдаёт восемь плейбуков `spine-*` (`spine-architect-review`, `spine-fitness-gate`
+отдаёт девять плейбуков `spine-*` (`spine-architect-review`, `spine-fitness-gate`
 и др.) через MCP-промпты (`prompts/list`, `prompts/get`) — в Claude Code это
 команды вида `/mcp__spine__spine-architect-review` из меню `/`. Текст сценария
 встроен в бинарь сервера, поэтому команды работают независимо от того, куда
