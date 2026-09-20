@@ -532,6 +532,7 @@ mod tests {
 - **trace_check** — SKIP — нет каталога model/
 - **model_validate** — SKIP — нет каталога model/
 - **decision_quality** — SKIP — не включена: добавьте 'decision_quality' в [gate.required] нужного маршрута
+- **semantic_quality** — SKIP — не включена: добавьте 'semantic_quality' в [gate.required] нужного маршрута
 
 \* — обязательна для маршрута Fast; остальные — сверх неё.
 
@@ -544,6 +545,7 @@ mod tests {
 - **trace_check** — нет каталога model/ (не обязательна для маршрута)
 - **model_validate** — нет каталога model/ (не обязательна для маршрута)
 - **decision_quality** — не включена: добавьте 'decision_quality' в [gate.required] нужного маршрута (не обязательна для маршрута)
+- **semantic_quality** — не включена: добавьте 'semantic_quality' в [gate.required] нужного маршрута (не обязательна для маршрута)
 
 ## Аттестация
 
@@ -589,6 +591,7 @@ arch-be gate --repo кейс --format json > verdict.json && arch-be gate --repo
 - **trace_check** — SKIP — нет каталога model/
 - **model_validate** — SKIP — нет каталога model/
 - **decision_quality** — SKIP — не включена: добавьте 'decision_quality' в [gate.required] нужного маршрута
+- **semantic_quality** — SKIP — не включена: добавьте 'semantic_quality' в [gate.required] нужного маршрута
 
 \* — обязательна для маршрута Fast; остальные — сверх неё.
 
@@ -601,6 +604,7 @@ arch-be gate --repo кейс --format json > verdict.json && arch-be gate --repo
 - **trace_check** — нет каталога model/ (не обязательна для маршрута)
 - **model_validate** — нет каталога model/ (не обязательна для маршрута)
 - **decision_quality** — не включена: добавьте 'decision_quality' в [gate.required] нужного маршрута (не обязательна для маршрута)
+- **semantic_quality** — не включена: добавьте 'semantic_quality' в [gate.required] нужного маршрута (не обязательна для маршрута)
 
 ## Аттестация
 

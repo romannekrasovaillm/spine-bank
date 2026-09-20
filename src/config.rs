@@ -851,6 +851,64 @@ pub struct GateConfig {
     /// Составляющая `decision_quality` (Н7 волны B 0.3.4, ADR-042): качество
     /// архитектурных решений по отчёту рубрики-судьи.
     pub decision_quality: DecisionQualityConfig,
+    /// Составляющая `semantic_quality` (ADR-052): смысловые рубрики —
+    /// решение против инварианта, ссылка не на ту сущность, обещание без
+    /// механизма, код против инварианта — по отчётам судьи.
+    pub semantic_quality: SemanticQualityConfig,
+}
+
+/// На что смотрит составляющая `semantic_quality` (ADR-052).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SemanticScope {
+    /// Субъекты, чьё досье затронуто диффом от базы или активной дельтой, —
+    /// дешёвый режим для потока доработок (дефолт).
+    #[default]
+    Changed,
+    /// Весь пакет: все ADR, сущности модели и файлы кода под корнями компонент.
+    All,
+}
+
+/// Составляющая `semantic_quality` (ADR-052).
+///
+/// Пустой список `rubrics` — составляющая ничего не требует, даже будучи
+/// включённой в `[gate.required]`: включать её можно раньше, чем заводить
+/// отчёты. Оценка дорогая (k сэмплов судьи на субъект), поэтому гейт **не
+/// оценивает** — он читает отчёты, которые положил хост, и переиспользует
+/// отчёт с совпавшим хэшем досье (ADR-051).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SemanticQualityConfig {
+    /// Имена рубрик из каталога рубрик (`paths.rubrics_dir`), обязательных к
+    /// отчёту. Пусто — ничего не требуется.
+    #[serde(default)]
+    pub rubrics: Vec<String>,
+    /// Область субъектов.
+    #[serde(default)]
+    pub scope: SemanticScope,
+    /// Минимальный взвешенный итог отчёта.
+    #[serde(default = "default_semantic_min_score")]
+    pub min_score: f64,
+    /// Требовать от судьи модель, отличную от автора документа: `true` —
+    /// `judge_is_author` становится error, `false` — warn.
+    #[serde(default)]
+    pub require_distinct_judge: bool,
+}
+
+/// Порог взвешенного итога смысловой рубрики по умолчанию — тот же, что у
+/// `decision_quality`: чек-лист `adr-authoring` требует 3.5 из 5.
+fn default_semantic_min_score() -> f64 {
+    3.5
+}
+
+impl Default for SemanticQualityConfig {
+    fn default() -> Self {
+        Self {
+            rubrics: Vec::new(),
+            scope: SemanticScope::Changed,
+            min_score: default_semantic_min_score(),
+            require_distinct_judge: false,
+        }
+    }
 }
 
 /// Настройки составляющей гейта `decision_quality` (Н7, ADR-042).

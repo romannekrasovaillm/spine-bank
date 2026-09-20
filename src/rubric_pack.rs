@@ -249,6 +249,89 @@ impl ContextPack {
     }
 }
 
+impl ContextPack {
+    /// Разбирает **замороженное** досье из текста: тот же формат маркеров, но
+    /// источники не собираются из репозитория, а читаются из текста.
+    ///
+    /// Зачем: golden-набор смысловых рубрик (ADR-051, S4) хранит досье как
+    /// артефакт — иначе прогон судьи зависел бы от состояния кейса, а калибровка
+    /// судьи обязана быть воспроизводимой (ADR-004). Проверки цитат по ролям и
+    /// сверка покрытия работают по такому досье так же, как по собранному.
+    ///
+    /// # Errors
+    /// В тексте нет ни одного источника или маркеры непарные.
+    pub fn from_text(kind: PackKind, subject: &str, text: &str) -> Result<Self> {
+        let mut inputs = Vec::new();
+        let mut cursor = 0usize;
+        while let Some(rel) = text.get(cursor..).and_then(|t| t.find(SOURCE_BEGIN)) {
+            let open = cursor + rel;
+            let Some(head_rel) = text.get(open..).and_then(|t| t.find('\n')) else {
+                return Err(marker_error(
+                    subject,
+                    "маркер источника без перевода строки",
+                ));
+            };
+            let head = &text[open..open + head_rel];
+            let (role, path) = parse_head(head).ok_or_else(|| {
+                marker_error(subject, &format!("заголовок маркера не разобран: '{head}'"))
+            })?;
+            let body_start = open + head_rel + 1;
+            let Some(body_rel) = text.get(body_start..).and_then(|t| t.find(SOURCE_END)) else {
+                return Err(marker_error(
+                    subject,
+                    &format!("у источника '{path}' нет закрывающего маркера"),
+                ));
+            };
+            let body = text[body_start..body_start + body_rel].trim_end_matches('\n');
+            inputs.push(PackInput {
+                path: path.clone(),
+                sha256: sha256_hex(body.as_bytes()),
+                role,
+                id: path
+                    .split_once('#')
+                    .map(|(_, frag)| frag.to_string())
+                    .filter(|f| !f.is_empty()),
+            });
+            cursor = body_start + body_rel + SOURCE_END.len();
+            if cursor >= text.len() {
+                break;
+            }
+        }
+        if inputs.is_empty() {
+            return Err(pack_error(
+                "pack_text_without_sources",
+                format!(
+                    "текст по субъекту '{subject}' не содержит ни одного источника \
+                     ('{SOURCE_BEGIN} <роль>: <путь> ===') — это не досье"
+                ),
+            ));
+        }
+        Ok(Self {
+            kind,
+            subject: subject.to_string(),
+            sha256: sha256_hex(text.as_bytes()),
+            text: text.to_string(),
+            inputs,
+        })
+    }
+}
+
+/// Заголовок маркера разобранный: роль и путь.
+fn parse_head(head: &str) -> Option<(InputRole, String)> {
+    let rest = head.strip_prefix(SOURCE_BEGIN)?.trim();
+    let (role, path) = rest.split_once(':')?;
+    let path = path.trim().trim_end_matches('=').trim();
+    if path.is_empty() {
+        return None;
+    }
+    Some((InputRole::parse(role).ok()?, path.to_string()))
+}
+
+/// Ошибка разбора замороженного досье: маркеры непарные или битые.
+fn marker_error(subject: &str, what: &str) -> HarnessError {
+    pack_error("pack_text_malformed", format!("досье '{subject}': {what}"))
+}
+
 /// Проверяет, что заголовок маркера объявляет роль `role`
 /// (`=== ИСТОЧНИК subject: путь ===`).
 fn head_ends_with_role(head: &str, role: InputRole) -> bool {
@@ -451,6 +534,16 @@ fn check_limit(pack: &ContextPack) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+/// Относительный путь к файлу от корня репозитория в слешевой форме.
+///
+/// Публичная: тем же правилом пользуется составляющая гейта `semantic_quality`
+/// (ADR-052), когда называет субъектов, — иначе один путь печатался бы в
+/// отчётах в двух разных формах и сверка путей расходилась бы.
+#[must_use]
+pub fn relative_path(repo: &Path, path: &Path) -> String {
+    relative(repo, path)
 }
 
 /// Относительный путь к файлу от корня репозитория в слешевой форме.
