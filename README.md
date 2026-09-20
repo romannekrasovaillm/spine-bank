@@ -4,11 +4,7 @@
 
 <p align="center">
   <b>Spine: архитектурный контур — внутри вашего CLI-агента или как отдельный харнесс с TUI</b><br>
-<<<<<<< HEAD
-  <sub>GigaCode CLI · Claude Code · Kimi Code · Qwen Code · omp · OpenClaw — MCP, 64 скилла, хуки-гейты, судья без API-ключей<br>
-=======
-  <sub>GigaCode CLI · Claude Code · Kimi Code · Qwen Code · omp · OpenClaw — MCP, 65 скиллов, хуки-гейты, судья без API-ключей<br>
->>>>>>> origin/main
+  <sub>GigaCode CLI · Claude Code · Kimi Code · Qwen Code · omp · OpenClaw — MCP, 66 скиллов, хуки-гейты, судья без API-ключей<br>
   Spine as an organ of your coding agent — or a standalone architect harness (TUI + own LLM).</sub>
 </p>
 
@@ -30,11 +26,7 @@
 | | **Spine Core** | **Spine Harness (TUI)** |
 |---|---|---|
 | Для кого | У вас уже есть кодовый агент — **кодер или архитектор** работает внутри него | Вы — архитектор и работаете сами, без внешнего агента |
-<<<<<<< HEAD
-| Что это | «Орган» чужого харнесса: MCP-сервер + 64 скилла + хуки-гейты | Полный харнесс архитектора: TUI + агентный цикл + то же ядро |
-=======
-| Что это | «Орган» чужого харнесса: MCP-сервер + 65 скиллов + хуки-гейты | Полный харнесс архитектора: TUI + агентный цикл + то же ядро |
->>>>>>> origin/main
+| Что это | «Орган» чужого харнесса: MCP-сервер + 66 скиллов + хуки-гейты | Полный харнесс архитектора: TUI + агентный цикл + то же ядро |
 | LLM | **Не нужна**: думает ваш агент; судья — `kind="cli"` или split-judge | Своя: DeepSeek / GLM / Kimi / GigaChat / локальная платформа |
 | Бинарь (релиз) | `arch-be-core-linux-x86_64` (~10 МБ) | `arch-be-linux-x86_64` (~19 МБ) |
 | Сборка | `cargo build --release --no-default-features --features core` | `cargo build --release` |
@@ -48,17 +40,11 @@ MIT; слой `banking/` в публикацию не входит.
 
 # Режим 1. Spine Core внутри вашего харнесса
 
-## Что нового в 0.3.5
+## Что нового в 0.3.6
 
-- **Инвариант → исполняемая проверка.** `arch-be rules template list` —
-  библиотека шаблонов `command_succeeds` (идемпотентность, неопределённый
-  исход, сага с резервом, единственный источник истины, журнал append-only,
-  ПДн в журналах, согласие до автодействия, проверка до побочного эффекта) на
-  python и Java: `apply` кладёт тест свойства и эталонную реализацию в кейс,
-  `verify` доказывает, что тест падает на нарушающей. `rules_suggest` называет
-  **каждый** инвариант без проверки поведения, паспорт вердикта печатает их
-  поимённо. Подробности — ADR-050,
-  `docs/experiments/executable-invariants-2026-09-20.md`.
+Релиз про **проверяемое происхождение оценки**: контур перестаёт делать вид,
+что знает, кто судил, и начинает называть то, что действительно знает.
+
 - **Происхождение оценки: кто судил, чем и что из этого проверяемо.** Отчёт
   рубрики несёт `provenance` (хост и сессия MCP либо команда запуска судьи),
   хэши сырых ответов и уровень независимости — «заявлена» (метки передал хост)
@@ -70,6 +56,18 @@ MIT; слой `banking/` в публикацию не входит.
   харнесс — `rubric handover` / `rubric accept` и плейбук
   `spine-judge-handover`, узкая запись `--rw=reports`. Подробности — ADR-048,
   `docs/experiments/judge-provenance-2026-09-20.md`.
+
+## Что нового в 0.3.5
+
+- **Инвариант → исполняемая проверка.** `arch-be rules template list` —
+  библиотека шаблонов `command_succeeds` (идемпотентность, неопределённый
+  исход, сага с резервом, единственный источник истины, журнал append-only,
+  ПДн в журналах, согласие до автодействия, проверка до побочного эффекта) на
+  python и Java: `apply` кладёт тест свойства и эталонную реализацию в кейс,
+  `verify` доказывает, что тест падает на нарушающей. `rules_suggest` называет
+  **каждый** инвариант без проверки поведения, паспорт вердикта печатает их
+  поимённо. Подробности — ADR-050,
+  `docs/experiments/executable-invariants-2026-09-20.md`.
 
 ## Что нового в 0.3.4
 
@@ -227,11 +225,7 @@ arch-be connect claude
 ```
 
 Пишет `.mcp.json` + `.claude/settings.json` (Stop-хук-гейт) +
-<<<<<<< HEAD
-`.claude/skills/` (64 скилла) + `CLAUDE.md`. Проверка: `claude mcp list` →
-=======
-`.claude/skills/` (65 скиллов) + `CLAUDE.md`. Проверка: `claude mcp list` →
->>>>>>> origin/main
+`.claude/skills/` (66 скиллов) + `CLAUDE.md`. Проверка: `claude mcp list` →
 `spine … ✔ Connected`. При первом запуске — разрешите project-сервер («Yes»).
 
 ![Подключение Claude Code](docs/screenshots/connect/01-connect.png)
@@ -479,13 +473,8 @@ pptx/docx/xlsx-отчёты + плейбуки spine-*) раскладывают
 агенту (на кадрах с прогонов — 55, плейбуки добавлены позже):
 
 <p align="center">
-<<<<<<< HEAD
-  <img src="docs/screenshots/harnesses/claude-skills.png" alt="Claude Code видит 64 скилла Spine" width="47%">
-  <img src="docs/screenshots/harnesses/omp-skills.png" alt="omp видит 64 скилла Spine" width="47%">
-=======
-  <img src="docs/screenshots/harnesses/claude-skills.png" alt="Claude Code видит 65 скиллов Spine" width="47%">
-  <img src="docs/screenshots/harnesses/omp-skills.png" alt="omp видит 65 скиллов Spine" width="47%">
->>>>>>> origin/main
+  <img src="docs/screenshots/harnesses/claude-skills.png" alt="Claude Code видит 66 скиллов Spine" width="47%">
+  <img src="docs/screenshots/harnesses/omp-skills.png" alt="omp видит 66 скиллов Spine" width="47%">
 </p>
 
 ---
@@ -598,11 +587,7 @@ arch-be mcp serve --rw    # + handoff_create (теперь и в core), adr_new,
   живые сессии со скриншотами.
 - [docs/mcp.md](docs/mcp.md) — контракт MCP-сервера и split-judge.
 - [docs/skills_for_architects.md](docs/skills_for_architects.md) — обзор
-<<<<<<< HEAD
-  библиотеки: все 64 скилла в 9 плагинах, с чего начать.
-=======
-  библиотеки: все 65 скиллов в 9 плагинах, с чего начать.
->>>>>>> origin/main
+  библиотеки: все 66 скиллов в 9 плагинах, с чего начать.
 - [docs/INVERSION.md](docs/INVERSION.md) — отчёт по плану инверсии: что сделано, отступления.
 - [README-full.md](README-full.md) — полный тур харнесса (RU/EN).
 

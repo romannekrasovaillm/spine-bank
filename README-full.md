@@ -114,13 +114,13 @@ TUI, CLI, библиотека.
 дисциплина артефактов: спецификации, architecture-spine, ADR, рубрики,
 fitness functions, handoff-пакеты кодовым агентам.
 
+**Что нового в 0.3.6**: проверяемое происхождение оценки — уровень
+независимости судьи («заявлена» или «обеспечена запуском»), хэши сырых ответов
+и находки на правку балла руками; передача судейства во второй харнесс
+(`rubric handover` / `rubric accept`) и узкая запись `--rw=reports`.
 **Что нового в 0.3.5**: инвариант становится исполняемой проверкой
 (`arch-be rules template` — библиотека шаблонов на python и Java, `verify`
-доказывает зубы правила), а отчёт рубрики несёт проверяемое происхождение
-оценки — уровень независимости («заявлена» или «обеспечена запуском»), хэши
-сырых ответов судьи и находки на правку балла руками. Плюс `rubric handover` /
-`rubric accept` для передачи судейства во второй харнесс и узкая запись
-`--rw=reports`. **Что нового в 0.3.4**: паспорт вердикта (`arch-be gate
+доказывает зубы правила) и появляется смысловой слой рубрик. **Что нового в 0.3.4**: паспорт вердикта (`arch-be gate
 --explain` — страница «чего зелёный НЕ означает»), проводник нового кейса
 (`arch-be bootstrap`), метрика доверия к контуру (`arch-be trust`), мутационное
 измерение пакета (`arch-be redteam`), семантика артефактов Evidence Bundle
@@ -272,11 +272,7 @@ BMAD, Spec Kit, OpenSpec и др.):
 
 <p align="center">
   <a href="docs/skills_for_architects.md"><img src="docs/screenshots/07-skills.png" alt="Библиотека скиллов в действии: skill_search находит методики надёжной интеграции, skill_load грузит transactional-outbox и fitness-functions в контекст, контур гейтов фиксируется в ADR · skills library in action" width="92%"></a><br>
-<<<<<<< HEAD
-  <sub>Скиллы в живом ходе: модель сама ищет методики (<code>skill_search</code>), грузит две в контекст (<code>skill_load</code>) и отвечает по методике · Обзор всех 64 скиллов: <a href="docs/skills_for_architects.md">docs/skills_for_architects.md</a></sub>
-=======
-  <sub>Скиллы в живом ходе: модель сама ищет методики (<code>skill_search</code>), грузит две в контекст (<code>skill_load</code>) и отвечает по методике · Обзор всех 65 скиллов: <a href="docs/skills_for_architects.md">docs/skills_for_architects.md</a></sub>
->>>>>>> origin/main
+  <sub>Скиллы в живом ходе: модель сама ищет методики (<code>skill_search</code>), грузит две в контекст (<code>skill_load</code>) и отвечает по методике · Обзор всех 66 скиллов: <a href="docs/skills_for_architects.md">docs/skills_for_architects.md</a></sub>
 </p>
 
 Подробности: `docs/plugins_and_skills.md` (механика: установка, поиск,
@@ -730,11 +726,7 @@ arch-be [--config <path>] <command>   # без команды — TUI
 - `docs/slash_commands.md` — слэш-команды TUI; `docs/tools.md` — инструменты (карта «база vs архитектурные» + полные параметры).
 - `docs/models.md` — подключение LLM (DeepSeek/Kimi/GLM, свои endpoint'ы).
 - `docs/plugins_and_skills.md` — плагины и библиотека скиллов (механика).
-<<<<<<< HEAD
-- `docs/skills_for_architects.md` — обзор библиотеки: все 64 скилла в 9
-=======
-- `docs/skills_for_architects.md` — обзор библиотеки: все 65 скиллов в 9
->>>>>>> origin/main
+- `docs/skills_for_architects.md` — обзор библиотеки: все 66 скиллов в 9
   плагинах, с чего начать.
 - `docs/failure_memory.md` — память сбоев инструментов («ошибся дважды → урок»).
 - `docs/rubrics_and_benchmarks.md`, `docs/control.md`, `docs/governance.md`,
@@ -761,13 +753,13 @@ corporate environments): a thin, Rust-built agent that lives in your terminal
 and speaks the language of architecture work — ADRs, architecture-spine
 invariants, rubrics, fitness functions, handoff packages for coding agents.
 
+**New in 0.3.6**: the provenance of a rubric score — an independence
+level ("declared" or "ensured by launch"), hashes of the judge's raw answers and
+findings for a hand-edited score; plus `rubric handover` / `rubric accept` for
+handing judging to a second harness and the narrow `--rw=reports` write mode.
 **New in 0.3.5**: an invariant becomes an executable check (`arch-be rules
 template` — a template library for python and Java whose `verify` proves the
-rule has teeth), and a rubric report now carries the provenance of its score —
-an independence level ("declared" or "ensured by launch"), hashes of the judge's
-raw answers, and findings for a hand-edited score. Plus `rubric handover` /
-`rubric accept` for handing judging to a second harness and the narrow
-`--rw=reports` write mode. **New in 0.3.4**: the verdict passport (`arch-be gate
+rule has teeth), and a semantic layer of rubrics. **New in 0.3.4**: the verdict passport (`arch-be gate
 --explain` — a page stating what a green does NOT mean), a case conductor
 (`arch-be bootstrap`), a trust metric with anchors and evidence (`arch-be
 trust`), mutation testing of the package itself (`arch-be redteam`), and

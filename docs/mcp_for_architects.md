@@ -105,11 +105,7 @@ arch-be connect qwen     # GigaCode CLI / Qwen Code; также: claude, kimi, o
 | Инструмент | Что даёт |
 |---|---|
 | `kb_search` | поиск по базе знаний архитектора (`knowledge.dirs`) |
-<<<<<<< HEAD
-| `skill_search` / `skill_load` | поиск по библиотеке из 64 скиллов и загрузка полного текста |
-=======
-| `skill_search` / `skill_load` | поиск по библиотеке из 65 скиллов и загрузка полного текста |
->>>>>>> origin/main
+| `skill_search` / `skill_load` | поиск по библиотеке из 66 скиллов и загрузка полного текста |
 | `mermaid_render` | mermaid-диаграмма в ASCII (flowchart, sequence, ER, C4) |
 | `rubric_list` / `plugin_list` | что есть из рубрик и плагинов |
 

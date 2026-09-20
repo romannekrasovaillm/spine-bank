@@ -147,7 +147,6 @@ arch-be rubric run solution_architecture docs/solution.md --model deepseek-pro
 в `reports/rubric-<name>-<timestamp>.md`. В TUI: `/rubric list`,
 `/rubric run <name> <file>` (отчёт — в чат и на вкладку «Рубрика»).
 
-<<<<<<< HEAD
 ### Происхождение оценки (ADR-048)
 
 Вместе с машиночитаемым отчётом (`reports/rubric/<slug>.json`) сохраняются
@@ -168,9 +167,7 @@ arch-be rubric reverify reports/rubric/ADR-001-kafka.json   # или катал�
 
 Что происхождение **не** удостоверяет: какая модель отвечала, механика не
 знает ни в одном режиме; `operator` — запись из git-конфига, а не подпись.
-Подробности и границы — `docs/adr/ADR-048-…md`.
-=======
-### Досье судьи: вход для смысловых рубрик (ADR-051)
+Подробности и границы — `docs/adr/ADR-048-…md`.### Досье судьи: вход для смысловых рубрик (ADR-051)
 
 Рубрика качества судит **один** документ на качество. Смысловая ошибка —
 противоречие между двумя артефактами (решение против инварианта спайна,
@@ -203,7 +200,6 @@ arch-be rubric pack code_vs_spine src/gate.rs#3422-3561   # фрагмент а�
 `pack`+`subject` (взаимоисключающи с `target`/`target_text`); отчёт по досье
 ложится в `reports/rubric/` под именем `<субъект>--<вид>.json` с полями
 `pack_kind`, `subject`, `pack_sha256`, `inputs`.
->>>>>>> origin/main
 
 ## Динамические рубрики
 

@@ -28,12 +28,8 @@ architectural verdict (`passed` + находки) **в момент написа
 arch-be + рендер mermaid-диаграмм — это read-only-инструменты поверх локальных
 каталогов конфига arch-be (`knowledge.dirs`, `plugins.dirs`), не репозитория
 клиента. Отдельная capability — **промпты** (`prompts/list`, `prompts/get`):
-<<<<<<< HEAD
 десять плейбуков spine-workflows как слэш-команды хоста (см. ниже); \
 передача судейства и приёмка — `spine-judge-handover`.
-=======
-десять плейбуков spine-workflows как слэш-команды хоста (см. ниже).
->>>>>>> origin/main
 
 Помимо ручных инструментов работает **мост в реестр** (`tools::full_registry`):
 белый список read-only доменных инструментов (20 штук: верификаторы
