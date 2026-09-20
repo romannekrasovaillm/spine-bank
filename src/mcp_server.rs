@@ -417,6 +417,11 @@ pub struct McpServe {
     cfg: Arc<Config>,
     mode: ServeMode,
     registry: ToolRegistry,
+    /// Состояние сессии: хост из рукопожатия, выданный идентификатор, счётчик
+    /// вызовов и выданные промпты судьи (ADR-048). Транспорт stdio — один
+    /// процесс на сессию, поэтому состояние живёт в сервере, а не в соединении;
+    /// `Mutex` нужен лишь потому, что хендлеры берут `&self`.
+    session: std::sync::Mutex<crate::judge::SessionState>,
 }
 
 /// Исход успешного вызова инструмента: чем заполнить `content`/`structuredContent`.
@@ -557,7 +562,18 @@ impl McpServe {
             cfg,
             mode,
             registry,
+            session: std::sync::Mutex::new(crate::judge::SessionState::new()),
         }
+    }
+
+    /// Состояние сессии. Захват яда мьютекса не ошибка: паника внутри
+    /// критической секции не оставляет состояние неконсистентным (только
+    /// счётчики и метки), поэтому работа продолжается на восстановленном
+    /// значении — отказ сервера из-за этого был бы хуже.
+    fn session(&self) -> std::sync::MutexGuard<'_, crate::judge::SessionState> {
+        self.session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Имя разрешено мосту в текущем режиме: только белые списки режима,
@@ -627,10 +643,34 @@ impl McpServe {
                     }
                     _ => mcp::PROTOCOL_VERSION,
                 };
+                // `clientInfo` — единственное, что хост говорит о себе сам:
+                // запоминаем как ЗАЯВЛЕННОЕ имя и версию (ADR-048: это метка
+                // хоста, а не удостоверение того, кто отвечал на промпты).
+                let host = params.get("clientInfo").and_then(|ci| {
+                    let name = ci.get("name").and_then(Value::as_str)?;
+                    if name.trim().is_empty() {
+                        return None;
+                    }
+                    Some(crate::judge::HostInfo {
+                        name: name.to_string(),
+                        version: ci
+                            .get("version")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                    })
+                });
+                let session_id = {
+                    let mut session = self.session();
+                    if let Some(host) = host {
+                        session.set_host(host);
+                    }
+                    session.id().to_string()
+                };
                 ok_response(
                     id,
                     &json!({
                         "protocolVersion": version,
+                        "sessionId": session_id,
                         "capabilities": {
                             "tools": {"listChanged": false},
                             "prompts": {"listChanged": false},
@@ -704,6 +744,11 @@ impl McpServe {
         }
         let started = std::time::Instant::now();
         let outcome = self.dispatch_tool(name, args).await;
+        // Счётчик вызовов сессии растёт ПОСЛЕ вызова: во время обработки
+        // `self.session().calls()` — это число уже прошедших вызовов, и отчёт
+        // судьи честно называет, сколько работы было в сессии ДО судейства
+        // (косвенный признак рабочего контекста автора, ADR-048).
+        self.session().note_call();
         self.journal_call(name, started.elapsed(), &outcome);
         match outcome {
             Ok(DispatchOutcome::Structured(structured)) => {
@@ -1526,12 +1571,28 @@ impl McpServe {
         let rubric_path = resolve_rubric(&self.cfg.paths.rubrics_dir(), &args.rubric);
         let rub = blocking("rubric_prompt", move || rubric::load(&rubric_path)).await?;
         let samples = self.cfg.judge.samples.max(1);
+        // Запоминаем выданный промпт: `rubric_verify` в той же сессии назовёт
+        // хэш промпта и счётчик вызовов до судейства (ADR-048). Оценку могли
+        // собрать и в другой сессии — тогда `prompt_issued_in_session: false`.
+        let system_prompt = rubric::judge_system_prompt(&rub);
+        let user_prompt = rubric::judge_user_prompt(&rub, &text);
+        let prompt_sha = crate::judge::prompt_sha256(&system_prompt, &user_prompt);
+        let session_id = {
+            let mut session = self.session();
+            session.record_prompt(
+                &crate::judge::prompt_key(&rub.name, &text),
+                prompt_sha.clone(),
+            );
+            session.id().to_string()
+        };
         Ok(json!({
             "rubric": rub.name,
             "criteria": rub.criteria.len(),
-            "system_prompt": rubric::judge_system_prompt(&rub),
-            "user_prompt": rubric::judge_user_prompt(&rub, &text),
+            "system_prompt": system_prompt,
+            "user_prompt": user_prompt,
             "response_json_schema": judge_response_schema(&rub),
+            "prompt_sha256": prompt_sha,
+            "session_id": session_id,
             "judge_config": {
                 "samples": samples,
                 "thinking": self.cfg.judge.thinking,
@@ -1622,17 +1683,48 @@ impl McpServe {
         // гейта `decision_quality`. Пишется только под `--rw`: read-only
         // контур MCP не имеет права оставлять след в рабочем каталоге.
         let mut artifact_note = None;
+        let mut provenance_out: Option<crate::judge::RubricProvenance> = None;
         if let Some(target) = target_path.as_deref() {
             let path = PathBuf::from(target);
             let abs = path.canonicalize().unwrap_or(path);
             if abs.is_file() {
+                let repo = crate::rubric::repo_root_of(&abs);
+                // Происхождение: заявленные метки, выданный промпт, сессия,
+                // оператор из git-конфига — то, что механика знает о судействе
+                // хостовой моделью (ADR-048). Какая модель отвечала, она не
+                // знает: в отчёте это сказано формулировкой паспорта.
+                let issued = self
+                    .session()
+                    .issued_prompt(&crate::judge::prompt_key(&rub.name, &text));
+                let mut provenance = {
+                    let session = self.session();
+                    let mut prov = crate::judge::RubricProvenance::declared(
+                        session.host(),
+                        Some(session.id().to_string()),
+                    );
+                    prov.session_calls_before = issued
+                        .as_ref()
+                        .map_or_else(|| session.calls(), |i| i.calls_before);
+                    prov
+                };
+                if let Some(issued) = issued {
+                    provenance.prompt_sha256 = Some(issued.sha256);
+                    provenance.prompt_issued_in_session = true;
+                }
+                if self.cfg.judge.record_operator {
+                    provenance.operator = crate::judge::operator(&repo);
+                }
+                provenance_out = Some(provenance.clone());
                 if self.mode.allows_write() {
-                    let repo = crate::rubric::repo_root_of(&abs);
-                    match crate::rubric::write_artifact(
+                    let extras = crate::rubric::ArtifactExtras {
+                        provenance: Some(provenance),
+                    };
+                    match crate::rubric::write_artifact_with(
                         &repo,
                         &report,
                         Some(&abs),
                         args.author_model.as_deref(),
+                        &extras,
                     ) {
                         Ok(p) => artifact_note = Some(p.display().to_string()),
                         Err(e) => {
@@ -1650,6 +1742,7 @@ impl McpServe {
             "judge_model": report.judge_model,
             "author_model": args.author_model,
             "artifact": artifact_note,
+            "provenance": provenance_out,
             "judge_samples": report.judge_samples,
             "weighted_total": report.weighted_total,
             "verdict": report.verdict,

@@ -1747,3 +1747,140 @@ fn every_accepted_rubric_argument_is_advertised() {
         "author_model обязан приниматься: {text}"
     );
 }
+/// Рубрика-фикстура для тестов происхождения: один критерий, вес 1.
+fn provenance_rubric(home: &Path) -> String {
+    let path = home.join("provenance-rubric.yaml");
+    std::fs::write(
+        &path,
+        "name: t-rubric\ndescription: тестовая\nscale_max: 5\norigin: anchor\ncriteria:\n  - id: context\n    name: Контекст\n    description: Описан контекст\n    weight: 1.0\n",
+    )
+    .expect("рубрика");
+    path.display().to_string()
+}
+
+/// ADR-001-фикстура внутри кейса с `.arch-handoff/`: по ней работает
+/// `repo_root_of`, а значит и запись отчёта, который читает гейт.
+fn provenance_case(home: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    let repo = home.join("case");
+    std::fs::create_dir_all(repo.join(".arch-handoff")).expect("mkdir handoff");
+    std::fs::write(repo.join(".arch-handoff/CONSTRAINTS.yaml"), "constraints: []\n")
+        .expect("constraints");
+    let adr = repo.join("docs/adr/ADR-001-pilot.md");
+    std::fs::create_dir_all(adr.parent().expect("каталог ADR")).expect("mkdir adr");
+    std::fs::write(
+        &adr,
+        "# ADR-001. Пилот\n\n- Статус: Accepted\n- Дата: 2026-09-20\n\n## Context\n\nКонтекст описан явно и коротко.\n",
+    )
+    .expect("ADR");
+    (repo, adr)
+}
+
+/// Ответ судьи-фикстуры: один разобранный ответ на критерий `context`.
+fn provenance_answer() -> String {
+    "{\"scores\":[{\"criterion_id\":\"context\",\"score\":4,\"rationale\":\"Цитата: \\\"Контекст описан явно\\\" — да\"}],\"verdict\":\"годно\"}".to_string()
+}
+
+/// AP-1 (ADR-048): `initialize` запоминает `clientInfo` и выдаёт идентификатор
+/// сессии; отчёт, собранный хостом, несёт ЗАЯВЛЕННОЕ происхождение — режим
+/// `declared`, хост с версией, идентификатор сессии, хэш выданного промпта и
+/// счётчик вызовов до судейства. Ни одно поле не утверждает «независимость
+/// подтверждена»: какая модель отвечала, механика не знает.
+#[test]
+fn initialize_stores_client_info_and_session() {
+    let home = tempfile::tempdir().expect("tmp");
+    let (repo, adr) = provenance_case(home.path());
+    let rubric = provenance_rubric(home.path());
+    let init = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-06-18",
+            "clientInfo": {"name": "claude-code", "version": "2.1.278"},
+        },
+    })
+    .to_string();
+    let prompt = call(
+        2,
+        "rubric_prompt",
+        &json!({"rubric": rubric, "target": adr.display().to_string()}),
+    );
+    let verify = call(
+        3,
+        "rubric_verify",
+        &json!({
+            "rubric": rubric,
+            "target": adr.display().to_string(),
+            "judge_model": "glm-5.2",
+            "answers": [provenance_answer()],
+        }),
+    );
+    let responses = mcp_serve_with_args(home.path(), &["--rw"], &batch(&[init, prompt, verify]));
+    let session_id = responses[0]["result"]["sessionId"]
+        .as_str()
+        .expect("идентификатор сессии в ответе initialize")
+        .to_string();
+    assert!(!session_id.is_empty(), "сессия без идентификатора");
+    let prompt_out = structured(&responses[1], 2);
+    assert!(prompt_out["prompt_sha256"].is_string(), "{prompt_out}");
+    let verdict = structured(&responses[2], 3);
+    let prov = &verdict["provenance"];
+    assert_eq!(prov["mode"], "declared", "{prov}");
+    assert_eq!(prov["host"]["name"], "claude-code", "{prov}");
+    assert_eq!(prov["host"]["version"], "2.1.278", "{prov}");
+    assert_eq!(prov["session_id"], json!(session_id), "{prov}");
+    assert_eq!(prov["prompt_issued_in_session"], true, "{prov}");
+    // До `rubric_prompt` в сессии не было ни одного вызова инструмента.
+    assert_eq!(prov["session_calls_before"], 0, "{prov}");
+    assert_eq!(prompt_out["session_id"], json!(session_id), "{prompt_out}");
+    assert_eq!(prompt_out["prompt_sha256"], prov["prompt_sha256"], "{prov}");
+    // Тот же блок — в файле отчёта, который читает гейт.
+    let artifact: Value = serde_json::from_str(
+        &std::fs::read_to_string(repo.join("reports/rubric/ADR-001-pilot.json")).expect("отчёт"),
+    )
+    .expect("JSON отчёта");
+    assert_eq!(artifact["provenance"]["mode"], "declared", "{artifact}");
+    assert_eq!(
+        artifact["provenance"]["host"]["name"], "claude-code",
+        "{artifact}"
+    );
+    assert_eq!(artifact["provenance"]["session_id"], json!(session_id));
+}
+
+/// AP-2 (ADR-048): `rubric_verify` без предшествующего `rubric_prompt` в этой
+/// сессии — не ошибка: судить могли в другой (в том числе чистой) сессии.
+/// Отчёт получается, происхождение честно говорит `prompt_issued_in_session:
+/// false` и не выдаёт чужой промпт за свой.
+#[test]
+fn verify_without_prompt_in_session_is_recorded_not_rejected() {
+    let home = tempfile::tempdir().expect("tmp");
+    let (_repo, adr) = provenance_case(home.path());
+    let rubric = provenance_rubric(home.path());
+    let init = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {"clientInfo": {"name": "qwen-code"}},
+    })
+    .to_string();
+    let verify = call(
+        2,
+        "rubric_verify",
+        &json!({
+            "rubric": rubric,
+            "target": adr.display().to_string(),
+            "judge_model": "deepseek-v4-pro",
+            "answers": [provenance_answer()],
+        }),
+    );
+    let responses = mcp_serve_with_args(home.path(), &["--rw"], &batch(&[init, verify]));
+    let verdict = structured(&responses[1], 2);
+    assert_eq!(verdict["answers"]["valid"], 1, "{verdict}");
+    let prov = &verdict["provenance"];
+    assert_eq!(prov["mode"], "declared", "{prov}");
+    assert_eq!(prov["prompt_issued_in_session"], false, "{prov}");
+    assert_eq!(prov["host"]["name"], "qwen-code", "{prov}");
+    // Версии хост не назвал — поле отсутствует, а не выдумано.
+    assert!(prov["host"].get("version").is_none(), "{prov}");
+    assert!(prov.get("prompt_sha256").is_none(), "{prov}");
+}

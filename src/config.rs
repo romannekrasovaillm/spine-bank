@@ -706,6 +706,12 @@ pub struct JudgeConfig {
     /// `max_tokens` провайдера и обрывали JSON посреди ответа
     /// (кейс 2026-09-01, deepseek-v4-flash).
     pub thinking: Option<bool>,
+    /// Писать в отчёт рубрики, кто организовал судейство: git `user.name` и
+    /// `user.email` репозитория (поле `provenance.operator`, ADR-048).
+    /// Это запись из git-конфига, а не подпись: личность механикой не
+    /// удостоверяется, а имя с адресом попадают в коммитимый JSON отчёта —
+    /// поэтому ключ существует (`false` выключает запись).
+    pub record_operator: bool,
 }
 
 impl Default for JudgeConfig {
@@ -716,6 +722,7 @@ impl Default for JudgeConfig {
             evidence_min_similarity: 0.8,
             golden_max_mae: 1.0,
             thinking: None,
+            record_operator: true,
         }
     }
 }

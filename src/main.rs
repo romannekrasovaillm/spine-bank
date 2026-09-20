@@ -2900,11 +2900,25 @@ async fn cmd_rubric(cfg: &Arc<Config>, cmd: RubricCmd) -> Result<()> {
             // относится документ, — иначе гейт его не найдёт.
             let abs_target = target.canonicalize().unwrap_or_else(|_| target.clone());
             let repo = arch_harness::rubric::repo_root_of(&abs_target);
-            match arch_harness::rubric::write_artifact(
+            // Происхождение `launched`: судью запустил Spine — известны
+            // команда и аргументы запуска (или имя API-модели), неизвестна
+            // отвечавшая модель (ADR-048).
+            let model_name = model.unwrap_or_else(|| cfg.default_model.clone());
+            let mut provenance = arch_harness::judge::RubricProvenance::launched(
+                arch_harness::judge::launcher_for(cfg, &model_name),
+            );
+            if cfg.judge.record_operator {
+                provenance.operator = arch_harness::judge::operator(&repo);
+            }
+            let extras = arch_harness::rubric::ArtifactExtras {
+                provenance: Some(provenance),
+            };
+            match arch_harness::rubric::write_artifact_with(
                 &repo,
                 &report,
                 Some(&abs_target),
                 author_model.as_deref(),
+                &extras,
             ) {
                 Ok(path) => eprintln!("Отчёт для гейта: {}", path.display()),
                 Err(e) => eprintln!("⚠ машиночитаемый отчёт не записан: {e}"),

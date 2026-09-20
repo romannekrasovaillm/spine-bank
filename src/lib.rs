@@ -61,6 +61,7 @@ pub mod harness;
 pub mod hash;
 pub mod hooks;
 pub mod injection;
+pub mod judge;
 pub mod kb;
 pub mod landscape;
 pub mod llm;

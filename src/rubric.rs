@@ -222,8 +222,25 @@ pub struct RubricArtifact {
     /// Число критериев с `evidence_not_found`.
     #[serde(default)]
     pub evidence_not_found: usize,
+    /// Происхождение оценки: как получен отчёт, что из этого удостоверено
+    /// механикой и что заявлено (ADR-048). Отсутствует у отчётов до появления
+    /// блока — это читается как режим `declared` без деталей.
+    #[serde(default)]
+    pub provenance: Option<crate::judge::RubricProvenance>,
     /// Метка времени оценки (RFC 3339).
     pub judged_at: String,
+}
+
+impl RubricArtifact {
+    /// Режим происхождения оценки: у отчёта без блока `provenance` — `declared`
+    /// без деталей (оценку собрал хост, но чем именно — отчёт не говорит).
+    #[must_use]
+    pub fn provenance_mode(&self) -> &str {
+        self.provenance.as_ref().map_or(
+            crate::judge::MODE_DECLARED,
+            crate::judge::RubricProvenance::mode,
+        )
+    }
 }
 
 /// Slug имени файла отчёта: путь документа, обезвреженный до имени файла
@@ -251,7 +268,18 @@ pub fn artifact_slug(target: Option<&Path>) -> String {
     }
 }
 
-/// Записывает отчёт рубрики в `<repo>/reports/rubric/<slug>.json`.
+/// Дополнительные сведения отчёта, которых нет в [`RubricReport`]:
+/// происхождение оценки (ADR-048). Отдельная структура, а не новые аргументы
+/// [`write_artifact`], — вызывающие без происхождения не переписываются.
+#[derive(Debug, Clone, Default)]
+pub struct ArtifactExtras {
+    /// Происхождение оценки: режим, хост, сессия, запускатель, отпечатки
+    /// сырых ответов, оператор.
+    pub provenance: Option<crate::judge::RubricProvenance>,
+}
+
+/// Записывает отчёт рубрики в `<repo>/reports/rubric/<slug>.json` без
+/// происхождения (поведение до ADR-048).
 ///
 /// # Errors
 /// Каталог отчётов не создаётся или файл не пишется.
@@ -260,6 +288,26 @@ pub fn write_artifact(
     report: &RubricReport,
     target: Option<&Path>,
     author_model: Option<&str>,
+) -> Result<PathBuf> {
+    write_artifact_with(
+        repo,
+        report,
+        target,
+        author_model,
+        &ArtifactExtras::default(),
+    )
+}
+
+/// Записывает отчёт рубрики вместе с происхождением оценки.
+///
+/// # Errors
+/// Каталог отчётов не создаётся или файл не пишется.
+pub fn write_artifact_with(
+    repo: &Path,
+    report: &RubricReport,
+    target: Option<&Path>,
+    author_model: Option<&str>,
+    extras: &ArtifactExtras,
 ) -> Result<PathBuf> {
     // Путь документа — относительный: аттестация не должна зависеть от того,
     // где склонирован репозиторий.
@@ -291,6 +339,7 @@ pub fn write_artifact(
             .iter()
             .filter(|s| s.has_flag(CriterionFlag::EvidenceNotFound))
             .count(),
+        provenance: extras.provenance.clone(),
         judged_at: chrono::Local::now().to_rfc3339(),
     };
     let dir = repo.join(RUBRIC_REPORTS_DIR);
