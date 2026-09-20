@@ -281,7 +281,7 @@ cd /tmp/e2e2 && arch-be control check . --constraints CONSTRAINTS.yaml
 ## 8. Как воспроизвести
 
 ```bash
-cd /home/roman/spine-bank-034
+cd /home/user/spine-bank   # путь к своему клону
 cargo build
 ./target/debug/arch-be rules template list
 ./target/debug/arch-be rules template show idempotency-key
