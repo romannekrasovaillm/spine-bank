@@ -188,6 +188,39 @@ CI её отсутствие ловит `--require-python` для python-пол�
 - **Стоимость**: исполняемое правило идёт в каждом прогоне гейта, включая
   Stop-хук и pre-push. Это записано в ADR-050 и в скилле `fitness-functions`.
 
+## 4a. Сквозная приёмка задания (§8) — пройдена
+
+На копии `кейсы/salary-payments` (каталог кейса в репозитории не тронут):
+
+```
+cp -r кейсы/salary-payments /tmp/e2e2
+arch-be rules template apply idempotency-key --ad AD-001 --dir /tmp/e2e2
+#   → 4 файла в skeleton/rule_templates/idempotency-key/, lock с SHA-256,
+#     напечатан фрагмент правила (id C-100, ad: AD-001) и строка verified_by
+arch-be rules template verify --dir /tmp/e2e2
+#   → пропуск «адаптирован: правила 'idempotency_key_enforced' нет в реестре» —
+#     честно, пока фрагмент не внесён дельтой
+# вносим напечатанный фрагмент (как это сделала бы дельта) и повторяем:
+arch-be rules template verify --dir /tmp/e2e2
+#   → ✓ idempotency-key [python] violating: код 1 — правило «с зубами»
+cd /tmp/e2e2 && arch-be control check . --constraints CONSTRAINTS.yaml
+#   → Итог: PASS, exit 0
+sed -i 's/if key in self._answers:/if False:/' skeleton/rule_templates/idempotency-key/reference_impl.py
+cd /tmp/e2e2 && arch-be control check . --constraints CONSTRAINTS.yaml
+#   → Итог: FAIL, exit 1  (нарушение инварианта краснеет)
+```
+
+Отдельно: `apply` **не** правит реестр и спайн (тест
+`apply_does_not_touch_registry_or_spine`) и не перезаписывает существующие файлы
+(повторное применение — ошибка с перечнем конфликтов).
+
+**Поправка по ходу приёмки.** Первый прогон скрипта дал на последнем шаге PASS
+и exit 0: заготовка правила печаталась с `severity: warn`, и нарушение
+инварианта не краснело. Это исправлено — заготовка идёт с `severity: error`
+(ложных срабатываний нет: на эталонной реализации тест зелёный, проверено 32
+проверками `verify --all`), а понижение до `warn` — решение архитектора, пока
+проверка не перенесена на настоящий код.
+
 ## 5. Что изменилось для читателя
 
 | Было (0.3.4) | Стало |
