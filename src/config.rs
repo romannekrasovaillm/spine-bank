@@ -1020,6 +1020,13 @@ impl PathsConfig {
         self.assets_dir.join("benchmarks")
     }
 
+    /// Каталог библиотеки шаблонов исполняемых правил
+    /// (`arch-be rules template …`, [`crate::rule_templates`]).
+    #[must_use]
+    pub fn rule_templates_dir(&self) -> PathBuf {
+        self.assets_dir.join("rule-templates")
+    }
+
     /// Каталог JSON-отчётов eval-сьютов: `evals/` в корне данных харнесса
     /// (по умолчанию `~/.arch-harness/evals`; следует за переопределением
     /// `reports_dir` — корнем считается его родитель).

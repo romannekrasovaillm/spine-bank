@@ -2021,6 +2021,63 @@ pub fn load_fitness_rules_with_skips(
     Ok((rules.into_iter().chain(constraints).collect(), skipped))
 }
 
+/// Карточка правила реестра для читателей вне `control` (детектор
+/// исполняемых инвариантов, проверка зубов шаблонов, паспорт и трассировка):
+/// что за правило, какого оно типа, какую команду запускает и какой инвариант
+/// спайна задевает.
+///
+/// Поля [`FitnessRule`] крейт-видимые, но `pattern`/`command`/`ad`/`covers` —
+/// приватные, поэтому внешние модули читают карточку, а не сам `FitnessRule`.
+#[derive(Debug, Clone, Serialize)]
+pub struct RuleCard {
+    /// Идентификатор правила (`C-12`), если задан.
+    pub id: Option<String>,
+    /// Имя правила (код находки).
+    pub name: String,
+    /// Тип проверки в snake_case (`command_succeeds`, `must_contain`, …).
+    pub kind: &'static str,
+    /// Команда (только у `command_succeeds`).
+    pub command: Option<String>,
+    /// Задетый инвариант спайна (`ad: AD-6`), если задан.
+    pub ad: Option<String>,
+    /// Требования, которые правило покрывает (`covers: [...]`).
+    pub covers: Vec<String>,
+}
+
+impl RuleCard {
+    /// Правило проверяет ПОВЕДЕНИЕ, а не наличие текста
+    /// ([`BEHAVIOUR_RULE_KINDS`]).
+    #[must_use]
+    pub fn is_behaviour(&self) -> bool {
+        BEHAVIOUR_RULE_KINDS.contains(&self.kind)
+    }
+
+    /// Ключ правила для сопоставления с `verified_by` сущности: `id`, иначе имя.
+    #[must_use]
+    pub fn key(&self) -> &str {
+        self.id.as_deref().unwrap_or(self.name.as_str())
+    }
+}
+
+/// Загружает карточки правил реестра (плоский список: id, имя, тип, команда,
+/// задетый инвариант) — общий резолвер для читателей вне `control`.
+///
+/// # Errors
+/// Те же, что у [`load_fitness_rules`].
+pub fn rule_cards(constraints: &Path) -> Result<Vec<RuleCard>> {
+    Ok(load_fitness_rules(constraints)?
+        .into_iter()
+        .map(|r| RuleCard {
+            id: r.id,
+            name: r.name,
+            kind: r.kind.as_str(),
+            command: r.command,
+            ad: r.ad,
+            covers: r.covers,
+        })
+        .collect())
+}
+
 /// Переменная окружения с каталогом-реестром родительских
 /// constraint-файлов (резолв непутевых ref в `extends`; без сети,
 /// `docs/corp-spine.md`).

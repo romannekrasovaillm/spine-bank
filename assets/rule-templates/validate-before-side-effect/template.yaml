@@ -1,0 +1,79 @@
+# Шаблон исполняемого правила: проверка раньше побочного эффекта.
+#
+# Свойство (П1): провал проверки не оставляет за собой исполненное действие.
+# Проверяется на фейке внешней системы со счётчиком обращений — без сети.
+id: validate-before-side-effect
+version: 1
+title: "Проверка раньше побочного эффекта: отказ не оставляет исполненного действия"
+pattern: >-
+  Точка входа проверяет предусловия (стоп-лист получателя, доступный лимит)
+  до обращения к внешней системе: при провале проверки обращений ноль и лимит
+  не израсходован, при успехе — ровно одно обращение. Порядок проверок
+  не влияет на исход.
+match:
+  ru:
+    - "побочн"
+    - "проверк"
+    - "стоп-лист"
+    - "предуслови"
+    - "лимит"
+    - "до обращени"
+    - "порядок проверок"
+  en:
+    - "side-effect"
+    - "validate"
+    - "precondition"
+    - "fail-fast"
+properties:
+  - "при провале проверки обращений к внешней системе ноль"
+  - "отклонённый перевод не расходует лимит клиента"
+  - "успешный перевод даёт ровно одно обращение и списывает ровно сумму"
+  - "порядок проверок не меняет исход: два нарушения сразу тоже дают ноль обращений"
+  - "проверка предшествует списанию лимита, а не следует за ним"
+rule:
+  name: validate_before_side_effect
+  type: command_succeeds
+  severity: warn
+  timeout_secs: 120
+  rationale: >-
+    инвариант «проверка раньше эффекта» проверяется исполнением: провал
+    предусловия не оставляет за собой исполненное обращение и списанный лимит
+  fix_hint: >-
+    перенести проверку со скелета на настоящую точку входа: команда правила
+    должна прогонять тесты вашего кода, а не эталонной реализации из шаблона
+  skill: fitness-functions
+  commands:
+    python: "python3 -m pytest -q -p no:cacheprovider skeleton/rule_templates/validate-before-side-effect/test_validate_before_side_effect.py"
+    java: "mvn -q -f skeleton/rule_templates/validate-before-side-effect/java test"
+files:
+  - lang: common
+    from: README.md
+    to: README.md
+  - lang: python
+    from: python/fakes.py
+    to: fakes.py
+  - lang: python
+    from: python/reference_impl.py
+    to: reference_impl.py
+  - lang: python
+    from: python/test_validate_before_side_effect.py
+    to: test_validate_before_side_effect.py
+  - lang: java
+    from: java/pom.xml
+    to: java/pom.xml
+  - lang: java
+    from: java/src/main/java/Fakes.java
+    to: java/src/main/java/Fakes.java
+  - lang: java
+    from: java/src/main/java/Subject.java
+    to: java/src/main/java/Subject.java
+  - lang: java
+    from: java/src/test/java/ValidateBeforeSideEffectTest.java
+    to: java/src/test/java/ValidateBeforeSideEffectTest.java
+violating:
+  - lang: python
+    to: reference_impl.py
+    from: python/violating_impl.py
+  - lang: java
+    to: java/src/main/java/Subject.java
+    from: java/violating/Subject.java

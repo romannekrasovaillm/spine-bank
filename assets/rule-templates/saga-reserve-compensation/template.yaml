@@ -1,0 +1,81 @@
+# Шаблон исполняемого правила: компенсация резерва в саге.
+#
+# Свойство (П3): резерв не остаётся подвешенным ни при одном исходе —
+# отказ снимает резерв, неопределённость удерживает, успех списывает ровно раз.
+# Проверяется на фейках внешней системы и лимитного резерва — без сети, без сна.
+id: saga-reserve-compensation
+version: 1
+title: "Компенсация резерва в саге: отказ снимает, неопределённость удерживает"
+pattern: >-
+  Операция идёт через сагу: под сумму удерживается резерв, затем отправляется
+  поручение во внешнюю систему, и исход решает судьбу резерва. Отказ снимает
+  резерв и не даёт списания; неопределённый исход резерв удерживает — ни
+  снятия, ни списания, пока исход не выяснен; успех превращает резерв
+  в списание ровно один раз.
+match:
+  ru:
+    - "резерв"
+    - "компенсац"
+    - "сага"
+    - "откат"
+    - "удерж"
+    - "снят"
+    - "лимит"
+  en:
+    - "reserve"
+    - "compensat"
+    - "saga"
+    - "rollback"
+    - "release"
+properties:
+  - "отказ внешней системы снимает резерв и не даёт списания"
+  - "неопределённый исход удерживает резерв: он не снят и не превращён в списание"
+  - "успех превращает резерв в списание ровно один раз"
+  - "снятый при отказе резерв возвращает лимит следующей операции"
+rule:
+  name: saga_reserve_compensation
+  type: command_succeeds
+  severity: warn
+  timeout_secs: 120
+  rationale: >-
+    компенсация резерва проверяется исполнением: резерв не остаётся
+    подвешенным ни при отказе, ни при неопределённом исходе, ни при успехе
+  fix_hint: >-
+    перенести проверку со скелета на настоящую сагу: команда правила
+    должна прогонять тесты вашего кода, а не эталонной реализации из шаблона
+  skill: fitness-functions
+  commands:
+    python: "python3 -m pytest -q -p no:cacheprovider skeleton/rule_templates/saga-reserve-compensation/test_saga_reserve_compensation.py"
+    java: "mvn -q -f skeleton/rule_templates/saga-reserve-compensation/java test"
+files:
+  - lang: common
+    from: README.md
+    to: README.md
+  - lang: python
+    from: python/fakes.py
+    to: fakes.py
+  - lang: python
+    from: python/reference_impl.py
+    to: reference_impl.py
+  - lang: python
+    from: python/test_saga_reserve_compensation.py
+    to: test_saga_reserve_compensation.py
+  - lang: java
+    from: java/pom.xml
+    to: java/pom.xml
+  - lang: java
+    from: java/src/main/java/Fakes.java
+    to: java/src/main/java/Fakes.java
+  - lang: java
+    from: java/src/main/java/Subject.java
+    to: java/src/main/java/Subject.java
+  - lang: java
+    from: java/src/test/java/SagaReserveCompensationTest.java
+    to: java/src/test/java/SagaReserveCompensationTest.java
+violating:
+  - lang: python
+    to: reference_impl.py
+    from: python/violating_impl.py
+  - lang: java
+    to: java/src/main/java/Subject.java
+    from: java/violating/Subject.java

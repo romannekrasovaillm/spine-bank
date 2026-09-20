@@ -1,0 +1,77 @@
+# Шаблон исполняемого правила: идемпотентность по ключу.
+#
+# Свойство (П1): повторная доставка с тем же ключом не создаёт второй эффект.
+# Проверяется на фейке внешней системы — без сети, без сна, без протокола.
+id: idempotency-key
+version: 1
+title: "Идемпотентность по ключу: повторная доставка не создаёт второй эффект"
+pattern: >-
+  Точка входа принимает ключ идемпотентности и дедуплицирует операцию:
+  повторная доставка с тем же ключом возвращает прежний ответ и не создаёт
+  второй эффект у внешней системы; разные ключи дают разные эффекты.
+match:
+  ru:
+    - "идемпотент"
+    - "ключ"
+    - "повторн"
+    - "дедуплик"
+    - "дубл"
+    - "двух доставок"
+    - "двойн"
+  en:
+    - "idempot"
+    - "dedup"
+    - "duplicate"
+    - "replay"
+properties:
+  - "две доставки с одним ключом дают ровно один эффект у внешней системы"
+  - "ответ на повторную доставку равен первому ответу"
+  - "разные ключи дают два независимых эффекта"
+  - "повторная доставка не увеличивает число обращений к внешней системе"
+rule:
+  name: idempotency_key_enforced
+  type: command_succeeds
+  severity: warn
+  timeout_secs: 120
+  rationale: >-
+    инвариант идемпотентности проверяется исполнением: повторная доставка
+    с тем же ключом не создаёт второй эффект
+  fix_hint: >-
+    перенести проверку со скелета на настоящую точку входа: команда правила
+    должна прогонять тесты вашего кода, а не эталонной реализации из шаблона
+  skill: fitness-functions
+  commands:
+    python: "python3 -m pytest -q -p no:cacheprovider skeleton/rule_templates/idempotency-key/test_idempotency_key.py"
+    java: "mvn -q -f skeleton/rule_templates/idempotency-key/java test"
+files:
+  - lang: common
+    from: README.md
+    to: README.md
+  - lang: python
+    from: python/fakes.py
+    to: fakes.py
+  - lang: python
+    from: python/reference_impl.py
+    to: reference_impl.py
+  - lang: python
+    from: python/test_idempotency_key.py
+    to: test_idempotency_key.py
+  - lang: java
+    from: java/pom.xml
+    to: java/pom.xml
+  - lang: java
+    from: java/src/main/java/Fakes.java
+    to: java/src/main/java/Fakes.java
+  - lang: java
+    from: java/src/main/java/Subject.java
+    to: java/src/main/java/Subject.java
+  - lang: java
+    from: java/src/test/java/IdempotencyKeyTest.java
+    to: java/src/test/java/IdempotencyKeyTest.java
+violating:
+  - lang: python
+    to: reference_impl.py
+    from: python/violating_impl.py
+  - lang: java
+    to: java/src/main/java/Subject.java
+    from: java/violating/Subject.java
