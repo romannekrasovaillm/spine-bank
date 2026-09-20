@@ -2980,6 +2980,47 @@ fn accept_matches_gate_verdict() {
         "правка обязана краснить приёмку: {stdout}"
     );
     assert!(stdout.contains("гейт красный"), "{stdout}");
+    // И приёмка сама называет причину: балл не сходится с сохранёнными
+    // ответами, из которых отчёт объявлен собранным.
+    assert!(
+        stdout.contains("сходятся: НЕТ"),
+        "правка балла видна и в приёмке: {stdout}"
+    );
+}
+
+/// J9 (ADR-048): отчёт без сохранённых сырых ответов приёмка называет
+/// «проверять нечего», а не «ответы расходятся». Разница существенная: во
+/// втором случае приёмка обвиняла бы отчёт в подлоге, которого не проверяла
+/// (тот же принцип, что у примечания гейта «отчёт невоспроизводим»).
+#[test]
+fn accept_calls_legacy_report_unverifiable_not_divergent() {
+    let home = tempfile::tempdir().expect("tmp");
+    let (repo, adr, rubric) = judge_gate_case(home.path());
+    judge_report_via_mcp(home.path(), &adr, &rubric, "glm-5.2");
+    // Сырые ответы убираем: получается ровно форма отчёта 0.3.4 — свежий по
+    // хэшу документа, но невоспроизводимый.
+    let raw = repo.join("reports/rubric/raw");
+    std::fs::remove_dir_all(&raw).expect("сырые ответы убраны");
+    let out = arch_cmd(home.path())
+        .arg("rubric")
+        .arg("accept")
+        .arg("--dir")
+        .arg(repo.as_os_str())
+        .output()
+        .expect("rubric accept");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("ответы не сохранены"),
+        "отчёт без отчётов-близнецов назван невоспроизводимым: {stdout}"
+    );
+    assert!(
+        !stdout.contains("сходятся: НЕТ"),
+        "невоспроизводимость — не расхождение: {stdout}"
+    );
+    assert!(
+        out.status.success(),
+        "свежий отчёт без сырых ответов приёмку не краснит: {stdout}"
+    );
 }
 
 /// J9 (ADR-048): `rubric run --all-accepted` судит только те принятые ADR, у

@@ -1131,10 +1131,13 @@ pub fn handover(
             (Some(a), Some(sha)) if a.target_sha256.as_ref() != Some(sha) => "stale",
             _ => "fresh",
         };
-        let slug = crate::rubric::artifact_slug(Some(&adr));
-        let reproduced = artifact.map(|_| {
-            let raw = load_raw_answers(repo, &slug);
-            !raw.is_empty() && raw.iter().all(|a| !a.tampered())
+        // Три состояния, а не два: «ответы сходятся», «ответы расходятся» и
+        // «сырых ответов нет — проверять нечего». Старый отчёт без ответов
+        // попадает в третье: назвать его расхождением значило бы обвинить
+        // отчёт в том, чего механика не проверяла (ADR-048).
+        let reproduced = artifact.and_then(|a| {
+            let check = reverify(repo, a, &cfg.paths.rubrics_dir(), &cfg.judge);
+            check.raw_saved.then(|| check.reproduced())
         });
         items.push(HandoverItem {
             path: rel,
