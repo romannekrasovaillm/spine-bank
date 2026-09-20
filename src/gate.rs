@@ -709,28 +709,80 @@ fn component_fitness(repo: &Path, constraints: &ConstraintsPath) -> GateComponen
         return GateComponent::skip("fitness", message);
     }
     let label = constraints_label(repo, &constraints.path);
-    // Пометка дрейфа двух копий реестра (E2): обе существуют и различаются.
-    let drift_note = constraints.drift.as_ref().map_or_else(String::new, |d| {
-        format!(
-            "; {}",
-            control::constraints_drift_note(&constraints.path, d)
-        )
-    });
+    // T-02: расхождение двух копий реестра — не пометка в тексте, а находка.
+    // Пакетная копия приоритетна (резолвер E2), поэтому расхождение означает:
+    // гейт проверяет НЕ тот реестр, что лежит в корне проекта, и правила
+    // корня в вердикте не участвуют вовсе. Раньше это был PASS с припиской
+    // «копии реестра различаются» — то есть зелёный там, где контур проверяет
+    // не то, что написал архитектор (и где `redteam` D7 не ловил ослабления).
+    let divergence = registry_divergence(repo, constraints);
     let notes = mention_rule_notes(&constraints.path);
+    let detail = |summary: &str| {
+        summary.to_string()
+            + &constraints.drift.as_ref().map_or_else(String::new, |d| {
+                format!(
+                    "; {}",
+                    control::constraints_drift_note(&constraints.path, d)
+                )
+            })
+    };
+    if let Some(finding) = divergence {
+        let mut findings = vec![finding];
+        let summary = match control::check(repo, &constraints.path) {
+            Ok(report) => {
+                findings.extend(report.issues.iter().map(GateFinding::lint));
+                report.summary
+            }
+            Err(e) => format!("сбой выполнения: {e}"),
+        };
+        return GateComponent::fail("fitness", detail(&summary), findings).noting(notes);
+    }
     match control::check(repo, &constraints.path) {
         Ok(report) if report.passed => GateComponent::pass(
             "fitness",
-            format!("{} — файл: {label}{drift_note}", report.summary),
+            format!("{} — файл: {label}", detail(&report.summary)),
         )
         .noting(notes),
         Ok(report) => GateComponent::fail(
             "fitness",
-            format!("{} — файл: {label}{drift_note}", report.summary),
+            format!("{} — файл: {label}", detail(&report.summary)),
             report.issues.iter().map(GateFinding::lint).collect(),
         )
         .noting(notes),
         Err(e) => GateComponent::fail("fitness", format!("сбой выполнения: {e}"), Vec::new()),
     }
+}
+
+/// Находка `registry_diverged` (T-02): в проекте две копии реестра правил, и
+/// они различаются. Гейт читает пакетную (`.arch-handoff/`), значит правила
+/// корневой копии — те, что видит архитектор, — в вердикте не участвуют.
+///
+/// Числа правил в тексте нужны, чтобы расхождение было действием, а не
+/// диагнозом: «3 правила против 1» сразу говорит, какая копия устарела.
+fn registry_divergence(repo: &Path, constraints: &ConstraintsPath) -> Option<GateFinding> {
+    let other = constraints.drift.as_ref()?;
+    let used = constraints_label(repo, &constraints.path);
+    let other_label = constraints_label(repo, other);
+    let count = |path: &Path| {
+        control::load_constraints_resolved(path).map_or_else(
+            |_| "реестр не читается".to_string(),
+            |r| format!("{} правил", r.rules.len()),
+        )
+    };
+    Some(GateFinding {
+        severity: "error".into(),
+        rule: Some("registry_diverged".into()),
+        file: Some(used.clone()),
+        line: Some(0),
+        message: format!(
+            "копии реестра различаются: гейт прочитал {used} ({used_count}), \
+             {other_label} ({other_count}) — правила второй копии в вердикте не \
+             участвуют. Синхронизируйте копии: `cp {other_label} {used}` (или \
+             пересоберите пакет: `arch-be handoff … --refresh-constraints`)",
+            used_count = count(&constraints.path),
+            other_count = count(other),
+        ),
+    })
 }
 
 /// Граница вердикта `fitness` (W1, блок 2 паспорта): доля правил реестра,
@@ -1911,6 +1963,17 @@ fn collect_inputs(
         "constraints",
         crate::hash::sha256_file(constraints)
             .map_or_else(|| "absent".to_string(), |h| format!("sha256:{h}")),
+    );
+    // T-02: ПО КАКОМУ реестру судили и сколько в нём правил. Хэш отвечает
+    // «тот же файл или нет», но не отвечает «а какой файл-то»: при двух
+    // копиях (пакетная приоритетна, корневая — fallback) это первое, что
+    // нужно знать читателю вердикта. Путь относительный — аттестация не
+    // зависит от каталога, куда склонирован репозиторий.
+    push("constraints_path", constraints_label(repo, constraints));
+    push(
+        "constraints_rules",
+        control::load_constraints_resolved(constraints)
+            .map_or_else(|_| "unreadable".to_string(), |r| r.rules.len().to_string()),
     );
     // Спайн: оба исторических расположения (как у `spine_lint`).
     let spine = ["ARCHITECTURE-SPINE.md", "docs/ARCHITECTURE-SPINE.md"]
@@ -3209,6 +3272,85 @@ mod tests {
             component.detail.contains("не существует"),
             "{}",
             component.detail
+        );
+    }
+
+    // --- T-02: две копии реестра правил ----------------------------------
+
+    /// Расхождение двух копий реестра — находка `registry_diverged` (error), а
+    /// не пометка в тексте. Гейт читает пакетную копию первой, поэтому
+    /// расхождение означает: правила корневой копии — те, что написал
+    /// архитектор, — в вердикте не участвуют вовсе. Раньше `fitness` при этом
+    /// оставался PASS с припиской «копии реестра различаются».
+    #[test]
+    fn diverged_registries_are_a_finding_not_a_note() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("repo");
+        make_gate_repo(&repo);
+        let packet_registry = repo.join(".arch-handoff/CONSTRAINTS.yaml");
+        let packet_rules = std::fs::read_to_string(&packet_registry).expect("реестр пакета");
+        // Корневая копия — другой реестр (в жизни так делает `bootstrap`:
+        // реестр в корне, а `handoff` кладёт в пакет заготовку).
+        std::fs::write(
+            repo.join("CONSTRAINTS.yaml"),
+            "rules:\n  - id: C-001\n    name: readme_exists\n    type: file_exists\n    path: \"README.md\"\n    severity: error\n",
+        )
+        .expect("корневой реестр");
+        std::fs::write(repo.join("README.md"), "# Проект\n").expect("readme");
+
+        let report = run(&repo, None, None, None, (1, 4)).expect("гейт");
+        let fitness = report
+            .components
+            .iter()
+            .find(|c| c.name == "fitness")
+            .expect("составляющая");
+        assert_eq!(status_of(&report, "fitness"), GateStatus::Fail);
+        let finding = fitness
+            .findings
+            .iter()
+            .find(|f| f.rule.as_deref() == Some("registry_diverged"))
+            .unwrap_or_else(|| panic!("нет находки registry_diverged: {}", render(&report)));
+        assert_eq!(finding.severity, "error");
+        // Текст — действие, а не диагноз: названы оба пути и оба числа правил.
+        assert!(finding.message.contains("2 правил"), "{}", finding.message);
+        assert!(finding.message.contains("1 правил"), "{}", finding.message);
+        assert!(finding.message.contains("cp "), "{}", finding.message);
+
+        // Синхронизация копий снимает находку.
+        std::fs::copy(repo.join("CONSTRAINTS.yaml"), &packet_registry).expect("синхронизация");
+        let report = run(&repo, None, None, None, (1, 4)).expect("гейт");
+        assert_eq!(status_of(&report, "fitness"), GateStatus::Pass);
+        assert!(
+            !render(&report).contains("registry_diverged"),
+            "{}",
+            render(&report)
+        );
+
+        // Приоритет копий виден в числах первой проверки: «прочитано 2»
+        // относится к ПАКЕТНОЙ копии (`make_gate_repo`), а не к корневой.
+        assert_eq!(
+            packet_rules.lines().filter(|l| l.contains("name:")).count(),
+            2
+        );
+    }
+
+    /// Паспорт (JSON `inputs`) называет ПУТЬ прочитанного реестра и число
+    /// правил: хэш отвечает «тот же файл или нет», но не «какой именно файл».
+    #[test]
+    fn inputs_name_the_registry_and_rule_count() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("repo");
+        make_gate_repo(&repo);
+        let report = run(&repo, None, None, None, (1, 4)).expect("гейт");
+        let inputs: std::collections::BTreeMap<String, String> =
+            report.inputs.iter().cloned().collect();
+        assert_eq!(
+            inputs.get("constraints_path").map(String::as_str),
+            Some(".arch-handoff/CONSTRAINTS.yaml")
+        );
+        assert_eq!(
+            inputs.get("constraints_rules").map(String::as_str),
+            Some("2")
         );
     }
 

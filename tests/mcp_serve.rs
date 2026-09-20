@@ -1205,6 +1205,11 @@ fn bridge_tranche2_reports_over_stdio() {
 /// единое ревью (маршрут + контур гейта + модель + контракты) с JSON-вердиктом
 /// в `structuredContent.output`; `change_impact` — радиус изменения по
 /// `id` (граф модели) и честная мягкая ошибка на неизвестном id.
+/// T-02: реестр кейса-фикстуры. Копии (корневая и пакетная) обязаны
+/// совпадать: расхождение гейт называет находкой `registry_diverged`, и
+/// «чистый кейс» перестаёт быть чистым.
+const REGISTRY: &str = "rules:\n  - id: C-001\n    name: no_float_money\n    type: must_not_contain\n    glob: \"**/*.rs\"\n    pattern: 'f64'\n    severity: error\n    owner: Команда платежей\n";
+
 #[test]
 fn bridge_tranche3_composite_tools_over_stdio() {
     let home = tempfile::tempdir().expect("tmp");
@@ -1237,11 +1242,7 @@ fn bridge_tranche3_composite_tools_over_stdio() {
         "---\nid: CMP-001\ntype: cmp\ntitle: Платёжный шлюз\nstatus: designed\nimplements: [AD-1]\ndepends_on: [INT-001]\naffects: [OWNER-1]\ncode_roots: [services/pay]\n---\n\nТело.\n",
     )
     .expect("CMP с владельцем");
-    std::fs::write(
-        case.join("CONSTRAINTS.yaml"),
-        "constraints:\n  - id: C-001\n    name: no_float_money\n    owner: Команда платежей\n",
-    )
-    .expect("constraints");
+    std::fs::write(case.join("CONSTRAINTS.yaml"), REGISTRY).expect("constraints");
     std::fs::write(
         case.join("ARCHITECTURE-SPINE.md"),
         "# Spine\n\n### AD-1. Точные деньги\n- Binds: денежные суммы\n- Prevents: потеря копеек\n- Rule: суммы в minor units\n",
@@ -1255,11 +1256,8 @@ fn bridge_tranche3_composite_tools_over_stdio() {
     )
     .expect("контракт");
     std::fs::create_dir_all(case.join(".arch-handoff")).expect("mkdir handoff");
-    std::fs::write(
-        case.join(".arch-handoff/CONSTRAINTS.yaml"),
-        "rules:\n  - name: spine_present\n    type: file_exists\n    path: \"ARCHITECTURE-SPINE.md\"\n    severity: error\n",
-    )
-    .expect("handoff constraints");
+    std::fs::write(case.join(".arch-handoff/CONSTRAINTS.yaml"), REGISTRY)
+        .expect("handoff constraints");
     git(&case, &["init", "-q"]);
     git(&case, &["add", "."]);
     git(&case, &["commit", "-q", "-m", "init"]);

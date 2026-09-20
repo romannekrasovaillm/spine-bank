@@ -435,12 +435,22 @@ fn mutate_d6(root: &Path) -> std::result::Result<(), String> {
 }
 
 /// D7: ослабление правила, закоммичено — severity понижается.
+///
+/// T-02: мутируется ТОТ реестр, который читает гейт, — им резолвер выбирает
+/// пакетную копию (`.arch-handoff/CONSTRAINTS.yaml`) и лишь затем корневую.
+/// Раньше предпочтение отдавалось корневому файлу: при двух копиях мутант
+/// ослаблял не тот реестр, гейт этого не видел, и D7 считался не пойманным —
+/// «дыра в защите» на ровном месте.
 fn mutate_d7(root: &Path) -> std::result::Result<(), String> {
-    let rel = if root.join("CONSTRAINTS.yaml").is_file() {
-        "CONSTRAINTS.yaml"
-    } else {
-        ".arch-handoff/CONSTRAINTS.yaml"
-    };
+    let resolved = crate::control::resolve_constraints_path(root, None);
+    let rel = resolved
+        .as_deref()
+        .and_then(|p| p.strip_prefix(root).ok())
+        .map_or_else(
+            || ".arch-handoff/CONSTRAINTS.yaml".to_string(),
+            |p| p.display().to_string(),
+        );
+    let rel = rel.as_str();
     let text = read(root, rel)?;
     let mut lines: Vec<String> = Vec::new();
     let mut weakened = false;
@@ -1207,6 +1217,38 @@ mod tests {
         assert_eq!(Expectation::Caught.label(), "ловится");
         assert_eq!(Expectation::Semantic.label(), "семантика");
         assert_eq!(Expectation::Control.label(), "контроль");
+    }
+
+    /// T-02: D7 ослабляет ТОТ реестр, который читает гейт. При двух копиях
+    /// (пакетной и корневой) резолвер выбирает пакетную — если мутант правит
+    /// корневую, гейт ослабления не видит, и D7 числится непойманным на
+    /// ровном месте: «дыра в защите», которой нет.
+    #[test]
+    fn d7_weakens_the_registry_the_gate_reads() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let case = tmp.path().join("case");
+        std::fs::create_dir_all(case.join(".arch-handoff")).expect("mkdir");
+        let strong = "rules:\n  - name: spine_present\n    type: file_exists\n    path: \"ARCHITECTURE-SPINE.md\"\n    severity: error\n";
+        std::fs::write(case.join(".arch-handoff/CONSTRAINTS.yaml"), strong).expect("реестр пакета");
+        std::fs::write(
+            case.join("CONSTRAINTS.yaml"),
+            "rules:\n  - name: readme_exists\n    type: file_exists\n    path: \"README.md\"\n    severity: error\n  - name: no_pan\n    type: must_not_contain\n    glob: \"**/*.py\"\n    pattern: 'PAN'\n    severity: error\n",
+        )
+        .expect("корневой реестр");
+        std::fs::write(case.join("ARCHITECTURE-SPINE.md"), "# Spine\n").expect("spine");
+
+        mutate_d7(&case).expect("мутант D7");
+        let packet =
+            std::fs::read_to_string(case.join(".arch-handoff/CONSTRAINTS.yaml")).expect("пакет");
+        assert!(
+            packet.contains("severity: warn"),
+            "ослабление обязано быть в реестре, который читает гейт: {packet}"
+        );
+        let root = std::fs::read_to_string(case.join("CONSTRAINTS.yaml")).expect("корень");
+        assert!(
+            root.contains("severity: error"),
+            "корневая копия мутантом не трогается — её гейт не читает: {root}"
+        );
     }
 
     #[test]

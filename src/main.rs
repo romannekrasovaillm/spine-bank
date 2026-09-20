@@ -144,6 +144,10 @@ enum Cmd {
         /// Маршрут значимости: fast|standard|critical (таймаут прогона: 1800/3600/7200 с).
         #[arg(long, default_value = "standard")]
         route: String,
+        /// Перезаписать существующий пакетный CONSTRAINTS.yaml (T-02):
+        /// без флага правки архитектора в пакете сохраняются.
+        #[arg(long)]
+        refresh_constraints: bool,
     },
     /// Прогнать кодовый харнесс по handoff-пакету. Только сборка `harness`.
     #[cfg(feature = "harness")]
@@ -1549,6 +1553,7 @@ async fn main() -> Result<()> {
             spec,
             rollback,
             route,
+            refresh_constraints,
         }) => {
             if !cfg.harnesses.contains_key(&harness) {
                 anyhow::bail!(
@@ -1558,13 +1563,16 @@ async fn main() -> Result<()> {
             }
             let route: arch_harness::control::Route =
                 route.parse().map_err(|e: String| anyhow::anyhow!(e))?;
-            let packet = arch_harness::handoff::generate_handoff(
+            let packet = arch_harness::handoff::generate_handoff_opts(
                 &repo,
                 &task,
                 &spec,
                 &cfg,
                 rollback.as_deref(),
                 route,
+                arch_harness::handoff::HandoffOptions {
+                    refresh_constraints,
+                },
             )?;
             println!("Handoff-пакет: {}", packet.dir.display());
             for f in &packet.files {
@@ -1593,6 +1601,14 @@ async fn main() -> Result<()> {
                 println!(
                     "⚠ незакоммиченные изменения отслеживаемых файлов: откат на baseline их потеряет"
                 );
+            }
+            // T-02: гейт читает пакетную копию реестра первой — что в неё
+            // попало, видно в выводе, а не только в файле.
+            match &packet.constraints_action {
+                Some(action) => println!("реестр правил пакета: {action}"),
+                None => println!(
+                    "реестр правил пакета: существующий файл не тронут (--refresh-constraints перезапишет)"
+                ),
             }
         }
         #[cfg(feature = "harness")]

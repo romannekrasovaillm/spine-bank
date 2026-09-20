@@ -1088,11 +1088,14 @@ mod tests {
         for (name, text) in entities {
             std::fs::write(model.join(name), text).expect("сущность");
         }
-        std::fs::write(
-            dir.join("CONSTRAINTS.yaml"),
-            "constraints:\n  - id: C-001\n    name: no_float_money\n    owner: Команда платежей\n",
-        )
-        .expect("constraints");
+        // T-02: обе копии реестра обязаны совпадать. Корневая несёт карточку
+        // C-001 (её читает `change_impact`), пакетная — то, что прогоняет
+        // гейт; расхождение копий гейт называет находкой `registry_diverged`,
+        // и «чистый кейс» перестаёт быть чистым.
+        let registry = "rules:\n  - id: C-001\n    name: no_float_money\n    \
+             type: must_not_contain\n    glob: \"**/*.rs\"\n    pattern: 'f64'\n    \
+             severity: error\n    owner: Команда платежей\n";
+        std::fs::write(dir.join("CONSTRAINTS.yaml"), registry).expect("constraints");
         std::fs::write(
             dir.join("ARCHITECTURE-SPINE.md"),
             "# Spine\n\n### AD-1. Точные деньги\n- Binds: денежные суммы\n- Prevents: потеря копеек\n- Rule: суммы в minor units\n",
@@ -1106,11 +1109,8 @@ mod tests {
         )
         .expect("контракт");
         std::fs::create_dir_all(dir.join(".arch-handoff")).expect("mkdir handoff");
-        std::fs::write(
-            dir.join(".arch-handoff/CONSTRAINTS.yaml"),
-            "rules:\n  - name: spine_present\n    type: file_exists\n    path: \"ARCHITECTURE-SPINE.md\"\n    severity: error\n",
-        )
-        .expect("handoff constraints");
+        std::fs::write(dir.join(".arch-handoff/CONSTRAINTS.yaml"), registry)
+            .expect("handoff constraints");
         git(dir, &["init", "-q"]);
         git(dir, &["add", "."]);
         git(dir, &["commit", "-q", "-m", "init"]);

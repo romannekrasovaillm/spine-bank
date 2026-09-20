@@ -158,7 +158,15 @@ arch-be control sensors examples/specs
 строкой «копии реестра различаются: используется X; Y отличается (drift)» —
 пометку печатают секция `fitness` единого гейта, `rules-report`,
 `openspec coverage`, `agents-md refresh` и MCP-инструменты
-(`fitness_check`/`rules_report`/`openspec_coverage`, JSON-поле `drift_note`). Итог PASS, если нет находок с severity `error`; **при FAIL —
+(`fitness_check`/`rules_report`/`openspec_coverage`, JSON-поле `drift_note`).
+Для **единого гейта** одной пометки мало (T-02): там расхождение копий —
+находка `registry_diverged` (severity error, то есть FAIL составляющей
+`fitness`), потому что гейт судит по пакетной копии, а корневую — ту, что
+обычно пишет архитектор, — не читает вовсе. Находка называет оба пути, оба
+числа правил и способ синхронизации. Путь прочитанного реестра и число правил
+попадают в конверт вердикта (`inputs.constraints_path`, `inputs.constraints_rules`),
+поэтому читатель вердикта видит, ПО КАКОМУ реестру он получен, а не только
+«тот же файл или нет». Итог PASS, если нет находок с severity `error`; **при FAIL —
 exit code 1** (годится для CI). Обход пропускает служебные и производные
 каталоги — `.git`, `target`, `node_modules`, `dist`, `__pycache__`, `.next`,
 `.pytest_cache` и `.arch-handoff`: правила целятся в артефакты реализации,
@@ -796,7 +804,7 @@ job summary — `markdown`. Текстовый вывод не меняется;
 
 | Составляющая | Что прогоняет | FAIL, когда |
 |---|---|---|
-| `fitness` | `control check` по `CONSTRAINTS.yaml` (дефолт `<repo>/.arch-handoff/CONSTRAINTS.yaml`, при его отсутствии — fallback на `<repo>/CONSTRAINTS.yaml`; `--constraints` — другой файл; секция печатает использованный путь: `— файл: …`, а при расхождении двух копий — пометку дрейфа `; копии реестра различаются: …`) | находки severity error; файл есть, но не читается/не валиден |
+| `fitness` | `control check` по `CONSTRAINTS.yaml` (дефолт `<repo>/.arch-handoff/CONSTRAINTS.yaml`, при его отсутствии — fallback на `<repo>/CONSTRAINTS.yaml`; `--constraints` — другой файл; секция печатает использованный путь: `— файл: …`, а при расхождении двух копий — и пометку дрейфа `; копии реестра различаются: …`, и находку `registry_diverged`) | находки severity error; файл есть, но не читается/не валиден; две копии реестра различаются (T-02); реестра нет ни в корне, ни в `.arch-handoff/` — SKIP с причиной (на обязательном маршруте это INCOMPLETE, а не зелёный) |
 | `delta_guard` | `delta guard` (защищённые пути: `model/`, `ARCHITECTURE-SPINE.md`, `CONSTRAINTS.yaml`); деталь PASS-секции — покрытие защищённых файлов дельтами (`— покрытие: file ← 'delta'`) | правки защищённых файлов без активной дельты |
 | `rule_weakened` | анти-ослабление реестра правил относительно git-базы (см. ниже); тот же резолв файла, что у fitness, fail-closed | правило удалено / `exclude_glob` расширен / severity понижен без активного override; явный `--constraints` вне репозитория |
 | `spine_lint` | `control spine ARCHITECTURE-SPINE.md` | error-находки линтера |

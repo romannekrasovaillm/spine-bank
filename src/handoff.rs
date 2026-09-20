@@ -281,6 +281,20 @@ pub struct HandoffPacket {
     /// декомпозиция REQ → задачи и т.п.); не блокируют сборку.
     #[serde(default)]
     pub warnings: Vec<String>,
+    /// Что сделано с пакетным реестром правил (T-02): копия корневого
+    /// `CONSTRAINTS.yaml`, заготовка под стек или «существующий файл не
+    /// тронут». `None` — реестр в пакете не писался.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub constraints_action: Option<String>,
+}
+
+/// Опции генерации пакета (T-02).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct HandoffOptions {
+    /// Перезаписать пакетную копию реестра правил (`--refresh-constraints`):
+    /// по умолчанию существующий файл пакета не трогается — правки
+    /// архитектора сохраняются.
+    pub refresh_constraints: bool,
 }
 
 /// Метаданные пакета (`MANIFEST.json`).
@@ -335,6 +349,30 @@ pub fn generate_handoff(
     cfg: &Config,
     rollback: Option<&str>,
     route: Route,
+) -> Result<HandoffPacket> {
+    generate_handoff_opts(
+        repo,
+        task,
+        spec_files,
+        cfg,
+        rollback,
+        route,
+        HandoffOptions::default(),
+    )
+}
+
+/// [`generate_handoff`] с опциями (T-02).
+///
+/// # Errors
+/// Как у [`generate_handoff`].
+pub fn generate_handoff_opts(
+    repo: &Path,
+    task: &str,
+    spec_files: &[PathBuf],
+    cfg: &Config,
+    rollback: Option<&str>,
+    route: Route,
+    opts: HandoffOptions,
 ) -> Result<HandoffPacket> {
     if !repo.is_dir() {
         return Err(HarnessError::Harness(format!(
@@ -405,16 +443,38 @@ pub fn generate_handoff(
         )));
     }
 
-    // CONSTRAINTS.yaml — только при отсутствии (не затирать пользовательские правила).
-    // Дефолт — под стек репозитория (Cargo.toml/pyproject.toml/go.mod/package.json).
+    // CONSTRAINTS.yaml — только при отсутствии (не затирать пользовательские
+    // правила), если не передан `--refresh-constraints`.
+    //
+    // T-02: пакетная копия ПРИОРИТЕТНА для резолвера гейта. Заготовка из
+    // одного правила, положенная в пакет поверх корневого реестра из
+    // шестнадцати, молча переключала гейт на себя: «Правил: 1, PASS» вместо
+    // прогона реальных правил проекта. Поэтому при существующем корневом
+    // реестре в пакет идёт его КОПИЯ — то, что написал архитектор, и то, что
+    // прочитает гейт, обязаны совпадать.
     let constraints_path = dir.join("CONSTRAINTS.yaml");
-    if !constraints_path.exists() {
-        let constraints_text = default_constraints(repo);
+    let root_registry = repo.join(crate::control::ROOT_CONSTRAINTS_PATH);
+    let mut constraints_action: Option<String> = None;
+    if !constraints_path.exists() || opts.refresh_constraints {
+        let (text, action) = if root_registry.is_file() {
+            let text = std::fs::read_to_string(&root_registry)
+                .map_err(|e| HarnessError::io(&root_registry, e))?;
+            (
+                text,
+                format!("копия корневого {}", crate::control::ROOT_CONSTRAINTS_PATH),
+            )
+        } else {
+            (
+                default_constraints(repo),
+                "заготовка под стек (корневого реестра в репозитории нет)".to_string(),
+            )
+        };
         // Самовалидация генератора до записи: падение здесь — дефект шаблонов,
         // а не данных репозитория (лучше ошибка, чем битый файл исполнителю).
-        validate_constraints_text(&constraints_text)?;
-        std::fs::write(&constraints_path, constraints_text)
+        validate_constraints_text(&text)?;
+        std::fs::write(&constraints_path, text)
             .map_err(|e| HarnessError::io(&constraints_path, e))?;
+        constraints_action = Some(action);
     }
 
     // SPEC.md — только при отсутствии (не затирать правки архитектора):
@@ -513,6 +573,7 @@ pub fn generate_handoff(
         git_dirty_tracked: baseline.dirty_tracked,
         recommended_timeout_secs: timeout,
         warnings,
+        constraints_action,
     })
 }
 
@@ -1309,21 +1370,30 @@ impl Tool for HandoffCreateTool {
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "Корень репозитория (относительно cwd или абсолютный)"},
+                    "path": {"type": "string", "description": "Корень репозитория (относительно cwd или абсолютный); историческое имя `repo` принимается. T-02: при существующем корневом CONSTRAINTS.yaml пакетный реестр — его КОПИЯ, а не заготовка: гейт читает пакетную копию первой, и расхождение копий он называет находкой registry_diverged"},
                     "task": {"type": "string", "description": "Формулировка задачи для кодового харнесса"},
                     "spec": {"type": "array", "items": {"type": "string"}, "description": "Пути к спецификациям/ADR (md), опционально"},
                     "rollback": {"type": "string", "description": "Явный план отката (шаги, сигналы, владелец решения); по умолчанию — откат на baseline-коммит"},
-                    "route": {"type": "string", "enum": ["fast", "standard", "critical"], "description": "Маршрут значимости из significance_score: задаёт рекомендованный таймаут прогона (fast=1800с, standard=3600с, critical=7200с); по умолчанию standard"}
+                    "route": {"type": "string", "enum": ["fast", "standard", "critical"], "description": "Маршрут значимости из significance_score: задаёт рекомендованный таймаут прогона (fast=1800с, standard=3600с, critical=7200с); по умолчанию standard"},
+                    "refresh_constraints": {"type": "boolean", "description": "Перезаписать существующий пакетный CONSTRAINTS.yaml (T-02): без флага файл пакета не трогается — правки архитектора сохраняются"}
                 },
-                "required": ["repo", "task"]
+                "required": ["task"]
             }),
         }
     }
 
     async fn call(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput> {
-        let Some(repo) = args.get("repo").and_then(Value::as_str) else {
+        // Каноничное имя пути — `path` (Н8); `repo` держится синонимом, чтобы
+        // старые клиенты и скрипты продолжали работать (T-02: раньше схема
+        // объявляла `path`, а инструмент требовал `repo` — вызов по
+        // объявленному имени падал).
+        let Some(repo) = args
+            .get("path")
+            .or_else(|| args.get("repo"))
+            .and_then(Value::as_str)
+        else {
             return Ok(ToolOutput::err(
-                "handoff_create: обязательный аргумент 'repo' (string) отсутствует",
+                "handoff_create: обязательный аргумент 'path' (string; историческое имя 'repo') отсутствует",
             ));
         };
         let Some(task) = args.get("task").and_then(Value::as_str) else {
@@ -1350,7 +1420,13 @@ impl Tool for HandoffCreateTool {
             },
             None => Route::Standard,
         };
-        match generate_handoff(&repo, task, &spec, &self.cfg, rollback, route) {
+        let opts = HandoffOptions {
+            refresh_constraints: args
+                .get("refresh_constraints")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        };
+        match generate_handoff_opts(&repo, task, &spec, &self.cfg, rollback, route, opts) {
             Ok(packet) => {
                 let files = packet
                     .files
@@ -1408,10 +1484,24 @@ impl Tool for HandoffCreateTool {
                 for w in &packet.warnings {
                     let _ = write!(out, "\nВНИМАНИЕ: {w}");
                 }
-                out.push_str(
-                    "\nНапоминание: CONSTRAINTS.yaml — стековая заготовка; перед передачей \
-                     перепишите правила под spine-инварианты (AD-n) эпика.",
-                );
+                // T-02: что стало с пакетным реестром — часть результата, а не
+                // деталь: гейт читает ПАКЕТНУЮ копию первой, поэтому «пакет
+                // собран» без ответа на вопрос «а какие правила он применит»
+                // оставлял бы исполнителя с чужим реестром.
+                match &packet.constraints_action {
+                    Some(action) => {
+                        let _ = write!(
+                            out,
+                            "\nРеестр правил пакета: {action} — гейт читает именно пакетную копию \
+                             (пакетная приоритетна, корневая — fallback); перед передачей \
+                             перепишите правила под spine-инварианты (AD-n) эпика."
+                        );
+                    }
+                    None => out.push_str(
+                        "\nРеестр правил пакета: существующий файл не тронут \
+                         (`--refresh-constraints` перезапишет его копией корневого).",
+                    ),
+                }
                 Ok(ToolOutput::ok(out))
             }
             Err(e) => Ok(ToolOutput::err(format!("handoff_create: {e}"))),
@@ -2083,8 +2173,11 @@ mod tests {
             .await
             .expect("call");
         assert!(out.content.contains("ниже окна рубрики"), "{}", out.content);
+        // T-02: в выводе названо, ЧТО стало с пакетным реестром — гейт читает
+        // именно его. Корневого реестра здесь нет, значит заготовка под стек.
         assert!(
-            out.content.contains("стековая заготовка"),
+            out.content
+                .contains("Реестр правил пакета: заготовка под стек"),
             "{}",
             out.content
         );
@@ -2676,5 +2769,130 @@ mod tests {
         .expect("handoff 2");
         let spec2 = std::fs::read_to_string(packet2.dir.join("SPEC.md")).expect("SPEC.md 2");
         assert!(spec2.starts_with(SPEC_MACHINE_BANNER), "{spec2}");
+    }
+
+    /// Н13 (T-02): схема инструмента объявляет ровно то, что разбирает
+    /// реализация. Раньше `handoff_create` рекламировал свойство `path`, а
+    /// требовал `repo` — клиент, читающий `tools/list`, получал отказ по
+    /// несуществующему аргументу.
+    #[test]
+    fn handoff_tool_schema_advertises_what_it_parses() {
+        let cfg = Config::default();
+        let tools = tools(&cfg);
+        let spec = tools[0].spec();
+        let props = spec.parameters["properties"]
+            .as_object()
+            .expect("properties")
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        for arg in [
+            "path",
+            "task",
+            "spec",
+            "rollback",
+            "route",
+            "refresh_constraints",
+        ] {
+            assert!(props.contains(&arg.to_string()), "нет '{arg}' в {props:?}");
+        }
+        // Обязательные аргументы обязаны быть объявлены среди свойств.
+        for req in spec.parameters["required"].as_array().expect("required") {
+            let req = req.as_str().expect("строка");
+            assert!(
+                props.contains(&req.to_string()),
+                "обязательный '{req}', но его нет в свойствах: {props:?}"
+            );
+        }
+        assert_eq!(spec.parameters["required"], serde_json::json!(["task"]));
+    }
+
+    /// T-02: при существующем КОРНЕВОМ реестре пакетный — его КОПИЯ, а не
+    /// заготовка под стек. Пакетная копия приоритетна для резолвера гейта,
+    /// поэтому заготовка из одного правила молча переключала гейт на себя:
+    /// «Правил: 1, PASS» вместо прогона правил проекта.
+    #[test]
+    fn packet_registry_is_a_copy_of_the_root_one() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        let root = "rules:\n  - id: C-001\n    name: spine_present\n    type: file_exists\n    path: \"ARCHITECTURE-SPINE.md\"\n    severity: error\n  - id: C-002\n    name: no_pan\n    type: must_not_contain\n    glob: \"**/*.py\"\n    pattern: 'PAN'\n    severity: error\n";
+        write_file(&repo.join("CONSTRAINTS.yaml"), root);
+        write_file(&repo.join("README.md"), "# Проект\n");
+        let cfg = cfg_in(tmp.path());
+
+        let packet =
+            generate_handoff(&repo, "задача", &[], &cfg, None, Route::Fast).expect("handoff");
+        let packet_registry = repo.join(".arch-handoff/CONSTRAINTS.yaml");
+        assert_eq!(
+            std::fs::read_to_string(&packet_registry).expect("реестр пакета"),
+            root,
+            "пакетный реестр обязан быть копией корневого"
+        );
+        assert_eq!(
+            packet.constraints_action.as_deref(),
+            Some("копия корневого CONSTRAINTS.yaml")
+        );
+        // Гейт читает именно пакетную копию — значит правил столько же.
+        let resolved = crate::control::resolve_constraints_path(&repo, None).expect("резолв");
+        assert_eq!(resolved, packet_registry);
+        assert_eq!(
+            crate::control::load_constraints_resolved(&resolved)
+                .expect("реестр читается")
+                .rules
+                .len(),
+            2
+        );
+
+        // Повторная генерация не затирает правки архитектора; явный флаг —
+        // затирает (T-02: «существующую копию не перезаписывает без флага»).
+        write_file(&packet_registry, "# правка архитектора\n");
+        let again = generate_handoff(&repo, "другая", &[], &cfg, None, Route::Fast)
+            .expect("повторный handoff");
+        assert_eq!(
+            std::fs::read_to_string(&packet_registry).expect("реестр после"),
+            "# правка архитектора\n"
+        );
+        assert!(again.constraints_action.is_none());
+        let refreshed = generate_handoff_opts(
+            &repo,
+            "третья",
+            &[],
+            &cfg,
+            None,
+            Route::Fast,
+            HandoffOptions {
+                refresh_constraints: true,
+            },
+        )
+        .expect("refresh");
+        assert_eq!(
+            std::fs::read_to_string(&packet_registry).expect("реестр после refresh"),
+            root
+        );
+        assert_eq!(
+            refreshed.constraints_action.as_deref(),
+            Some("копия корневого CONSTRAINTS.yaml")
+        );
+    }
+
+    /// Без корневого реестра пакетный — по-прежнему заготовка под стек: копировать
+    /// нечего, и об этом сказано в результате, а не умолчано.
+    #[test]
+    fn packet_registry_stays_a_stack_stub_without_root_one() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        write_file(&repo.join("Cargo.toml"), "[package]\nname = \"demo\"\n");
+        let cfg = cfg_in(tmp.path());
+        let packet =
+            generate_handoff(&repo, "задача", &[], &cfg, None, Route::Fast).expect("handoff");
+        let action = packet.constraints_action.as_deref().expect("действие");
+        assert!(action.contains("заготовка"), "{action}");
+        assert!(
+            std::fs::read_to_string(repo.join(".arch-handoff/CONSTRAINTS.yaml"))
+                .expect("реестр")
+                .contains("cargo")
+                || action.contains("корневого реестра"),
+            "{action}"
+        );
     }
 }
