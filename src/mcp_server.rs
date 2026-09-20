@@ -1530,7 +1530,10 @@ impl McpServe {
                     .into(),
             ));
         }
+        let rubric_path = resolve_rubric(&self.cfg.paths.rubrics_dir(), &args.rubric);
+        let rub = blocking("rubric_prompt", move || rubric::load(&rubric_path)).await?;
         let addressed_to_target = args.target.is_some() || args.target_text.is_some();
+        pack_matches_rubric("rubric_prompt", &rub, args.pack.as_deref())?;
         let pack = rubric_pack_input(
             "rubric_prompt",
             args.pack,
@@ -1544,8 +1547,6 @@ impl McpServe {
             None => rubric_target_text("rubric_prompt", args.target, args.target_text).await?,
         };
         rubric::check_target_len(&text).map_err(|e| CallError::execution("rubric_prompt", e))?;
-        let rubric_path = resolve_rubric(&self.cfg.paths.rubrics_dir(), &args.rubric);
-        let rub = blocking("rubric_prompt", move || rubric::load(&rubric_path)).await?;
         let samples = self.cfg.judge.samples.max(1);
         let mut out = json!({
             "rubric": rub.name,
@@ -1632,7 +1633,10 @@ impl McpServe {
             )));
         }
         let target_path = args.target.clone();
+        let rubric_path = resolve_rubric(&self.cfg.paths.rubrics_dir(), &args.rubric);
+        let rub = blocking("rubric_verify", move || rubric::load(&rubric_path)).await?;
         let addressed_to_target = args.target.is_some() || args.target_text.is_some();
+        pack_matches_rubric("rubric_verify", &rub, args.pack.as_deref())?;
         let pack = rubric_pack_input(
             "rubric_verify",
             args.pack,
@@ -1646,8 +1650,6 @@ impl McpServe {
             None => rubric_target_text("rubric_verify", args.target, args.target_text).await?,
         };
         rubric::check_target_len(&text).map_err(|e| CallError::execution("rubric_verify", e))?;
-        let rubric_path = resolve_rubric(&self.cfg.paths.rubrics_dir(), &args.rubric);
-        let rub = blocking("rubric_verify", move || rubric::load(&rubric_path)).await?;
         let total = args.answers.len();
         let mut runs = Vec::with_capacity(total);
         let mut dropped = 0usize;
@@ -2227,6 +2229,39 @@ async fn rubric_pack_input(
         (None, Some(_)) => Err(CallError::invalid_params(format!(
             "{tool}: аргумент 'subject' требует 'pack' — вид досье: adr_vs_spine, \
              entity_links, nfr_mechanism, code_vs_spine"
+        ))),
+    }
+}
+
+/// Сверяет запрошенный вид досье с тем, который объявлен в рубрике (ADR-051,
+/// волна B).
+///
+/// Рубрика знает свой вид досье (`pack:` в YAML), поэтому «смысловую рубрику
+/// прогнали по обычному документу» и «собрали не то досье» — ошибка вызова, а
+/// не молчаливая оценка не по тому входу: судья без досье не увидит второй
+/// стороны противоречия, а отчёт при этом выглядел бы полноценным.
+fn pack_matches_rubric(
+    tool: &str,
+    rubric: &rubric::Rubric,
+    requested: Option<&str>,
+) -> std::result::Result<(), CallError> {
+    let Some(declared) = rubric.pack else {
+        return Ok(());
+    };
+    match requested {
+        Some(kind) if kind.trim() == declared.as_str() => Ok(()),
+        Some(kind) => Err(CallError::invalid_params(format!(
+            "{tool}: рубрика '{}' собирается по досье '{}', а запрошено '{kind}' — \
+             вход судьи был бы не тем, на который рубрика рассчитана",
+            rubric.name,
+            declared.as_str(),
+        ))),
+        None => Err(CallError::invalid_params(format!(
+            "{tool}: рубрика '{}' — смысловая: она оценивает не документ, а досье '{}'. \
+             Передайте 'pack' и 'subject' (путь к ADR или файлу кода либо идентификатор \
+             сущности модели); аргументы 'target'/'target_text' здесь не годятся",
+            rubric.name,
+            declared.as_str(),
         ))),
     }
 }
@@ -4258,6 +4293,96 @@ mod tests {
             "хэш досье в отчёте: {sc}"
         );
         assert_eq!(sc["rubric"], "adr-quality");
+    }
+
+    /// Приёмка волны B (ADR-051): смысловая рубрика оценивается по досье, и
+    /// промпт несёт оба источника, а схема ответа — поля цитат по ролям и
+    /// перечень `checked`. Прогон её по обычному документу — ошибка вызова,
+    /// а не молчаливая оценка не по тому входу.
+    #[tokio::test]
+    async fn semantic_rubric_judges_dossier_and_refuses_plain_document() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = pack_repo(tmp.path());
+        // Рубрика-копия встроенной смысловой: имя файла — как у неё, вид досье
+        // объявлен в самой рубрике.
+        let rub = tmp.path().join("semantic.yaml");
+        std::fs::write(&rub, crate::assets::RUBRIC_ADR_SPINE_CONSISTENCY).expect("рубрика");
+
+        let call = format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"rubric_prompt","arguments":{{"rubric":"{}","pack":"adr_vs_spine","subject":"docs/adr/ADR-001-x.md","root":"{}"}}}}}}"#,
+            rub.display(),
+            repo.display()
+        );
+        let responses = run_lines(&[&call]).await;
+        let result = &responses[0]["result"];
+        assert_eq!(result["isError"], false, "{result}");
+        let sc = &result["structuredContent"];
+        let prompt = sc["user_prompt"].as_str().expect("user_prompt");
+        assert!(
+            prompt.contains("=== ИСТОЧНИК subject: docs/adr/ADR-001-x.md ===")
+                && prompt.contains("=== ИСТОЧНИК reference: ARCHITECTURE-SPINE.md#AD-2 ==="),
+            "в промпте обе стороны противоречия: {prompt}"
+        );
+        assert!(
+            prompt.contains("Доказательство: цитата при оценке ≤ 2; роли: subject, reference")
+                && prompt.contains("перечисли в \"checked\""),
+            "критерии несут направление доказательства и покрытие: {prompt}"
+        );
+        let rationale =
+            sc["response_json_schema"]["properties"]["scores"]["items"]["properties"]["rationale"]
+                ["description"]
+                .as_str()
+                .expect("описание rationale");
+        assert!(
+            rationale.contains("Цитата subject") && rationale.contains("reference"),
+            "схема требует цитаты по ролям: {rationale}"
+        );
+        assert_eq!(
+            sc["response_json_schema"]["properties"]["scores"]["items"]["properties"]["checked"]["type"],
+            "array",
+            "перечень проверенного есть в схеме: {sc}"
+        );
+
+        // Тот же вызов по обычному документу — отказ: досье не собрать.
+        let plain = format!(
+            r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"rubric_prompt","arguments":{{"rubric":"{}","target_text":"текст решения"}}}}}}"#,
+            rub.display()
+        );
+        let responses = run_lines(&[&plain]).await;
+        assert_eq!(
+            responses[0]["error"]["code"], -32602,
+            "смысловая рубрика без досье: {}",
+            responses[0]
+        );
+        assert!(
+            responses[0]["error"]["message"]
+                .as_str()
+                .expect("message")
+                .contains("pack"),
+            "подсказка называет аргументы: {}",
+            responses[0]["error"]
+        );
+
+        // Не тот вид досье — тоже ошибка: вход был бы не тот.
+        let wrong = format!(
+            r#"{{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{{"name":"rubric_prompt","arguments":{{"rubric":"{}","pack":"entity_links","subject":"docs/adr/ADR-001-x.md","root":"{}"}}}}}}"#,
+            rub.display(),
+            repo.display()
+        );
+        let responses = run_lines(&[&wrong]).await;
+        assert_eq!(
+            responses[0]["error"]["code"], -32602,
+            "чужой вид досье: {}",
+            responses[0]
+        );
+        assert!(
+            responses[0]["error"]["message"]
+                .as_str()
+                .expect("message")
+                .contains("adr_vs_spine"),
+            "ожидаемый вид назван: {}",
+            responses[0]["error"]
+        );
     }
 
     #[tokio::test]

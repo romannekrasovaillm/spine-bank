@@ -45,6 +45,22 @@ pub const RUBRIC_ADR_QUALITY: &str = include_str!("../assets/rubrics/adr_quality
 /// Якорная рубрика: качество handoff-пакета.
 pub const RUBRIC_HANDOFF_QUALITY: &str = include_str!("../assets/rubrics/handoff_quality.yaml");
 
+/// Смысловая рубрика (ADR-051, волна B): решение против инварианта спайна
+/// (класс `D10`). Досье — `adr_vs_spine`.
+pub const RUBRIC_ADR_SPINE_CONSISTENCY: &str =
+    include_str!("../assets/rubrics/adr_spine_consistency.yaml");
+/// Смысловая рубрика (ADR-051, волна B): ссылка «не на ту» сущность
+/// (класс `D6`). Досье — `entity_links`.
+pub const RUBRIC_MODEL_LINK_SEMANTICS: &str =
+    include_str!("../assets/rubrics/model_link_semantics.yaml");
+/// Смысловая рубрика (ADR-051, волна B): обещание показателя без механизма,
+/// способного его дать. Досье — `nfr_mechanism`.
+pub const RUBRIC_NFR_MECHANISM_FIT: &str = include_str!("../assets/rubrics/nfr_mechanism_fit.yaml");
+/// Смысловая рубрика (ADR-051, волна B): код против инварианта
+/// (класс `D11`). Досье — `code_vs_spine`.
+pub const RUBRIC_CODE_INVARIANT_CONFORMANCE: &str =
+    include_str!("../assets/rubrics/code_invariant_conformance.yaml");
+
 /// Бенчмарк: интеграция платёжного шлюза.
 pub const BENCH_PAYMENT_INTEGRATION: &str =
     include_str!("../assets/benchmarks/payment_integration.yaml");
@@ -645,6 +661,22 @@ const DEFAULT_FILES: &[(&str, &str)] = &[
         RUBRIC_HANDOFF_QUALITY,
     ),
     (
+        "assets/rubrics/adr_spine_consistency.yaml",
+        RUBRIC_ADR_SPINE_CONSISTENCY,
+    ),
+    (
+        "assets/rubrics/model_link_semantics.yaml",
+        RUBRIC_MODEL_LINK_SEMANTICS,
+    ),
+    (
+        "assets/rubrics/nfr_mechanism_fit.yaml",
+        RUBRIC_NFR_MECHANISM_FIT,
+    ),
+    (
+        "assets/rubrics/code_invariant_conformance.yaml",
+        RUBRIC_CODE_INVARIANT_CONFORMANCE,
+    ),
+    (
         "assets/benchmarks/payment_integration.yaml",
         BENCH_PAYMENT_INTEGRATION,
     ),
@@ -891,6 +923,10 @@ mod tests {
             RUBRIC_ADR_QUALITY,
             RUBRIC_HANDOFF_QUALITY,
             RUBRIC_AGENTS_MD_QUALITY_YAML,
+            RUBRIC_ADR_SPINE_CONSISTENCY,
+            RUBRIC_MODEL_LINK_SEMANTICS,
+            RUBRIC_NFR_MECHANISM_FIT,
+            RUBRIC_CODE_INVARIANT_CONFORMANCE,
         ];
         for text in rubrics {
             let r: crate::rubric::Rubric = serde_yaml_ng::from_str(text).expect("рубрика парсится");
@@ -908,6 +944,72 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// Смысловые рубрики (ADR-051, волна B): у каждой ровно один главный
+    /// критерий, и он — тот, где обвинение опирается на цитаты обеих сторон.
+    /// Гейт строит по нему блокирующую находку, поэтому «нет главного» и
+    /// «главных два» одинаково недопустимы: первое оставило бы класс дефекта
+    /// без блокировки, второе сделало бы вердикт непредсказуемым.
+    #[test]
+    fn semantic_rubrics_have_exactly_one_blocking_criterion() {
+        let rubrics = [
+            (
+                "adr_spine_consistency",
+                RUBRIC_ADR_SPINE_CONSISTENCY,
+                crate::rubric_pack::PackKind::AdrVsSpine,
+            ),
+            (
+                "model_link_semantics",
+                RUBRIC_MODEL_LINK_SEMANTICS,
+                crate::rubric_pack::PackKind::EntityLinks,
+            ),
+            (
+                "nfr_mechanism_fit",
+                RUBRIC_NFR_MECHANISM_FIT,
+                crate::rubric_pack::PackKind::NfrMechanism,
+            ),
+            (
+                "code_invariant_conformance",
+                RUBRIC_CODE_INVARIANT_CONFORMANCE,
+                crate::rubric_pack::PackKind::CodeVsSpine,
+            ),
+        ];
+        for (name, text, pack) in rubrics {
+            let r: crate::rubric::Rubric =
+                serde_yaml_ng::from_str(text).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(r.name, name, "имя рубрики — имя файла");
+            let blocking: Vec<&crate::rubric::Criterion> =
+                r.criteria.iter().filter(|c| c.blocking).collect();
+            assert_eq!(
+                blocking.len(),
+                1,
+                "{name}: главный критерий должен быть один, найдено {}",
+                blocking.len()
+            );
+            let main = blocking[0];
+            assert!(
+                main.evidence_on.requires_low(),
+                "{name}/{}: главный критерий судит обвинение — цитата нужна при низком балле",
+                main.id
+            );
+            assert!(
+                !main.evidence_roles.is_empty(),
+                "{name}/{}: обвинение обязано опираться на обе стороны (роли)",
+                main.id
+            );
+            // Схема рубрики — тот же путь загрузки, что у CLI и MCP: имена
+            // ролей проверяются на загрузке, опечатка тут не пройдёт.
+            let path = std::env::temp_dir().join(format!("{name}-schema.yaml"));
+            std::fs::write(&path, text).expect("запись рубрики");
+            let loaded = crate::rubric::load(&path).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(loaded.criteria.len(), r.criteria.len());
+            // Соответствие «рубрика → досье» объявлено в самой рубрике, а не
+            // в коде гейта: без него субъект для сбора досье пришлось бы
+            // угадывать по имени рубрики.
+            assert_eq!(r.pack, Some(pack), "{name}: вид досье объявлен в рубрике");
+            std::fs::remove_file(&path).ok();
         }
     }
 

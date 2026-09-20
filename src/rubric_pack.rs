@@ -647,15 +647,32 @@ fn load_repo_model(repo: &Path) -> Result<crate::model::Model> {
     crate::model::load_model_tolerant(&dir)
 }
 
-/// Карточка сущности модели как источник досье.
+/// Карточка сущности как источник досье.
+///
+/// Абсолютный путь в строке `Файл:` заменяется относительным: иначе хэш досье
+/// зависел бы от места чекаута, и отчёт, снятый в одном клоне, становился бы
+/// «устаревшим» в другом на том же содержимом — а гейт сравнивает именно хэш
+/// (ADR-051, П3).
+fn card_source(
+    model: &crate::model::Model,
+    repo: &Path,
+    e: &crate::model::Entity,
+    role: InputRole,
+) -> Source {
+    let rel = relative(repo, &e.file);
+    let card = crate::model::card(model, e).replace(&e.file.display().to_string(), &rel);
+    Source {
+        path: rel,
+        text: card,
+        role,
+        id: Some(e.id.clone()),
+    }
+}
+
+/// Карточка сущности по идентификатору как источник-ссылка.
 fn entity_source(model: &crate::model::Model, repo: &Path, id: &str) -> Option<Source> {
     let e = model.get(id)?;
-    Some(Source {
-        path: relative(repo, &e.file),
-        text: crate::model::card(model, e),
-        role: InputRole::Reference,
-        id: Some(e.id.clone()),
-    })
+    Some(card_source(model, repo, e, InputRole::Reference))
 }
 
 /// Досье `entity_links`: карточка субъекта + карточки всех сущностей, на
@@ -672,12 +689,7 @@ fn entity_links(repo: &Path, subject: &str) -> Result<Vec<Source>> {
             ),
         )
     })?;
-    let mut out = vec![Source {
-        path: relative(repo, &entity.file),
-        text: crate::model::card(&model, entity),
-        role: InputRole::Subject,
-        id: Some(entity.id.clone()),
-    }];
+    let mut out = vec![card_source(&model, repo, entity, InputRole::Subject)];
     // Цели всех видов связей в детерминированном порядке; повтор не дублируется,
     // несуществующая цель пропускается (это дефект `model_validate`, а не досье).
     let mut ids: BTreeSet<String> = BTreeSet::new();
@@ -689,6 +701,10 @@ fn entity_links(repo: &Path, subject: &str) -> Result<Vec<Source>> {
             out.push(src);
         }
     }
+    // Ссылки `verified_by` ведут и на правила fitness-реестра (`C-09`), а не
+    // только на сущности: без карточки правила судья не может судить, относится
+    // ли проверка к формулировке инварианта (ADR-051, R2 `rule_invariant_fit`).
+    out.extend(rule_sources(repo, &ids));
     if let Some(contract) = &entity.contract {
         let path = repo.join(contract);
         if path.is_file() {
@@ -708,6 +724,33 @@ fn entity_links(repo: &Path, subject: &str) -> Result<Vec<Source>> {
         }
     });
     Ok(out)
+}
+
+/// Карточки правил fitness-реестра для целей, названных в связях сущности
+/// (`C-09`, `module-exists`, …): в модель правила не входят, поэтому берутся из
+/// активного `CONSTRAINTS.yaml`. Нет реестра или нет совпадений — источников
+/// нет: пустых карточек досье не выдумывает.
+fn rule_sources(repo: &Path, ids: &BTreeSet<String>) -> Vec<Source> {
+    let Some(path) = crate::control::resolve_constraints_path(repo, None) else {
+        return Vec::new();
+    };
+    let Ok(rules) = crate::control::load_fitness_rules(&path) else {
+        return Vec::new();
+    };
+    let file = relative(repo, &path);
+    let mut out = Vec::new();
+    for rule in &rules {
+        let key = rule.id.clone().unwrap_or_else(|| rule.name.clone());
+        if !ids.contains(&key) && !ids.contains(&rule.name) {
+            continue;
+        }
+        out.push(Source::reference(
+            format!("{file}#{key}"),
+            rule.card(),
+            Some(key),
+        ));
+    }
+    out
 }
 
 /// Досье `nfr_mechanism`: карточка NFR + ADR и компоненты, привязанные к нему
@@ -734,12 +777,7 @@ fn nfr_mechanism(repo: &Path, subject: &str) -> Result<Vec<Source>> {
             ),
         ));
     }
-    let mut out = vec![Source {
-        path: relative(repo, &entity.file),
-        text: crate::model::card(&model, entity),
-        role: InputRole::Subject,
-        id: Some(entity.id.clone()),
-    }];
+    let mut out = vec![card_source(&model, repo, entity, InputRole::Subject)];
     let mut ids: BTreeSet<String> = BTreeSet::new();
     for kind in crate::model::LinkKind::ALL {
         ids.extend(entity.link_targets(kind).iter().cloned());
@@ -1175,6 +1213,87 @@ mod tests {
             pack.inputs
         );
         assert!(pack.text.contains("ядро системы"), "текст карточки цели");
+    }
+
+    /// Досье по модели не зависит от места чекаута: карточка печатает путь
+    /// файла, и абсолютный путь сделал бы хэш досье машинозависимым — отчёт,
+    /// снятый в одном клоне, «устаревал» бы в другом на том же содержимом.
+    #[test]
+    fn pack_is_independent_of_checkout_path() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path();
+        std::fs::write(
+            root.join(SPINE_FILE),
+            "## AD-2: Контроль\n\n- **Rule**: без LLM.\n",
+        )
+        .expect("spine");
+        std::fs::create_dir_all(root.join("model")).expect("mkdir model");
+        std::fs::write(
+            root.join("model/CMP-001-core.md"),
+            "---\nid: CMP-001\ntype: cmp\ntitle: Ядро\nstatus: ADOPTED\n---\n\nядро\n",
+        )
+        .expect("cmp");
+
+        // Второй клон: то же содержимое по другому пути.
+        let other = tempfile::tempdir().expect("tmp");
+        let root2 = other.path();
+        for rel in [SPINE_FILE, "model/CMP-001-core.md"] {
+            std::fs::create_dir_all(root2.join(rel).parent().expect("parent")).expect("mkdir");
+            std::fs::copy(root.join(rel), root2.join(rel)).expect("copy");
+        }
+        let a = build(root, PackKind::EntityLinks, "CMP-001").expect("досье");
+        let b = build(root2, PackKind::EntityLinks, "CMP-001").expect("досье");
+        assert_eq!(
+            a[0].text, b[0].text,
+            "текст досье не зависит от корня чекаута"
+        );
+        assert_eq!(a[0].sha256, b[0].sha256, "и хэш тоже");
+        assert!(
+            !a[0].text.contains(&root.display().to_string()),
+            "абсолютный путь в досье не печатается: {}",
+            a[0].text
+        );
+    }
+
+    /// Ссылка сущности на правило fitness-реестра приносит в досье карточку
+    /// правила: без неё нечем судить, относится ли проверка к формулировке
+    /// инварианта (рубрика `model_link_semantics`).
+    #[test]
+    fn entity_links_includes_rule_cards() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("model")).expect("mkdir model");
+        std::fs::write(
+            root.join(SPINE_FILE),
+            "## AD-2: Контроль\n\n- **Rule**: без LLM.\n",
+        )
+        .expect("spine");
+        std::fs::write(
+            root.join("CONSTRAINTS.yaml"),
+            "rules:\n  - id: C-009\n    name: journal_append_only\n    type: must_contain\n    \
+             glob: \"src/**/*.rs\"\n    pattern: \"append_only\"\n    severity: error\n    \
+             ad: AD-2\n",
+        )
+        .expect("constraints");
+        std::fs::write(
+            root.join("model/AD-002-append.md"),
+            "---\nid: AD-002\ntype: ad\ntitle: Append-only журнал\nstatus: ADOPTED\n\
+             verified_by: [C-009]\n---\n\nжурнал только дописывается\n",
+        )
+        .expect("ad");
+
+        let packs = build(root, PackKind::EntityLinks, "AD-002").expect("досье");
+        let pack = &packs[0];
+        assert!(
+            pack.inputs.iter().any(|i| i.id.as_deref() == Some("C-009")),
+            "карточка правила в источниках: {:?}",
+            pack.inputs
+        );
+        assert!(
+            pack.text.contains("Шаблон (regex): append_only"),
+            "карточка правила говорит, что именно проверяется: {}",
+            pack.text
+        );
     }
 
     #[test]

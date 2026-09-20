@@ -149,6 +149,12 @@ pub struct Criterion {
     /// `None` — покрытие не проверяется (поведение 0.3.4).
     #[serde(default)]
     pub coverage: Option<Coverage>,
+    /// Главный критерий рубрики (ADR-052): по нему составляющая гейта
+    /// `semantic_quality` строит блокирующую находку `semantic_contradiction`.
+    /// Движок рубрик поле не читает — это решение гейта, и рубрика без
+    /// главного критерия гейтом отвергается.
+    #[serde(default)]
+    pub blocking: bool,
 }
 
 impl Criterion {
@@ -181,6 +187,13 @@ pub struct Rubric {
     pub criteria: Vec<Criterion>,
     /// Пометка происхождения: anchor|dynamic.
     pub origin: String,
+    /// Вид досье, которым собирается вход этой рубрики (ADR-051, волна B);
+    /// `None` — рубрика оценивает один документ (поведение 0.3.4).
+    ///
+    /// Соответствие «рубрика → досье» живёт в рубрике, а не в коде гейта:
+    /// иначе третья смысловая рубрика потребовала бы правки механики.
+    #[serde(default)]
+    pub pack: Option<crate::rubric_pack::PackKind>,
 }
 
 /// Сводная строка списка рубрик.
@@ -1854,6 +1867,7 @@ mod tests {
             description: "t".into(),
             scale_max: 5,
             origin: "anchor".into(),
+            pack: None,
             criteria: vec![Criterion {
                 id: "c1".into(),
                 name: "c1".into(),
@@ -1863,6 +1877,7 @@ mod tests {
                 evidence_on: EvidenceOn::High,
                 evidence_roles: Vec::new(),
                 coverage: None,
+                blocking: false,
             }],
         };
         let llm = RecLlm(Mutex::new(Vec::new()));
@@ -1954,6 +1969,7 @@ mod tests {
                     evidence_on: EvidenceOn::High,
                     evidence_roles: Vec::new(),
                     coverage: None,
+                    blocking: false,
                 },
                 Criterion {
                     id: "alternatives".into(),
@@ -1964,9 +1980,11 @@ mod tests {
                     evidence_on: EvidenceOn::High,
                     evidence_roles: Vec::new(),
                     coverage: None,
+                    blocking: false,
                 },
             ],
             origin: "anchor".into(),
+            pack: None,
         }
     }
 
@@ -2650,6 +2668,7 @@ mod tests {
             evidence_on: on,
             evidence_roles: roles.iter().map(|r| (*r).to_string()).collect(),
             coverage: None,
+            blocking: false,
         }
     }
 
@@ -2661,6 +2680,7 @@ mod tests {
             scale_max: 5,
             criteria,
             origin: "anchor".into(),
+            pack: None,
         }
     }
 
