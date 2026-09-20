@@ -1859,7 +1859,13 @@ impl SemanticState {
                 ),
             )],
             Self::Low(total, judge) => vec![GateFinding::ruled(
-                "error".to_string(),
+                // warn, а не error: взвешенный итог смешивает качество документа
+                // с дисциплиной цитирования судьи — на чистом контроле живого
+                // прогона 2026-09-20 три критерия из четырёх остались без
+                // свидетельств, и итог 3.43 стоял в 0.43 от порога. Ошибкой
+                // краснело бы честное решение за поведение судьи. Красный —
+                // только за обвинение по главному критерию с цитатами.
+                "warn".to_string(),
                 "semantic_quality_low".to_string(),
                 format!("{who}: {total:.2}/5 ниже порога (судья {judge})"),
             )],
@@ -3193,8 +3199,9 @@ mod tests {
     /// Неподтверждённое обвинение не должно вытеснять подтверждённый низкий
     /// итог: живой прогон D11 (2026-09-20) дал главному критерию 1 с меткой
     /// `accusation_unconfirmed` и взвешенный итог 1.00/5 — при старом порядке
-    /// гейт показал бы только warn и не покраснел бы на коде, нарушающем
-    /// инвариант спайна.
+    /// гейт показал бы только «обвинение не подтверждено» и промолчал бы про
+    /// итог. Итог сообщается отдельной находкой, но не краснит составляющую:
+    /// красный — только за обвинение по главному критерию с цитатами.
     #[test]
     fn semantic_quality_low_total_survives_unconfirmed_accusation() {
         let tmp = tempfile::tempdir().expect("tmp");
@@ -3215,7 +3222,11 @@ mod tests {
             semantic_cfg(crate::config::SemanticScope::All),
             &rubrics,
         );
-        assert_eq!(status_of(&report, "semantic_quality"), GateStatus::Fail);
+        assert_eq!(
+            status_of(&report, "semantic_quality"),
+            GateStatus::Pass,
+            "низкий итог — предупреждение, краснит только обвинение по главному критерию"
+        );
         let rules = semantic_rules(&report);
         assert!(
             rules.contains(&"semantic_quality_low".to_string()),
