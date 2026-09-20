@@ -553,7 +553,7 @@ memory_file = "~/.arch-harness/MEMORY.md"  # глобальная md-памят�
 # [gate.semantic_quality]
 # rubrics = ["adr_spine_consistency", "model_link_semantics"]  # обязательные
 # scope = "changed"          # changed (затронутые диффом) | all (весь пакет)
-# min_score = 3.5            # порог взвешенного итога
+# min_score = 3.0            # порог взвешенного итога (калибровка — в docs/experiments/semantic-rubrics-2026-09-20.md)
 # require_distinct_judge = false  # true — судья обязан отличаться от автора
 #
 # Включение на маршруте (пример для Critical):

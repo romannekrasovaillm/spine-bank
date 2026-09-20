@@ -1906,9 +1906,6 @@ fn semantic_subject_state(
         }
     }
     let mut state = SemanticState::Ok;
-    if artifact.weighted_total < cfg.min_score {
-        state = SemanticState::Low(artifact.weighted_total, artifact.judge_model.clone());
-    }
     // Обвинение по главному критерию.
     if let Some(main) = rubric.criteria.iter().find(|c| c.blocking) {
         if let Some(score) = artifact.scores.iter().find(|s| s.criterion_id == main.id) {
@@ -1924,6 +1921,23 @@ fn semantic_subject_state(
                 }
             }
         }
+    }
+    // Взвешенный итог ниже порога — факт, подтверждённый счётом: критерий без
+    // подтверждённых цитат в итог не входит (`excludes_from_total`), поэтому
+    // «обвинение не подтверждено» не отменяет низкий итог и не должно его
+    // вытеснять. Живой прогон D11 (2026-09-20): главный критерий 1 с меткой
+    // `accusation_unconfirmed` утопил итог 1.00/5 в предупреждение, и гейт
+    // перестал бы краснеть на коде, нарушающем инвариант. Порядок силы:
+    // противоречие → низкий итог → неподтверждённое обвинение.
+    if artifact.weighted_total < cfg.min_score
+        && matches!(
+            state,
+            SemanticState::Ok
+                | SemanticState::Unconfirmed(_)
+                | SemanticState::CoverageIncomplete(_)
+        )
+    {
+        state = SemanticState::Low(artifact.weighted_total, artifact.judge_model.clone());
     }
     if matches!(state, SemanticState::Ok) {
         let uncovered: Vec<String> = artifact
@@ -3173,6 +3187,44 @@ mod tests {
             semantic_rules(&report).contains(&"semantic_accusation_unconfirmed".to_string()),
             "{:?}",
             semantic_rules(&report)
+        );
+    }
+
+    /// Неподтверждённое обвинение не должно вытеснять подтверждённый низкий
+    /// итог: живой прогон D11 (2026-09-20) дал главному критерию 1 с меткой
+    /// `accusation_unconfirmed` и взвешенный итог 1.00/5 — при старом порядке
+    /// гейт показал бы только warn и не покраснел бы на коде, нарушающем
+    /// инвариант спайна.
+    #[test]
+    fn semantic_quality_low_total_survives_unconfirmed_accusation() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        make_semantic_repo(dir);
+        let rubrics = semantic_rubrics_dir(dir);
+        write_semantic_report(
+            dir,
+            "docs/adr/ADR-001-reshenie.md",
+            1,
+            &["accusation_unconfirmed"],
+            1.0,
+            None,
+        );
+        let report = run_semantic(
+            dir,
+            None,
+            semantic_cfg(crate::config::SemanticScope::All),
+            &rubrics,
+        );
+        assert_eq!(status_of(&report, "semantic_quality"), GateStatus::Fail);
+        let rules = semantic_rules(&report);
+        assert!(
+            rules.contains(&"semantic_quality_low".to_string()),
+            "{rules:?}"
+        );
+        assert_eq!(
+            rules.len(),
+            1,
+            "состояние одно и называет самое сильное: {rules:?}"
         );
     }
 
