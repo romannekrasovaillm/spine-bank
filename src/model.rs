@@ -38,6 +38,8 @@ pub mod validate;
 use std::fmt::Write as _;
 use std::sync::Arc;
 
+use std::path::{Path, PathBuf};
+
 use async_trait::async_trait;
 use regex::Regex;
 use serde::Deserialize;
@@ -270,6 +272,36 @@ pub fn tools() -> Vec<Arc<dyn Tool>> {
     ]
 }
 
+/// Каталог модели по аргументу `path` инструмента: принимается и КОРЕНЬ
+/// КЕЙСА, и сам каталог `model/` — инструмент находит модель сам.
+///
+/// До T-13 одинаковый по смыслу аргумент `path` значил разное: у
+/// `model_validate`/`model_query`/`model_graph` — каталог модели, у
+/// `model_drift` — корень кейса; «не свой» вариант давал либо ошибку загрузки,
+/// либо пустой результат, и это зависело от инструмента, а не от предмета.
+#[must_use]
+pub fn model_dir_from(resolved: &Path) -> PathBuf {
+    let nested = resolved.join("model");
+    if nested.is_dir() {
+        nested
+    } else {
+        resolved.to_path_buf()
+    }
+}
+
+/// Корень кейса по тому же аргументу: каталог `model/` разворачивается в
+/// родителя, корень остаётся собой (обратная сторона [`model_dir_from`]).
+#[must_use]
+pub fn case_root_from(resolved: &Path) -> PathBuf {
+    if !resolved.join("model").is_dir() && resolved.file_name().is_some_and(|n| n == "model") {
+        resolved
+            .parent()
+            .map_or_else(|| resolved.to_path_buf(), Path::to_path_buf)
+    } else {
+        resolved.to_path_buf()
+    }
+}
+
 /// Инструмент `model_validate`: ссылочная целостность модели —
 /// JSON-вердикт `{passed, issues, summary}` (мост в MCP, транш 1 инверсии).
 pub struct ModelValidateTool;
@@ -295,7 +327,7 @@ impl Tool for ModelValidateTool {
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "Каталог модели (по умолчанию model)"}
+                    "path": {"type": "string", "description": "Корень кейса или каталог `model/` — инструмент находит модель сам (по умолчанию `model`)"}
                 }
             }),
         }
@@ -310,7 +342,7 @@ impl Tool for ModelValidateTool {
                 )));
             }
         };
-        let dir = ctx.resolve(args.dir.as_deref().unwrap_or("model"));
+        let dir = model_dir_from(&ctx.resolve(args.dir.as_deref().unwrap_or("model")));
         // Толерантная загрузка (E3): битая сущность — error-находка отчёта
         // (её добавляет `validate`), а не отказ всего инструмента.
         let model = match load_model_tolerant(&dir) {
@@ -370,7 +402,7 @@ impl Tool for ModelQueryTool {
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "Каталог модели (по умолчанию model)"},
+                    "path": {"type": "string", "description": "Корень кейса или каталог `model/` — инструмент находит модель сам (по умолчанию `model`)"},
                     "id": {"type": "string", "description": "ID сущности (ADR-001, CMP-002, …): карточка со связями"},
                     "type": {"type": "string", "description": "Фильтр списка по типу (cmp, adr, …)"}
                 }
@@ -387,7 +419,7 @@ impl Tool for ModelQueryTool {
                 )));
             }
         };
-        let dir = ctx.resolve(args.dir.as_deref().unwrap_or("model"));
+        let dir = model_dir_from(&ctx.resolve(args.dir.as_deref().unwrap_or("model")));
         // Толерантная загрузка (E3): работа по валидному подмножеству +
         // warn-пометка о пропущенных сущностях первой строкой.
         let model = match load_model_tolerant(&dir) {
@@ -477,7 +509,7 @@ impl Tool for ModelGraphTool {
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "Каталог модели (по умолчанию model)"},
+                    "path": {"type": "string", "description": "Корень кейса или каталог `model/` — инструмент находит модель сам (по умолчанию `model`)"},
                     "format": {
                         "type": "string",
                         "description": "Формат графа: text (по умолчанию) | mermaid",
@@ -508,7 +540,7 @@ impl Tool for ModelGraphTool {
                 "model_graph: неизвестный формат '{format}' (допустимы: text, mermaid)"
             )));
         }
-        let dir = ctx.resolve(args.dir.as_deref().unwrap_or("model"));
+        let dir = model_dir_from(&ctx.resolve(args.dir.as_deref().unwrap_or("model")));
         // Толерантная загрузка (E3): граф по валидному подмножеству +
         // поле `load_issues` в JSON-ответе.
         let model = match load_model_tolerant(&dir) {
@@ -559,6 +591,32 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+
+    /// T-13: аргумент `path` инструментов модели значит одно и то же —
+    /// принимается и корень кейса, и каталог `model/`; нормализаторы
+    /// переводят оба варианта в нужную сторону и идемпотентны.
+    #[test]
+    fn model_and_case_root_are_resolved_from_either_argument() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let case = tmp.path().join("case");
+        let model = case.join("model");
+        std::fs::create_dir_all(&model).expect("mkdir");
+        // Из корня кейса: модель — во вложенном model/, корень — сам корень.
+        assert_eq!(model_dir_from(&case), model);
+        assert_eq!(case_root_from(&case), case);
+        // Из каталога модели: он же и модель, а корень — родитель.
+        assert_eq!(model_dir_from(&model), model);
+        assert_eq!(case_root_from(&model), case);
+        // Идемпотентность: повторный проход ничего не меняет.
+        assert_eq!(model_dir_from(&model_dir_from(&case)), model);
+        assert_eq!(case_root_from(&case_root_from(&model)), case);
+        // Путь без model/ внутри — «как есть»: инструмент скажет о пустой
+        // модели своей находкой, а не подменит предмет.
+        let bare = tmp.path().join("bare");
+        std::fs::create_dir_all(&bare).expect("mkdir bare");
+        assert_eq!(model_dir_from(&bare), bare);
+        assert_eq!(case_root_from(&bare), bare);
+    }
 
     #[test]
     fn parse_id_accepts_all_prefixes() {

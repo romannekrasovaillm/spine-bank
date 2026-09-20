@@ -1063,6 +1063,60 @@ fn tool_calls_are_journaled_to_project_journal() {
     );
 }
 
+/// T-13: аргумент `path` значит одно и то же — принимается и корень кейса, и
+/// каталог `model/`. Проверяется на `model_validate` (ждал каталог модели) и
+/// `model_drift` (ждал корень кейса): оба обязаны дать ОДИНАКОВЫЙ результат на
+/// обоих вариантах аргумента.
+#[test]
+fn bridge_model_tools_accept_case_root_and_model_dir() {
+    let home = tempfile::tempdir().expect("tmp");
+    let case = home.path().join("case");
+    let model = case.join("model");
+    std::fs::create_dir_all(&model).expect("mkdir model");
+    std::fs::write(
+        model.join("CMP-001.md"),
+        "---\nid: CMP-001\ntype: cmp\ntitle: Шлюз\nstatus: designed\ndepends_on: [CMP-404]\n---\n\nТело.\n",
+    )
+    .expect("сущность");
+    let root = case.display().to_string();
+    let model_dir = model.display().to_string();
+    let responses = mcp_serve(
+        home.path(),
+        &batch(&[
+            call(1, "model_validate", &json!({"path": root})),
+            call(2, "model_validate", &json!({"path": model_dir})),
+            call(3, "model_drift", &json!({"path": root})),
+            call(4, "model_drift", &json!({"path": model_dir})),
+        ]),
+    );
+    let by_root = structured(&responses[0], 1);
+    let by_model = structured(&responses[1], 2);
+    // Битая ссылка CMP-404: находка есть, и она одна и та же в обоих вариантах.
+    assert_eq!(by_root["passed"], false, "{by_root}");
+    assert_eq!(
+        by_root["issue_count"], by_model["issue_count"],
+        "{by_root} / {by_model}"
+    );
+    assert_eq!(
+        by_root["issues"], by_model["issues"],
+        "{by_root} / {by_model}"
+    );
+    assert_eq!(
+        by_root["summary"], by_model["summary"],
+        "{by_root} / {by_model}"
+    );
+    let drift_root = structured(&responses[2], 3);
+    let drift_model = structured(&responses[3], 4);
+    assert_eq!(
+        drift_root["passed"], drift_model["passed"],
+        "{drift_root} / {drift_model}"
+    );
+    assert_eq!(
+        drift_root["summary"], drift_model["summary"],
+        "{drift_root} / {drift_model}"
+    );
+}
+
 /// T-12: мостовой инструмент отдаёт РАЗОБРАННЫЙ объект, а не только JSON
 /// строкой внутри `output`. Проверяется на `contract_diff`: вердикт читается
 /// как `structuredContent.passed` / `structuredContent.breaking`, а строковое

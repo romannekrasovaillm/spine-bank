@@ -3712,6 +3712,8 @@ fn cmd_control(cfg: &arch_harness::config::Config, cmd: ControlCmd) -> Result<()
 fn cmd_model(cmd: ModelCmd) -> Result<()> {
     match cmd {
         ModelCmd::Validate { dir } => {
+            // Аргумент принимает и корень кейса, и каталог `model/` (T-13).
+            let dir = arch_harness::model::model_dir_from(&dir);
             let model = arch_harness::model::load_model_tolerant(&dir)
                 .with_context(|| format!("загрузка модели {}", dir.display()))?;
             let report = arch_harness::model::validate(&model);
@@ -3745,6 +3747,7 @@ fn cmd_model(cmd: ModelCmd) -> Result<()> {
             print!("{}", arch_harness::model::card(&model, entity));
         }
         ModelCmd::Graph { dir, format } => {
+            let dir = arch_harness::model::model_dir_from(&dir);
             let model = arch_harness::model::load_model_tolerant(&dir)
                 .with_context(|| format!("загрузка модели {}", dir.display()))?;
             if let Some(note) = arch_harness::model::load_issues_note(&model.load_issues) {
@@ -3871,6 +3874,7 @@ fn cmd_model(cmd: ModelCmd) -> Result<()> {
             }
         }
         ModelCmd::Drift { dir, json } => {
+            let dir = arch_harness::model::case_root_from(&dir);
             let report = arch_harness::model::drift_check(&dir)
                 .with_context(|| format!("дрейф «модель ↔ код» кейса {}", dir.display()))?;
             if json {

@@ -403,7 +403,7 @@ impl Tool for ModelDriftTool {
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "Корень кейса — каталог с model/ (по умолчанию текущий)"}
+                    "path": {"type": "string", "description": "Корень кейса или каталог `model/` — инструмент находит модель сам (по умолчанию текущий каталог)"}
                 }
             }),
         }
@@ -418,7 +418,9 @@ impl Tool for ModelDriftTool {
                 )));
             }
         };
-        let dir = ctx.resolve(args.dir.as_deref().unwrap_or("."));
+        // Аргумент принимает и корень кейса, и каталог `model/` (T-13):
+        // дрейф считается от корня, каталог модели разворачивается в родителя.
+        let dir = crate::model::case_root_from(&ctx.resolve(args.dir.as_deref().unwrap_or(".")));
         let report = match drift_check(&dir) {
             Ok(r) => r,
             Err(e) => return Ok(ToolOutput::err(format!("model_drift: {e}"))),

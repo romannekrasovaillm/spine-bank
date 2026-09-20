@@ -350,6 +350,8 @@ pub fn architect_review(
     constraints: Option<&Path>,
     limits: (usize, usize),
 ) -> Result<ReviewReport> {
+    // Аргумент принимает и корень кейса, и каталог `model/` (T-13).
+    let repo = &crate::model::case_root_from(repo);
     let mut gate_report = gate::run(repo, None, base, constraints, limits)?;
     // `model_validate` уже пришла из гейта (Н2): вторая секция означала бы
     // двойной счёт одной проверки. Ревью = gate + контракты.
@@ -604,6 +606,8 @@ fn load_case_model(case: &Path) -> Result<Model> {
 /// Нет каталога `model/`; модель не разбирается; не заданы ни `id`, ни
 /// `paths`; `id` неизвестен модели.
 pub fn change_impact(case: &Path, id: Option<&str>, paths: &[String]) -> Result<ImpactReport> {
+    // Аргумент принимает и корень кейса, и каталог `model/` (T-13).
+    let case = &crate::model::case_root_from(case);
     let model =
         load_case_model(case).map_err(|e| HarnessError::Model(format!("change_impact: {e}")))?;
     if id.is_none() && paths.is_empty() {
@@ -651,6 +655,8 @@ pub fn change_impact(case: &Path, id: Option<&str>, paths: &[String]) -> Result<
 /// Нет каталога `model/`; модель не разбирается; список пуст; какой-то из
 /// ID неизвестен модели.
 pub fn impact_from_ids(case: &Path, ids: &[String]) -> Result<ImpactReport> {
+    // Аргумент принимает и корень кейса, и каталог `model/` (T-13).
+    let case = &crate::model::case_root_from(case);
     let model =
         load_case_model(case).map_err(|e| HarnessError::Model(format!("impact_from_ids: {e}")))?;
     if ids.is_empty() {

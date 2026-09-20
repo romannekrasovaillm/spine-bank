@@ -1389,7 +1389,8 @@ impl McpServe {
     async fn tool_model_query(&self, args: Value) -> std::result::Result<Value, CallError> {
         #[derive(Deserialize)]
         struct Args {
-            /// Каталог модели (дефолт `model` от cwd процесса сервера).
+            /// Корень кейса или каталог `model/` (T-13): инструмент находит
+            /// модель сам; дефолт — `model` от cwd процесса сервера.
             #[serde(alias = "path")]
             dir: Option<String>,
             /// ID сущности — карточка (без `id` — список).
@@ -1414,7 +1415,7 @@ impl McpServe {
             }
             None => None,
         };
-        let dir = PathBuf::from(args.dir.unwrap_or_else(|| "model".into()));
+        let dir = model::model_dir_from(&PathBuf::from(args.dir.unwrap_or_else(|| "model".into())));
         let id = args.id;
         blocking("model_query", move || {
             // Толерантная загрузка (E3): ответ по валидному подмножеству +
@@ -2286,7 +2287,7 @@ fn tool_specs() -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "Каталог модели (по умолчанию model от cwd сервера)"},
+                    "path": {"type": "string", "description": "Корень кейса или каталог `model/` — инструмент находит модель сам (по умолчанию `model` от cwd сервера)"},
                     "id": {"type": "string", "description": "ID сущности (ADR-001, CMP-002, …): карточка со связями"},
                     "type": {"type": "string", "description": "Фильтр списка по типу (cmp, adr, …)"},
                 },
