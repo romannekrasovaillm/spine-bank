@@ -415,6 +415,23 @@ pub fn artifact_json(
     Ok((path, text))
 }
 
+/// Уровень независимости оценки — один расчёт на все входы (J5, ADR-049):
+/// запись отчёта и ответ `rubric_verify` берут его отсюда, чтобы уровень в
+/// журнале и в файле не мог разойтись.
+#[must_use]
+pub fn independence_for(
+    author_model: Option<&str>,
+    judge_model: &str,
+    provenance: Option<&crate::judge::RubricProvenance>,
+    families: &BTreeMap<String, String>,
+) -> String {
+    let mode = provenance.map_or(
+        crate::judge::MODE_DECLARED,
+        crate::judge::RubricProvenance::mode,
+    );
+    crate::judge::independence_of(author_model, judge_model, mode, families)
+}
+
 /// Собирает артефакт отчёта и путь, по которому он лёг бы. `save_raw` —
 /// сохранять ли сырые ответы судьи: при сборке «на возврат» (read-only контур)
 /// следов в рабочем каталоге не остаётся.
@@ -460,13 +477,12 @@ fn build_artifact(
     // Уровень независимости считается ЗДЕСЬ, а не вызывающим: иначе один из
     // двух путей (CLI и MCP) мог бы писать отчёт без уровня, и порог
     // независимости молча не действовал бы (J5, ADR-049).
-    let independence = {
-        let mode = provenance.as_ref().map_or(
-            crate::judge::MODE_DECLARED,
-            crate::judge::RubricProvenance::mode,
-        );
-        crate::judge::independence_of(author_model, &report.judge_model, mode, &extras.families)
-    };
+    let independence = independence_for(
+        author_model,
+        &report.judge_model,
+        provenance.as_ref(),
+        &extras.families,
+    );
     let artifact = RubricArtifact {
         schema: RUBRIC_REPORT_SCHEMA.to_string(),
         rubric: report.rubric_name.clone(),

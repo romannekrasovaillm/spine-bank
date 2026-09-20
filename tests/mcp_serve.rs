@@ -2772,3 +2772,97 @@ fn readonly_verify_says_report_not_saved_and_returns_artifact_json() {
         "сохранённый хостом отчёт засчитан: {stdout}"
     );
 }
+
+/// J6 (ADR-048): журнал вызовов несёт идентификатор сессии и хоста, а для
+/// `rubric_verify` — мету судейства: цель, рубрику, судью, автора и уровень
+/// независимости. Сами ответы судьи в журнал НЕ пишутся (они рядом с отчётом).
+#[test]
+fn journal_records_judging_meta_without_answers() {
+    let home = tempfile::tempdir().expect("tmp");
+    let (repo, adr, rubric) = judge_gate_case(home.path());
+    let init = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {"clientInfo": {"name": "claude-code", "version": "2.1.278"}},
+    })
+    .to_string();
+    let verify = call(
+        2,
+        "rubric_verify",
+        &json!({
+            "rubric": rubric,
+            "target": adr.display().to_string(),
+            "judge_model": "glm-5.2",
+            "author_model": "claude-opus-4",
+            "answers": [provenance_answer()],
+        }),
+    );
+    let _ = mcp_serve_with_args(home.path(), &["--rw=reports"], &batch(&[init, verify]));
+    // Журнал проектный: он пишется в `.arch-handoff/` рабочего каталога
+    // сервера (cwd процесса), а не репозитория документа.
+    let _ = &repo;
+    let journal = std::fs::read_to_string(home.path().join(".arch-handoff/mcp-calls.jsonl"))
+        .expect("журнал вызовов");
+    let entry: Value = journal
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .find(|v| v["tool"] == "rubric_verify")
+        .expect("запись о судействе");
+    assert!(
+        entry["session_id"].as_str().is_some_and(|s| !s.is_empty()),
+        "сессия в журнале: {entry}"
+    );
+    assert_eq!(entry["host"], "claude-code", "{entry}");
+    let meta = &entry["judging"];
+    assert_eq!(meta["rubric"], "t-rubric", "{entry}");
+    assert_eq!(meta["judge_model"], "glm-5.2", "{entry}");
+    assert_eq!(meta["author_model"], "claude-opus-4", "{entry}");
+    assert_eq!(meta["independence"], "declared_cross_family", "{entry}");
+    // Ответы судьи в журнал не пишутся: только метки.
+    assert!(
+        !journal.contains("Цитата"),
+        "содержимое ответа судьи не должно попадать в журнал"
+    );
+}
+
+/// J6 (ADR-048): `arch-be digest` печатает раздел «Судейство» — что оценено,
+/// кем, с каким уровнем независимости и сколько оценок пришлось на рабочую
+/// сессию. Порог «рабочей сессии» — дефолтный (журнал не знает конфига).
+#[test]
+fn digest_has_judging_section() {
+    let home = tempfile::tempdir().expect("tmp");
+    let (repo, _adr, _rubric) = judge_gate_case(home.path());
+    let journal = repo.join(".arch-handoff/mcp-calls.jsonl");
+    std::fs::create_dir_all(journal.parent().expect("каталог")).expect("mkdir");
+    let ts = chrono::Local::now().to_rfc3339();
+    std::fs::write(
+        &journal,
+        format!(
+            "{{\"ts\":\"{ts}\",\"tool\":\"rubric_verify\",\"verdict\":\"ok\",\"duration_ms\":5,\"session_id\":\"s1\",\"host\":\"claude-code\",\"judging\":{{\"target\":\"docs/adr/ADR-001-pilot.md\",\"rubric\":\"t-rubric\",\"judge_model\":\"glm-5.2\",\"author_model\":\"claude-opus-4\",\"independence\":\"declared_cross_family\",\"session_calls_before\":1}}}}\n{{\"ts\":\"{ts}\",\"tool\":\"rubric_verify\",\"verdict\":\"ok\",\"duration_ms\":5,\"session_id\":\"s2\",\"host\":\"qwen-code\",\"judging\":{{\"target\":\"docs/adr/ADR-001-pilot.md\",\"rubric\":\"t-rubric\",\"judge_model\":\"glm-5.2\",\"author_model\":\"claude-opus-4\",\"independence\":\"declared_cross_family\",\"session_calls_before\":9}}}}\n"
+        ),
+    )
+    .expect("журнал");
+    let out = arch_cmd(home.path())
+        .arg("digest")
+        .arg("--repo")
+        .arg(repo.as_os_str())
+        .output()
+        .expect("digest");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("## Судейство"), "{text}");
+    assert!(text.contains("Оценок рубриками: 2"), "{text}");
+    assert!(
+        text.contains("переоценок: 1"),
+        "одна цель оценена дважды: {text}"
+    );
+    assert!(text.contains("glm-5.2"), "судья назван: {text}");
+    assert!(
+        text.contains("declared_cross_family"),
+        "уровень назван: {text}"
+    );
+    assert!(
+        text.contains("рабочей сессии") && text.contains("косвенный"),
+        "признак рабочей сессии назван косвенным: {text}"
+    );
+}

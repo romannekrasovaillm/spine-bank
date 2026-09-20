@@ -846,12 +846,34 @@ impl McpServe {
             Err(CallError::Protocol { .. }) => ("invalid", Vec::new()),
         };
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        // Сессия и хост: без них «судейство в рабочей сессии» неотличимо от
+        // судейства в чистой (ADR-048).
+        let (session_id, host) = {
+            let session = self.session();
+            (
+                Some(session.id().to_string()),
+                session.host().map(|h| h.name),
+            )
+        };
+        let mut entry = crate::mcp_journal::JournalEntry::new(name, verdict, duration, rules)
+            .with_session(session_id, host);
+        // Мета судейства — только у `rubric_verify`: метки судьи и автора и
+        // уровень независимости. Это единственное исключение из правила «в
+        // журнале нет содержимого аргументов»: метки — не содержимое документа
+        // (ADR-048). Сами ответы судьи в журнал не пишутся.
+        if name == "rubric_verify" {
+            if let Ok(DispatchOutcome::Structured(v)) = outcome {
+                let target = v.get("artifact_path").and_then(Value::as_str);
+                if let Some(meta) =
+                    crate::mcp_journal::JournalEntry::judging_from_response(target, v)
+                {
+                    entry = entry.with_judging(meta);
+                }
+            }
+        }
         // Ошибка записи журнала осознанно глушится (fail-soft по контракту
         // mcp_journal): аудит не должен ломать вызовы инструментов.
-        let _ = crate::mcp_journal::append(
-            &cwd,
-            &crate::mcp_journal::JournalEntry::new(name, verdict, duration, rules),
-        );
+        let _ = crate::mcp_journal::append(&cwd, &entry);
     }
 
     /// `prompts/list`: семь плейбуков [`PLAYBOOK_PROMPTS`] с описаниями из
@@ -1854,6 +1876,12 @@ impl McpServe {
             "judge_model": report.judge_model,
             "author_model": choice.author,
             "author_source": choice.source,
+            "independence": crate::rubric::independence_for(
+                choice.author.as_deref(),
+                &report.judge_model,
+                provenance_out.as_ref(),
+                &self.cfg.judge.families,
+            ),
             "artifact": artifact_note,
             "artifact_saved": artifact_json_out.is_none(),
             "artifact_json": artifact_json_out,

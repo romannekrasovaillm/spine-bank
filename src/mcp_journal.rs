@@ -54,6 +54,43 @@ pub struct JournalEntry {
     /// сам verdict, не аргументы вызова). Пустой список не сериализуется.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rules: Vec<String>,
+    /// Идентификатор MCP-сессии, выданный сервером на `initialize` (ADR-048):
+    /// по нему видно, что вызовы шли в одной сессии, — без него «судейство в
+    /// рабочей сессии» неотличимо от судейства в чистой.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// Хост, назвавшийся в рукопожатии (`claude-code`, `qwen-code`, …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    /// Мета судейства — только у `rubric_verify` (см. [`JudgingMeta`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub judging: Option<JudgingMeta>,
+}
+
+/// Кто судил и с каким уровнем независимости.
+///
+/// Единственное исключение из правила «в журнале нет содержимого аргументов»:
+/// метки судьи и автора, рубрика и путь документа — это метаданные судейства,
+/// а не содержимое оцениваемого текста. Сами ответы судьи в журнал не пишутся
+/// (они лежат рядом с отчётом, `reports/rubric/raw/`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JudgingMeta {
+    /// Путь оценённого документа относительно репозитория.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// Имя рубрики.
+    pub rubric: String,
+    /// Метка модели-судьи.
+    pub judge_model: String,
+    /// Метка модели-автора (если названа).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author_model: Option<String>,
+    /// Уровень независимости (ADR-049).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub independence: Option<String>,
+    /// Вызовов сессии до судейства — косвенный признак рабочей сессии.
+    #[serde(default)]
+    pub session_calls_before: usize,
 }
 
 impl JournalEntry {
@@ -71,7 +108,55 @@ impl JournalEntry {
             verdict: verdict.to_string(),
             duration_ms: duration.as_millis() as u64,
             rules,
+            session_id: None,
+            host: None,
+            judging: None,
         }
+    }
+
+    /// Дополняет запись сессией: кто вызвал и в какой сессии (ADR-048).
+    #[must_use]
+    pub fn with_session(mut self, session_id: Option<String>, host: Option<String>) -> Self {
+        self.session_id = session_id;
+        self.host = host;
+        self
+    }
+
+    /// Дополняет запись метой судейства (`rubric_verify`, ADR-048).
+    #[must_use]
+    pub fn with_judging(mut self, judging: JudgingMeta) -> Self {
+        self.judging = Some(judging);
+        self
+    }
+
+    /// Метка судейства из структурированного ответа `rubric_verify`: то, что
+    /// инструмент уже положил в ответ (`judge_model`, `author_model`,
+    /// `independence`, `rubric`), плюс цель из запроса.
+    #[must_use]
+    pub fn judging_from_response(
+        target: Option<&str>,
+        response: &serde_json::Value,
+    ) -> Option<JudgingMeta> {
+        let rubric = response.get("rubric").and_then(|v| v.as_str())?;
+        let judge_model = response.get("judge_model").and_then(|v| v.as_str())?;
+        Some(JudgingMeta {
+            target: target.map(str::to_string),
+            rubric: rubric.to_string(),
+            judge_model: judge_model.to_string(),
+            author_model: response
+                .get("author_model")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            independence: response
+                .get("independence")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            session_calls_before: response
+                .get("provenance")
+                .and_then(|p| p.get("session_calls_before"))
+                .and_then(serde_json::Value::as_u64)
+                .map_or(0, |v| v as usize),
+        })
     }
 }
 

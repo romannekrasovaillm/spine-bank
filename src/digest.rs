@@ -187,6 +187,9 @@ pub struct DigestReport {
     pub fail_pass_iterations: BTreeMap<String, usize>,
     /// Топ нарушаемых правил (имена из error-находок fail-вызовов).
     pub top_failed_rules: Vec<(String, usize)>,
+    /// Судейство рубриками за окно (ADR-048): что оценено, кем, с каким
+    /// уровнем независимости, сколько переоценок и сколько в рабочей сессии.
+    pub judging: JudgingDigest,
     /// Пометок FP в регистре за окно.
     pub fp_marks: usize,
     /// Fail-вызовов за окно (знаменатель ориентировочной доли FP).
@@ -205,6 +208,22 @@ pub struct DigestReport {
     /// Записей журнала пропущено (битый JSON или непарсящийся штамп
     /// времени) — честный счётчик потерь окна.
     pub skipped: usize,
+}
+
+/// Судейство рубриками за окно (J6, ADR-048).
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct JudgingDigest {
+    /// Вызовов `rubric_verify` в окне.
+    pub judgements: usize,
+    /// Оценённые документы → число оценок (переоценка видна как > 1).
+    pub by_target: BTreeMap<String, usize>,
+    /// Судьи и сколько раз они судили.
+    pub by_judge: BTreeMap<String, usize>,
+    /// Уровни независимости, встреченные в окне.
+    pub by_independence: BTreeMap<String, usize>,
+    /// Оценок в рабочей сессии (косвенный признак, порог
+    /// [`crate::judge::DEFAULT_CLEAN_SESSION_MAX_CALLS`]).
+    pub session_not_clean: usize,
 }
 
 /// Срез `CONSTRAINTS.yaml` для дайджеста: только сроки (expiry правил и
@@ -354,6 +373,7 @@ fn build_at(repo: &Path, days: u32, now: chrono::DateTime<chrono::Local>) -> Res
     // от записей «назад во времени» (часы машины, внешние правки файла).
     entries.sort_by_key(|a| a.0);
 
+    let mut judging_digest = JudgingDigest::default();
     let mut calls_by_tool: BTreeMap<String, usize> = BTreeMap::new();
     let mut verdicts: BTreeMap<String, usize> = BTreeMap::new();
     let mut rule_counts: BTreeMap<String, usize> = BTreeMap::new();
@@ -375,6 +395,27 @@ fn build_at(repo: &Path, days: u32, now: chrono::DateTime<chrono::Local>) -> Res
             *fail_pass.entry(entry.tool.clone()).or_default() += 1;
         }
         last_verdict.insert(entry.tool.clone(), entry.verdict.as_str());
+        // Судейство: мета лежит только у `rubric_verify` (ADR-048).
+        if let Some(judging) = &entry.judging {
+            judging_digest.judgements += 1;
+            let target = judging
+                .target
+                .clone()
+                .unwrap_or_else(|| judging.rubric.clone());
+            *judging_digest.by_target.entry(target).or_default() += 1;
+            *judging_digest
+                .by_judge
+                .entry(judging.judge_model.clone())
+                .or_default() += 1;
+            let level = judging
+                .independence
+                .clone()
+                .unwrap_or_else(|| "не указан".to_string());
+            *judging_digest.by_independence.entry(level).or_default() += 1;
+            if judging.session_calls_before > crate::judge::DEFAULT_CLEAN_SESSION_MAX_CALLS {
+                judging_digest.session_not_clean += 1;
+            }
+        }
     }
     let mut top_failed_rules: Vec<(String, usize)> = rule_counts.into_iter().collect();
     top_failed_rules.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
@@ -404,6 +445,7 @@ fn build_at(repo: &Path, days: u32, now: chrono::DateTime<chrono::Local>) -> Res
         verdicts,
         fail_pass_iterations: fail_pass,
         top_failed_rules,
+        judging: judging_digest,
         fp_marks,
         fail_calls,
         fp_share_pct,
@@ -467,6 +509,47 @@ pub fn render_markdown(report: &DigestReport) -> String {
     // Секция для управления: квитанция ценности гейта — дефекты, которые
     // механика остановила до ревью (fail-вердикты журнала), с разложением
     // по правилам и ориентировочной долей FP (метод — §2 протокола).
+    let _ = writeln!(out, "\n## Судейство\n");
+    if report.judging.judgements == 0 {
+        let _ = writeln!(
+            out,
+            "Оценок рубриками за окно нет (мета судейства пишется с 0.3.5)."
+        );
+    } else {
+        let _ = writeln!(
+            out,
+            "Оценок рубриками: {} (переоценок: {})",
+            report.judging.judgements,
+            report
+                .judging
+                .by_target
+                .values()
+                .filter(|count| **count > 1)
+                .count()
+        );
+        let _ = writeln!(out, "\n| Документ | Оценок |");
+        let _ = writeln!(out, "|---|---|");
+        for (target, count) in &report.judging.by_target {
+            let _ = writeln!(out, "| {} | {count} |", md_cell(target));
+        }
+        let _ = writeln!(out, "\nСудьи:");
+        for (judge, count) in &report.judging.by_judge {
+            let _ = writeln!(out, "- {} — {count}", md_cell(judge));
+        }
+        let _ = writeln!(out, "\nУровни независимости:");
+        for (level, count) in &report.judging.by_independence {
+            let _ = writeln!(out, "- {} — {count}", md_cell(level));
+        }
+        if report.judging.session_not_clean > 0 {
+            let _ = writeln!(
+                out,
+                "\nОценок в рабочей сессии: {} — судья мог видеть контекст автора. \
+                 Признак косвенный: сам по себе он ничего не доказывает.",
+                report.judging.session_not_clean
+            );
+        }
+    }
+
     let _ = writeln!(out, "\n## Дефекты, не дошедшие до ревью\n");
     if report.fail_calls == 0 {
         let _ = writeln!(
