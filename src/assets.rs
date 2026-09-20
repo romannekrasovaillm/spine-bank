@@ -61,6 +61,70 @@ pub const RUBRIC_NFR_MECHANISM_FIT: &str = include_str!("../assets/rubrics/nfr_m
 pub const RUBRIC_CODE_INVARIANT_CONFORMANCE: &str =
     include_str!("../assets/rubrics/code_invariant_conformance.yaml");
 
+/// Пара файлов golden-набора смысловых рубрик (ADR-051, S4).
+macro_rules! semantic_golden_files {
+    ($($path:literal),* $(,)?) => {
+        &[$((
+            concat!("assets/benchmarks/golden/semantic/", $path),
+            include_str!(concat!("../assets/benchmarks/golden/semantic/", $path)),
+        )),*]
+    };
+}
+
+/// Встроенный golden-набор смысловых рубрик: 4 рубрики × 6 досье × (досье +
+/// эталон). Отдельным списком, а не строками `DEFAULT_FILES`: набор растёт
+/// вместе с числом рубрик и читается одним блоком.
+pub const SEMANTIC_GOLDEN: &[(&str, &str)] = semantic_golden_files![
+    "adr_spine_consistency/clean-no-invariants-touched.expected.yaml",
+    "adr_spine_consistency/clean-no-invariants-touched.md",
+    "adr_spine_consistency/clean-plain.expected.yaml",
+    "adr_spine_consistency/clean-plain.md",
+    "adr_spine_consistency/distributed-contradiction.expected.yaml",
+    "adr_spine_consistency/distributed-contradiction.md",
+    "adr_spine_consistency/gross-contradiction.expected.yaml",
+    "adr_spine_consistency/gross-contradiction.md",
+    "adr_spine_consistency/hard-clean-override.expected.yaml",
+    "adr_spine_consistency/hard-clean-override.md",
+    "adr_spine_consistency/masked-word-in-place.expected.yaml",
+    "adr_spine_consistency/masked-word-in-place.md",
+    "code_invariant_conformance/clean-comment-and-check.expected.yaml",
+    "code_invariant_conformance/clean-comment-and-check.md",
+    "code_invariant_conformance/clean-enforced-by-construction.expected.yaml",
+    "code_invariant_conformance/clean-enforced-by-construction.md",
+    "code_invariant_conformance/distributed-bypass.expected.yaml",
+    "code_invariant_conformance/distributed-bypass.md",
+    "code_invariant_conformance/gross-direct-write.expected.yaml",
+    "code_invariant_conformance/gross-direct-write.md",
+    "code_invariant_conformance/hard-clean-legacy-adapter.expected.yaml",
+    "code_invariant_conformance/hard-clean-legacy-adapter.md",
+    "code_invariant_conformance/masked-debug-branch.expected.yaml",
+    "code_invariant_conformance/masked-debug-branch.md",
+    "model_link_semantics/clean-links-fit.expected.yaml",
+    "model_link_semantics/clean-links-fit.md",
+    "model_link_semantics/clean-rule-fits-invariant.expected.yaml",
+    "model_link_semantics/clean-rule-fits-invariant.md",
+    "model_link_semantics/contract-other-domain.expected.yaml",
+    "model_link_semantics/contract-other-domain.md",
+    "model_link_semantics/gross-wrong-executor.expected.yaml",
+    "model_link_semantics/gross-wrong-executor.md",
+    "model_link_semantics/hard-clean-similar-name.expected.yaml",
+    "model_link_semantics/hard-clean-similar-name.md",
+    "model_link_semantics/masked-plausible-target.expected.yaml",
+    "model_link_semantics/masked-plausible-target.md",
+    "nfr_mechanism_fit/clean-degradation-defined.expected.yaml",
+    "nfr_mechanism_fit/clean-degradation-defined.md",
+    "nfr_mechanism_fit/clean-sync-commit.expected.yaml",
+    "nfr_mechanism_fit/clean-sync-commit.md",
+    "nfr_mechanism_fit/gross-rpo-zero-async.expected.yaml",
+    "nfr_mechanism_fit/gross-rpo-zero-async.md",
+    "nfr_mechanism_fit/hard-clean-scoped.expected.yaml",
+    "nfr_mechanism_fit/hard-clean-scoped.md",
+    "nfr_mechanism_fit/masked-availability-composition.expected.yaml",
+    "nfr_mechanism_fit/masked-availability-composition.md",
+    "nfr_mechanism_fit/verification-checks-presence.expected.yaml",
+    "nfr_mechanism_fit/verification-checks-presence.md",
+];
+
 /// Бенчмарк: интеграция платёжного шлюза.
 pub const BENCH_PAYMENT_INTEGRATION: &str =
     include_str!("../assets/benchmarks/payment_integration.yaml");
@@ -830,7 +894,11 @@ pub fn embedded_plugin_files() -> &'static [(&'static str, &'static str)] {
 /// Ошибка создания каталогов или записи файлов (с привязкой к пути).
 pub fn write_defaults(home: &Path) -> Result<Vec<PathBuf>> {
     let mut written = Vec::new();
-    for (rel, content) in DEFAULT_FILES.iter().chain(PLUGIN_FILES.iter()) {
+    for (rel, content) in DEFAULT_FILES
+        .iter()
+        .chain(PLUGIN_FILES.iter())
+        .chain(SEMANTIC_GOLDEN.iter())
+    {
         let path = home.join(rel);
         if path.exists() {
             continue;
@@ -853,9 +921,13 @@ mod tests {
     fn write_defaults_creates_full_tree() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let written = write_defaults(tmp.path()).expect("write_defaults");
-        let total = DEFAULT_FILES.len() + PLUGIN_FILES.len();
+        let total = DEFAULT_FILES.len() + PLUGIN_FILES.len() + SEMANTIC_GOLDEN.len();
         assert_eq!(written.len(), total, "записаны не все файлы");
-        for (rel, content) in DEFAULT_FILES.iter().chain(PLUGIN_FILES.iter()) {
+        for (rel, content) in DEFAULT_FILES
+            .iter()
+            .chain(PLUGIN_FILES.iter())
+            .chain(SEMANTIC_GOLDEN.iter())
+        {
             let path = tmp.path().join(rel);
             assert!(path.is_file(), "нет файла {rel}");
             let on_disk = std::fs::read_to_string(&path).expect("read");
@@ -944,6 +1016,135 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// Golden-набор смысловых рубрик (ADR-051, S4): у каждой рубрики шесть
+    /// досье, эталоны покрывают все её критерии, а главный критерий размечен
+    /// так, чтобы кейс что-то измерял: на дефектном он низкий, на чистом —
+    /// высокий. Ошибка в разметке делает кейс бесполезным молча — отсюда
+    /// проверка, а не доверие к автору файла.
+    #[test]
+    fn semantic_golden_set_parses_and_measures() {
+        let rubrics: [(&str, &str, &str); 4] = [
+            (
+                "adr_spine_consistency",
+                RUBRIC_ADR_SPINE_CONSISTENCY,
+                "adr_vs_spine",
+            ),
+            (
+                "model_link_semantics",
+                RUBRIC_MODEL_LINK_SEMANTICS,
+                "entity_links",
+            ),
+            (
+                "nfr_mechanism_fit",
+                RUBRIC_NFR_MECHANISM_FIT,
+                "nfr_mechanism",
+            ),
+            (
+                "code_invariant_conformance",
+                RUBRIC_CODE_INVARIANT_CONFORMANCE,
+                "code_vs_spine",
+            ),
+        ];
+        for (name, yaml, pack) in rubrics {
+            let rubric: crate::rubric::Rubric =
+                serde_yaml_ng::from_str(yaml).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(
+                rubric.pack.map(crate::rubric_pack::PackKind::as_str),
+                Some(pack)
+            );
+            let main = rubric
+                .criteria
+                .iter()
+                .find(|c| c.blocking)
+                .unwrap_or_else(|| panic!("{name}: нет главного критерия"));
+
+            // Файлы рубрики разложены по «<имя>.md» и «<имя>.expected.yaml».
+            let dir = format!("assets/benchmarks/golden/semantic/{name}/");
+            let files: Vec<(&str, &str)> = SEMANTIC_GOLDEN
+                .iter()
+                .filter(|(rel, _)| rel.starts_with(&dir))
+                .map(|(rel, body)| (&rel[dir.len()..], *body))
+                .collect();
+            assert_eq!(files.len(), 12, "{name}: 6 досье + 6 эталонов");
+
+            let (mut docs, mut defective, mut clean) = (0usize, 0usize, 0usize);
+            for (file, body) in &files {
+                if !std::path::Path::new(file)
+                    .extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("md"))
+                {
+                    continue;
+                }
+                docs += 1;
+                assert!(
+                    body.contains("=== ИСТОЧНИК subject:"),
+                    "{name}/{file}: досье без источника-субъекта"
+                );
+                assert_eq!(
+                    body.matches(crate::rubric_pack::SOURCE_BEGIN).count(),
+                    body.matches(crate::rubric_pack::SOURCE_END).count(),
+                    "{name}/{file}: маркеры источников непарные"
+                );
+                let expected = files
+                    .iter()
+                    .find(|(f, _)| *f == format!("{}.expected.yaml", file.trim_end_matches(".md")))
+                    .map_or_else(|| panic!("{name}/{file}: нет эталона"), |(_, b)| *b);
+                let exp: crate::bench::GoldenExpectation = serde_yaml_ng::from_str(expected)
+                    .unwrap_or_else(|e| panic!("{name}/{file}: эталон: {e}"));
+                assert_eq!(exp.rubric, name, "{name}/{file}: имя рубрики в эталоне");
+                assert_ne!(
+                    exp.kind,
+                    crate::bench::GoldenKind::Unlabeled,
+                    "{name}/{file}: у смыслового кейса обязана быть метка"
+                );
+                for c in &rubric.criteria {
+                    assert!(
+                        exp.scores.contains_key(&c.id),
+                        "{name}/{file}: нет эталона критерия '{}'",
+                        c.id
+                    );
+                }
+                let range = exp.scores[&main.id];
+                assert!(
+                    range.upper() <= rubric.scale_max,
+                    "{name}/{file}: балл выше шкалы"
+                );
+                match exp.kind {
+                    crate::bench::GoldenKind::Defective => {
+                        defective += 1;
+                        // Распределённый дефект вправе жить во ВТОРОМ критерии
+                        // (механизм достаточен, а проверка измеряет не то):
+                        // требуем, чтобы рубрика дефект видела хоть где-то, и
+                        // чтобы главный критерий не был «всё хорошо».
+                        assert!(
+                            exp.scores.values().any(|r| r.upper() <= 2),
+                            "{name}/{file}: дефектный кейс не имеет НИ ОДНОГО низкого \
+                             критерия — он ничего не измеряет"
+                        );
+                        assert!(
+                            range.upper() <= 3,
+                            "{name}/{file}: на дефектном кейсе главный критерий '{}' не \
+                             может быть высоким",
+                            main.id
+                        );
+                    }
+                    crate::bench::GoldenKind::Clean => {
+                        clean += 1;
+                        assert!(
+                            range.midpoint() >= 3.5,
+                            "{name}/{file}: на чистом кейсе главный критерий '{}' обязан \
+                             быть высоким — иначе измеряется не чистота",
+                            main.id
+                        );
+                    }
+                    crate::bench::GoldenKind::Unlabeled => unreachable!("проверено выше"),
+                }
+            }
+            assert_eq!(docs, 6, "{name}: шесть досье");
+            assert_eq!((defective, clean), (3, 3), "{name}: 3 дефектных + 3 чистых");
         }
     }
 
@@ -1098,8 +1299,9 @@ mod tests {
                     "критерия '{id}' нет в рубрике adr_quality"
                 );
                 assert!(
-                    (1..=rubric.scale_max).contains(score),
-                    "{id}: балл {score} вне шкалы 1..={}",
+                    (1..=rubric.scale_max).contains(&score.upper()),
+                    "{id}: балл {} вне шкалы 1..={}",
+                    score.upper(),
                     rubric.scale_max
                 );
             }

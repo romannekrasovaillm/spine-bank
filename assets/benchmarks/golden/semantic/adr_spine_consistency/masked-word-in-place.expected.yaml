@@ -1,0 +1,9 @@
+# Засеяно: решение формально подтверждает AD-3 («соблюдается») и тут же вводит «единственное исключение», которое его снимает, прикрываясь ключом идемпотентности (AD-1).
+# Поэтому no_contradiction 1..2: слова на месте, а смысл расходится — это ровно якорь 3, а разрешение запрещённого тянет к якорю 1.
+rubric: adr_spine_consistency
+kind: defective
+scores:
+  no_contradiction: {min: 1, max: 2}
+  invariant_attribution: {min: 4, max: 5}
+  exception_discipline: {min: 2, max: 3}
+  deferred_respected: {min: 4, max: 5}

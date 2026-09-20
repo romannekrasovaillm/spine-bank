@@ -1,0 +1,9 @@
+# Засеяно: Context держится границ AD-2 (журнал append-only, только компенсирующие записи), а далёкий пункт последствий перезаписывает записи старше 13 месяцев агрегатом.
+# Поэтому no_contradiction 1..2: по отдельности каждый абзац нормален, но перезапись записей журнала запрещена прямо — выше 2 балла ставить нечего.
+rubric: adr_spine_consistency
+kind: defective
+scores:
+  no_contradiction: {min: 1, max: 2}
+  invariant_attribution: {min: 3, max: 5}
+  exception_discipline: {min: 1, max: 2}
+  deferred_respected: {min: 4, max: 5}
