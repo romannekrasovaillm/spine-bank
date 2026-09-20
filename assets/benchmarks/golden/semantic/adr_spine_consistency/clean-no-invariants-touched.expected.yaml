@@ -1,0 +1,9 @@
+# Чисто и пусто: решение организационное (смены дежурства), технический контур не меняет, пустой перечень задетых инвариантов обоснован явно, DEF-1 и DEF-2 не затронуты.
+# no_contradiction 4..5: все семь источников досье проверены и ни один не задет; кейс прежде всего на ложное обвинение судьи.
+rubric: adr_spine_consistency
+kind: clean
+scores:
+  no_contradiction: {min: 4, max: 5}
+  invariant_attribution: {min: 4, max: 5}
+  exception_discipline: {min: 4, max: 5}
+  deferred_respected: {min: 4, max: 5}

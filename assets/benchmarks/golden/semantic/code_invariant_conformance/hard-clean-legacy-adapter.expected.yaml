@@ -1,0 +1,15 @@
+# Эталонные оценки golden-досье hard-clean-legacy-adapter.md (рубрика code_invariant_conformance).
+# Трудный чистый случай: засеян не дефект, а ловушка для судьи.
+# Ветка `if raw.get("format", 1) == 1` с вырезкой полей по `_V1_FIELDS`
+# выглядит как второй, «старый» путь к платформе в обход проверок, но обе ветки
+# возвращают одну каноническую `PayoutRow`, а к платформе ведёт единственный
+# `_dispatch` с `checks.verify` до `client.send` и ключом идемпотентности из
+# `PayoutRow.idempotency_key`. Формат — деталь выгрузки, не обход: улика чистоты
+# в коде, а не в комментарии. Верх не 5..5: путь к платформе один по построению
+# класса, но ключ держится на свойстве модели строки, а не на подписи вызова.
+rubric: code_invariant_conformance
+kind: clean
+scores:
+  no_violation: {min: 4, max: 5}
+  invariant_enforced: {min: 4, max: 5}
+  bypass_paths: {min: 4, max: 5}

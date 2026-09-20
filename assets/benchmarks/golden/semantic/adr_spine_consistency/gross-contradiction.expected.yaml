@@ -1,0 +1,9 @@
+# Засеяно: решение прямо переопределяет AD-3 («повтор при таймауте — штатный режим»), называя инвариант по имени, но без срока, условия пересмотра и уровня решения.
+# Поэтому no_contradiction 1..2: утверждение разрешает запрещённое, назван и нарушенный инвариант — якорь 1; выше 2 нечего, нарушение заявлено прямо, а не «прочитывается».
+rubric: adr_spine_consistency
+kind: defective
+scores:
+  no_contradiction: {min: 1, max: 2}
+  invariant_attribution: {min: 3, max: 4}
+  exception_discipline: {min: 2, max: 3}
+  deferred_respected: {min: 4, max: 5}

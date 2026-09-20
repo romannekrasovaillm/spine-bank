@@ -1,9 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
   JUnit 5-половина шаблона. Запуск: mvn -q test (из этого каталога).
-  Без Maven тесты можно прогнать JUnit-консолью:
-    javac -cp junit-platform-console-standalone.jar -d out src/main/java/*.java src/test/java/*.java
-    java -jar junit-platform-console-standalone.jar execute -cp out --scan-classpath
+  Без Maven тесты прогоняются JUnit-консолью (сборка javac и запуск java -jar;
+  точные команды — в README шаблона).
+  NB: в XML-комментарии недопустима двойная черта, поэтому флаги консоли
+  здесь не цитируются буквально — иначе pom становится невалидным XML и
+  Maven отказывается его читать (проверено на CI 2026-09-20).
 -->
 <project xmlns="http://maven.apache.org/POM/4.0.0"
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"

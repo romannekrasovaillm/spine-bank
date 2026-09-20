@@ -1,0 +1,9 @@
+# Чисто: решение касается AD-1..AD-5 и называет их поимённо по пунктам решения, отступлений не вводит.
+# no_contradiction 4..5: проверены все семь источников досье и ни один не задет (якорь 5); 4 — если судья осторожничает на деталях хранения.
+rubric: adr_spine_consistency
+kind: clean
+scores:
+  no_contradiction: {min: 4, max: 5}
+  invariant_attribution: {min: 4, max: 5}
+  exception_discipline: {min: 4, max: 5}
+  deferred_respected: {min: 4, max: 5}

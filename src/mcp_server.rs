@@ -188,6 +188,14 @@ const PLAYBOOK_PROMPTS: &[PlaybookPrompt] = &[
         ],
     },
     PlaybookPrompt {
+        name: "spine-semantic-judge",
+        embedded: crate::assets::PLUGIN_SPINE_WORKFLOWS_SKILLS_SPINE_SEMANTIC_JUDGE_SKILL_MD,
+        arguments: &[(
+            "subject",
+            "субъект досье: путь к ADR или файлу кода либо идентификатор сущности модели",
+        )],
+    },
+    PlaybookPrompt {
         name: "spine-contracts-gate",
         embedded: crate::assets::PLUGIN_SPINE_WORKFLOWS_SKILLS_SPINE_CONTRACTS_GATE_SKILL_MD,
         arguments: &[
@@ -1528,6 +1536,15 @@ impl McpServe {
             target: Option<String>,
             /// Текст документа inline (альтернатива `target`).
             target_text: Option<String>,
+            /// Вид досье смысловой рубрики (ADR-051): `adr_vs_spine` |
+            /// `entity_links` | `nfr_mechanism` | `code_vs_spine`.
+            pack: Option<String>,
+            /// Субъект досье: путь к ADR/файлу кода или идентификатор
+            /// сущности модели. Взаимоисключающ с `target`/`target_text`.
+            subject: Option<String>,
+            /// Корень репозитория для сборки досье (по умолчанию — текущий
+            /// каталог процесса сервера).
+            root: Option<String>,
             /// В MCP-режиме не поддерживается: генерация динамической
             /// рубрики требует LLM на стороне сервера.
             dynamic_subject: Option<String>,
@@ -1541,12 +1558,25 @@ impl McpServe {
                     .into(),
             ));
         }
-        let text = rubric_target_text("rubric_prompt", args.target, args.target_text).await?;
-        rubric::check_target_len(&text).map_err(|e| CallError::execution("rubric_prompt", e))?;
         let rubric_path = resolve_rubric(&self.cfg.paths.rubrics_dir(), &args.rubric);
         let rub = blocking("rubric_prompt", move || rubric::load(&rubric_path)).await?;
+        let addressed_to_target = args.target.is_some() || args.target_text.is_some();
+        pack_matches_rubric("rubric_prompt", &rub, args.pack.as_deref())?;
+        let pack = rubric_pack_input(
+            "rubric_prompt",
+            args.pack,
+            args.subject,
+            args.root,
+            addressed_to_target,
+        )
+        .await?;
+        let text = match &pack {
+            Some(p) => p.text.clone(),
+            None => rubric_target_text("rubric_prompt", args.target, args.target_text).await?,
+        };
+        rubric::check_target_len(&text).map_err(|e| CallError::execution("rubric_prompt", e))?;
         let samples = self.cfg.judge.samples.max(1);
-        Ok(json!({
+        let mut out = json!({
             "rubric": rub.name,
             "criteria": rub.criteria.len(),
             "system_prompt": rubric::judge_system_prompt(&rub),
@@ -1560,13 +1590,26 @@ impl McpServe {
             },
             "instructions": "Исполните system+user промпт samples раз независимыми запросами \
                              своей модели; сырые ответы (как есть, без правок) передайте массивом \
-                             'answers' в rubric_verify с ТЕМИ ЖЕ rubric и target/target_text.",
+                             'answers' в rubric_verify с ТЕМИ ЖЕ rubric и target/target_text \
+                             (или с теми же pack/subject/root).",
             "summary": format!(
                 "Промпт судьи по рубрике '{}' собран ({} критериев; нужно независимых ответов: {samples})",
                 rub.name,
                 rub.criteria.len(),
             ),
-        }))
+        });
+        if let Some(p) = &pack {
+            out["pack"] = pack_json(p);
+            out["summary"] = json!(format!(
+                "Промпт судьи по рубрике '{}' собран по досье '{}' (субъект '{}', источников {}; \
+                 нужно независимых ответов: {samples})",
+                rub.name,
+                p.kind.as_str(),
+                p.subject,
+                p.inputs.len(),
+            ));
+        }
+        Ok(out)
     }
 
     /// `rubric_verify`: split-judge, фаза 2 (без LLM у сервера): разбор
@@ -1596,6 +1639,13 @@ impl McpServe {
             /// — судья судил свою же работу; попадает в отчёт и в находку
             /// `judge_is_author` составляющей гейта `decision_quality`.
             author_model: Option<String>,
+            /// Вид досье смысловой рубрики (ADR-051); тот же, что в
+            /// `rubric_prompt`.
+            pack: Option<String>,
+            /// Субъект досье; тот же, что в `rubric_prompt`.
+            subject: Option<String>,
+            /// Корень репозитория для сборки досье.
+            root: Option<String>,
         }
         let args: Args = parse_args(args, "rubric_verify")?;
         if args.answers.is_empty() {
@@ -1611,10 +1661,23 @@ impl McpServe {
             )));
         }
         let target_path = args.target.clone();
-        let text = rubric_target_text("rubric_verify", args.target, args.target_text).await?;
-        rubric::check_target_len(&text).map_err(|e| CallError::execution("rubric_verify", e))?;
         let rubric_path = resolve_rubric(&self.cfg.paths.rubrics_dir(), &args.rubric);
         let rub = blocking("rubric_verify", move || rubric::load(&rubric_path)).await?;
+        let addressed_to_target = args.target.is_some() || args.target_text.is_some();
+        pack_matches_rubric("rubric_verify", &rub, args.pack.as_deref())?;
+        let pack = rubric_pack_input(
+            "rubric_verify",
+            args.pack,
+            args.subject,
+            args.root.clone(),
+            addressed_to_target,
+        )
+        .await?;
+        let text = match &pack {
+            Some(p) => p.text.clone(),
+            None => rubric_target_text("rubric_verify", args.target, args.target_text).await?,
+        };
+        rubric::check_target_len(&text).map_err(|e| CallError::execution("rubric_verify", e))?;
         let total = args.answers.len();
         let mut runs = Vec::with_capacity(total);
         let mut dropped = 0usize;
@@ -1636,33 +1699,53 @@ impl McpServe {
             .judge_model
             .or(args.model)
             .unwrap_or_else(|| "external (split-judge)".into());
-        let report = rubric::build_report(&rub, &judge_model, &runs, &text, &self.cfg.judge)
+        let scope = match &pack {
+            Some(p) => rubric::EvidenceScope::Pack(p),
+            None => rubric::EvidenceScope::Target(&text),
+        };
+        let report = rubric::build_report(&rub, &judge_model, &runs, &scope, &self.cfg.judge)
             .map_err(|e| CallError::execution("rubric_verify", e))?;
-        // Машиночитаемый отчёт (Н7, ADR-042) — то, что читает составляющая
-        // гейта `decision_quality`. Пишется только под `--rw`: read-only
-        // контур MCP не имеет права оставлять след в рабочем каталоге.
+        // Машиночитаемый отчёт (Н7, ADR-042; досье — ADR-051) — то, что читает
+        // гейт. Пишется только под `--rw`: read-only контур MCP не имеет права
+        // оставлять след в рабочем каталоге.
+        let root_arg = args.root.clone();
+        let abs_target: Option<PathBuf> = target_path.as_deref().map(|t| {
+            let p = PathBuf::from(t);
+            p.canonicalize().unwrap_or(p)
+        });
+        let pack_for_write = pack.clone();
+        let subject_for_write = if let Some(p) = &pack_for_write {
+            let repo = root_arg.map_or_else(|| PathBuf::from("."), PathBuf::from);
+            let repo = repo.canonicalize().unwrap_or(repo);
+            Some((repo, crate::rubric::ArtifactSubject::Pack(p), true))
+        } else {
+            abs_target.as_ref().map(|abs| {
+                (
+                    crate::rubric::repo_root_of(abs),
+                    crate::rubric::ArtifactSubject::Target(Some(abs.as_path())),
+                    abs.is_file(),
+                )
+            })
+        };
         let mut artifact_note = None;
-        if let Some(target) = target_path.as_deref() {
-            let path = PathBuf::from(target);
-            let abs = path.canonicalize().unwrap_or(path);
-            if abs.is_file() {
-                if self.mode.allows_write() {
-                    let repo = crate::rubric::repo_root_of(&abs);
-                    match crate::rubric::write_artifact(
-                        &repo,
-                        &report,
-                        Some(&abs),
-                        args.author_model.as_deref(),
-                    ) {
-                        Ok(p) => artifact_note = Some(p.display().to_string()),
-                        Err(e) => {
-                            artifact_note = Some(format!("не записан: {e}"));
-                        }
+        if let Some((repo, subject, addressable)) = subject_for_write {
+            if !addressable {
+                // Текста без файла гейт не найдёт: писать нечего.
+            } else if self.mode.allows_write() {
+                match crate::rubric::write_artifact_for_subject(
+                    &repo,
+                    &report,
+                    &subject,
+                    args.author_model.as_deref(),
+                ) {
+                    Ok(p) => artifact_note = Some(p.display().to_string()),
+                    Err(e) => {
+                        artifact_note = Some(format!("не записан: {e}"));
                     }
-                } else {
-                    artifact_note =
-                        Some("не записан: контур MCP только для чтения (нужен `--rw`)".to_string());
                 }
+            } else {
+                artifact_note =
+                    Some("не записан: контур MCP только для чтения (нужен `--rw`)".to_string());
             }
         }
         let mut out = json!({
@@ -1688,6 +1771,9 @@ impl McpServe {
                 runs.len(),
             ),
         });
+        if let Some(p) = &pack {
+            out["pack"] = pack_json(p);
+        }
         if dropped > 0 {
             out["warning"] = json!(format!(
                 "{dropped} из {total} ответов не разобраны как JSON судьи и отброшены; \
@@ -2128,11 +2214,139 @@ async fn rubric_target_text(
     }
 }
 
+/// Досье судьи по аргументам `pack`/`subject`/`root` (ADR-051): `None` —
+/// вызов по документу (поведение 0.3.4), `Some` — ровно одно собранное досье.
+///
+/// Фрагментированное досье (`code_vs_spine` по большому файлу) в один вызов не
+/// укладывается: инструмент отвечает ошибкой со списком субъектов-фрагментов,
+/// и хост вызывает его по каждому — «один вызов, одно суждение, один отчёт».
+async fn rubric_pack_input(
+    tool: &str,
+    pack: Option<String>,
+    subject: Option<String>,
+    root: Option<String>,
+    addressed_to_target: bool,
+) -> std::result::Result<Option<crate::rubric_pack::ContextPack>, CallError> {
+    match (pack, subject) {
+        (None, None) => Ok(None),
+        (Some(kind), Some(subject)) => {
+            if addressed_to_target {
+                return Err(CallError::invalid_params(format!(
+                    "{tool}: аргументы 'pack'/'subject' взаимоисключающи с 'target'/'target_text' \
+                     — досье собирается из репозитория, а не из переданного текста"
+                )));
+            }
+            let repo = root.map_or_else(|| PathBuf::from("."), PathBuf::from);
+            let repo = repo.canonicalize().unwrap_or(repo);
+            let packs = blocking(tool, move || {
+                let kind = crate::rubric_pack::PackKind::parse(&kind)?;
+                crate::rubric_pack::build(&repo, kind, &subject)
+            })
+            .await?;
+            if packs.len() > 1 {
+                let list: Vec<String> = packs.iter().map(|p| format!("'{}'", p.subject)).collect();
+                return Err(CallError::Execution(format!(
+                    "{tool}: досье дробится на {} фрагментов ({}); вызовите инструмент по \
+                     каждому, указав субъект с диапазоном строк",
+                    packs.len(),
+                    list.join(", ")
+                )));
+            }
+            Ok(packs.into_iter().next())
+        }
+        (Some(_), None) => Err(CallError::invalid_params(format!(
+            "{tool}: аргумент 'pack' требует 'subject' — путь к ADR или файлу кода либо \
+             идентификатор сущности модели"
+        ))),
+        (None, Some(_)) => Err(CallError::invalid_params(format!(
+            "{tool}: аргумент 'subject' требует 'pack' — вид досье: adr_vs_spine, \
+             entity_links, nfr_mechanism, code_vs_spine"
+        ))),
+    }
+}
+
+/// Сверяет запрошенный вид досье с тем, который объявлен в рубрике (ADR-051,
+/// волна B).
+///
+/// Рубрика знает свой вид досье (`pack:` в YAML), поэтому «смысловую рубрику
+/// прогнали по обычному документу» и «собрали не то досье» — ошибка вызова, а
+/// не молчаливая оценка не по тому входу: судья без досье не увидит второй
+/// стороны противоречия, а отчёт при этом выглядел бы полноценным.
+fn pack_matches_rubric(
+    tool: &str,
+    rubric: &rubric::Rubric,
+    requested: Option<&str>,
+) -> std::result::Result<(), CallError> {
+    let Some(declared) = rubric.pack else {
+        return Ok(());
+    };
+    match requested {
+        Some(kind) if kind.trim() == declared.as_str() => Ok(()),
+        Some(kind) => Err(CallError::invalid_params(format!(
+            "{tool}: рубрика '{}' собирается по досье '{}', а запрошено '{kind}' — \
+             вход судьи был бы не тем, на который рубрика рассчитана",
+            rubric.name,
+            declared.as_str(),
+        ))),
+        None => Err(CallError::invalid_params(format!(
+            "{tool}: рубрика '{}' — смысловая: она оценивает не документ, а досье '{}'. \
+             Передайте 'pack' и 'subject' (путь к ADR или файлу кода либо идентификатор \
+             сущности модели); аргументы 'target'/'target_text' здесь не годятся",
+            rubric.name,
+            declared.as_str(),
+        ))),
+    }
+}
+
+/// Машиночитаемое описание собранного досье для ответа инструмента.
+fn pack_json(pack: &crate::rubric_pack::ContextPack) -> Value {
+    json!({
+        "kind": pack.kind.as_str(),
+        "subject": pack.subject,
+        "sha256": pack.sha256,
+        "sources": pack.inputs.iter().map(|i| json!({
+            "path": i.path,
+            "sha256": i.sha256,
+            "role": i.role.as_str(),
+            "id": i.id,
+        })).collect::<Vec<_>>(),
+        "reference_ids": pack.references().iter().map(|i| i.key()).collect::<Vec<_>>(),
+    })
+}
+
 /// JSON-схема ответа судьи, как её ждёт [`rubric::parse_judge_response`]
 /// (split-judge: хост подставляет её в структурированный вывод своей модели;
 /// парсер терпимо принимает балл и строкой — схема фиксирует канону).
 fn judge_response_schema(rubric: &rubric::Rubric) -> Value {
     let ids: Vec<&str> = rubric.criteria.iter().map(|c| c.id.as_str()).collect();
+    // Смысловые рубрики (ADR-051) требуют цитат на роли и допускают низкий
+    // балл как обвинение — описание поля это называет, иначе хост, следующий
+    // схеме, пришлёт обвинение без цитат.
+    let needs_low = rubric.criteria.iter().any(|c| c.evidence_on.requires_low());
+    let roles: std::collections::BTreeSet<&str> = rubric
+        .criteria
+        .iter()
+        .flat_map(|c| c.evidence_roles.iter().map(String::as_str))
+        .collect();
+    let needs_coverage = rubric.criteria.iter().any(|c| c.coverage.is_some());
+    let rationale_hint = if roles.is_empty() {
+        "При балле ≥ 2 (или ≤ 2 у критериев с пометкой «цитата при оценке ≤ 2») начинается с «Цитата: \"<дословный фрагмент текста>\"» — цитата проверяется механически".to_string()
+    } else {
+        format!(
+            "Для критериев с ролями ({}) — по цитате на каждую роль в формате «Цитата {}: \"<фрагмент из этого источника>\"»; каждая сверяется только со своим источником.{}",
+            roles.iter().copied().collect::<Vec<_>>().join(", "),
+            roles
+                .iter()
+                .copied()
+                .collect::<Vec<_>>()
+                .join(": \"…\". Цитата "),
+            if needs_low {
+                " У критериев с пометкой «цитата при оценке ≤ 2» низкий балл — найденное противоречие, и он тоже требует цитат"
+            } else {
+                ""
+            }
+        )
+    };
     json!({
         "type": "object",
         "properties": {
@@ -2149,7 +2363,16 @@ fn judge_response_schema(rubric: &rubric::Rubric) -> Value {
                         },
                         "rationale": {
                             "type": "string",
-                            "description": "При балле ≥ 2 начинается с «Цитата: \"<дословный фрагмент текста>\"» — цитата проверяется механически",
+                            "description": rationale_hint,
+                        },
+                        "checked": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": if needs_coverage {
+                                "Идентификаторы проверенных ссылочных источников досье (AD-1, CMP-002, …) — обязательны при оценке 4 и выше у критериев с пометкой «покрытие»: механика сверяет перечень с составом досье, пропуск исключает критерий"
+                            } else {
+                                "Не используется этой рубрикой; оставьте пустым"
+                            },
                         },
                     },
                     "required": ["criterion_id", "score", "rationale"],
@@ -2387,15 +2610,21 @@ fn tool_specs() -> Vec<Value> {
             "name": "rubric_prompt",
             "description": "Split-judge, фаза 1 (без API-ключа): собирает system+user промпты \
                             архитектурного судьи по рубрике и целевому документу + JSON-схему \
-                            ответа + judge_config (число сэмплов k). Выполните промпт k раз \
-                            СВОЕЙ моделью и передайте сырые ответы массивом 'answers' в \
-                            rubric_verify с теми же rubric и target/target_text",
+                            ответа + judge_config (число сэмплов k). Вместо документа можно \
+                            указать досье (pack+subject) — вход смысловой рубрики, который \
+                            собирается из репозитория вместе с хэшами источников. Выполните \
+                            промпт k раз СВОЕЙ моделью и передайте сырые ответы массивом \
+                            'answers' в rubric_verify с теми же rubric и target/target_text \
+                            (или pack/subject/root)",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "rubric": {"type": "string", "description": "Рубрика: имя в каталоге рубрик arch или путь к YAML"},
                     "target": {"type": "string", "description": "Путь к оцениваемому документу (md/txt)"},
                     "target_text": {"type": "string", "description": "Текст документа inline (альтернатива target)"},
+                    "pack": {"type": "string", "description": "Вид досье смысловой рубрики (ADR-051): adr_vs_spine | entity_links | nfr_mechanism | code_vs_spine; взаимоисключающ с target/target_text"},
+                    "subject": {"type": "string", "description": "Субъект досье: путь к ADR или файлу кода (можно с диапазоном строк, 'src/gate.rs#12-88') либо идентификатор сущности модели (CMP-001)"},
+                    "root": {"type": "string", "description": "Опц.: корень репозитория для сборки досье (по умолчанию — текущий каталог)"},
                     "dynamic_subject": {"type": "string", "description": "НЕ поддерживается в MCP-режиме (нужен LLM у сервера): сгенерируйте рубрику своей моделью и передайте путь в rubric"},
                 },
                 "required": ["rubric"],
@@ -2408,13 +2637,18 @@ fn tool_specs() -> Vec<Value> {
                             модели на промпт rubric_prompt (массив строк 'answers') и строит \
                             отчёт рубрики: медиана баллов по сэмплам, метки unstable (разброс) \
                             и evidence_not_found (цитата не подтверждена target'ом). Битые \
-                            ответы отбрасываются со счётчиком в answers.dropped",
+                            ответы отбрасываются со счётчиком в answers.dropped. Под `--rw` \
+                            отчёт ложится в reports/rubric/ и его находит гейт: для досье — \
+                            с хэшем досье и поимёнными хэшами источников (ADR-051)",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "rubric": {"type": "string", "description": "Та же рубрика, что в rubric_prompt"},
                     "target": {"type": "string", "description": "Тот же документ (путь), что судился — для проверки цитат"},
                     "target_text": {"type": "string", "description": "Тот же текст inline (альтернатива target)"},
+                    "pack": {"type": "string", "description": "Тот же вид досье, что в rubric_prompt (ADR-051): adr_vs_spine | entity_links | nfr_mechanism | code_vs_spine"},
+                    "subject": {"type": "string", "description": "Тот же субъект досье, что в rubric_prompt (с диапазоном строк, если досье фрагментировано)"},
+                    "root": {"type": "string", "description": "Опц.: корень репозитория для сборки досье — тот же, что в rubric_prompt"},
                     "answers": {
                         "type": "array",
                         "items": {"type": "string"},
@@ -3334,7 +3568,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prompts_list_has_eight_playbooks_with_frontmatter_descriptions() {
+    async fn prompts_list_has_nine_playbooks_with_frontmatter_descriptions() {
         // Пустой plugins-каталог → встроенные ассеты (чистая машина).
         let tmp = tempfile::tempdir().expect("tmp");
         let server = server_with_dirs(tmp.path(), tmp.path());
@@ -3357,12 +3591,13 @@ mod tests {
                 "spine-content-bootstrap",
                 "spine-architect-review",
                 "spine-adr-judge",
+                "spine-semantic-judge",
                 "spine-contracts-gate",
                 "spine-archify-viz",
                 "spine-fitness-gate",
                 "spine-bundle",
             ],
-            "восемь плейбуков в зафиксированном порядке"
+            "девять плейбуков в зафиксированном порядке"
         );
         for p in prompts {
             assert!(
@@ -4000,6 +4235,187 @@ mod tests {
         // Пустой массив и превышение лимита — ошибки параметров -32602.
         assert_eq!(responses[1]["error"]["code"], INVALID_PARAMS);
         assert_eq!(responses[2]["error"]["code"], INVALID_PARAMS);
+    }
+
+    /// Репозиторий-кейс для досье: спайн с инвариантом и ADR.
+    fn pack_repo(root: &Path) -> PathBuf {
+        let repo = root.join("case");
+        std::fs::create_dir_all(repo.join("docs/adr")).expect("adr dir");
+        std::fs::write(
+            repo.join("ARCHITECTURE-SPINE.md"),
+            "# Spine\n\n## AD-2: Детерминированный слой контроля\n\n- **Rule**: механика контроля без LLM.\n",
+        )
+        .expect("spine");
+        std::fs::write(
+            repo.join("docs/adr/ADR-001-x.md"),
+            "# ADR-001\n\nРешение: контроль без LLM в гейте.\n",
+        )
+        .expect("adr");
+        repo
+    }
+
+    /// Досье из MCP (ADR-051): `rubric_prompt` собирает вход из репозитория и
+    /// называет источники с их хэшами, `rubric_verify` строит по нему отчёт и
+    /// называет хэш досье.
+    #[tokio::test]
+    async fn rubric_prompt_and_verify_accept_pack() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = pack_repo(tmp.path());
+        let rub = rubric_fixture(tmp.path());
+        let prompt = format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"rubric_prompt","arguments":{{"rubric":"{}","pack":"adr_vs_spine","subject":"docs/adr/ADR-001-x.md","root":"{}"}}}}}}"#,
+            rub.display(),
+            repo.display()
+        );
+        let responses = run_lines(&[&prompt]).await;
+        let result = &responses[0]["result"];
+        assert_eq!(result["isError"], false, "{result}");
+        let sc = &result["structuredContent"];
+        assert_eq!(sc["pack"]["kind"], "adr_vs_spine");
+        assert_eq!(sc["pack"]["subject"], "docs/adr/ADR-001-x.md");
+        assert_eq!(
+            sc["pack"]["reference_ids"],
+            json!(["AD-2"]),
+            "ссылочные источники досье названы: {sc}"
+        );
+        assert_eq!(
+            sc["pack"]["sources"][0]["role"], "subject",
+            "первый источник — субъект: {sc}"
+        );
+        assert!(
+            sc["user_prompt"]
+                .as_str()
+                .expect("user_prompt")
+                .contains("Rule: механика контроля без LLM"),
+            "инвариант спайна попал в промпт"
+        );
+        // Взаимоисключение: досье — не переданный текст.
+        let both = format!(
+            r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"rubric_prompt","arguments":{{"rubric":"{}","pack":"adr_vs_spine","subject":"docs/adr/ADR-001-x.md","target_text":"текст"}}}}}}"#,
+            rub.display()
+        );
+        let responses = run_lines(&[&both]).await;
+        assert_eq!(
+            responses[0]["error"]["code"], -32602,
+            "pack и target_text вместе — ошибка протокола: {}",
+            responses[0]
+        );
+        assert!(
+            responses[0]["error"]["message"]
+                .as_str()
+                .expect("message")
+                .contains("взаимоисключающи"),
+            "причина названа: {}",
+            responses[0]["error"]
+        );
+        // Проверка цитат по досье: цитата из ADR подтверждается, выдуманная — нет.
+        let answers = [
+            r#"{"scores":[{"criterion_id":"context","score":4,"rationale":"Цитата: \"Решение: контроль без LLM в гейте.\" — есть"}],"verdict":"v"}"#,
+        ];
+        let answers_json = serde_json::to_string(&answers).expect("json");
+        let verify = format!(
+            r#"{{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{{"name":"rubric_verify","arguments":{{"rubric":"{}","pack":"adr_vs_spine","subject":"docs/adr/ADR-001-x.md","root":"{}","answers":{answers_json},"model":"host-x"}}}}}}"#,
+            rub.display(),
+            repo.display()
+        );
+        let responses = run_lines(&[&verify]).await;
+        let sc = &responses[0]["result"]["structuredContent"];
+        assert_eq!(responses[0]["result"]["isError"], false, "{sc}");
+        assert!(
+            sc["pack"]["sha256"].as_str().is_some_and(|s| s.len() == 64),
+            "хэш досье в отчёте: {sc}"
+        );
+        assert_eq!(sc["rubric"], "adr-quality");
+    }
+
+    /// Приёмка волны B (ADR-051): смысловая рубрика оценивается по досье, и
+    /// промпт несёт оба источника, а схема ответа — поля цитат по ролям и
+    /// перечень `checked`. Прогон её по обычному документу — ошибка вызова,
+    /// а не молчаливая оценка не по тому входу.
+    #[tokio::test]
+    async fn semantic_rubric_judges_dossier_and_refuses_plain_document() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = pack_repo(tmp.path());
+        // Рубрика-копия встроенной смысловой: имя файла — как у неё, вид досье
+        // объявлен в самой рубрике.
+        let rub = tmp.path().join("semantic.yaml");
+        std::fs::write(&rub, crate::assets::RUBRIC_ADR_SPINE_CONSISTENCY).expect("рубрика");
+
+        let call = format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"rubric_prompt","arguments":{{"rubric":"{}","pack":"adr_vs_spine","subject":"docs/adr/ADR-001-x.md","root":"{}"}}}}}}"#,
+            rub.display(),
+            repo.display()
+        );
+        let responses = run_lines(&[&call]).await;
+        let result = &responses[0]["result"];
+        assert_eq!(result["isError"], false, "{result}");
+        let sc = &result["structuredContent"];
+        let prompt = sc["user_prompt"].as_str().expect("user_prompt");
+        assert!(
+            prompt.contains("=== ИСТОЧНИК subject: docs/adr/ADR-001-x.md ===")
+                && prompt.contains("=== ИСТОЧНИК reference: ARCHITECTURE-SPINE.md#AD-2 ==="),
+            "в промпте обе стороны противоречия: {prompt}"
+        );
+        assert!(
+            prompt.contains("Доказательство: цитата при оценке ≤ 2; роли: subject, reference")
+                && prompt.contains("перечисли в \"checked\""),
+            "критерии несут направление доказательства и покрытие: {prompt}"
+        );
+        let rationale =
+            sc["response_json_schema"]["properties"]["scores"]["items"]["properties"]["rationale"]
+                ["description"]
+                .as_str()
+                .expect("описание rationale");
+        assert!(
+            rationale.contains("Цитата subject") && rationale.contains("reference"),
+            "схема требует цитаты по ролям: {rationale}"
+        );
+        assert_eq!(
+            sc["response_json_schema"]["properties"]["scores"]["items"]["properties"]["checked"]["type"],
+            "array",
+            "перечень проверенного есть в схеме: {sc}"
+        );
+
+        // Тот же вызов по обычному документу — отказ: досье не собрать.
+        let plain = format!(
+            r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"rubric_prompt","arguments":{{"rubric":"{}","target_text":"текст решения"}}}}}}"#,
+            rub.display()
+        );
+        let responses = run_lines(&[&plain]).await;
+        assert_eq!(
+            responses[0]["error"]["code"], -32602,
+            "смысловая рубрика без досье: {}",
+            responses[0]
+        );
+        assert!(
+            responses[0]["error"]["message"]
+                .as_str()
+                .expect("message")
+                .contains("pack"),
+            "подсказка называет аргументы: {}",
+            responses[0]["error"]
+        );
+
+        // Не тот вид досье — тоже ошибка: вход был бы не тот.
+        let wrong = format!(
+            r#"{{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{{"name":"rubric_prompt","arguments":{{"rubric":"{}","pack":"entity_links","subject":"docs/adr/ADR-001-x.md","root":"{}"}}}}}}"#,
+            rub.display(),
+            repo.display()
+        );
+        let responses = run_lines(&[&wrong]).await;
+        assert_eq!(
+            responses[0]["error"]["code"], -32602,
+            "чужой вид досье: {}",
+            responses[0]
+        );
+        assert!(
+            responses[0]["error"]["message"]
+                .as_str()
+                .expect("message")
+                .contains("adr_vs_spine"),
+            "ожидаемый вид назван: {}",
+            responses[0]["error"]
+        );
     }
 
     #[tokio::test]
