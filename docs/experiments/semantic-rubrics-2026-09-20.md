@@ -1,8 +1,9 @@
 # Смысловые рубрики 0.3.5 — что сделано, что измерено, что осталось
 
 Задание: `CLAUDE-TASK-Spine-Core-semantic-rubrics.md`. Ветка
-`feat/semantic-rubrics` от `a960a17` (0.3.4 + T-01…T-06), worktree
-`/home/roman/spine-bank-034-semantic`. Отчёт написан 2026-09-20.
+`feat/semantic-rubrics` от `a960a17` (0.3.4 + T-01…T-06), отдельный git-worktree
+(путь к нему не приводится — личные пути не должны попадать в репозиторий).
+Отчёт написан 2026-09-20.
 
 ## Коротко
 
