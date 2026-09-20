@@ -2889,6 +2889,61 @@ mod tests {
         );
     }
 
+    /// Приёмка волны A: ни одна из шести существующих рубрик не затронута
+    /// новыми полями — иначе поехало бы поведение на golden-наборе, а он
+    /// калибрует судью (ADR-004).
+    #[test]
+    fn legacy_rubric_behaviour_unchanged() {
+        let sources: [(&str, &str); 6] = [
+            (
+                "solution_architecture",
+                crate::assets::RUBRIC_SOLUTION_ARCHITECTURE,
+            ),
+            (
+                "architecture_gates",
+                crate::assets::RUBRIC_ARCHITECTURE_GATES,
+            ),
+            ("macedo_dimensions", crate::assets::RUBRIC_MACEDO_DIMENSIONS),
+            ("adr_quality", crate::assets::RUBRIC_ADR_QUALITY),
+            ("handoff_quality", crate::assets::RUBRIC_HANDOFF_QUALITY),
+            (
+                "agents_md_quality",
+                crate::assets::RUBRIC_AGENTS_MD_QUALITY_YAML,
+            ),
+        ];
+        for (name, text) in sources {
+            let rubric = parse_rubric_yaml(text).unwrap_or_else(|e| panic!("{name}: {e}"));
+            for c in &rubric.criteria {
+                assert_eq!(
+                    c.evidence_on,
+                    EvidenceOn::High,
+                    "{name}/{}: направление",
+                    c.id
+                );
+                assert!(c.evidence_roles.is_empty(), "{name}/{}: роли", c.id);
+                assert!(c.coverage.is_none(), "{name}/{}: покрытие", c.id);
+            }
+            assert!(
+                judge_extra_rules(&rubric).is_empty(),
+                "{name}: у рубрики без новых полей нет дополнительных правил промпта"
+            );
+            // Проверяются именно метки движка, а не слова вообще: описание
+            // рубрики вправе говорить про «покрытие инвариантов».
+            let user = judge_user_prompt(&rubric, "текст");
+            assert!(
+                !user.contains("Доказательство:"),
+                "{name}: пометки новых полей не печатаются"
+            );
+            let system = judge_system_prompt(&rubric);
+            assert!(
+                !system.contains("цитата при оценке ≤ 2")
+                    && !system.contains("критерии с пометкой «покрытие»")
+                    && !system.contains("требуют ЦИТАТУ НА КАЖДУЮ РОЛЬ"),
+                "{name}: системный промпт прежний"
+            );
+        }
+    }
+
     // --- S3 (ADR-051): покрытие вместо цитаты для «всё чисто» ---------------
 
     /// Критерий с требованием покрытия ссылочных источников.
