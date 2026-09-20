@@ -508,7 +508,7 @@ CI-джобой `dogfood` (`arch-be control spine` + `arch-be control check .` +
   > CI и кейсах `кейсы/`.
 - **MCP-клиент** (`docs/mcp.md`), **веб-доступ** (11 кураторских сайтов
   архитектора) и **локальная база знаний** (`docs/web_kb.md`).
-- **MCP-сервер** `arch-be mcp serve` (ADR-008): 36 read-only инструментов
+- **MCP-сервер** `arch-be mcp serve` (ADR-008): 38 read-only инструментов
   (контроль: `spine_lint`, `fitness_check`, `significance_score`/`significance_from_diff`,
   `trace_check`, `model_query`, `nfr_check`, `delta_guard`, `evidence_verify`,
   `contract_diff`, `rules_suggest`; реестры: `landscape_report`, `adr_registry`, `rules_report`,
@@ -677,7 +677,7 @@ arch-be [--config <path>] <command>   # без команды — TUI
 | `kb <query> [--limit]` | Поиск по локальной базе знаний |
 | `web search <query> [--arch]` / `web fetch <url>` / `web sites` | Веб: поиск, фетч, кураторские сайты |
 | `mcp list` / `mcp call <server__tool>` | MCP-серверы и вызовы инструментов |
-| `mcp serve` | MCP-сервер (stdio): архитектурный контроль кодовым агентам — verdict в момент написания кода (ADR-008, `docs/mcp.md`); 36 read-only инструментов + 8 промптов-плейбуков `spine-*`; `--rw` — белый список записей (`handoff_create`, `adr_new`, …); каждый вызов журналируется в `.arch-handoff/mcp-calls.jsonl` |
+| `mcp serve` | MCP-сервер (stdio): архитектурный контроль кодовым агентам — verdict в момент написания кода (ADR-008, `docs/mcp.md`); 38 read-only инструментов + 8 промптов-плейбуков `spine-*`; `--rw` — белый список записей (`handoff_create`, `adr_new`, …); каждый вызов журналируется в `.arch-handoff/mcp-calls.jsonl` |
 | `connect <claude\|qwen\|gigacode\|codex\|kimi\|omp\|generic> [--dir] [--rw] [--no-skills] [--no-hooks] [--no-agents-md] [--strict-hooks] [--apply-global] [--dry-run]` | Подключение Spine к внешнему CLI-агенту: MCP-конфиг (мердж, чужое сохраняется), скиллы, хуки (`arch-be gate --route auto`); `--dry-run` — только план (`docs/CONNECT.md`, `docs/mcp.md`) |
 | `connect ci --provider gitlab\|github\|jenkins` / `connect git-hooks` | Хосто-независимые гейты: джоба `arch-be gate` под площадку CI (нативный формат отчёта: codequality/sarif/junit) / локальные pre-commit + pre-push (`docs/CONNECT.md`) |
 | `handoff <harness> --repo <path> --task <text>` | Handoff-пакет `.arch-handoff/` |
@@ -958,7 +958,7 @@ Live mini-case: [`кейсы/fleet-spine-drift`](кейсы/fleet-spine-drift/) 
   attribute scenarios** (`QAS-*` entities: source/stimulus/artifact/response/
   measure) unfold automatically into the acceptance-criteria section of the
   handoff `TASK.md`.
-- **MCP server** `arch-be mcp serve` (ADR-008): 36 read-only tools (control:
+- **MCP server** `arch-be mcp serve` (ADR-008): 38 read-only tools (control:
   `spine_lint`, `fitness_check`, `significance_score`/`significance_from_diff`,
   `trace_check`, `model_query`, `nfr_check`, `delta_guard`, `evidence_verify`,
   `contract_diff`, `rules_suggest`; registries: `landscape_report`, `adr_registry`, `rules_report`,

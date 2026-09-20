@@ -361,7 +361,7 @@ MCP-инструмента, а плейбуки работы (`spine-*`) при�
 
 ![Headless-прогоны architect_review: omp · OpenClaw · Qwen](docs/screenshots/harnesses/waves-headless-reviews.png)
 
-Полный гид по каналу MCP — карта всех 36 инструментов по задачам
+Полный гид по каналу MCP — карта всех 38 инструментов по задачам
 архитектора, плейбуки, живые сессии, журнал вызовов, устранение
 неполадок: **[docs/mcp_for_architects.md](docs/mcp_for_architects.md)**.
 
@@ -512,7 +512,7 @@ fitness-правил, **сам** чинил его и перепроверял. 
 ## Что внутри MCP-сервера
 
 ```bash
-arch-be mcp serve         # read-only: 36 инструментов (контроль + знания + реестры)
+arch-be mcp serve         # read-only: 38 инструментов (контроль + знания + реестры + шаблоны правил)
                           # + 8 промптов-плейбуков spine-* (слэш-команды хоста)
 arch-be mcp serve --rw    # + handoff_create (теперь и в core), adr_new, …
 ```
