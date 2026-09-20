@@ -265,6 +265,10 @@ pub struct GuardReport {
     /// контекст честности вывода — нарушение при нуле дельт означает
     /// «правку нечем покрыть», а не «дельта не та».
     pub active_deltas: usize,
+    /// Дельта, заархивированные ВНУТРИ проверяемого диапазона `base..HEAD`
+    /// (T-07): архивация до merge — покрытие для правок этого диапазона.
+    /// Аддитивное поле: старые читатели JSON его не знают.
+    pub archived_in_range: Vec<String>,
     /// Покрытие каждого изменённого защищённого файла: (файл, имена ВСЕХ
     /// активных дельт, его упоминающих; пустой список — нарушение).
     pub mentions: Vec<(String, Vec<String>)>,
@@ -404,8 +408,10 @@ fn git_stderr_reason(stderr: &[u8]) -> String {
 
 /// Гейт прямых правок спайна мимо дельты (CI-запрет «прямых коммитов в model/
 /// мимо changes/»): каждый изменённый защищённый файл обязан упоминаться
-/// (путём или именем) в теле хотя бы одной АКТИВНОЙ дельты
-/// `changes/<name>/DELTA.md`; архивные дельты не засчитываются.
+/// (путём или именем) в теле хотя бы одной дельты-покрытия — активной
+/// (`changes/<name>/DELTA.md`) или заархивированной ВНУТРИ проверяемого
+/// диапазона (`base..HEAD`, T-07). Дельта, заархивированная до базы, не
+/// засчитывается: правок диапазона она не описывает.
 ///
 /// Изменённые файлы — `git diff --name-only <base>` (дефолт `HEAD`: staged +
 /// unstaged рабочего дерева; untracked-файлы git-diff не показывает — для CI
@@ -467,11 +473,20 @@ pub fn guard(repo: &Path, base: Option<&str>, protect: &[String]) -> Result<Guar
     changed.sort();
     changed.dedup();
 
-    // Тела активных дельт (архив — уже влитая истина, покрытием не считается).
+    // Тела дельт-покрытий: активные (`changes/<id>`) и заархивированные ВНУТРИ
+    // проверяемого диапазона (T-07). Дельта, заархивированная ДО базы, — влитая
+    // истина: правок диапазона она не описывает и покрытием не считается, иначе
+    // архив стал бы универсальной отмычкой для любой последующей правки.
     let mut active: Vec<(String, String)> = Vec::new();
+    let mut active_deltas = 0_usize;
+    let mut archived_in_range: Vec<String> = Vec::new();
     for d in list(repo) {
-        if d.status != DeltaStatus::Proposed {
-            continue;
+        match d.status {
+            DeltaStatus::Proposed => active_deltas += 1,
+            DeltaStatus::Archived if archived_within(repo, &base, &d.path) => {
+                archived_in_range.push(d.name.clone());
+            }
+            DeltaStatus::Archived => continue,
         }
         let body = std::fs::read_to_string(&d.path).map_err(|e| HarnessError::io(&d.path, e))?;
         active.push((d.name, body));
@@ -509,16 +524,99 @@ pub fn guard(repo: &Path, base: Option<&str>, protect: &[String]) -> Result<Guar
         covered,
         violations,
         passed,
-        active_deltas: active.len(),
+        active_deltas,
+        archived_in_range,
         mentions,
         reasons,
     })
 }
 
+/// Заархивирована ли дельта ВНУТРИ проверяемого диапазона (T-07).
+///
+/// Порядок работы «merge → archive» — правило процесса, но архивация на ветке
+/// ДО merge тоже встречается, и гейт от базы не должен краснеть от того, что
+/// работа уже влита в живую истину: правки диапазона описаны этой дельтой.
+/// Признак один — файл дельты изменён в диапазоне `base..HEAD`: архивная дельта
+/// покрывает правки СВОЕГО диапазона и не покрывает всё, что случится потом.
+/// Незакоммиченный перенос в архив покрытием не становится: пока перенос не в
+/// истории, «заархивирована» — намерение, а не факт (граница Н4).
+fn archived_within(repo: &Path, base: &str, delta: &Path) -> bool {
+    let rel = delta.strip_prefix(repo).map_or_else(
+        |_| delta.display().to_string(),
+        |p| p.to_string_lossy().replace('\\', "/"),
+    );
+    // Трёхточечная форма базы (`origin/main...HEAD`) — уже диапазон.
+    let range = if base.contains("..") {
+        base.to_string()
+    } else {
+        format!("{base}..HEAD")
+    };
+    std::process::Command::new("git")
+        .args(["-c", "core.quotepath=false"])
+        .arg("-C")
+        .arg(repo)
+        .args(["log", "--format=%H", "--max-count=1", &range, "--", &rel])
+        .output()
+        .is_ok_and(|o| o.status.success() && !o.stdout.is_empty())
+}
+
+/// Чем дельта покрывает правку: обычной активной или заархивированной внутри
+/// проверяемого диапазона (T-07). Различие называть обязательно: «покрыто
+/// архивной дельтой» — не то же самое, что «правка описана дельтой в работе».
+fn covering_kind(report: &GuardReport, name: &str) -> &'static str {
+    if report.archived_in_range.iter().any(|a| a == name) {
+        "дельтой, заархивированной в диапазоне"
+    } else {
+        "активной дельтой"
+    }
+}
+
+/// Подсказка после `delta archive` на ветке, ещё не влитой в основную (T-07).
+///
+/// Порядок «merge → archive» — единственный, при котором дельта покрывает свои
+/// правки на всём пути: архивация на feature-ветке делает дельту архивной, и
+/// гейт от базы видит правки спайна уже без активной дельты. Покрытием дельта
+/// засчитывается (правки диапазона она описывает), но правки, попавшие в базу
+/// ДО архивации, — нет. `None` — подсказывать нечего: git недоступен, ветка
+/// влита в основную, основной ветки нет.
+#[must_use]
+pub fn archive_order_hint(repo: &Path) -> Option<String> {
+    let git_ok = |args: &[&str]| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .output()
+            .is_ok_and(|o| o.status.success())
+    };
+    let mut branches: Vec<&str> = Vec::new();
+    for branch in ["origin/main", "main", "origin/master", "master"] {
+        if git_ok(&["rev-parse", "--verify", "--quiet", branch]) {
+            branches.push(branch);
+        }
+    }
+    if branches.is_empty() {
+        return None;
+    }
+    // Влито — если HEAD достижим из любой из основных веток.
+    if branches
+        .iter()
+        .any(|b| git_ok(&["merge-base", "--is-ancestor", "HEAD", b]))
+    {
+        return None;
+    }
+    Some(format!(
+        "ветка не влита в {}: дельта станет архивной, и гейт от базы (--base {}) \
+         увидит правки спайна без активной дельты для того, что попало в базу до \
+         архивации. Порядок: merge → archive; границы пересмотра — docs/control.md",
+        branches[0], branches[0]
+    ))
+}
+
 /// Текстовый рендер отчёта гейта (в стиле остальных delta-команд): сводка,
 /// по каждому изменённому защищённому файлу — статус его упоминания в
-/// активных дельтах (все дельты поимённо; при полном их отсутствии — честное
-/// «активных дельт нет», а не обтекаемое «не упоминается»).
+/// дельтах-покрытиях (все дельты поимённо; при полном их отсутствии — честное
+/// «дельт нет», а не обтекаемое «не упоминается»).
 #[must_use]
 pub fn render_guard(report: &GuardReport) -> String {
     use std::fmt::Write as _;
@@ -526,10 +624,18 @@ pub fn render_guard(report: &GuardReport) -> String {
     let _ = writeln!(out, "Гейт прямых правок спайна (база: {})", report.base);
     let _ = writeln!(
         out,
-        "Изменённых файлов: {}, защищённых среди них: {} (активных дельт: {})",
+        "Изменённых файлов: {}, защищённых среди них: {} (активных дельт: {}{})",
         report.changed,
         report.protected_changed.len(),
-        report.active_deltas
+        report.active_deltas,
+        if report.archived_in_range.is_empty() {
+            String::new()
+        } else {
+            format!(
+                ", заархивировано в диапазоне: {}",
+                report.archived_in_range.join(", ")
+            )
+        }
     );
     if !report.protected_changed.is_empty() {
         out.push('\n');
@@ -538,17 +644,24 @@ pub fn render_guard(report: &GuardReport) -> String {
                 [] => {
                     let _ = writeln!(
                         out,
-                        "[error] {file} — не упоминается ни в одной активной дельте{}",
-                        if report.active_deltas == 0 {
+                        "[error] {file} — не упоминается ни в одной дельте-покрытии{}",
+                        if report.active_deltas == 0 && report.archived_in_range.is_empty() {
                             " (активных дельт нет)".to_string()
-                        } else {
+                        } else if report.archived_in_range.is_empty() {
                             format!(" (активных дельт: {})", report.active_deltas)
+                        } else {
+                            format!(
+                                " (активных дельт: {}, заархивировано в диапазоне: {})",
+                                report.active_deltas,
+                                report.archived_in_range.join(", ")
+                            )
                         }
                     );
                     let _ = writeln!(
                         out,
                         "  → оформите правку дельтой: arch-be delta new <name>, опишите изменение \
-                         в changes/<name>/DELTA.md (архивные дельты не засчитываются)"
+                         в changes/<name>/DELTA.md (дельта, заархивированная до базы, покрытием \
+                         не считается)"
                     );
                 }
                 [single] => {
@@ -557,15 +670,31 @@ pub fn render_guard(report: &GuardReport) -> String {
                         .iter()
                         .find(|(f, _)| f == file)
                         .map_or(String::new(), |(_, r)| format!(" ({r})"));
-                    let _ = writeln!(out, "[ok] {file} — покрыт активной дельтой '{single}'{why}");
-                }
-                many => {
-                    let quoted: Vec<String> = many.iter().map(|d| format!("'{d}'")).collect();
                     let _ = writeln!(
                         out,
-                        "[ok] {file} — покрыт активными дельтами: {}",
-                        quoted.join(", ")
+                        "[ok] {file} — покрыт {} '{single}'{why}",
+                        covering_kind(report, single)
                     );
+                }
+                many => {
+                    // Пока все покрытия — активные дельты, формулировка прежняя:
+                    // отчёт читается человеком, и лишняя детализация там, где
+                    // уточнять нечего, только мешает.
+                    if many.iter().all(|d| !report.archived_in_range.contains(d)) {
+                        let quoted: Vec<String> = many.iter().map(|d| format!("'{d}'")).collect();
+                        let _ = writeln!(
+                            out,
+                            "[ok] {file} — покрыт активными дельтами: {}",
+                            quoted.join(", ")
+                        );
+                    } else {
+                        let quoted: Vec<String> = many
+                            .iter()
+                            .map(|d| format!("'{}' ({})", d, covering_kind(report, d)))
+                            .collect();
+                        let _ =
+                            writeln!(out, "[ok] {file} — покрыт дельтами: {}", quoted.join(", "));
+                    }
                 }
             }
         }
@@ -656,12 +785,13 @@ impl Tool for DeltaGuardTool {
         };
         let summary = format!(
             "Гейт прямых правок спайна (база: {}): изменённых файлов {}, защищённых {}, \
-             непокрытых нарушений {} (активных дельт: {})",
+             непокрытых нарушений {} (активных дельт: {}, заархивировано в диапазоне: {})",
             report.base,
             report.changed,
             report.protected_changed.len(),
             report.violations.len(),
-            report.active_deltas
+            report.active_deltas,
+            report.archived_in_range.len()
         );
         let verdict = json!({
             "tool": "delta_guard",
@@ -674,6 +804,7 @@ impl Tool for DeltaGuardTool {
             // Аддитивные поля (SDK-контракт v1): полный статус упоминания
             // каждого защищённого файла — все активные дельты, а не первая.
             "active_deltas": report.active_deltas,
+            "archived_in_range": report.archived_in_range,
             "mentions": report.mentions.iter().map(|(f, ds)| json!({"file": f, "deltas": ds})).collect::<Vec<_>>(),
             "summary": summary,
         });
@@ -964,6 +1095,77 @@ mod tests {
             "кириллический защищённый путь обязан быть виден: {report:?}"
         );
         assert!(!report.passed, "{report:?}");
+    }
+
+    /// T-07: дельта, заархивированная ВНУТРИ проверяемого диапазона, покрывает
+    /// правки этого диапазона — архивация до merge (обычный порядок на ветке)
+    /// не краснит гейт от базы. И обратная граница: дельта, заархивированная ДО
+    /// базы, покрытием не становится, а правка без всякой дельты красна.
+    #[test]
+    fn guard_counts_delta_archived_within_range() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("repo");
+        make_guard_repo(&repo);
+        // Основная ветка называется явно: имя ветки по умолчанию зависит от git.
+        git(&repo, &["branch", "-M", "main"]);
+        git(&repo, &["checkout", "-q", "-b", "feature"]);
+        // Работа на ветке: правка спайна + дельта, затем архивация — до merge.
+        std::fs::write(repo.join("ARCHITECTURE-SPINE.md"), "# Spine v2\n").expect("edit");
+        let path = new(&repo, "spine-v2").expect("new");
+        fill_delta(&path);
+        let body = std::fs::read_to_string(&path).expect("read");
+        std::fs::write(&path, format!("{body}\nПравка ARCHITECTURE-SPINE.md.\n")).expect("mention");
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-q", "-m", "правка спайна дельтой"]);
+        archive(&repo, "spine-v2").expect("archive");
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-q", "-m", "архивация до merge"]);
+        let report = guard(&repo, Some("main"), &[]).expect("guard");
+        assert!(
+            report.passed,
+            "архивация внутри диапазона обязана покрывать: {report:?}"
+        );
+        assert_eq!(report.active_deltas, 0, "{report:?}");
+        assert_eq!(report.archived_in_range, vec!["spine-v2".to_string()]);
+        let text = render_guard(&report);
+        assert!(
+            text.contains("заархивированной в диапазоне"),
+            "отчёт обязан называть, чем покрыто: {text}"
+        );
+        // Новая правка того же файла после архивации — уже мимо дельты: архив
+        // описывает правки СВОЕГО диапазона, а не всё, что случится потом.
+        std::fs::write(repo.join("ARCHITECTURE-SPINE.md"), "# Spine v3\n").expect("edit");
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-q", "-m", "правка без дельты"]);
+        let report = guard(&repo, Some("HEAD~1"), &[]).expect("guard");
+        assert_eq!(
+            report.violations,
+            vec!["ARCHITECTURE-SPINE.md".to_string()],
+            "правка без дельты обязана быть красной: {report:?}"
+        );
+    }
+
+    /// T-07: архивация на ветке, не влитой в основную, называет порядок
+    /// «merge → archive»; на влитой ветке подсказки нет.
+    #[test]
+    fn archive_hint_names_the_merge_order() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("repo");
+        make_guard_repo(&repo);
+        // make_guard_repo коммитит в текущую ветку: она и есть «main».
+        git(&repo, &["branch", "-M", "main"]);
+        git(&repo, &["checkout", "-q", "-b", "feature"]);
+        std::fs::write(repo.join("notes.md"), "ветка в работе\n").expect("write");
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-q", "-m", "работа на ветке"]);
+        let hint = archive_order_hint(&repo).expect("подсказка на невлитой ветке");
+        assert!(hint.contains("merge → archive"), "{hint}");
+        git(&repo, &["checkout", "-q", "main"]);
+        git(&repo, &["merge", "-q", "--ff-only", "feature"]);
+        assert!(
+            archive_order_hint(&repo).is_none(),
+            "влитая ветка — подсказывать нечего"
+        );
     }
 
     #[test]
