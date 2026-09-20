@@ -769,14 +769,21 @@ fn rollback_plan(slug: &str) -> String {
     )
 }
 
-/// Отчёт репетиции отката: PASS, иначе бандл краснеет по `rehearsal_not_passed`.
+/// Отчёт репетиции отката — ЗАГОТОВКА, а не пройденная проверка (Д8):
+/// `"passed": false`, пустой список шагов и честная строка в `log`.
+///
+/// Заготовка с `"passed": true` и `steps: []` выглядела как аттестация: гейт A4
+/// на свежем каркасе не краснел по репетиции, хотя репетиции не было. Пустой
+/// список шагов не подтверждает ничего — отчёт обязан это сказать.
 fn rehearsal(slug: &str) -> String {
     format!(
         "{{\n  \"kind\": \"rollback_rehearsal\",\n  \"gate\": \"A4\",\n  \
-         \"passed\": true,\n  \"baseline_commit\": \"{slug}-1\",\n  \
-         \"rehearsed_at\": \"{now}\",\n  \"duration_secs\": 1.0,\n  \
+         \"passed\": false,\n  \"baseline_commit\": \"{slug}-1\",\n  \
+         \"rehearsed_at\": \"{now}\",\n  \"duration_secs\": 0.0,\n  \
          \"steps\": [],\n  \"verify\": null,\n  \
-         \"log\": [\"каркас: репетиция отката пройдена на baseline {slug}-1\"]\n}}\n",
+         \"log\": [\"каркас: репетиция отката НЕ проводилась — это заготовка \
+         отчёта, а не результат прогона; заполните .arch-handoff/ROLLBACK.yaml \
+         и прогоните `arch-be rehearsal run`\"]\n}}\n",
         now = chrono::Local::now().to_rfc3339()
     )
 }
@@ -997,6 +1004,41 @@ mod tests {
         );
     }
 
+    /// Д8: заготовка репетиции отката не имеет права выглядеть пройденной.
+    /// `passed: true` при пустом списке шагов — аттестация без предмета: гейт A4
+    /// на каркасе молчал, а архитектор считал откат отрепетированным.
+    #[test]
+    fn bootstrap_rehearsal_stub_is_not_passed() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path().join("case");
+        bootstrapped(&dir, "Зарплатные выплаты");
+
+        let text = std::fs::read_to_string(dir.join(".arch-handoff/REHEARSAL.json"))
+            .expect("отчёт репетиции записан");
+        let report: serde_json::Value = serde_json::from_str(&text).expect("REHEARSAL.json — JSON");
+        assert_eq!(
+            report["passed"], false,
+            "заготовка не подтверждает откат: {text}"
+        );
+        assert_eq!(report["steps"].as_array().map(Vec::len), Some(0));
+        let log = report["log"].to_string();
+        assert!(
+            log.contains("НЕ проводилась"),
+            "лог обязан сказать, что репетиции не было: {log}"
+        );
+        // Следствие: семантика бандла ловит непройденную репетицию сама.
+        let verdict = crate::evidence::verify_with(&dir, &crate::config::EvidenceConfig::default())
+            .expect("бандл каркаса читается");
+        assert!(
+            verdict
+                .semantics
+                .iter()
+                .any(|f| f.rule == "rehearsal_not_passed"),
+            "непройденная репетиция — находка, а не тишина: {:?}",
+            verdict.semantics
+        );
+    }
+
     /// Проводник не перезаписывает чужой каталог и говорит, что делать с
     /// существующим кейсом.
     #[test]
@@ -1061,6 +1103,30 @@ mod tests {
             std::fs::write(&path, text.replace("<оценка>", "две недели и один релиз"))
                 .expect("adr filled");
         }
+        // Репетиция отката — часть пути до зелёного на Critical (гейт A4).
+        // Д8: заготовка отчёта не считается пройденной репетицией, поэтому
+        // каркас доводится так же, как это делает архитектор: репозиторий,
+        // якорь отката, прогон шагов.
+        git_init(&dir).expect("git init каркаса");
+        let head = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&dir)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .expect("git rev-parse");
+        let baseline = String::from_utf8_lossy(&head.stdout).trim().to_string();
+        std::fs::write(
+            dir.join(".arch-handoff/ROLLBACK.yaml"),
+            format!(
+                "baseline_commit: {baseline}\nsteps:\n  - name: вернуть предыдущую версию\n    \
+                 run: \"true\"\nverify: \"true\"\n"
+            ),
+        )
+        .expect("план отката");
+        let report = crate::rehearsal::rehearse(&dir, &dir.join(".arch-handoff"))
+            .expect("репетиция отката");
+        assert!(report.passed, "шаги каркаса обязаны пройти: {:?}", report.log);
+
         crate::evidence::pack(&dir, Route::Critical).expect("pack");
         let progress = status(&dir, &Config::default()).expect("status");
         assert_eq!(

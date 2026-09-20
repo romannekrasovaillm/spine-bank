@@ -647,6 +647,47 @@ fn semantic_check(
             let packet = path.parent().unwrap_or(change_dir);
             match crate::rehearsal::load_report(packet) {
                 Ok(Some(report)) if report.passed => {
+                    // Д8: «пройдено» с пустым списком шагов — не репетиция, а
+                    // отчёт-заготовка: подтверждать нечем, а гейт A4 на каркасе
+                    // молчал, потому что видел `passed: true`.
+                    if report.steps.is_empty() {
+                        out.push(finding(
+                            key,
+                            "rehearsal_empty",
+                            severity,
+                            "репетиция объявлена пройденной, но не содержит ни одного шага"
+                                .to_string(),
+                            "прогоните `arch-be rehearsal run`: пустой список шагов откат не подтверждает",
+                        ));
+                    }
+                    // Д8: baseline — якорь отката. Отчёт, объявленный пройденным
+                    // на коммите, которого нет, — ложная аттестация; проверка
+                    // смотрит только на `passed`, потому что настоящая репетиция
+                    // такого отчёта произвести не может (`rehearsal::rehearse`
+                    // падает на нерезолвящемся якоре), а непройденная уже
+                    // заблокирована `rehearsal_not_passed`.
+                    // Severity — всегда `warn`, в отличие от остальных находок:
+                    // нерезолвящийся якорь не доказывает подлога. Пакет мог быть
+                    // собран в ДРУГОМ репозитории (кейс, перенесённый в чужую
+                    // историю, — так живут `кейсы/*`: их baseline принадлежит
+                    // истории кейса, а не репозитория-носителя). Сказать об этом
+                    // обязательно, блокировать выпуск — нет.
+                    let baseline = report.baseline_commit.trim();
+                    if !baseline.is_empty()
+                        && crate::rehearsal::baseline_resolves(packet, baseline) == Some(false)
+                    {
+                        out.push(finding(
+                            key,
+                            "rehearsal_baseline_unresolved",
+                            "warn",
+                            format!(
+                                "baseline репетиции «{baseline}» не резолвится в коммит этого \
+                                 репозитория — якорь отката здесь не проверить"
+                            ),
+                            "если репетиция шла в другом репозитории, это ожидаемо; иначе укажите \
+                             существующий коммит",
+                        ));
+                    }
                     if let Ok(plan) = crate::rehearsal::load_plan(packet) {
                         if !plan.baseline_commit.trim().is_empty()
                             && plan.baseline_commit.trim() != report.baseline_commit.trim()
@@ -1273,12 +1314,18 @@ mod tests {
                 body("итог")
             ),
         );
+        // Д8: «пройдено» обязано опираться на шаги. Отчёт без шагов (каким его
+        // писала заготовка `bootstrap` до 0.3.5) — не аттестация, и держать его
+        // в фикстуре «полного бандла» значило бы требовать от гейта слепоты.
         put(
             dir,
             ".arch-handoff/REHEARSAL.json",
             r#"{"kind":"rollback_rehearsal","gate":"A4","passed":true,
                     "baseline_commit":"abc123","rehearsed_at":"2026-09-19T10:00:00Z",
-                    "duration_secs":1.5,"steps":[],"verify":null,
+                    "duration_secs":1.5,
+                    "steps":[{"name":"якорь-доступен","status":"pass","exit_code":0,
+                              "detail":"commit"}],
+                    "verify":null,
                     "log":["репетиция отката прошла"]}"#,
         );
         put(
@@ -1520,6 +1567,109 @@ mod tests {
             "{:?}",
             v.semantics
         );
+    }
+
+    /// git-команда в песочнице теста; identity задаётся явно — в окружении CI
+    /// её может не быть.
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.email=test@example.com", "-c", "user.name=test"])
+            .args(args)
+            .output()
+            .expect("git запускается");
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// Д8: отчёт, объявленный пройденным, но без единого шага, — не
+    /// репетиция. На Critical это блокирующая находка: пустой список шагов
+    /// откат не подтверждает, а «passed: true» утверждает обратное.
+    #[test]
+    fn verify_flags_empty_rehearsal() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        put_complete_critical(dir);
+        put(
+            dir,
+            ".arch-handoff/REHEARSAL.json",
+            r#"{"kind":"rollback_rehearsal","gate":"A4","passed":true,
+                    "baseline_commit":"abc123","rehearsed_at":"2026-09-19T10:00:00Z",
+                    "duration_secs":1.5,"steps":[],"verify":null,
+                    "log":["репетиция отката прошла"]}"#,
+        );
+        pack(dir, Route::Critical).expect("pack");
+        let v = verify(dir).expect("verify");
+        assert!(!v.passed, "заготовка не имеет права давать зелёный");
+        let found = v
+            .semantics
+            .iter()
+            .find(|f| f.rule == "rehearsal_empty")
+            .unwrap_or_else(|| panic!("находка rehearsal_empty: {:?}", v.semantics));
+        assert_eq!(found.severity, "error", "Critical — блокирует выпуск");
+        assert!(!found.fix_hint.is_empty(), "у находки есть подсказка");
+    }
+
+    /// Д8: якорь отката, не резолвящийся в коммит ЭТОГО репозитория,
+    /// называется явно — но не блокирует: пакет мог быть собран в другой
+    /// истории (так живут перенесённые кейсы `кейсы/*`), и обвинять их в
+    /// подлоге нечем.
+    #[test]
+    fn verify_flags_unresolved_baseline() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        put_complete_critical(dir);
+        // Репозиторий есть, коммита `abc123` в нём нет.
+        git(dir, &["init", "-q"]);
+        pack(dir, Route::Critical).expect("pack");
+        let v = verify(dir).expect("verify");
+        let found = v
+            .semantics
+            .iter()
+            .find(|f| f.rule == "rehearsal_baseline_unresolved")
+            .unwrap_or_else(|| panic!("находка о нерезолвящемся якоре: {:?}", v.semantics));
+        assert_eq!(found.severity, "warn", "не блокирует: другой репозиторий");
+        assert!(found.message.contains("abc123"), "{}", found.message);
+        assert!(v.passed, "warn выпуск не блокирует: {:?}", v.semantics);
+    }
+
+    /// Обратная сторона Д8: честная репетиция (шаги записаны, якорь
+    /// резолвится) проходит без единого замечания о репетиции — усиление не
+    /// наказывает того, кто откат действительно отрепетировал.
+    #[test]
+    fn real_rehearsal_still_passes() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        put_complete_critical(dir);
+        git(dir, &["init", "-q"]);
+        git(dir, &["add", "-A"]);
+        git(dir, &["commit", "-q", "-m", "каркас кейса"]);
+        let head = git(dir, &["rev-parse", "HEAD"]);
+        put(
+            dir,
+            ".arch-handoff/ROLLBACK.yaml",
+            &format!(
+                "baseline_commit: {head}\nsteps:\n  - name: якорь-доступен\n    \
+                 run: \"true\"\nverify: \"true\"\n"
+            ),
+        );
+        let report =
+            crate::rehearsal::rehearse(dir, &dir.join(".arch-handoff")).expect("репетиция");
+        assert!(report.passed, "{:?}", report.log);
+        assert!(!report.steps.is_empty(), "шаги обязаны попасть в отчёт");
+        pack(dir, Route::Critical).expect("pack");
+        let v = verify(dir).expect("verify");
+        assert!(
+            v.semantics.iter().all(|f| !f.rule.starts_with("rehearsal")),
+            "честная репетиция не даёт находок о себе: {:?}",
+            v.semantics
+        );
+        assert!(v.passed, "{:?}", v.semantics);
     }
 
     #[tokio::test]
