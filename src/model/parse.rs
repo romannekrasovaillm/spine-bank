@@ -50,6 +50,9 @@ pub struct Entity {
     /// Обоснованный отказ от механической проверки (для `AD`, ADR-006):
     /// непустая строка — почему fitness-правило невозможно.
     pub unverifiable: Option<String>,
+    /// Несущий инвариант (для `AD`, ADR-050): `load_bearing: true` —
+    /// инвариант, на котором держится решение. Необязательный признак.
+    pub load_bearing: bool,
     /// Заявленный latency-бюджет hop'а, мс (для `INT`, ADR-007).
     pub latency_budget_ms: Option<f64>,
     /// Целевой p99 цепочки, мс (для `NFR`, ADR-007).
@@ -182,6 +185,12 @@ struct Frontmatter {
     verification: Option<String>,
     /// Отказ от механической проверки с обоснованием (для `AD`, ADR-006).
     unverifiable: Option<String>,
+    /// Несущий инвариант (для `AD`, ADR-050): инвариант, на котором держится
+    /// решение. Необязательный признак; без него механика работает так же,
+    /// но кандидаты по несущим идут первыми, а находка «инвариант без
+    /// проверки поведения» адресуется только им.
+    #[serde(default)]
+    load_bearing: bool,
     /// Latency-бюджет hop'а, мс (для `INT`, ADR-007).
     latency_budget_ms: Option<f64>,
     /// Цель p99 цепочки, мс (для `NFR`, ADR-007).
@@ -318,6 +327,7 @@ pub fn parse_entity(file: &Path, text: &str) -> Result<Entity> {
         verified_by: fm.verified_by,
         verification: fm.verification,
         unverifiable: fm.unverifiable,
+        load_bearing: fm.load_bearing,
         latency_budget_ms: fm.latency_budget_ms,
         p99_target_ms: fm.p99_target_ms,
         availability_target: fm.availability_target,

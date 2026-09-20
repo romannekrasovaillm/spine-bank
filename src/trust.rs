@@ -271,6 +271,20 @@ fn anchor_rules(repo: &Path) -> Anchor {
     // Регистр FP — доказательство, что правила ревизуют, а не только завели.
     let marks = crate::digest::fp_register_read(&crate::digest::fp_register_path(repo));
     let _ = write!(evidence, "; пометок FP: {}", marks.len());
+    // Покрытие инвариантов исполняемыми проверками (ADR-050): условие ступени
+    // не меняется (`behaviour > 0`), но деталь показывает, сколько инвариантов
+    // реально проверяется поведением — иначе «правила сопровождаются» читается
+    // как «инварианты проверяются», а это разные утверждения.
+    if let Ok(Some(coverage)) = crate::rule_templates::ad_coverage(repo) {
+        let total_ads = coverage.total();
+        if total_ads > 0 {
+            let _ = write!(
+                evidence,
+                "; инвариантов с проверкой поведения: {} из {total_ads}",
+                coverage.covered().len()
+            );
+        }
+    }
     let why_not = (!met).then(|| {
         let mut reasons: Vec<String> = Vec::new();
         if total == 0 {
