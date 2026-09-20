@@ -34,8 +34,9 @@ use crate::tool::{Tool, ToolContext, ToolOutput};
 
 /// Максимум символов оцениваемого текста: жёсткий лимит промпта судьи.
 /// Превышение — явная ошибка ([`check_target_len`]), тихого усечения
-/// больше нет (ADR-004).
-const MAX_TARGET_CHARS: usize = 24_000;
+/// больше нет (ADR-004). Тот же лимит держит досье смысловой рубрики
+/// ([`crate::rubric_pack`], ADR-051) — судья видит ровно один такой объём.
+pub const MAX_TARGET_CHARS: usize = 24_000;
 
 /// Сколько символов ответа модели включается в сообщение об ошибке разбора.
 const ERR_FRAGMENT_CHARS: usize = 400;
@@ -222,6 +223,21 @@ pub struct RubricArtifact {
     /// Число критериев с `evidence_not_found`.
     #[serde(default)]
     pub evidence_not_found: usize,
+    /// Вид досье смысловой рубрики (`adr_vs_spine`, …); `None` — отчёт о
+    /// документе, а не о досье (ADR-051).
+    #[serde(default)]
+    pub pack_kind: Option<String>,
+    /// Субъект досье: путь или идентификатор; для фрагмента кода — с
+    /// диапазоном строк (`src/gate.rs#12-88`).
+    #[serde(default)]
+    pub subject: Option<String>,
+    /// SHA-256 текста собранного досье — привязка отчёта ко ВСЕМ источникам
+    /// сразу, а не только к субъекту (ADR-051, П3).
+    #[serde(default)]
+    pub pack_sha256: Option<String>,
+    /// Источники досье с их хэшами: правка любого из них — отчёт устарел.
+    #[serde(default)]
+    pub inputs: Vec<crate::rubric_pack::PackInput>,
     /// Метка времени оценки (RFC 3339).
     pub judged_at: String,
 }
@@ -261,22 +277,61 @@ pub fn write_artifact(
     target: Option<&Path>,
     author_model: Option<&str>,
 ) -> Result<PathBuf> {
-    // Путь документа — относительный: аттестация не должна зависеть от того,
-    // где склонирован репозиторий.
-    let rel = target.map(|p| {
-        p.strip_prefix(repo).map_or_else(
-            |_| p.display().to_string().replace('\\', "/"),
-            |r| r.display().to_string().replace('\\', "/"),
-        )
-    });
-    let sha = match target {
-        Some(p) if p.is_file() => crate::hash::sha256_file(p),
-        _ => None,
+    write_artifact_for_subject(repo, report, &ArtifactSubject::Target(target), author_model)
+}
+
+/// Путь файла относительно корня репозитория в слешевой форме — аттестация не
+/// должна зависеть от того, где склонирован репозиторий; файл вне корня
+/// остаётся абсолютным.
+fn relative_to(repo: &Path, path: &Path) -> String {
+    path.strip_prefix(repo).map_or_else(
+        |_| path.display().to_string().replace('\\', "/"),
+        |r| r.display().to_string().replace('\\', "/"),
+    )
+}
+
+/// О чём отчёт: о документе (поведение 0.3.4) или о досье смысловой рубрики.
+#[derive(Debug, Clone, Copy)]
+pub enum ArtifactSubject<'a> {
+    /// Документ репозитория; `None` — текст без файла.
+    Target(Option<&'a Path>),
+    /// Досье: субъект, хэш собранного текста и источники (ADR-051).
+    Pack(&'a crate::rubric_pack::ContextPack),
+}
+
+/// Записывает отчёт с указанием субъекта — общий путь для документа и досье.
+///
+/// # Errors
+/// Каталог отчётов не создаётся или файл не пишется.
+pub fn write_artifact_for_subject(
+    repo: &Path,
+    report: &RubricReport,
+    subject: &ArtifactSubject<'_>,
+    author_model: Option<&str>,
+) -> Result<PathBuf> {
+    let (target, sha, file_stem, pack_kind, pack_subject, pack_sha256, inputs) = match subject {
+        ArtifactSubject::Target(t) => {
+            let target = t.map(|p| relative_to(repo, p));
+            let sha = match t {
+                Some(p) if p.is_file() => crate::hash::sha256_file(p),
+                _ => None,
+            };
+            (target, sha, artifact_slug(*t), None, None, None, Vec::new())
+        }
+        ArtifactSubject::Pack(pack) => (
+            None,
+            None,
+            pack_artifact_slug(pack.kind.as_str(), &pack.subject),
+            Some(pack.kind.as_str().to_string()),
+            Some(pack.subject.clone()),
+            Some(pack.sha256.clone()),
+            pack.inputs.clone(),
+        ),
     };
     let artifact = RubricArtifact {
         schema: RUBRIC_REPORT_SCHEMA.to_string(),
         rubric: report.rubric_name.clone(),
-        target: rel.clone(),
+        target,
         target_sha256: sha,
         judge_model: report.judge_model.clone(),
         author_model: author_model.map(str::to_string),
@@ -291,15 +346,51 @@ pub fn write_artifact(
             .iter()
             .filter(|s| s.has_flag(CriterionFlag::EvidenceNotFound))
             .count(),
+        pack_kind,
+        subject: pack_subject,
+        pack_sha256,
+        inputs,
         judged_at: chrono::Local::now().to_rfc3339(),
     };
     let dir = repo.join(RUBRIC_REPORTS_DIR);
     std::fs::create_dir_all(&dir).map_err(|e| HarnessError::io(&dir, e))?;
-    let path = dir.join(format!("{}.json", artifact_slug(target)));
+    let path = dir.join(format!("{file_stem}.json"));
     let text = serde_json::to_string_pretty(&artifact)
         .map_err(|e| HarnessError::Config(format!("сериализация отчёта рубрики: {e}")))?;
     std::fs::write(&path, text).map_err(|e| HarnessError::io(&path, e))?;
     Ok(path)
+}
+
+/// Slug файла отчёта по досье: имя файла субъекта + вид досье + диапазон
+/// строк фрагмента.
+///
+/// Отдельный slug обязателен: отчёт о качестве документа (`adr_quality` по
+/// ADR-051) и отчёт о согласованности того же документа со спайном
+/// (`adr_spine_consistency`) — разные отчёты об одном файле, и общий slug
+/// заставлял бы их затирать друг друга.
+#[must_use]
+pub fn pack_artifact_slug(kind: &str, subject: &str) -> String {
+    let (path, frag) = subject
+        .split_once('#')
+        .map_or((subject, None), |(p, f)| (p, Some(f)));
+    let base = artifact_slug(Some(Path::new(path)));
+    let frag_slug = frag.map(|f| {
+        let s: String = f
+            .chars()
+            .map(|c| {
+                if c.is_alphanumeric() || c == '-' {
+                    c
+                } else {
+                    '-'
+                }
+            })
+            .collect();
+        s.trim_matches('-').to_string()
+    });
+    match frag_slug {
+        Some(f) if !f.is_empty() => format!("{base}--{kind}--{f}"),
+        _ => format!("{base}--{kind}"),
+    }
 }
 
 /// Все машиночитаемые отчёты рубрик репозитория (`reports/rubric/*.json`);

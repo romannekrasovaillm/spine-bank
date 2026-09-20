@@ -805,6 +805,17 @@ enum RubricCmd {
         #[arg(long)]
         author_model: Option<String>,
     },
+    /// Собрать досье судьи (вход смысловой рубрики) и напечатать его с хэшем.
+    Pack {
+        /// Вид досье: `adr_vs_spine` | `entity_links` | `nfr_mechanism` |
+        /// `code_vs_spine`.
+        kind: String,
+        /// Субъект: путь к ADR/файлу кода либо идентификатор сущности модели.
+        subject: String,
+        /// Корень репозитория (по умолчанию — текущий каталог).
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
 }
 
 /// Подкоманды `arch-be bench` (только сборка `harness`).
@@ -2909,6 +2920,42 @@ async fn cmd_rubric(cfg: &Arc<Config>, cmd: RubricCmd) -> Result<()> {
                 Ok(path) => eprintln!("Отчёт для гейта: {}", path.display()),
                 Err(e) => eprintln!("⚠ машиночитаемый отчёт не записан: {e}"),
             }
+        }
+        RubricCmd::Pack {
+            kind,
+            subject,
+            root,
+        } => {
+            let repo = root.unwrap_or_else(|| PathBuf::from("."));
+            let repo = repo.canonicalize().unwrap_or(repo);
+            let kind = arch_harness::rubric_pack::PackKind::parse(&kind)?;
+            let packs = arch_harness::rubric_pack::build(&repo, kind, &subject)?;
+            for p in &packs {
+                println!("{}", p.text);
+                println!();
+                println!(
+                    "досье '{}' · субъект '{}' · sha256:{} · источников {} (ссылочных {})",
+                    p.kind.as_str(),
+                    p.subject,
+                    p.sha256,
+                    p.inputs.len(),
+                    p.references().len()
+                );
+                for i in &p.inputs {
+                    println!(
+                        "  [{}] {} {}",
+                        i.role.as_str(),
+                        i.path,
+                        i.id.as_deref().unwrap_or("-")
+                    );
+                }
+            }
+            eprintln!(
+                "Досье собрано: {} (субъект '{}', вид '{}')",
+                packs.len(),
+                subject,
+                kind.as_str()
+            );
         }
     }
     Ok(())

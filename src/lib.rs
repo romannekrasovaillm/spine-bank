@@ -89,6 +89,7 @@ pub mod report_fmt;
 pub mod retry;
 pub mod review;
 pub mod rubric;
+pub mod rubric_pack;
 pub mod rules_suggest;
 pub mod secrets;
 pub mod selftest;
