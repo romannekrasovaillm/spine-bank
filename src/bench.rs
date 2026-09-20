@@ -383,6 +383,9 @@ pub async fn run_golden(
                 samples: Vec::new(),
                 stdev: 0.0,
                 flags: Vec::new(),
+                // Ожидание golden-набора не измеряет цитаты: расхождение
+                // свидетельств — свойство прогона, а не эталона (Д10).
+                evidence_unconfirmed_ratio: 0.0,
             });
         }
         let case_mae = mean_absolute_error(&pairs).ok_or_else(|| {
