@@ -1959,7 +1959,10 @@ mod tests {
     fn single_fabricated_quote_is_flagged_and_excluded() {
         let runs = vec![
             judge_run(3, "Цитата: \"контекст описан кратко\" — средне"),
-            judge_run(5, "Цитата: \"этой фразы в документе нет вообще\" — якобы образцово"),
+            judge_run(
+                5,
+                "Цитата: \"этой фразы в документе нет вообще\" — якобы образцово",
+            ),
             judge_run(3, "Цитата: \"контекст описан кратко\" — средне"),
         ];
         let report = build_report(
