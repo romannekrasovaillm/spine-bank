@@ -1499,6 +1499,8 @@ fn component_decision_quality(repo: &Path, options: &GateOptions, enabled: bool)
     // Отчёты, у которых нет сырых ответов судьи: сверить балл с ответами
     // механика не может (это не находка, а граница проверки — ADR-048).
     let mut not_reproducible = 0usize;
+    // Отчёты, собранные в рабочей сессии (косвенный признак, ADR-049).
+    let mut session_dirty = 0usize;
     for adr in &adrs {
         let Ok(text) = std::fs::read_to_string(adr) else {
             continue;
@@ -1585,6 +1587,34 @@ fn component_decision_quality(repo: &Path, options: &GateOptions, enabled: bool)
                     check.differences.join("; ")
                 ),
             ));
+        }
+        // Уровень независимости ниже порога проекта (ADR-049). Дефолт порога —
+        // `none`: находка не появляется, пока проект сам не попросит строже.
+        let independence = artifact.independence.as_deref().unwrap_or_default();
+        if !independence.is_empty() {
+            let min = crate::judge::independence_rank(&cfg.min_independence);
+            if crate::judge::independence_rank(independence) < min {
+                findings.push(GateFinding::ruled(
+                    "error".to_string(),
+                    "judge_independence_low".to_string(),
+                    format!(
+                        "{rel}: независимость судьи «{}» ниже порога «{}» — поднимите её \
+                         запуском судьи самим Spine (`arch-be rubric run`) или судьёй \
+                         другого семейства",
+                        crate::judge::independence_label(independence),
+                        crate::judge::independence_label(&cfg.min_independence),
+                    ),
+                ));
+            }
+        }
+        // Судейство шло в рабочей сессии: судья мог видеть контекст автора.
+        // Это КОСВЕННЫЙ признак и примечание паспорта, а не находка (ADR-049).
+        if let Some(prov) = &artifact.provenance {
+            if prov.mode() == crate::judge::MODE_DECLARED
+                && prov.session_calls_before > options.judge.clean_session_max_calls
+            {
+                session_dirty += 1;
+            }
         }
         // Судья и автор — разные модели одного семейства: «другая модель» не
         // значит «другой взгляд» — слепые зоны у семейства общие (ADR-048).
@@ -1697,6 +1727,15 @@ fn component_decision_quality(repo: &Path, options: &GateOptions, enabled: bool)
              совпадает с автором либо автор в отчёте не указан (judge_is_author)"
                 .to_string(),
         );
+    }
+    if session_dirty > 0 {
+        notes.push(format!(
+            "судейство части отчётов ({session_dirty}) шло в рабочей сессии: до выдачи \
+             промпта судьи в ней было больше {max} вызовов — судья мог видеть контекст \
+             автора. Это косвенный признак, а не доказательство: сам по себе он ничего \
+             не значит",
+            max = options.judge.clean_session_max_calls
+        ));
     }
     if not_reproducible > 0 {
         notes.push(format!(
@@ -2101,6 +2140,16 @@ fn collect_inputs(
     push(
         "model",
         crate::hash::sha256_tree(&repo.join("model"))
+            .map_or_else(|| "absent".to_string(), |h| format!("sha256:{h}")),
+    );
+    // Сырые ответы судьи рубрик: отчёт объявлен собранным ИЗ НИХ, поэтому
+    // правка сохранённого ответа меняет вердикт о качестве решения — а значит
+    // обязана менять и аттестацию (J5, ADR-049). Каталога нет (отчётов нет
+    // либо они до появления сырых ответов) — честное `absent`: аттестация
+    // существующих кейсов не меняется.
+    push(
+        "judge_raw",
+        crate::hash::sha256_tree(&repo.join(crate::judge::RUBRIC_RAW_DIR))
             .map_or_else(|| "absent".to_string(), |h| format!("sha256:{h}")),
     );
     // Каждый проверенный бандл: правка EVIDENCE.yaml обязана менять аттестацию.

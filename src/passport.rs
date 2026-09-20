@@ -330,6 +330,10 @@ fn collect_claims(repo: &Path, report: &GateReport) -> Vec<Claim> {
                 .to_string(),
         });
     }
+    // Независимость судьи рубрики — по каждому уровню, который встретился в
+    // отчётах (ADR-049). Уровень `none` здесь не называется: там независимости
+    // нет вовсе, и это видно гейту находкой `judge_is_author`.
+    out.extend(judge_independence_claims(repo));
     // Ревью: бандл хранит вердикт, но не подпись ревьюера.
     if bundle_has_artifact(repo, "adversarial_review") {
         out.push(Claim {
@@ -344,6 +348,76 @@ fn collect_claims(repo: &Path, report: &GateReport) -> Vec<Claim> {
         });
     }
     out
+}
+
+/// Утверждения о независимости судьи рубрики по уровням, встретившимся в
+/// отчётах: «заявлена» (метки передал хост) и «обеспечена запуском» (судью
+/// запустил Spine) — с деталями того, что механика действительно знает.
+///
+/// Формулировки не обещают «подтверждённой независимости»: при `declared`
+/// видно только, что метки назвал хост; при `launched` — что Spine сам запускал
+/// сэмплы, а какая модель отвечала, не знает ни один режим (ADR-048).
+fn judge_independence_claims(repo: &Path) -> Vec<Claim> {
+    let mut declared: Vec<String> = Vec::new();
+    let mut launched: Vec<String> = Vec::new();
+    for artifact in crate::rubric::load_artifacts(repo) {
+        let Some(level) = artifact.independence.as_deref() else {
+            continue;
+        };
+        if level == crate::judge::INDEPENDENCE_NONE {
+            continue;
+        }
+        if crate::judge::independence_rank(level)
+            >= crate::judge::independence_rank(crate::judge::INDEPENDENCE_LAUNCHED)
+        {
+            if !launched.contains(&artifact.judge_model) {
+                launched.push(artifact.judge_model.clone());
+            }
+        } else if !declared.contains(&artifact.judge_model) {
+            declared.push(artifact.judge_model.clone());
+        }
+    }
+    let mut out = Vec::new();
+    if !declared.is_empty() {
+        let host = declared_host(repo);
+        out.push(Claim {
+            source: "судья".to_string(),
+            text: format!(
+                "независимость судьи **заявлена**: метки ({}) переданы хостом{host}, \
+                 механикой не проверяются — судить могли в рабочей сессии автора",
+                declared.join(", ")
+            ),
+            instead: "запустите судью самим Spine (`arch-be rubric run`) — уровень станет \
+                      «обеспечена запуском»"
+                .to_string(),
+        });
+    }
+    if !launched.is_empty() {
+        out.push(Claim {
+            source: "судья".to_string(),
+            text: format!(
+                "независимость судьи **обеспечена запуском**: Spine сам запускал судью ({}), \
+                 каждый сэмпл — отдельный процесс/запрос; какая модель отвечала, механикой \
+                 не проверяется",
+                launched.join(", ")
+            ),
+            instead: String::new(),
+        });
+    }
+    out
+}
+
+/// Хост, назвавшийся в отчёте (`<имя> <версия>`), — для текста паспорта.
+fn declared_host(repo: &Path) -> String {
+    let host = crate::rubric::load_artifacts(repo)
+        .into_iter()
+        .find_map(|a| a.provenance.and_then(|p| p.host));
+    host.map_or_else(String::new, |h| {
+        h.version.map_or_else(
+            || format!(" ({})", h.name),
+            |version| format!(" ({} {version})", h.name),
+        )
+    })
 }
 
 /// Есть ли в репозитории принятый прозаический ADR (`docs/adr/ADR-*.md`).
@@ -673,6 +747,84 @@ arch-be gate --repo кейс --format json > verdict.json && arch-be gate --repo
             !passport.claimed.iter().any(|c| c.source == "бандл"),
             "нет бандла — нет утверждения о независимости ревьюера: {:?}",
             passport.claimed
+        );
+    }
+
+    /// Паспорт различает ЗАЯВЛЕННУЮ и ОБЕСПЕЧЕННУЮ запуском независимость
+    /// судьи: у первой метки передал хост, у второй сэмплы запускал Spine.
+    /// Ни та, ни другая формулировка не обещает «подтверждённой независимости»
+    /// (ADR-048/049).
+    #[test]
+    fn passport_distinguishes_declared_and_launched() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        make_repo(dir, "ARCHITECTURE-SPINE.md");
+        let reports = dir.join("reports/rubric");
+        std::fs::create_dir_all(&reports).expect("mkdir");
+        std::fs::write(
+            reports.join("ADR-001-demo.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "schema": "arch-be/rubric-report/v1",
+                "rubric": "adr_quality",
+                "target": "docs/adr/ADR-001-demo.md",
+                "judge_model": "glm-5.2",
+                "author_model": "claude-opus-4",
+                "weighted_total": 4.0,
+                "verdict": "годно",
+                "judged_at": "2026-09-20T10:00:00+03:00",
+                "independence": "declared_cross_family",
+                "provenance": {
+                    "mode": "declared",
+                    "host": {"name": "claude-code", "version": "2.1.278"},
+                },
+            }))
+            .expect("JSON"),
+        )
+        .expect("отчёт");
+        let passport = passport_of(dir);
+        let claim = passport
+            .claimed
+            .iter()
+            .find(|c| c.source == "судья")
+            .expect("утверждение о судье: {:?}");
+        assert!(claim.text.contains("заявлена"), "{claim:?}");
+        assert!(claim.text.contains("claude-code"), "хост назван: {claim:?}");
+        assert!(
+            !claim.text.contains("подтверждена"),
+            "формулировка не обещает подтверждения: {claim:?}"
+        );
+
+        // Тот же отчёт, но судью запускал Spine: формулировка другая.
+        std::fs::write(
+            reports.join("ADR-001-demo.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "schema": "arch-be/rubric-report/v1",
+                "rubric": "adr_quality",
+                "target": "docs/adr/ADR-001-demo.md",
+                "judge_model": "glm-5.2",
+                "author_model": "claude-opus-4",
+                "weighted_total": 4.0,
+                "verdict": "годно",
+                "judged_at": "2026-09-20T10:00:00+03:00",
+                "independence": "launched_cross_family",
+                "provenance": {
+                    "mode": "launched",
+                    "launcher": {"provider": "judge-cli", "command": "claude", "args": ["-p"]},
+                },
+            }))
+            .expect("JSON"),
+        )
+        .expect("отчёт");
+        let passport = passport_of(dir);
+        let claim = passport
+            .claimed
+            .iter()
+            .find(|c| c.source == "судья")
+            .expect("утверждение о судье");
+        assert!(claim.text.contains("обеспечена запуском"), "{claim:?}");
+        assert!(
+            claim.instead.is_empty(),
+            "правильный путь уже выбран — подсказки нет: {claim:?}"
         );
     }
 

@@ -2933,6 +2933,7 @@ async fn cmd_rubric(cfg: &Arc<Config>, cmd: RubricCmd) -> Result<()> {
                 provenance: Some(provenance),
                 author_source: Some(choice.source.clone()),
                 author_model_declared: choice.declared.clone(),
+                families: cfg.judge.families.clone(),
                 // Сырые ответы судьи — рядом с отчётом: отчёт обязан
                 // пересобираться из них (J2, ADR-048).
                 raw_answers: raw

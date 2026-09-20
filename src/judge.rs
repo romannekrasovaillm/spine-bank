@@ -941,6 +941,99 @@ fn matches_prefix(normalized: &str, prefix: &str) -> bool {
             .is_some_and(|rest| rest.starts_with('-'))
 }
 
+// ---------------------------------------------------------------------------
+// J5: уровень независимости судьи
+// ---------------------------------------------------------------------------
+
+/// Уровень независимости: автор не указан либо метки совпали — сегодняшний
+/// `judge_is_author`.
+pub const INDEPENDENCE_NONE: &str = "none";
+/// Метки различны, режим `declared` (метки передал хост), семейство одно.
+pub const INDEPENDENCE_DECLARED: &str = "declared";
+/// То же, но семейства моделей разные.
+pub const INDEPENDENCE_DECLARED_CROSS_FAMILY: &str = "declared_cross_family";
+/// Судью запустил Spine, метка отлична от автора, семейство одно.
+pub const INDEPENDENCE_LAUNCHED: &str = "launched";
+/// То же, но семейства разные.
+pub const INDEPENDENCE_LAUNCHED_CROSS_FAMILY: &str = "launched_cross_family";
+
+/// Все уровни по возрастанию силы — порядок порога
+/// ([`crate::config::DecisionQualityConfig::min_independence`]).
+pub const INDEPENDENCE_LEVELS: [&str; 5] = [
+    INDEPENDENCE_NONE,
+    INDEPENDENCE_DECLARED,
+    INDEPENDENCE_DECLARED_CROSS_FAMILY,
+    INDEPENDENCE_LAUNCHED,
+    INDEPENDENCE_LAUNCHED_CROSS_FAMILY,
+];
+
+/// Числовой ранг уровня (0..=4) для сравнения с порогом; неизвестное значение
+/// читается как [`INDEPENDENCE_NONE`] — строка из будущей версии не должна
+/// молча поднимать независимость.
+#[must_use]
+pub fn independence_rank(level: &str) -> u8 {
+    INDEPENDENCE_LEVELS
+        .iter()
+        .position(|l| *l == level)
+        .map_or(0, |i| i as u8)
+}
+
+/// Уровень независимости оценки (ADR-048/049).
+///
+/// Считается по тому, что механика ЗНАЕТ: метки автора и судьи, режим оценки
+/// (`declared` — метки передал хост, `launched` — судью запустил Spine) и
+/// семейства моделей. Уровень `launched*` не значит «независимость
+/// подтверждена»: он значит, что Spine сам запускал сэмплы и знает, что каждый
+/// — отдельный процесс (или отдельный запрос), а какая модель отвечала — не
+/// знает по-прежнему.
+#[must_use]
+pub fn independence_of(
+    author: Option<&str>,
+    judge: &str,
+    mode: &str,
+    families: &BTreeMap<String, String>,
+) -> String {
+    let Some(author) = author.filter(|a| !a.trim().is_empty()) else {
+        return INDEPENDENCE_NONE.to_string();
+    };
+    if same_label(author, judge) {
+        return INDEPENDENCE_NONE.to_string();
+    }
+    let cross_family = family_key(author, families) != family_key(judge, families);
+    let launched = mode == MODE_LAUNCHED;
+    match (launched, cross_family) {
+        (true, true) => INDEPENDENCE_LAUNCHED_CROSS_FAMILY.to_string(),
+        (true, false) => INDEPENDENCE_LAUNCHED.to_string(),
+        (false, true) => INDEPENDENCE_DECLARED_CROSS_FAMILY.to_string(),
+        (false, false) => INDEPENDENCE_DECLARED.to_string(),
+    }
+}
+
+/// Минимальный (самый слабый) уровень из набора: по нему читается сводка по
+/// кейсу. Пустой набор — `None`: отчётов нет, и минимум не определён.
+#[must_use]
+pub fn min_independence<'a, I>(levels: I) -> Option<String>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    levels
+        .into_iter()
+        .min_by_key(|level| independence_rank(level))
+        .map(str::to_string)
+}
+
+/// Человекочитаемое имя уровня для паспорта и текстов находок.
+#[must_use]
+pub fn independence_label(level: &str) -> &'static str {
+    match level {
+        INDEPENDENCE_DECLARED => "заявлена (метки передал хост, одно семейство)",
+        INDEPENDENCE_DECLARED_CROSS_FAMILY => "заявлена (метки передал хост, разные семейства)",
+        INDEPENDENCE_LAUNCHED => "обеспечена запуском (одно семейство)",
+        INDEPENDENCE_LAUNCHED_CROSS_FAMILY => "обеспечена запуском (разные семейства)",
+        _ => "не обеспечена (автор не указан или метки совпали)",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1140,6 +1233,90 @@ mod tests {
         // Самый длинный префикс побеждает: `glm-air` точнее, чем дефолтный `glm`.
         assert_eq!(family_of("glm-air-2", &families), "zhipu-air");
         assert_eq!(family_of("glm-5.2", &families), "zhipu");
+    }
+
+    /// Уровень независимости считается по меткам, режиму и семействам
+    /// (ADR-049): `launched` не значит «подтверждена» — он значит, что Spine
+    /// сам запускал сэмплы.
+    #[test]
+    fn independence_levels_are_computed() {
+        let none = BTreeMap::new();
+        // Автора нет — независимости нет, режим не спасает.
+        assert_eq!(
+            independence_of(None, "glm-5.2", MODE_LAUNCHED, &none),
+            "none"
+        );
+        // Метки совпали (в т.ч. с точностью до написания).
+        assert_eq!(
+            independence_of(Some("Claude-Opus"), "claude-opus", MODE_DECLARED, &none),
+            "none"
+        );
+        // Метки разные, семейства разные.
+        assert_eq!(
+            independence_of(Some("claude-opus-4"), "glm-5.2", MODE_DECLARED, &none),
+            "declared_cross_family"
+        );
+        // Метки разные, семейство одно: «другая модель» ≠ «другой взгляд».
+        assert_eq!(
+            independence_of(
+                Some("claude-opus-4"),
+                "claude-3-5-sonnet",
+                MODE_DECLARED,
+                &none
+            ),
+            "declared"
+        );
+        // Запуск самим Spine поднимает уровень, семейство — отдельная ось.
+        assert_eq!(
+            independence_of(Some("claude-opus-4"), "glm-5.2", MODE_LAUNCHED, &none),
+            "launched_cross_family"
+        );
+        assert_eq!(
+            independence_of(
+                Some("claude-opus-4"),
+                "claude-3-5-sonnet",
+                MODE_LAUNCHED,
+                &none
+            ),
+            "launched"
+        );
+        // Автор-человек отличен от любой модели.
+        assert_eq!(
+            independence_of(Some("human:Иван"), "claude-opus-4", MODE_DECLARED, &none),
+            "declared_cross_family"
+        );
+    }
+
+    /// Ранги уровней возрастают, неизвестное значение читается как `none`
+    /// (строка из будущей версии не должна молча поднимать независимость),
+    /// а минимум по набору — самый слабый уровень.
+    #[test]
+    fn independence_ranks_and_minimum() {
+        assert!(independence_rank(INDEPENDENCE_NONE) < independence_rank(INDEPENDENCE_DECLARED));
+        assert!(
+            independence_rank(INDEPENDENCE_DECLARED)
+                < independence_rank(INDEPENDENCE_DECLARED_CROSS_FAMILY)
+        );
+        assert!(
+            independence_rank(INDEPENDENCE_DECLARED_CROSS_FAMILY)
+                < independence_rank(INDEPENDENCE_LAUNCHED)
+        );
+        assert!(
+            independence_rank(INDEPENDENCE_LAUNCHED)
+                < independence_rank(INDEPENDENCE_LAUNCHED_CROSS_FAMILY)
+        );
+        assert_eq!(
+            independence_rank("из будущего"),
+            independence_rank(INDEPENDENCE_NONE)
+        );
+        assert_eq!(
+            min_independence(["launched", "declared", "none"]).as_deref(),
+            Some("none")
+        );
+        assert!(
+            min_independence(Vec::<&str>::new()).is_none(),
+            "пустой набор — минимум не определён"
+        );
     }
 
     /// Ключ промпта не зависит от написания пути: он считается по тексту

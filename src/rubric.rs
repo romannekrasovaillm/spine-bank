@@ -19,6 +19,7 @@
 //!   промпт собирается сервером, отвечает модель хоста, сборка отчёта
 //!   механическая и идёт тем же кодом, что у встроенного судьи.
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -239,6 +240,13 @@ pub struct RubricArtifact {
     /// Число критериев с `evidence_not_found`.
     #[serde(default)]
     pub evidence_not_found: usize,
+    /// Уровень независимости судьи (ADR-049): `none`, `declared`,
+    /// `declared_cross_family`, `launched`, `launched_cross_family`. Считается
+    /// по тому, что механика знает: метки, режим оценки, семейства моделей.
+    /// У отчётов до появления поля отсутствует — порог независимости на них
+    /// не действует (поведение 0.3.4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub independence: Option<String>,
     /// Откуда взята метка автора: `header` (поле в шапке документа),
     /// `argument` (аргумент вызова) или `none` (автор не указан) — J3, ADR-048.
     /// У отчётов до появления поля отсутствует; тогда, как и раньше, о метке
@@ -313,6 +321,9 @@ pub struct ArtifactExtras {
     pub author_source: Option<String>,
     /// Метка автора, переданная вызовом, если она разошлась с шапкой (J3).
     pub author_model_declared: Option<String>,
+    /// Семейства моделей (секция `[judge.families]`): по ним считается уровень
+    /// независимости (J5). Пусто — работают дефолтные префиксы.
+    pub families: BTreeMap<String, String>,
     /// Сырые ответы судьи: сохраняются рядом с отчётом
     /// (`reports/rubric/raw/<slug>/sample-<n>.json`), их хэши идут в
     /// `provenance.samples` (J2, ADR-048). Пусто — ответы не сохранены.
@@ -381,6 +392,16 @@ pub fn write_artifact_with(
             provenance.get_or_insert_with(|| crate::judge::RubricProvenance::declared(None, None));
         prov.samples = stamps;
     }
+    // Уровень независимости считается ЗДЕСЬ, а не вызывающим: иначе один из
+    // двух путей (CLI и MCP) мог бы писать отчёт без уровня, и порог
+    // независимости молча не действовал бы (J5, ADR-049).
+    let independence = {
+        let mode = provenance.as_ref().map_or(
+            crate::judge::MODE_DECLARED,
+            crate::judge::RubricProvenance::mode,
+        );
+        crate::judge::independence_of(author_model, &report.judge_model, mode, &extras.families)
+    };
     let artifact = RubricArtifact {
         schema: RUBRIC_REPORT_SCHEMA.to_string(),
         rubric: report.rubric_name.clone(),
@@ -399,6 +420,7 @@ pub fn write_artifact_with(
             .iter()
             .filter(|s| s.has_flag(CriterionFlag::EvidenceNotFound))
             .count(),
+        independence: Some(independence),
         author_source: extras.author_source.clone(),
         author_model_declared: extras.author_model_declared.clone(),
         provenance,

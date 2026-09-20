@@ -1744,6 +1744,7 @@ impl McpServe {
                         provenance: Some(provenance),
                         author_source: Some(choice.source.clone()),
                         author_model_declared: choice.declared.clone(),
+                families: self.cfg.judge.families.clone(),
                         raw_answers: raw_inputs.clone(),
                     };
                     match crate::rubric::write_artifact_with(

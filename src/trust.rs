@@ -362,20 +362,48 @@ fn anchor_verdict(repo: &Path, report: &gate::GateReport, cfg: &Config) -> Ancho
     gaps.extend(unsigned.iter().cloned());
     let judge = judge_is_author(repo);
     gaps.extend(judge.iter().cloned());
+    // Уровень независимости: условие ступени не меняется (его задаёт
+    // judge_is_author), но требование проекта поднимает планку (ADR-049).
+    let weakest = weakest_independence(repo, cfg);
+    if let Some((level, min)) = &weakest {
+        if crate::judge::independence_rank(level) < crate::judge::independence_rank(min) {
+            gaps.push(format!(
+                "независимость судьи «{}» ниже порога проекта «{}»",
+                crate::judge::independence_label(level),
+                crate::judge::independence_label(min),
+            ));
+        }
+    }
     let met = gaps.is_empty();
     Anchor {
         n: 5,
         title: "Вердикт полон и подписан",
         met,
         evidence: format!(
-            "вердикт: {} (exit {}), аттестация sha256:{}…; обязательных без входа: {}",
+            "вердикт: {} (exit {}), аттестация sha256:{}…; обязательных без входа: {}; \
+             минимальная независимость судьи: {}",
             report.outcome.label(),
             report.outcome.exit_code(),
             report.attestation.get(..12).unwrap_or(&report.attestation),
-            report.not_checked.len()
+            report.not_checked.len(),
+            weakest.map_or_else(
+                || "отчётов рубрики нет".to_string(),
+                |(level, _)| crate::judge::independence_label(&level).to_string(),
+            )
         ),
         why_not: (!met).then(|| gaps.join("; ")),
     }
+}
+
+/// Минимальный уровень независимости по отчётам рубрики и порог проекта:
+/// `None` — отчётов с уровнем нет, сравнивать не с чем (ADR-049).
+fn weakest_independence(repo: &Path, cfg: &Config) -> Option<(String, String)> {
+    let levels: Vec<String> = crate::rubric::load_artifacts(repo)
+        .into_iter()
+        .filter_map(|a| a.independence)
+        .collect();
+    let weakest = crate::judge::min_independence(levels.iter().map(String::as_str))?;
+    Some((weakest, cfg.trust.min_independence.clone()))
 }
 
 /// Блокеры верхней ступени (честное правило W4): неподписанное A3, судья =
@@ -581,6 +609,53 @@ mod tests {
         )
         .expect("constraints");
         std::fs::write(dir.join("ARCHITECTURE-SPINE.md"), "# Spine\n").expect("spine");
+    }
+
+    /// Отчёт рубрики с уровнем независимости: пятая ступень говорит, какой
+    /// уровень достигнут и какого требует проект (ADR-049).
+    fn report_with_independence(dir: &Path, level: &str, judge: &str, author: &str) {
+        let reports = dir.join("reports/rubric");
+        std::fs::create_dir_all(&reports).expect("mkdir");
+        std::fs::write(
+            reports.join("ADR-001-demo.json"),
+            format!(
+                "{{\n  \"schema\": \"arch-be/rubric-report/v1\",\n  \"rubric\": \"adr_quality\",\n                   \"target\": \"docs/adr/ADR-001-demo.md\",\n  \"judge_model\": \"{judge}\",\n                   \"author_model\": \"{author}\",\n  \"weighted_total\": 4.0,\n  \"verdict\": \"годно\",\n                   \"judged_at\": \"2026-09-20T10:00:00+03:00\",\n  \"independence\": \"{level}\"\n}}\n"
+            ),
+        )
+        .expect("отчёт");
+    }
+
+    /// Пятая ступень называет минимальный уровень независимости по отчётам, а
+    /// требование проекта поднимает планку: при пороге `launched` отчёт
+    /// уровня `declared` делает ступень недостижимой (ADR-049).
+    #[test]
+    fn trust_detail_shows_min_independence() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        repo_with_rules(dir, true);
+        journal(dir, &[("spine_lint", "fail"), ("spine_lint", "pass")]);
+        report_with_independence(dir, "declared_cross_family", "glm-5.2", "claude-opus-4");
+
+        let cfg = Config::default();
+        let report = crate::gate::run(dir, Some(crate::control::Route::Fast), None, None, (50, 50))
+            .expect("gate");
+        let anchor = anchor_verdict(dir, &report, &cfg);
+        assert!(
+            anchor.evidence.contains("заявлена"),
+            "уровень назван в доказательстве: {}",
+            anchor.evidence
+        );
+
+        // Порог проекта: требовать обеспеченную запуском независимость.
+        let mut strict = Config::default();
+        strict.trust.min_independence = crate::judge::INDEPENDENCE_LAUNCHED.to_string();
+        let anchor = anchor_verdict(dir, &report, &strict);
+        assert!(!anchor.met, "порог не достигнут — ступень не взята");
+        let why = anchor.why_not.expect("причина");
+        assert!(
+            why.contains("ниже порога проекта"),
+            "причина называет порог: {why}"
+        );
     }
 
     /// Запись журнала MCP-вызовов.

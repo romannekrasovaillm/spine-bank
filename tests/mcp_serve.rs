@@ -2440,3 +2440,134 @@ fn unknown_families_do_not_collide() {
         "ложного красного быть не должно: {stdout}"
     );
 }
+
+/// J5 (ADR-049): порог независимости. По умолчанию (`none`) поведение 0.3.4
+/// сохраняется — отчёт, собранный хостом, зелёный. Проект, поднявший порог до
+/// `launched`, получает находку `judge_independence_low` (error): судейство
+/// «заявлено», а он требует, чтобы Spine сам запускал судью.
+#[test]
+fn min_independence_blocks_below_threshold() {
+    let home = tempfile::tempdir().expect("tmp");
+    let (repo, adr, rubric) = judge_gate_case(home.path());
+    judge_report_via_mcp(home.path(), &adr, &rubric, "glm-5.2");
+    // Дефолт: порога нет — отчёт, собранный хостом, проходит.
+    let gate = gate_output(home.path(), &repo);
+    let stdout = String::from_utf8_lossy(&gate.stdout);
+    assert!(
+        gate.status.success(),
+        "дефолт обязан сохранять 0.3.4: {stdout}"
+    );
+    assert!(
+        !stdout.contains("judge_independence_low"),
+        "без порога находки нет: {stdout}"
+    );
+    // Проект требует запуск самим Spine — тот же отчёт краснеет.
+    std::fs::write(
+        home.path().join("arch-harness.toml"),
+        "[gate.required]\nfast = [\"decision_quality\"]\n\n[gate.decision_quality]\nmin_independence = \"launched\"\n",
+    )
+    .expect("конфиг со строгим порогом");
+    let strict = gate_output(home.path(), &repo);
+    let stdout = String::from_utf8_lossy(&strict.stdout);
+    assert!(!strict.status.success(), "порог обязан краснить: {stdout}");
+    assert!(
+        stdout.contains("judge_independence_low"),
+        "ожидалась находка о пороге независимости: {stdout}"
+    );
+    assert!(
+        stdout.contains("обеспечена запуском"),
+        "находка называет требуемый уровень: {stdout}"
+    );
+}
+
+/// J5 (ADR-049): судейство в рабочей сессии — ПРИМЕЧАНИЕ паспорта, а не
+/// находка. Признак косвенный (судья мог видеть контекст автора), и выдавать
+/// его за доказательство нельзя — но и молчать нельзя.
+#[test]
+fn session_not_clean_is_note_not_finding() {
+    let home = tempfile::tempdir().expect("tmp");
+    let (repo, adr, rubric) = judge_gate_case(home.path());
+    judge_report_via_mcp(home.path(), &adr, &rubric, "glm-5.2");
+    // Правим происхождение: судейство шло после сорока вызовов в сессии.
+    let report = repo.join("reports/rubric/ADR-001-pilot.json");
+    let mut artifact: Value =
+        serde_json::from_str(&std::fs::read_to_string(&report).expect("отчёт")).expect("JSON");
+    artifact["provenance"]["session_calls_before"] = json!(40);
+    std::fs::write(
+        &report,
+        serde_json::to_string_pretty(&artifact).expect("JSON"),
+    )
+    .expect("запись");
+    let gate = gate_output(home.path(), &repo);
+    let stdout = String::from_utf8_lossy(&gate.stdout);
+    assert!(
+        gate.status.success(),
+        "рабочая сессия — не нарушение: {stdout}"
+    );
+    assert!(
+        !stdout.contains("judge_session_not_clean"),
+        "примечание не должно выглядеть находкой: {stdout}"
+    );
+    // В паспорте примечание названо, и названо косвенным признаком.
+    let explain = arch_cmd(home.path())
+        .arg("gate")
+        .arg("--repo")
+        .arg(repo.as_os_str())
+        .arg("--route")
+        .arg("fast")
+        .arg("--explain")
+        .output()
+        .expect("gate --explain");
+    let text = String::from_utf8_lossy(&explain.stdout);
+    assert!(
+        text.contains("рабочей сессии"),
+        "примечание в паспорте: {text}"
+    );
+    assert!(
+        text.contains("косвенный признак"),
+        "признак назван косвенным: {text}"
+    );
+}
+
+/// J5 (ADR-049): хэши сырых ответов входят в аттестацию вердикта — правка
+/// сохранённого ответа меняет аттестацию, потому что отчёт объявлен собранным
+/// из этих ответов. У кейса без сырых ответов аттестация не меняется: вход
+/// `judge_raw` там честное `absent`.
+#[test]
+fn envelope_changes_when_raw_answer_changes() {
+    let home = tempfile::tempdir().expect("tmp");
+    let (repo, adr, rubric) = judge_gate_case(home.path());
+    judge_report_via_mcp(home.path(), &adr, &rubric, "glm-5.2");
+    let envelope = |home: &Path, repo: &Path| -> Value {
+        let out = arch_cmd(home)
+            .arg("gate")
+            .arg("--repo")
+            .arg(repo.as_os_str())
+            .arg("--route")
+            .arg("fast")
+            .arg("--format")
+            .arg("json")
+            .output()
+            .expect("gate --format json");
+        serde_json::from_slice(&out.stdout).expect("конверт вердикта")
+    };
+    let before = envelope(home.path(), &repo);
+    assert!(
+        before["inputs"]["judge_raw"].is_string(),
+        "вход judge_raw назван: {before}"
+    );
+    let raw = repo.join("reports/rubric/raw/ADR-001-pilot/sample-1.json");
+    let mut record: Value =
+        serde_json::from_str(&std::fs::read_to_string(&raw).expect("сырой ответ")).expect("JSON");
+    record["text"] = json!("{\"scores\":[],\"verdict\":\"иначе\"}");
+    std::fs::write(&raw, serde_json::to_string_pretty(&record).expect("JSON")).expect("запись");
+    let after = envelope(home.path(), &repo);
+    assert_ne!(
+        before["attestation"], after["attestation"],
+        "правка сырого ответа обязана менять аттестацию"
+    );
+    assert_ne!(
+        before["inputs"]["judge_raw"], after["inputs"]["judge_raw"],
+        "вход judge_raw обязан измениться"
+    );
+}

@@ -43,6 +43,8 @@ pub struct Config {
     pub cron: CronSettings,
     /// Настройки LLM-судьи рубрик (калибровка, ADR-004).
     pub judge: JudgeConfig,
+    /// Порог независимости судьи для метрики доверия (ADR-049).
+    pub trust: TrustConfig,
     /// Настройки флота прогонов кодовых харнессов (изоляция и гейт мерджа).
     pub fleet: FleetConfig,
     /// Пороги маршрутизации значимости (Architecture Significance Score).
@@ -681,6 +683,30 @@ impl Default for CronSettings {
     }
 }
 
+/// Настройки метрики доверия (`arch-be trust`, ADR-049).
+///
+/// Шкала отвечает, насколько можно верить зелёному контуру; её ступени — не
+/// гейт, а измерение. Единственный ключ здесь — порог независимости судьи для
+/// верхней ступени.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TrustConfig {
+    /// Минимальный уровень независимости судьи, который считается достаточным
+    /// для пятой ступени (ADR-049): `declared` (дефолт) — «метки передал хост»
+    /// достаточно; `launched` — требуем, чтобы судью запускал сам Spine.
+    /// Уровни: `none` < `declared` < `declared_cross_family` < `launched` <
+    /// `launched_cross_family`.
+    pub min_independence: String,
+}
+
+impl Default for TrustConfig {
+    fn default() -> Self {
+        Self {
+            min_independence: crate::judge::INDEPENDENCE_DECLARED.to_string(),
+        }
+    }
+}
+
 /// Настройки LLM-судьи рубрик (калибровка и верификация, ADR-004).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -712,6 +738,11 @@ pub struct JudgeConfig {
     /// [`crate::judge::DEFAULT_FAMILIES`] и переопределяет её по самому
     /// длинному подошедшему префиксу.
     pub families: BTreeMap<String, String>,
+    /// Порог «чистой сессии» (ADR-049): режим `declared` и больше стольких
+    /// вызовов MCP в сессии до выдачи промпта судьи — примечание
+    /// `judge_session_not_clean` в паспорте («судейство шло в рабочей сессии:
+    /// судья мог видеть контекст автора»). Это КОСВЕННЫЙ признак, а не находка.
+    pub clean_session_max_calls: usize,
     /// Писать в отчёт рубрики, кто организовал судейство: git `user.name` и
     /// `user.email` репозитория (поле `provenance.operator`, ADR-048).
     /// Это запись из git-конфига, а не подпись: личность механикой не
@@ -729,6 +760,7 @@ impl Default for JudgeConfig {
             golden_max_mae: 1.0,
             thinking: None,
             families: BTreeMap::new(),
+            clean_session_max_calls: crate::judge::DEFAULT_CLEAN_SESSION_MAX_CALLS,
             record_operator: true,
         }
     }
@@ -886,6 +918,12 @@ pub struct DecisionQualityConfig {
     /// По умолчанию warn: смена модели внутри одного семейства — обычная
     /// практика, а не нарушение; ужесточение — осознанный выбор проекта.
     pub require_distinct_family: bool,
+    /// Минимальный уровень независимости судьи (ADR-049): ниже порога —
+    /// находка `judge_independence_low` (error). Дефолт `none` — поведение
+    /// 0.3.4: независимость заявлена, порога нет. Уровни:
+    /// `none` < `declared` < `declared_cross_family` < `launched` <
+    /// `launched_cross_family`.
+    pub min_independence: String,
 }
 
 impl Default for DecisionQualityConfig {
@@ -894,6 +932,7 @@ impl Default for DecisionQualityConfig {
             min_score: 3.5,
             require_distinct_judge: false,
             require_distinct_family: false,
+            min_independence: crate::judge::INDEPENDENCE_NONE.to_string(),
         }
     }
 }
@@ -1257,6 +1296,7 @@ impl Default for Config {
             bash: BashConfig::default(),
             cron: CronSettings::default(),
             judge: JudgeConfig::default(),
+            trust: TrustConfig::default(),
             fleet: FleetConfig::default(),
             significance: SignificanceConfig::default(),
             gate: GateConfig::default(),
