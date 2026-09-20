@@ -2034,7 +2034,7 @@ pub struct RuleCard {
     pub id: Option<String>,
     /// Имя правила (код находки).
     pub name: String,
-    /// Тип проверки в snake_case (`command_succeeds`, `must_contain`, …).
+    /// Тип проверки в `snake_case` (`command_succeeds`, `must_contain`, …).
     pub kind: &'static str,
     /// Команда (только у `command_succeeds`).
     pub command: Option<String>,

@@ -252,7 +252,7 @@ impl Template {
 pub enum Lang {
     /// Только python + pytest.
     Python,
-    /// Только java + JUnit 5.
+    /// Только java + `JUnit` 5.
     Java,
     /// Обе половины.
     Both,
@@ -456,14 +456,15 @@ pub fn render_show(id: &str) -> Result<String> {
 
 /// Ошибка «шаблона нет» с перечнем известных id.
 fn unknown_template(id: &str) -> HarnessError {
-    let known = templates()
-        .map(|all| {
+    let known = templates().map_or_else(
+        |_| "каталог недоступен".to_string(),
+        |all| {
             all.iter()
                 .map(|t| t.manifest.id.clone())
                 .collect::<Vec<_>>()
                 .join(", ")
-        })
-        .unwrap_or_else(|_| "каталог недоступен".to_string());
+        },
+    );
     HarnessError::Control(format!("шаблон '{id}' не найден (известны: {known})"))
 }
 
@@ -693,7 +694,7 @@ pub fn spine_ad_text(case: &Path, ad: &str) -> Option<String> {
 pub struct AdRuleKind {
     /// Ссылка на правило (`C-2`) или имя сущности из `verified_by`.
     pub reference: String,
-    /// Тип правила, если оно нашлось в реестре (snake_case).
+    /// Тип правила, если оно нашлось в реестре (`snake_case`).
     pub kind: Option<String>,
 }
 
@@ -991,7 +992,7 @@ pub fn apply(case: &Path, id: &str, ad: &str, lang: Lang, dry_run: bool) -> Resu
         ));
     }
     lock_entries.retain(|e| !(e.id == t.manifest.id && rule_ref_eq(&e.ad, ad)));
-    lock_entries.push(lock_entry(case, &t, ad, lang, &planned)?);
+    lock_entries.push(lock_entry(case, &t, ad, lang, &planned));
     lock_entries.sort_by(|a, b| a.id.cmp(&b.id).then_with(|| a.ad.cmp(&b.ad)));
     if !dry_run {
         write_lock(&lock, &lock_entries)?;
@@ -1078,7 +1079,7 @@ fn lock_entry(
     ad: &str,
     lang: Lang,
     planned: &[(PathBuf, &str)],
-) -> Result<LockEntry> {
+) -> LockEntry {
     let mut files = Vec::new();
     for (path, content) in planned {
         let rel = path
@@ -1092,11 +1093,8 @@ fn lock_entry(
         });
     }
     files.sort_by(|a, b| a.path.cmp(&b.path));
-    let python = t
-        .command_for("python")
-        .map(str::to_string)
-        .unwrap_or_default();
-    Ok(LockEntry {
+    let python = t.command_for("python").map(str::to_string).unwrap_or_default();
+    LockEntry {
         id: t.manifest.id.clone(),
         version: t.manifest.version,
         ad: ad.to_string(),
@@ -1104,7 +1102,7 @@ fn lock_entry(
         dir: format!("{TARGET_REL}/{}", t.manifest.id),
         command: python,
         files,
-    })
+    }
 }
 
 fn read_lock(path: &Path) -> Result<Vec<LockEntry>> {
@@ -1263,10 +1261,7 @@ fn run_shell(dir: &Path, command: &str, timeout: Duration) -> Result<(Option<i32
         }
     }
     let tail = String::from_utf8_lossy(&captured).into_owned();
-    let code = match status {
-        Some(s) => Some(s.code().unwrap_or(-1)),
-        None => None,
-    };
+    let code = status.map(|s| s.code().unwrap_or(-1));
     Ok((code, tail))
 }
 
@@ -1347,16 +1342,7 @@ pub fn verify_all(runner: &Runner, lang: Lang, require_python: bool) -> Result<V
             } else {
                 Duration::from_secs(t.manifest.rule.timeout_secs.max(1))
             };
-            run_stage(
-                &mut report,
-                &t,
-                half,
-                "reference",
-                &command,
-                &root,
-                timeout,
-                true,
-            )?;
+            run_stage(&mut report, &t, half, Stage::Reference, &command, &root, timeout)?;
             // Нарушающая реализация: подменяем объявленные файлы (П2).
             let swaps = t.violating_for(lang);
             let swaps: Vec<&ViolatingSwap> =
@@ -1369,16 +1355,7 @@ pub fn verify_all(runner: &Runner, lang: Lang, require_python: bool) -> Result<V
                 continue;
             }
             apply_swaps(&root, TARGET_REL, &t.manifest.id, &swaps, &t)?;
-            run_stage(
-                &mut report,
-                &t,
-                half,
-                "violating",
-                &command,
-                &root,
-                timeout,
-                false,
-            )?;
+            run_stage(&mut report, &t, half, Stage::Violating, &command, &root, timeout)?;
         }
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1413,18 +1390,42 @@ fn command_for(
         .or_else(|| t.command_for("python").map(str::to_string))
 }
 
+/// Стадия проверки зубов: эталон (ожидание PASS) или нарушение (ожидание FAIL).
+#[derive(Debug, Clone, Copy)]
+enum Stage {
+    /// Эталонная реализация: тест обязан быть зелёным.
+    Reference,
+    /// Нарушающая реализация: тест обязан упасть.
+    Violating,
+}
+
+impl Stage {
+    /// Подпись стадии для отчёта.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Reference => "reference",
+            Self::Violating => "violating",
+        }
+    }
+
+    /// Исход, который считается успехом стадии.
+    fn expect_pass(self) -> bool {
+        matches!(self, Self::Reference)
+    }
+}
+
 /// Прогоняет одну стадию (эталонную или нарушающую) и записывает проверку.
 fn run_stage(
     report: &mut VerifyReport,
     t: &Template,
     half: &str,
-    stage: &'static str,
+    stage: Stage,
     command: &str,
     root: &Path,
     timeout: Duration,
-    expect_pass: bool,
 ) -> Result<()> {
     let (code, tail) = run_shell(root, command, timeout)?;
+    let expect_pass = stage.expect_pass();
     let ok = match code {
         Some(0) => expect_pass,
         Some(_) => !expect_pass,
@@ -1437,11 +1438,11 @@ fn run_stage(
     report.checks.push(VerifyCheck {
         template: t.manifest.id.clone(),
         lang: half.to_string(),
-        stage,
+        stage: stage.label(),
         ok,
         detail,
     });
-    if !ok && stage == "violating" && code == Some(0) {
+    if !ok && matches!(stage, Stage::Violating) && code == Some(0) {
         report.findings.push(format!(
             "{} [{half}]: тест остался зелёным на нарушающей реализации — правило беззубое \
              (`executable_rule_toothless`)",
@@ -1479,8 +1480,7 @@ fn tail_tail(text: &str) -> String {
 fn temp_root(id: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_nanos());
     let root = std::env::temp_dir().join(format!("arch-be-rt-{}-{id}-{nanos}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     root
@@ -1634,16 +1634,7 @@ pub fn verify_dir(case: &Path, runner: &Runner, lang: Lang) -> Result<VerifyRepo
             } else {
                 Duration::from_secs(t.manifest.rule.timeout_secs.max(1))
             };
-            run_stage(
-                &mut report,
-                &t,
-                half,
-                "violating",
-                &command,
-                &root,
-                timeout,
-                false,
-            )?;
+            run_stage(&mut report, &t, half, Stage::Violating, &command, &root, timeout)?;
             let _ = std::fs::remove_dir_all(&root);
         }
     }
@@ -1934,7 +1925,7 @@ mod tests {
                     t.manifest.id
                 );
                 assert!(
-                    !t.manifest.match_terms.iter().next().is_none(),
+                    t.manifest.match_terms.iter().next().is_some(),
                     "{}: пустой словарь подбора",
                     t.manifest.id
                 );

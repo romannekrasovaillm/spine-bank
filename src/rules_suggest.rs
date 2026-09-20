@@ -472,10 +472,10 @@ fn detect_executable_invariant_per_ad(case_dir: &Path) -> Result<Vec<Candidate>>
         } else {
             matched
         };
-        let best = templates
-            .first()
-            .map(|t| t.id.clone())
-            .unwrap_or_else(|| rt::GENERIC_TEMPLATE_ID.to_string());
+        let best = templates.first().map_or_else(
+            || rt::GENERIC_TEMPLATE_ID.to_string(),
+            |t| t.id.clone(),
+        );
         let rules = if entry.rules.is_empty() {
             "правил в `verified_by` нет вовсе".to_string()
         } else {
@@ -1031,10 +1031,11 @@ mod tests_executable_invariant_per_ad {
                 ),
             )
             .expect("сущность");
-            spine.push_str(&format!(
+            let _ = write!(
+                spine,
                 "## AD-{num}. {title}\n\n- **Binds**: Приём\n- **Prevents**: потерю\n\
                  - **Rule**: правило\n\n"
-            ));
+            );
         }
         std::fs::write(case.join("ARCHITECTURE-SPINE.md"), spine).expect("спайн");
         std::fs::write(case.join("CONSTRAINTS.yaml"), registry).expect("реестр");
@@ -1072,8 +1073,16 @@ mod tests_executable_invariant_per_ad {
         let case = case_with(
             tmp.path(),
             &[
-                ("AD-001", "Идемпотентность по ключу: повторная доставка", "verified_by: [C-002]"),
-                ("AD-002", "Журнал только на дозапись", "verified_by: [C-002]"),
+                (
+                    "AD-001",
+                    "Идемпотентность по ключу: повторная доставка",
+                    "verified_by: [C-002]",
+                ),
+                (
+                    "AD-002",
+                    "Журнал только на дозапись",
+                    "verified_by: [C-002]",
+                ),
             ],
             TEXT_ONLY,
         );
@@ -1082,7 +1091,10 @@ mod tests_executable_invariant_per_ad {
         assert_eq!(ads.len(), 2, "{:?}", ids(&report));
         assert_eq!(ads[0].id, "executable-invariant:AD-001");
         for c in &ads {
-            assert_eq!(c.ad.as_deref(), Some(c.id.trim_start_matches("executable-invariant:")));
+            assert_eq!(
+                c.ad.as_deref(),
+                Some(c.id.trim_start_matches("executable-invariant:"))
+            );
             assert!(!c.templates.is_empty(), "шаблон предложен: {c:?}");
             assert!(c.templates[0].score > 0, "паттерн распознан: {c:?}");
             let yaml = c.yaml.as_deref().expect("фрагмент правила");
@@ -1091,7 +1103,10 @@ mod tests_executable_invariant_per_ad {
                 !yaml.trim_start().starts_with('#'),
                 "фрагмент обязан быть незакомментированным: {yaml}"
             );
-            assert!(yaml.contains(&format!("ad: {}", c.ad.as_deref().unwrap())), "{yaml}");
+            assert!(
+                yaml.contains(&format!("ad: {}", c.ad.as_deref().unwrap())),
+                "{yaml}"
+            );
             // Свободный id — из реестра кейса: занятый C-002 не переиспользуем,
             // ниже сотни не занимаем (запас на библиотеку корпоративных правил).
             assert!(yaml.contains("id: C-100"), "{yaml}");
@@ -1107,7 +1122,11 @@ mod tests_executable_invariant_per_ad {
             tmp.path(),
             &[
                 ("AD-001", "Идемпотентность по ключу", "verified_by: [C-002]"),
-                ("AD-002", "Журнал только на дозапись", "verified_by: [C-003]"),
+                (
+                    "AD-002",
+                    "Журнал только на дозапись",
+                    "verified_by: [C-003]",
+                ),
             ],
             WITH_BEHAVIOUR,
         );
@@ -1154,7 +1173,12 @@ mod tests_executable_invariant_per_ad {
         let report = suggest(&case).expect("suggest");
         let c = per_ad(&report)[0];
         assert_eq!(c.templates[0].id, "idempotency-key", "{:?}", c.templates);
-        assert!(c.templates[0].matched.iter().any(|m| m.starts_with("идемпотент")));
+        assert!(
+            c.templates[0]
+                .matched
+                .iter()
+                .any(|m| m.starts_with("идемпотент"))
+        );
     }
 
     /// Паттерн не распознан — заготовка и честная пометка, а не выдуманный
@@ -1180,7 +1204,11 @@ mod tests_executable_invariant_per_ad {
             c.templates
         );
         assert_eq!(c.templates[0].score, 0);
-        assert!(c.rationale.contains("паттерн не распознан"), "{}", c.rationale);
+        assert!(
+            c.rationale.contains("паттерн не распознан"),
+            "{}",
+            c.rationale
+        );
         let yaml = c.yaml.as_deref().expect("фрагмент");
         assert!(
             yaml.contains("# Заготовка") && yaml.contains("#   - id:"),
@@ -1251,12 +1279,7 @@ mod tests_executable_invariant_per_ad {
         let report = suggest(&case).expect("suggest");
         let mut got: Vec<(String, String)> = per_ad(&report)
             .iter()
-            .map(|c| {
-                (
-                    c.ad.clone().unwrap_or_default(),
-                    c.templates[0].id.clone(),
-                )
-            })
+            .map(|c| (c.ad.clone().unwrap_or_default(), c.templates[0].id.clone()))
             .collect();
         got.sort();
         let expect = [
@@ -1284,7 +1307,12 @@ mod tests_executable_invariant_per_ad {
         let case = Path::new(env!("CARGO_MANIFEST_DIR")).join("кейсы/digital-ruble-merchant");
         let report = suggest(&case).expect("suggest");
         let ads = per_ad(&report);
-        assert_eq!(ads.len(), 9, "девять инвариантов названы: {:?}", ids(&report));
+        assert_eq!(
+            ads.len(),
+            9,
+            "девять инвариантов названы: {:?}",
+            ids(&report)
+        );
         let unrecognized = ads
             .iter()
             .filter(|c| c.templates[0].id == crate::rule_templates::GENERIC_TEMPLATE_ID)
