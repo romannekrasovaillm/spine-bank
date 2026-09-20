@@ -832,6 +832,115 @@ pub fn is_human_author(label: &str) -> bool {
     normalized == "human" || normalized.starts_with("human-") || normalized.starts_with("human:")
 }
 
+// ---------------------------------------------------------------------------
+// J4: семейства моделей — «другая модель» ≠ «независимый судья»
+// ---------------------------------------------------------------------------
+
+/// Семейство не опознано по префиксам из конфига и дефолтам.
+pub const FAMILY_UNKNOWN: &str = "unknown";
+/// Семейство документа, написанного человеком.
+pub const FAMILY_HUMAN: &str = "human";
+
+/// Дефолтные семейства моделей по префиксам метки: `claude*` → anthropic,
+/// `gpt*`/`o1*`/`o3*`/`codex*` → openai и так далее. Секция `[judge.families]`
+/// конфига дополняет и переопределяет их (сравнение — по самому длинному
+/// подошедшему префиксу).
+pub const DEFAULT_FAMILIES: &[(&str, &str)] = &[
+    ("claude", "anthropic"),
+    ("gpt", "openai"),
+    ("o1", "openai"),
+    ("o3", "openai"),
+    ("codex", "openai"),
+    ("gemini", "google"),
+    ("glm", "zhipu"),
+    ("deepseek", "deepseek"),
+    ("qwen", "qwen"),
+    ("kimi", "moonshot"),
+    ("gigachat", "sber"),
+];
+
+/// Семейство метки для СРАВНЕНИЯ.
+///
+/// Известная метка — имя семейства (`anthropic`, `openai`, …): две разные
+/// модели одного семейства делят слепые зоны, и «независимый судья» из того же
+/// семейства независим лишь по названию. Неизвестная метка — сама
+/// нормализованная метка в пространстве `unknown:`: две РАЗНЫЕ неизвестные
+/// метки не становятся одной семьёй от того, что обе неизвестны (иначе
+/// `foo` и `bar` молча считались бы совпавшими), а две одинаковые — совпадают.
+#[must_use]
+pub fn family_key(label: &str, families: &BTreeMap<String, String>) -> String {
+    let normalized = normalize_label(label);
+    if normalized.is_empty() {
+        return format!("{FAMILY_UNKNOWN}:");
+    }
+    if is_human_author(&normalized) {
+        return FAMILY_HUMAN.to_string();
+    }
+    if let Some(family) = prefix_family(&normalized, families) {
+        return format!("family:{family}");
+    }
+    if let Some(family) = prefix_family_defaults(&normalized) {
+        return format!("family:{family}");
+    }
+    format!("{FAMILY_UNKNOWN}:{normalized}")
+}
+
+/// Человекочитаемое семейство метки: имя семейства либо [`FAMILY_UNKNOWN`]
+/// (для текстов находок и паспорта).
+#[must_use]
+pub fn family_of(label: &str, families: &BTreeMap<String, String>) -> String {
+    let key = family_key(label, families);
+    key.strip_prefix("family:").map_or_else(
+        || {
+            if key == FAMILY_HUMAN {
+                FAMILY_HUMAN.to_string()
+            } else {
+                FAMILY_UNKNOWN.to_string()
+            }
+        },
+        str::to_string,
+    )
+}
+
+/// Семейство по самому длинному подошедшему префиксу из конфига.
+fn prefix_family(normalized: &str, families: &BTreeMap<String, String>) -> Option<String> {
+    let mut best: Option<(usize, &str)> = None;
+    for (prefix, family) in families {
+        let prefix = normalize_label(prefix);
+        if !matches_prefix(normalized, &prefix) {
+            continue;
+        }
+        if best.is_none_or(|(len, _)| prefix.len() > len) {
+            best = Some((prefix.len(), family.as_str()));
+        }
+    }
+    best.map(|(_, family)| family.to_string())
+}
+
+/// Семейство по дефолтной таблице префиксов.
+fn prefix_family_defaults(normalized: &str) -> Option<String> {
+    let mut best: Option<(usize, &str)> = None;
+    for (prefix, family) in DEFAULT_FAMILIES {
+        let prefix = normalize_label(prefix);
+        if !matches_prefix(normalized, &prefix) {
+            continue;
+        }
+        if best.is_none_or(|(len, _)| prefix.len() > len) {
+            best = Some((prefix.len(), family));
+        }
+    }
+    best.map(|(_, family)| family.to_string())
+}
+
+/// Метка начинается с префикса как отдельного слова: `claude-opus-4` — да,
+/// `claudette` — нет (иначе префикс `claude` поймал бы чужое имя).
+fn matches_prefix(normalized: &str, prefix: &str) -> bool {
+    normalized == prefix
+        || normalized
+            .strip_prefix(prefix)
+            .is_some_and(|rest| rest.starts_with('-'))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -982,6 +1091,55 @@ mod tests {
         assert!(is_human_author("HUMAN"));
         assert!(is_human_author("human:Иван Петров"));
         assert!(!is_human_author("claude-opus-4"));
+    }
+
+    /// Семейство опознаётся по префиксу нормализованной метки: `Claude-Opus`
+    /// и `claude-3-5` — одно семейство, `gpt-5` — другое.
+    #[test]
+    fn families_are_resolved_by_prefix() {
+        let none = BTreeMap::new();
+        assert_eq!(family_of("Claude-Opus-4", &none), "anthropic");
+        assert_eq!(family_of("claude 3.5 sonnet", &none), "anthropic");
+        assert_eq!(family_of("gpt-5.2", &none), "openai");
+        assert_eq!(family_of("o3-mini", &none), "openai");
+        assert_eq!(family_of("glm-5.2", &none), "zhipu");
+        assert_eq!(family_of("kimi-k3", &none), "moonshot");
+        assert_eq!(family_of("GigaChat-2-Max", &none), "sber");
+        // Префикс как отдельное слово: `claudette` — не anthropic.
+        assert_eq!(family_of("claudette", &none), FAMILY_UNKNOWN);
+        // Человек — отдельное «семейство»: он отличен от любой модели.
+        assert_eq!(family_of("human:Иван", &none), FAMILY_HUMAN);
+    }
+
+    /// Неизвестные метки не становятся одной семьёй от того, что обе
+    /// неизвестны: одинаковые метки — тот же автор, разные — разные семейства
+    /// (иначе `foo` и `bar` молча считались бы совпавшими).
+    #[test]
+    fn unknown_family_is_not_equal_to_itself_silently() {
+        let none = BTreeMap::new();
+        assert_eq!(
+            family_key("my-llm", &none),
+            family_key("My LLM", &none),
+            "одна метка, названная по-разному, — одно семейство"
+        );
+        assert_ne!(
+            family_key("my-llm", &none),
+            family_key("other-llm", &none),
+            "разные неизвестные метки — разные семейства"
+        );
+    }
+
+    /// Конфиг дополняет дефолтную таблицу и переопределяет её по самому
+    /// длинному подошедшему префиксу.
+    #[test]
+    fn config_families_override_defaults() {
+        let mut families = BTreeMap::new();
+        families.insert("claude".to_string(), "corp-anthropic".to_string());
+        families.insert("glm-air".to_string(), "zhipu-air".to_string());
+        assert_eq!(family_of("claude-opus-4", &families), "corp-anthropic");
+        // Самый длинный префикс побеждает: `glm-air` точнее, чем дефолтный `glm`.
+        assert_eq!(family_of("glm-air-2", &families), "zhipu-air");
+        assert_eq!(family_of("glm-5.2", &families), "zhipu");
     }
 
     /// Ключ промпта не зависит от написания пути: он считается по тексту

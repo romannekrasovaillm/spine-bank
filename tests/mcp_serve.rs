@@ -2364,3 +2364,79 @@ fn adr_new_writes_author_model() {
         "записанная метка обязана читаться тем же разбором"
     );
 }
+
+/// J4 (ADR-048): судья и автор — разные модели ОДНОГО семейства. «Другая
+/// модель» не значит «другой взгляд»: слепые зоны у семейства общие, и находка
+/// `judge_same_family` называет это предупреждением.
+#[test]
+fn same_family_is_flagged() {
+    let home = tempfile::tempdir().expect("tmp");
+    let (repo, adr, rubric) = judge_gate_case(home.path());
+    let text = std::fs::read_to_string(&adr).expect("ADR");
+    std::fs::write(
+        &adr,
+        text.replace(
+            "- Дата: 2026-09-20",
+            "- Дата: 2026-09-20\n- Модель-автор: claude-opus-4",
+        ),
+    )
+    .expect("ADR с автором");
+    // Судья — другая модель того же семейства (anthropic).
+    judge_report_via_mcp(home.path(), &adr, &rubric, "claude-3-5-sonnet");
+    let gate = gate_output(home.path(), &repo);
+    let stdout = String::from_utf8_lossy(&gate.stdout);
+    assert!(
+        stdout.contains("judge_same_family"),
+        "одно семейство обязано быть названо: {stdout}"
+    );
+    assert!(
+        stdout.contains("anthropic"),
+        "находка называет семейство: {stdout}"
+    );
+    // По умолчанию это warn: зелёный вердикт сохраняется.
+    assert!(
+        gate.status.success(),
+        "смена модели внутри семейства — не нарушение по умолчанию: {stdout}"
+    );
+    // Ключ проекта поднимает находку до error.
+    std::fs::write(
+        home.path().join("arch-harness.toml"),
+        "[gate.required]\nfast = [\"decision_quality\"]\n\n[gate.decision_quality]\nrequire_distinct_family = true\n",
+    )
+    .expect("конфиг со строгим семейством");
+    let strict = gate_output(home.path(), &repo);
+    let stdout = String::from_utf8_lossy(&strict.stdout);
+    assert!(
+        !strict.status.success(),
+        "require_distinct_family = true обязан краснить: {stdout}"
+    );
+}
+
+/// J4 (ADR-048): разные НЕИЗВЕСТНЫЕ метки — разные семейства, а не «оба
+/// unknown, значит совпали». Иначе судья `my-llm` считался бы роднёй автора
+/// `other-llm` только потому, что механика не знает ни того, ни другого.
+#[test]
+fn unknown_families_do_not_collide() {
+    let home = tempfile::tempdir().expect("tmp");
+    let (repo, adr, rubric) = judge_gate_case(home.path());
+    let text = std::fs::read_to_string(&adr).expect("ADR");
+    std::fs::write(
+        &adr,
+        text.replace(
+            "- Дата: 2026-09-20",
+            "- Дата: 2026-09-20\n- Модель-автор: my-llm-v1",
+        ),
+    )
+    .expect("ADR с автором");
+    judge_report_via_mcp(home.path(), &adr, &rubric, "other-llm-v2");
+    let gate = gate_output(home.path(), &repo);
+    let stdout = String::from_utf8_lossy(&gate.stdout);
+    assert!(
+        !stdout.contains("judge_same_family"),
+        "разные неизвестные метки не одно семейство: {stdout}"
+    );
+    assert!(
+        gate.status.success(),
+        "ложного красного быть не должно: {stdout}"
+    );
+}

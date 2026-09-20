@@ -706,6 +706,12 @@ pub struct JudgeConfig {
     /// `max_tokens` провайдера и обрывали JSON посреди ответа
     /// (кейс 2026-09-01, deepseek-v4-flash).
     pub thinking: Option<bool>,
+    /// Семейства моделей по префиксам метки (`claude = "anthropic"`): судья и
+    /// автор из одного семейства делят слепые зоны, и «независимость» между
+    /// ними — только по названию (ADR-048). Дополняет дефолтную таблицу
+    /// [`crate::judge::DEFAULT_FAMILIES`] и переопределяет её по самому
+    /// длинному подошедшему префиксу.
+    pub families: BTreeMap<String, String>,
     /// Писать в отчёт рубрики, кто организовал судейство: git `user.name` и
     /// `user.email` репозитория (поле `provenance.operator`, ADR-048).
     /// Это запись из git-конфига, а не подпись: личность механикой не
@@ -722,6 +728,7 @@ impl Default for JudgeConfig {
             evidence_min_similarity: 0.8,
             golden_max_mae: 1.0,
             thinking: None,
+            families: BTreeMap::new(),
             record_operator: true,
         }
     }
@@ -874,6 +881,11 @@ pub struct DecisionQualityConfig {
     /// Требовать от судьи модель, отличную от автора документа: `true` —
     /// `judge_is_author` становится error, `false` — warn.
     pub require_distinct_judge: bool,
+    /// Требовать судью из другого СЕМЕЙСТВА моделей (ADR-048): `true` —
+    /// `judge_same_family` становится error, `false` (дефолт) — warn.
+    /// По умолчанию warn: смена модели внутри одного семейства — обычная
+    /// практика, а не нарушение; ужесточение — осознанный выбор проекта.
+    pub require_distinct_family: bool,
 }
 
 impl Default for DecisionQualityConfig {
@@ -881,6 +893,7 @@ impl Default for DecisionQualityConfig {
         Self {
             min_score: 3.5,
             require_distinct_judge: false,
+            require_distinct_family: false,
         }
     }
 }

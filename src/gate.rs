@@ -1586,6 +1586,42 @@ fn component_decision_quality(repo: &Path, options: &GateOptions, enabled: bool)
                 ),
             ));
         }
+        // Судья и автор — разные модели одного семейства: «другая модель» не
+        // значит «другой взгляд» — слепые зоны у семейства общие (ADR-048).
+        // Сравнение — по нормализованным меткам и семействам; две разные
+        // НЕИЗВЕСТНЫЕ метки разными семействами и остаются.
+        let author_for_family = artifact.author_model.as_deref().unwrap_or_default();
+        if !author_for_family.trim().is_empty()
+            && !crate::judge::same_label(author_for_family, &artifact.judge_model)
+        {
+            let judge_family =
+                crate::judge::family_of(&artifact.judge_model, &options.judge.families);
+            let same = crate::judge::family_key(author_for_family, &options.judge.families)
+                == crate::judge::family_key(&artifact.judge_model, &options.judge.families);
+            if same {
+                let severity = if cfg.require_distinct_family {
+                    "error"
+                } else {
+                    "warn"
+                };
+                let message = if judge_family == crate::judge::FAMILY_UNKNOWN {
+                    format!(
+                        "{rel}: семейство судьи и автора не опознано (метки '{}' и '{}') —                          судья независим только по названию",
+                        artifact.judge_model, author_for_family
+                    )
+                } else {
+                    format!(
+                        "{rel}: судья и автор — разные модели одного семейства '{judge_family}'                          ({} и {}) — слепые зоны у семейства общие",
+                        artifact.judge_model, author_for_family
+                    )
+                };
+                findings.push(GateFinding::ruled(
+                    severity.to_string(),
+                    "judge_same_family".to_string(),
+                    message,
+                ));
+            }
+        }
         // Метка автора из вызова разошлась с шапкой документа: в отчёт пошло
         // значение из шапки (оно закоммичено вместе с документом), но само
         // расхождение читателю назвать нужно — это признак того, что автора
