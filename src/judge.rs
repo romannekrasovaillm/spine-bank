@@ -16,6 +16,7 @@
 //!   процесс/запрос без истории.
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -1032,6 +1033,460 @@ pub fn independence_label(level: &str) -> &'static str {
         INDEPENDENCE_LAUNCHED_CROSS_FAMILY => "обеспечена запуском (разные семейства)",
         _ => "не обеспечена (автор не указан или метки совпали)",
     }
+}
+
+// ---------------------------------------------------------------------------
+// J9: передача судейства в другой харнесс и приёмка
+// ---------------------------------------------------------------------------
+
+/// Что нужно оценить: принятый ADR и состояние его отчёта (J9).
+#[derive(Debug, Clone, Serialize)]
+pub struct HandoverItem {
+    /// Путь документа относительно кейса.
+    pub path: String,
+    /// `missing` (отчёта нет) | `stale` (отчёт от другой редакции) |
+    /// `fresh` (отчёт соответствует документу).
+    pub state: String,
+    /// Модель-автор из шапки документа (`None` — не указана).
+    pub author_model: Option<String>,
+    /// Судья имеющегося отчёта.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_judge: Option<String>,
+    /// Уровень независимости имеющегося отчёта.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub independence: Option<String>,
+    /// Отчёт сходится со своими сырыми ответами (`None` — ответов нет).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reproduced: Option<bool>,
+}
+
+impl HandoverItem {
+    /// Отчёт отсутствует или устарел — решение не оценено по текущей редакции.
+    #[must_use]
+    pub fn pending(&self) -> bool {
+        self.state != "fresh"
+    }
+}
+
+/// Настроенный судья-CLI: чем можно судить, не имея ключа у Spine (J9).
+#[derive(Debug, Clone, Serialize)]
+pub struct JudgeOption {
+    /// Имя модели из `[models]`.
+    pub name: String,
+    /// Команда CLI-харнесса.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    /// Семейство метки судьи (по префиксам `[judge.families]` и дефолтам).
+    pub family: String,
+}
+
+/// Перечень работы для судьи: что уже оценено, что нет и кем можно судить.
+#[derive(Debug, Clone, Serialize)]
+pub struct Handover {
+    /// Кейс.
+    pub case: PathBuf,
+    /// Рубрика, по которой оцениваются решения.
+    pub rubric: String,
+    /// Принятые ADR со состоянием отчёта.
+    pub items: Vec<HandoverItem>,
+    /// Судьи, настроенные как `kind = "cli"`.
+    pub judges: Vec<JudgeOption>,
+}
+
+impl Handover {
+    /// Пункты, требующие оценки (нет отчёта или отчёт устарел).
+    #[must_use]
+    pub fn pending(&self) -> Vec<&HandoverItem> {
+        self.items.iter().filter(|i| i.pending()).collect()
+    }
+}
+
+/// Инвентарь судейства по кейсу (J9). Ничего не пишет: это ответ на вопрос
+/// «что осталось оценить и чем», а не действие.
+///
+/// # Errors
+/// Каталог `docs/adr` не читается.
+pub fn handover(
+    repo: &Path,
+    rubric: &str,
+    cfg: &crate::config::Config,
+) -> crate::error::Result<Handover> {
+    let artifacts = crate::rubric::load_artifacts(repo);
+    let mut items = Vec::new();
+    for adr in accepted_adrs(repo) {
+        let rel = adr
+            .strip_prefix(repo)
+            .map_or_else(|_| adr.display().to_string(), |p| p.display().to_string());
+        let sha = crate::hash::sha256_file(&adr);
+        let artifact = artifacts
+            .iter()
+            .find(|a| a.target_sha256.is_some() && a.target_sha256 == sha)
+            .or_else(|| {
+                artifacts
+                    .iter()
+                    .find(|a| a.target.as_deref() == Some(rel.as_str()))
+            });
+        let state = match (artifact, &sha) {
+            (None, _) => "missing",
+            (Some(a), Some(sha)) if a.target_sha256.as_ref() != Some(sha) => "stale",
+            _ => "fresh",
+        };
+        let slug = crate::rubric::artifact_slug(Some(&adr));
+        let reproduced = artifact.map(|_| {
+            let raw = load_raw_answers(repo, &slug);
+            !raw.is_empty() && raw.iter().all(|a| !a.tampered())
+        });
+        items.push(HandoverItem {
+            path: rel,
+            state: state.to_string(),
+            author_model: crate::adr_registry::author_model_of(&adr),
+            report_judge: artifact.map(|a| a.judge_model.clone()),
+            independence: artifact.and_then(|a| a.independence.clone()),
+            reproduced,
+        });
+    }
+    let judges = cfg
+        .models
+        .iter()
+        .filter(|(_, m)| m.kind.as_deref() == Some("cli"))
+        .map(|(name, m)| JudgeOption {
+            name: name.clone(),
+            command: m.command.clone(),
+            family: family_of(name, &cfg.judge.families),
+        })
+        .collect();
+    Ok(Handover {
+        case: repo.to_path_buf(),
+        rubric: rubric.to_string(),
+        items,
+        judges,
+    })
+}
+
+/// Два готовых текста передачи (J9): команда для способа «судью запускает
+/// Spine» и поручение агенту второго харнесса — с уже подставленными путями,
+/// рубрикой и метками. Способы не равны: запуск самим Spine даёт уровень
+/// `обеспечена запуском`, судейство хостом — `заявлена`.
+#[must_use]
+pub fn handover_texts(h: &Handover) -> (String, String) {
+    use std::fmt::Write as _;
+    let pending: Vec<&str> = h.pending().iter().map(|i| i.path.as_str()).collect();
+    let judges = if h.judges.is_empty() {
+        "<судья>".to_string()
+    } else {
+        h.judges.first().map_or_else(
+            || "<судья>".to_string(),
+            |j| {
+                format!(
+                    "{} ({}, семейство {})",
+                    j.name,
+                    j.command.as_deref().unwrap_or("—"),
+                    j.family
+                )
+            },
+        )
+    };
+    let spine_command = format!(
+        "arch-be rubric run {} <документ> --model <судья>\n# либо все принятые ADR без свежего отчёта сразу:\n\
+         arch-be rubric run {} --all-accepted --model <судья>\n\
+         # доступные судьи-CLI: {judges}",
+        h.rubric, h.rubric
+    );
+    let second_harness = if pending.is_empty() {
+        "Оценивать нечего: все принятые ADR кейса имеют свежий отчёт.".to_string()
+    } else {
+        let mut out = format!(
+            "Оцени документы кейса по рубрике «{}» и передай оценки в Spine.\n\
+             Порядок (подключение с узкой записью — отчёты лягут в reports/rubric/):\n\
+             1. rubric_prompt {{\"rubric\": \"{}\", \"target\": \"<документ>\"}} — получишь \
+             system+user промпт судьи и схему ответа;\n\
+             2. исполни промпт k раз СВОЕЙ моделью (k — из judge_config);\n\
+             3. rubric_verify {{\"rubric\": \"{}\", \"target\": \"<документ>\", \
+             \"answers\": [<сырые ответы как есть>], \"judge_model\": \"<твоя модель>\"}}.\n\
+             Метку автора не подставляй: она берётся из шапки документа.\n\n\
+             Документы, которым нужна оценка ({}):\n",
+            h.rubric,
+            h.rubric,
+            h.rubric,
+            pending.len()
+        );
+        for item in h.pending() {
+            let author = item.author_model.as_deref().unwrap_or("не указана");
+            let _ = writeln!(
+                out,
+                "- {} ({}, автор: {author})",
+                item.path,
+                match item.state.as_str() {
+                    "stale" => "отчёт устарел",
+                    _ => "отчёта нет",
+                }
+            );
+        }
+        out
+    };
+    (spine_command, second_harness)
+}
+
+/// Приёмка судейства по кейсу (J9): по каждому принятому ADR — есть ли свежий
+/// отчёт, кто судил, какой уровень независимости, сходится ли отчёт со своими
+/// ответами, — и вердикт той же составляющей, что у гейта.
+#[derive(Debug, Clone, Serialize)]
+pub struct AcceptReport {
+    /// Пункты приёмки.
+    pub items: Vec<HandoverItem>,
+    /// Гейт по `decision_quality` остался бы красным.
+    pub gate_red: bool,
+    /// Что скажет гейт (строка составляющей).
+    pub gate_detail: String,
+}
+
+impl AcceptReport {
+    /// Итог одной строкой — что именно не сходится.
+    #[must_use]
+    pub fn summary(&self) -> String {
+        let pending = self.items.iter().filter(|i| i.pending()).count();
+        let fresh = self.items.len() - pending;
+        if !self.gate_red {
+            format!(
+                "Судейство принято: свежих отчётов {fresh} из {}, гейт по decision_quality зелёный",
+                self.items.len()
+            )
+        } else if pending > 0 {
+            format!(
+                "Судейство не завершено: без свежего отчёта {pending} из {} — {}. {}",
+                self.items.len(),
+                self.items
+                    .iter()
+                    .filter(|i| i.pending())
+                    .map(|i| i.path.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                self.gate_detail
+            )
+        } else {
+            format!(
+                "Отчёты свежие, но гейт красный: {} — смотрите находки выше",
+                self.gate_detail
+            )
+        }
+    }
+}
+
+/// Приёмка: переиспользует составляющую гейта `decision_quality` (не дублирует
+/// её логику) и добавляет к ней состояние отчётов (J9).
+///
+/// # Errors
+/// Кейс недоступен или гейт не отработал.
+pub fn accept(repo: &Path, cfg: &crate::config::Config) -> crate::error::Result<AcceptReport> {
+    let rubric = "adr_quality";
+    let handover = handover(repo, rubric, cfg)?;
+    // Составляющая включается через [gate.required]: включаем её для всех
+    // маршрутов в этой локальной матрице, иначе ответ был бы «не проверялось».
+    let mut requirements = crate::gate::GateRequirements::from_config(&cfg.gate);
+    for route in [
+        &mut requirements.fast,
+        &mut requirements.standard,
+        &mut requirements.critical,
+    ] {
+        if !route.iter().any(|r| r == "decision_quality") {
+            route.push("decision_quality".to_string());
+        }
+    }
+    let options = crate::gate::GateOptions::from_config(cfg);
+    let report = crate::gate::run_opts(
+        repo,
+        Some(crate::control::Route::Fast),
+        None,
+        None,
+        (50, 50),
+        &requirements,
+        &options,
+    )?;
+    let (gate_red, gate_detail) = report
+        .components
+        .iter()
+        .find(|c| c.name == "decision_quality")
+        .map_or(
+            (
+                false,
+                "составляющая decision_quality не найдена".to_string(),
+            ),
+            |c| (c.status == crate::gate::GateStatus::Fail, c.detail.clone()),
+        );
+    Ok(AcceptReport {
+        items: handover.items,
+        gate_red,
+        gate_detail,
+    })
+}
+
+/// Принятые прозаические ADR кейса (`docs/adr/ADR-*.md` со `Status: Accepted`),
+/// по возрастанию пути. Нет каталога — пусто.
+fn accepted_adrs(repo: &Path) -> Vec<PathBuf> {
+    let dir = repo.join("docs/adr");
+    let Ok(rd) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<PathBuf> = rd
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.is_file()
+                && p.extension().is_some_and(|x| x.eq_ignore_ascii_case("md"))
+                && p.file_name()
+                    .is_some_and(|n| n.to_string_lossy().starts_with("ADR-"))
+        })
+        .filter(|p| std::fs::read_to_string(p).is_ok_and(|t| crate::gate::adr_is_accepted(&t)))
+        .collect();
+    out.sort();
+    out
+}
+
+// ---------------------------------------------------------------------------
+// J9: инструменты передачи и приёмки (read-only мост MCP)
+// ---------------------------------------------------------------------------
+
+/// Инструмент `rubric_handover`: что осталось оценить и чем (J9). Ничего не
+/// пишет — ответ на вопрос, а не действие.
+pub struct RubricHandoverTool;
+
+#[async_trait::async_trait]
+impl crate::tool::Tool for RubricHandoverTool {
+    fn spec(&self) -> crate::llm::ToolSpec {
+        crate::llm::ToolSpec {
+            name: "rubric_handover".into(),
+            description: "Перечень принятых ADR без свежего отчёта рубрики: рубрика, путь, \
+                          модель-автор из шапки, доступные судьи CLI, и два готовых текста \
+                          передачи судейства (запуск самим Spine или вторым харнессом). \
+                          Ничего не пишет"
+                .into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Корень кейса (по умолчанию — рабочий каталог)"},
+                    "rubric": {"type": "string", "description": "Рубрика оценки решений (по умолчанию adr_quality)"}
+                }
+            }),
+        }
+    }
+
+    async fn call(
+        &self,
+        args: serde_json::Value,
+        ctx: &crate::tool::ToolContext,
+    ) -> crate::error::Result<crate::tool::ToolOutput> {
+        let rubric = args
+            .get("rubric")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("adr_quality");
+        let repo = ctx.resolve(
+            args.get("path")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("."),
+        );
+        let h = handover(&repo, rubric, &ctx.config)?;
+        let (spine, second) = handover_texts(&h);
+        let mut out = format!(
+            "Кейс {} · рубрика «{}»: принятых ADR {}, из них без свежего отчёта {}\n\n",
+            h.case.display(),
+            h.rubric,
+            h.items.len(),
+            h.pending().len()
+        );
+        for item in &h.items {
+            let _ = writeln!(
+                out,
+                "- [{}] {} — автор: {}, судья отчёта: {}, независимость: {}",
+                item.state,
+                item.path,
+                item.author_model.as_deref().unwrap_or("не указана"),
+                item.report_judge.as_deref().unwrap_or("—"),
+                item.independence.as_deref().unwrap_or("—")
+            );
+        }
+        out.push_str("\nСудьи CLI в [models]:\n");
+        if h.judges.is_empty() {
+            out.push_str("- нет: добавьте модель с kind = \"cli\" (ключ не нужен)\n");
+        } else {
+            for j in &h.judges {
+                let _ = writeln!(
+                    out,
+                    "- {} (команда {}, семейство {})",
+                    j.name,
+                    j.command.as_deref().unwrap_or("—"),
+                    j.family
+                );
+            }
+        }
+        out.push_str("\nСпособ 1 — судью запускает Spine (уровень «обеспечена запуском»):\n");
+        out.push_str(&spine);
+        out.push_str("\n\nСпособ 2 — судит второй харнесс (уровень «заявлена»):\n");
+        out.push_str(&second);
+        Ok(crate::tool::ToolOutput::ok(out))
+    }
+}
+
+/// Инструмент `rubric_accept`: приёмка судейства (J9). Логика — та же
+/// составляющая гейта `decision_quality`, плюс состояние отчётов.
+pub struct RubricAcceptTool;
+
+#[async_trait::async_trait]
+impl crate::tool::Tool for RubricAcceptTool {
+    fn spec(&self) -> crate::llm::ToolSpec {
+        crate::llm::ToolSpec {
+            name: "rubric_accept".into(),
+            description: "Приёмка судейства по кейсу: по каждому принятому ADR — есть ли \
+                          свежий отчёт, кто судил, какой уровень независимости, сходится ли \
+                          отчёт со своими сырыми ответами; итог одной строкой и вердикт гейта"
+                .into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Корень кейса (по умолчанию — рабочий каталог)"}
+                }
+            }),
+        }
+    }
+
+    async fn call(
+        &self,
+        args: serde_json::Value,
+        ctx: &crate::tool::ToolContext,
+    ) -> crate::error::Result<crate::tool::ToolOutput> {
+        let repo = ctx.resolve(
+            args.get("path")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("."),
+        );
+        let report = accept(&repo, &ctx.config)?;
+        let mut out = String::new();
+        for item in &report.items {
+            let _ = writeln!(
+                out,
+                "- [{}] {} — судья: {}, независимость: {}, ответы сходятся: {}",
+                item.state,
+                item.path,
+                item.report_judge.as_deref().unwrap_or("—"),
+                item.independence.as_deref().unwrap_or("—"),
+                match item.reproduced {
+                    Some(true) => "да",
+                    Some(false) => "НЕТ",
+                    None => "ответы не сохранены",
+                }
+            );
+        }
+        out.push_str(&report.summary());
+        Ok(crate::tool::ToolOutput::ok(out))
+    }
+}
+
+/// Инструменты домена судейства (read-only мост MCP): передача и приёмка.
+#[must_use]
+pub fn tools() -> Vec<std::sync::Arc<dyn crate::tool::Tool>> {
+    vec![
+        std::sync::Arc::new(RubricHandoverTool),
+        std::sync::Arc::new(RubricAcceptTool),
+    ]
 }
 
 #[cfg(test)]

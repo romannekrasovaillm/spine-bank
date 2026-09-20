@@ -197,7 +197,7 @@ project-scoped сервер из `.mcp.json` и доверие каталогу 
 ![fitness FAIL → fix → PASS](screenshots/connect/04-fitness.png)
 
 Готовые сценарии работы со Spine доступны как **слэш-команды хоста**: сервер
-отдаёт восемь плейбуков `spine-*` (`spine-architect-review`, `spine-fitness-gate`
+отдаёт девять плейбуков `spine-*` (`spine-architect-review`, `spine-fitness-gate`
 и др.) через MCP-промпты (`prompts/list`, `prompts/get`) — в Claude Code это
 команды вида `/mcp__spine__spine-architect-review` из меню `/`. Текст сценария
 встроен в бинарь сервера, поэтому команды работают независимо от того, куда
@@ -228,8 +228,10 @@ project-scoped сервер из `.mcp.json` и доверие каталогу 
 ## 4. Режимы MCP-сервера
 
 ```bash
-arch-be mcp serve          # дефолт: строго read-only (36 инструментов:
-                           #   14 ручных + 20 моста в реестр)
+arch-be mcp serve          # дефолт: строго read-only (38 инструментов:
+                           #   16 ручных + 22 моста в реестр)
+arch-be mcp serve --rw=reports   # узкая запись: только отчёты рубрики
+                           #   (судейскому харнессу больше и не нужно)
 arch-be mcp serve --rw     # + записывающие: handoff_create, adr_new,
                            #   agentsmd_generate, skill_distill, archify_*,
                            #   reverse_survey, evidence_pack, delta_propose

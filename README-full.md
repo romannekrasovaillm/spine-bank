@@ -266,7 +266,7 @@ BMAD, Spec Kit, OpenSpec и др.):
 
 <p align="center">
   <a href="docs/skills_for_architects.md"><img src="docs/screenshots/07-skills.png" alt="Библиотека скиллов в действии: skill_search находит методики надёжной интеграции, skill_load грузит transactional-outbox и fitness-functions в контекст, контур гейтов фиксируется в ADR · skills library in action" width="92%"></a><br>
-  <sub>Скиллы в живом ходе: модель сама ищет методики (<code>skill_search</code>), грузит две в контекст (<code>skill_load</code>) и отвечает по методике · Обзор всех 63 скиллов: <a href="docs/skills_for_architects.md">docs/skills_for_architects.md</a></sub>
+  <sub>Скиллы в живом ходе: модель сама ищет методики (<code>skill_search</code>), грузит две в контекст (<code>skill_load</code>) и отвечает по методике · Обзор всех 64 скиллов: <a href="docs/skills_for_architects.md">docs/skills_for_architects.md</a></sub>
 </p>
 
 Подробности: `docs/plugins_and_skills.md` (механика: установка, поиск,
@@ -720,7 +720,7 @@ arch-be [--config <path>] <command>   # без команды — TUI
 - `docs/slash_commands.md` — слэш-команды TUI; `docs/tools.md` — инструменты (карта «база vs архитектурные» + полные параметры).
 - `docs/models.md` — подключение LLM (DeepSeek/Kimi/GLM, свои endpoint'ы).
 - `docs/plugins_and_skills.md` — плагины и библиотека скиллов (механика).
-- `docs/skills_for_architects.md` — обзор библиотеки: все 63 скилла в 9
+- `docs/skills_for_architects.md` — обзор библиотеки: все 64 скилла в 9
   плагинах, с чего начать.
 - `docs/failure_memory.md` — память сбоев инструментов («ошибся дважды → урок»).
 - `docs/rubrics_and_benchmarks.md`, `docs/control.md`, `docs/governance.md`,

@@ -35,7 +35,7 @@ Spine Banking Edition — доменный харнесс solution-архите�
 | [mcp_for_architects.md](mcp_for_architects.md) | MCP для архитекторов: практический гид по работе из кодового харнесса — карта инструментов по задачам, плейбуки, живые сессии со скриншотами |
 | [web_kb.md](web_kb.md) | Веб-поиск/фетч и локальная база знаний |
 | [plugins_and_skills.md](plugins_and_skills.md) | Плагины и библиотека скиллов: структура, загрузка, доверие |
-| [skills_for_architects.md](skills_for_architects.md) | Обзор содержимого библиотеки: все 63 скилла в 9 плагинах, разбор самого интересного |
+| [skills_for_architects.md](skills_for_architects.md) | Обзор содержимого библиотеки: все 64 скилла в 9 плагинах, разбор самого интересного |
 | [agents_md.md](agents_md.md) | Генерация AGENTS.md для репозиториев команд из архитектурных артефактов |
 | [experiments/](experiments/) | Живые эксперименты «Spine Core без своей LLM»: архитектор в чужом харнессе, измеренные ценности и честные границы (кейс `digital-ruble`) |
 

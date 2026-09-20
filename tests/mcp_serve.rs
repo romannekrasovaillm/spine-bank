@@ -232,9 +232,9 @@ fn handshake_then_tools_list_over_stdio() {
     }
     assert_eq!(
         tools.len(),
-        36,
-        "ровно 36 инструментов в ro-режиме (16 ручных + 20 read-only моста; \
-         verdict_explain и trust_report — волна W)"
+        38,
+        "ровно 38 инструментов в ro-режиме (16 ручных + 22 read-only моста; \
+         rubric_handover и rubric_accept — передача судейства, ADR-048)"
     );
     // rw-контур и write/exec-принадлежность хоста закрыты в ro-режиме.
     for banned in [
@@ -276,12 +276,12 @@ fn prompts_list_and_get_over_stdio() {
     );
     // initialize рекламирует capability prompts.
     assert!(responses[0]["result"]["capabilities"]["prompts"].is_object());
-    // prompts/list: ровно восемь плейбуков spine-workflows (дом изолирован —
+    // prompts/list: ровно девять плейбуков spine-workflows (дом изолирован —
     // тексты и описания из встроенных ассетов).
     let prompts = responses[1]["result"]["prompts"]
         .as_array()
         .expect("prompts");
-    assert_eq!(prompts.len(), 8, "восемь плейбуков: {prompts:?}");
+    assert_eq!(prompts.len(), 9, "девять плейбуков: {prompts:?}");
     let names: Vec<&str> = prompts.iter().filter_map(|p| p["name"].as_str()).collect();
     for want in [
         "spine-quickstart",
@@ -2865,4 +2865,220 @@ fn digest_has_judging_section() {
         text.contains("рабочей сессии") && text.contains("косвенный"),
         "признак рабочей сессии назван косвенным: {text}"
     );
+}
+
+/// J9 (ADR-048): `rubric handover` перечисляет только работу для судьи —
+/// принятые ADR без отчёта или с устаревшим отчётом, — называет автора из
+/// шапки, доступных судей CLI и оба способа передачи. Ничего не пишет: это
+/// ответ на вопрос, а не действие.
+#[test]
+fn handover_lists_missing_and_stale_only() {
+    let home = tempfile::tempdir().expect("tmp");
+    let (repo, adr, rubric) = judge_gate_case(home.path());
+    // Второй ADR: Proposed (не принят) — в перечень не попадает вовсе.
+    let drafts = repo.join("docs/adr/ADR-002-chernovik.md");
+    std::fs::write(
+        &drafts,
+        "# ADR-002. Черновик\n\n- Статус: Proposed\n\n## Context\n\nЕщё думаем.\n",
+    )
+    .expect("черновик");
+    let handover = |home: &Path, repo: &Path| -> String {
+        let out = arch_cmd(home)
+            .arg("rubric")
+            .arg("handover")
+            .arg("--dir")
+            .arg(repo.as_os_str())
+            .output()
+            .expect("rubric handover");
+        assert!(out.status.success(), "handover: {out:?}");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let before = handover(home.path(), &repo);
+    assert!(before.contains("без свежего отчёта 1"), "{before}");
+    assert!(before.contains("ADR-001-pilot.md"), "{before}");
+    assert!(
+        !before.contains("ADR-002-chernovik.md"),
+        "непринятый ADR в перечень не входит: {before}"
+    );
+    assert!(
+        before.contains("Способ 1") && before.contains("Способ 2"),
+        "оба способа передачи названы: {before}"
+    );
+    assert!(
+        before.contains("--all-accepted"),
+        "команда для судьи-CLI подставлена: {before}"
+    );
+    // Ничего не написано: отчётов в кейсе как не было, так и нет.
+    assert!(
+        !repo.join("reports/rubric/ADR-001-pilot.json").is_file(),
+        "handover не пишет отчётов"
+    );
+    // После оценки (split-judge) документ уходит из перечня, а подмена
+    // документа делает отчёт устаревшим и возвращает его обратно.
+    judge_report_via_mcp(home.path(), &adr, &rubric, "glm-5.2");
+    let after = handover(home.path(), &repo);
+    assert!(after.contains("без свежего отчёта 0"), "{after}");
+    std::fs::write(
+        &adr,
+        "# ADR-001. Пилот\n\n- Статус: Accepted\n- Дата: 2026-09-20\n\n## Context\n\nКонтекст описан явно и коротко, плюс правка.\n",
+    )
+    .expect("правка ADR");
+    let stale = handover(home.path(), &repo);
+    assert!(stale.contains("без свежего отчёта 1"), "{stale}");
+    assert!(stale.contains("stale"), "состояние названо: {stale}");
+}
+
+/// J9 (ADR-048): `rubric accept` — приёмка тем же вердиктом, что у гейта: по
+/// каждому принятому ADR состояние отчёта, судья, уровень независимости и
+/// сходство с сырыми ответами; ненулевой код, если `decision_quality` красный.
+#[test]
+fn accept_matches_gate_verdict() {
+    let home = tempfile::tempdir().expect("tmp");
+    let (repo, adr, rubric) = judge_gate_case(home.path());
+    let accept = |home: &Path, repo: &Path| -> std::process::Output {
+        arch_cmd(home)
+            .arg("rubric")
+            .arg("accept")
+            .arg("--dir")
+            .arg(repo.as_os_str())
+            .output()
+            .expect("rubric accept")
+    };
+    // Отчёта нет — приёмка называет причину и выходит с кодом 1 раньше гейта.
+    let missing = accept(home.path(), &repo);
+    let stdout = String::from_utf8_lossy(&missing.stdout);
+    assert!(
+        !missing.status.success(),
+        "незавершённое судейство: {stdout}"
+    );
+    assert!(stdout.contains("без свежего отчёта 1"), "{stdout}");
+    assert!(stdout.contains("ADR-001-pilot.md"), "{stdout}");
+    // Оценили — приёмка зелёная и говорит, что гейт тоже зелёный.
+    judge_report_via_mcp(home.path(), &adr, &rubric, "glm-5.2");
+    let ok = accept(home.path(), &repo);
+    let stdout = String::from_utf8_lossy(&ok.stdout);
+    assert!(ok.status.success(), "приёмка обязана пройти: {stdout}");
+    assert!(stdout.contains("Судейство принято"), "{stdout}");
+    assert!(
+        stdout.contains("гейт по decision_quality зелёный"),
+        "{stdout}"
+    );
+    // Поднятый рукой балл: приёмка краснеет вместе с гейтом.
+    let report = repo.join("reports/rubric/ADR-001-pilot.json");
+    let mut artifact: Value =
+        serde_json::from_str(&std::fs::read_to_string(&report).expect("отчёт")).expect("JSON");
+    artifact["scores"][0]["score"] = json!(5);
+    std::fs::write(
+        &report,
+        serde_json::to_string_pretty(&artifact).expect("JSON"),
+    )
+    .expect("правка отчёта");
+    let bad = accept(home.path(), &repo);
+    let stdout = String::from_utf8_lossy(&bad.stdout);
+    assert!(
+        !bad.status.success(),
+        "правка обязана краснить приёмку: {stdout}"
+    );
+    assert!(stdout.contains("гейт красный"), "{stdout}");
+}
+
+/// J9 (ADR-048): `rubric run --all-accepted` судит только те принятые ADR, у
+/// которых нет свежего отчёта, — одна команда закрывает `rubric_report_missing`
+/// и `rubric_report_stale` по кейсу.
+#[test]
+fn rubric_run_all_accepted_judges_only_missing_and_stale() {
+    let home = tempfile::tempdir().expect("tmp");
+    let (repo, adr, rubric) = judge_gate_case(home.path());
+    // Второй принятый ADR — он тоже попадёт в очередь.
+    let second = repo.join("docs/adr/ADR-002-vtoroy.md");
+    std::fs::write(
+        &second,
+        "# ADR-002. Второе решение\n\n- Статус: Accepted\n\n## Context\n\nКонтекст описан явно и коротко.\n",
+    )
+    .expect("второй ADR");
+    // Фиктивный CLI-судья: отвечает заготовленным JSON (живая модель не нужна).
+    let answer = home.path().join("answer.json");
+    std::fs::write(
+        &answer,
+        r#"{"scores":[{"criterion_id":"context","score":4,"rationale":"Цитата: \"Контекст описан явно\""}],"verdict":"годно"}"#,
+    )
+    .expect("ответ судьи");
+    let script = home.path().join("judge.sh");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\ncat > /dev/null\ncat {answer}\nsleep 0.2\n",
+            answer = answer.display()
+        ),
+    )
+    .expect("скрипт судьи");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mut perms = std::fs::metadata(&script).expect("stat").permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).expect("chmod +x");
+    }
+    // Конфиг кейса: рубрики + судья-CLI + режим оценки решений.
+    std::fs::write(
+        home.path().join("arch-harness.toml"),
+        format!(
+            "default_model = \"fake-judge\"\n\n[paths]\nassets_dir = \"{assets}\"\n\n\
+             [gate.required]\nfast = [\"decision_quality\"]\n\n\
+             [models.fake-judge]\nkind = \"cli\"\ncommand = \"{script}\"\nargs = []\n",
+            assets = home.path().join("assets-test").display(),
+            script = script.display()
+        ),
+    )
+    .expect("конфиг с судьёй");
+    let run = |home: &Path, repo: &Path| -> std::process::Output {
+        arch_cmd(home)
+            .arg("rubric")
+            .arg("run")
+            .arg(&rubric)
+            .arg("--all-accepted")
+            .arg("--dir")
+            .arg(repo.as_os_str())
+            .arg("--model")
+            .arg("fake-judge")
+            .arg("--samples")
+            .arg("1")
+            .output()
+            .expect("rubric run --all-accepted")
+    };
+    let out = run(home.path(), &repo);
+    assert!(
+        out.status.success(),
+        "прогон: {}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // Оценены оба документа: отчёты на месте, у каждого — сырые ответы.
+    for slug in ["ADR-001-pilot", "ADR-002-vtoroy"] {
+        assert!(
+            repo.join(format!("reports/rubric/{slug}.json")).is_file(),
+            "отчёт {slug} не записан"
+        );
+        assert!(
+            repo.join(format!("reports/rubric/raw/{slug}/sample-1.json"))
+                .is_file(),
+            "сырые ответы {slug} не сохранены"
+        );
+    }
+    // Второй прогон: оценивать нечего — команда честно об этом говорит.
+    let again = run(home.path(), &repo);
+    let stderr = String::from_utf8_lossy(&again.stderr);
+    assert!(stderr.contains("Оценивать нечего"), "{stderr}");
+    // `--all-accepted` с явным документом — отказ, а не тихое совмещение.
+    let conflict = arch_cmd(home.path())
+        .arg("rubric")
+        .arg("run")
+        .arg(&rubric)
+        .arg(adr.as_os_str())
+        .arg("--all-accepted")
+        .arg("--model")
+        .arg("fake-judge")
+        .output()
+        .expect("конфликт флагов");
+    assert!(!conflict.status.success(), "конфликт обязан быть ошибкой");
 }

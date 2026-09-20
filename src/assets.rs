@@ -475,6 +475,11 @@ pub const PLUGIN_SPINE_WORKFLOWS_PLUGIN_JSON: &str =
 /// Встроенный файл `skills/spine-quickstart/SKILL.md`.
 pub const PLUGIN_SPINE_WORKFLOWS_SKILLS_SPINE_QUICKSTART_SKILL_MD: &str =
     include_str!("../assets/plugins/spine-workflows/skills/spine-quickstart/SKILL.md");
+/// Встроенный файл `skills/spine-judge-handover/SKILL.md` (ADR-048): передача
+/// судейства второму харнессу и приёмка результата.
+pub const PLUGIN_SPINE_WORKFLOWS_SKILLS_SPINE_JUDGE_HANDOVER_SKILL_MD: &str =
+    include_str!("../assets/plugins/spine-workflows/skills/spine-judge-handover/SKILL.md");
+
 /// Встроенный файл `skills/spine-bundle/SKILL.md`.
 pub const PLUGIN_SPINE_WORKFLOWS_SKILLS_SPINE_BUNDLE_SKILL_MD: &str =
     include_str!("../assets/plugins/spine-workflows/skills/spine-bundle/SKILL.md");
@@ -600,6 +605,7 @@ const PLUGIN_FILES: &[(&str, &str)] = &[
     ("plugins/spine-workflows/plugin.json", PLUGIN_SPINE_WORKFLOWS_PLUGIN_JSON),
     ("plugins/spine-workflows/skills/spine-quickstart/SKILL.md", PLUGIN_SPINE_WORKFLOWS_SKILLS_SPINE_QUICKSTART_SKILL_MD),
     ("plugins/spine-workflows/skills/spine-bundle/SKILL.md", PLUGIN_SPINE_WORKFLOWS_SKILLS_SPINE_BUNDLE_SKILL_MD),
+    ("plugins/spine-workflows/skills/spine-judge-handover/SKILL.md", PLUGIN_SPINE_WORKFLOWS_SKILLS_SPINE_JUDGE_HANDOVER_SKILL_MD),
     ("plugins/spine-workflows/skills/spine-fitness-gate/SKILL.md", PLUGIN_SPINE_WORKFLOWS_SKILLS_SPINE_FITNESS_GATE_SKILL_MD),
     ("plugins/spine-workflows/skills/spine-architect-review/SKILL.md", PLUGIN_SPINE_WORKFLOWS_SKILLS_SPINE_ARCHITECT_REVIEW_SKILL_MD),
     ("plugins/spine-workflows/skills/spine-adr-judge/SKILL.md", PLUGIN_SPINE_WORKFLOWS_SKILLS_SPINE_ADR_JUDGE_SKILL_MD),

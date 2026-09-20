@@ -131,7 +131,7 @@ $ arch-be digest
 - п.5 транш 1: `nfr_check`/`model_validate`/`delta_guard`/`evidence_verify`
   вызваны из харнессов (журнал; вердикты в составе `architect_review`).
 - п.9 журнал+дайджест: заполнен реальными вызовами пяти харнессов.
-- п.11 MCP prompts: qwen 0.24 — 7 плейбуков как команды [Project], ревью
+- п.11 MCP prompts: qwen 0.24 — 7 плейбуков как команды [Project] (на 0.3.2; на 0.3.5 их 9), ревью
   запущено из меню; серверная сторона (prompts/list/get) — NDJSON-тесты.
 - п.12/13: `model_drift`, `architect_review`, `change_impact` — вызваны из
   харнессов (журнал).

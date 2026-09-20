@@ -12,7 +12,7 @@
 //!   битый JSON → `-32700`, отсутствует `method` → `-32600`, битые
 //!   аргументы/инструмент/промпт → `-32602`; `resources/*` не поддержаны
 //!   (`-32601`);
-//! - промпты (capability `prompts`): семь плейбуков встроенного плагина
+//! - промпты (capability `prompts`): девять плейбуков встроенного плагина
 //!   spine-workflows как слэш-команды хоста ([`PLAYBOOK_PROMPTS`]) —
 //!   хосту не нужно знать формулу «действуй по скиллу …» и то, куда он
 //!   кладёт файлы скиллов: `prompts/get` возвращает user-сообщение с
@@ -230,6 +230,17 @@ const PLAYBOOK_PROMPTS: &[PlaybookPrompt] = &[
             ),
         ],
     },
+    PlaybookPrompt {
+        name: "spine-judge-handover",
+        embedded: crate::assets::PLUGIN_SPINE_WORKFLOWS_SKILLS_SPINE_JUDGE_HANDOVER_SKILL_MD,
+        arguments: &[
+            ("path", "Опц.: каталог кейса, судейство которого передаём"),
+            (
+                "rubric",
+                "Опц.: рубрика оценки решений (по умолчанию adr_quality)",
+            ),
+        ],
+    },
 ];
 
 /// Белый список read-only моста в реестр инструментов ([`crate::tools::full_registry`]):
@@ -257,6 +268,8 @@ pub const BRIDGE_READ_ONLY: &[&str] = &[
     "openapi_lint",
     "openspec_coverage",
     "plugin_list",
+    "rubric_accept",
+    "rubric_handover",
     "rubric_list",
     "rules_report",
 ];
@@ -876,7 +889,7 @@ impl McpServe {
         let _ = crate::mcp_journal::append(&cwd, &entry);
     }
 
-    /// `prompts/list`: семь плейбуков [`PLAYBOOK_PROMPTS`] с описаниями из
+    /// `prompts/list`: девять плейбуков [`PLAYBOOK_PROMPTS`] с описаниями из
     /// frontmatter и объявлениями аргументов. Пагинация не нужна (список
     /// фиксирован и мал) — `cursor` из params принимается и игнорируется.
     async fn handle_prompts_list(&self, id: &Value) -> Value {
@@ -3595,7 +3608,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prompts_list_has_eight_playbooks_with_frontmatter_descriptions() {
+    async fn prompts_list_has_nine_playbooks_with_frontmatter_descriptions() {
         // Пустой plugins-каталог → встроенные ассеты (чистая машина).
         let tmp = tempfile::tempdir().expect("tmp");
         let server = server_with_dirs(tmp.path(), tmp.path());
@@ -3622,8 +3635,9 @@ mod tests {
                 "spine-archify-viz",
                 "spine-fitness-gate",
                 "spine-bundle",
+                "spine-judge-handover",
             ],
-            "восемь плейбуков в зафиксированном порядке"
+            "девять плейбуков в зафиксированном порядке"
         );
         for p in prompts {
             assert!(

@@ -61,6 +61,9 @@ fn domain_tools(cfg: &Config) -> Vec<Arc<dyn Tool>> {
         out.extend(crate::archify::tools());
     }
     out.extend(crate::rubric::tools());
+    // Передача и приёмка судейства (ADR-048): read-only, в мост MCP отдаются
+    // белым списком `BRIDGE_READ_ONLY` (src/mcp_server.rs).
+    out.extend(crate::judge::tools());
     // Egress-дисциплина (AD-BE5, GAP-C1): при `[web].enabled = false` веб-канал
     // выключен конфигом — инструменты не регистрируются, агент их не видит.
     // Гейт живёт на уровне регистрации, сами web-инструменты о нём не знают (AD-4).
