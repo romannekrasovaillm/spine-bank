@@ -1093,7 +1093,10 @@ fn lock_entry(
         });
     }
     files.sort_by(|a, b| a.path.cmp(&b.path));
-    let python = t.command_for("python").map(str::to_string).unwrap_or_default();
+    let python = t
+        .command_for("python")
+        .map(str::to_string)
+        .unwrap_or_default();
     LockEntry {
         id: t.manifest.id.clone(),
         version: t.manifest.version,
@@ -1342,7 +1345,15 @@ pub fn verify_all(runner: &Runner, lang: Lang, require_python: bool) -> Result<V
             } else {
                 Duration::from_secs(t.manifest.rule.timeout_secs.max(1))
             };
-            run_stage(&mut report, &t, half, Stage::Reference, &command, &root, timeout)?;
+            run_stage(
+                &mut report,
+                &t,
+                half,
+                Stage::Reference,
+                &command,
+                &root,
+                timeout,
+            )?;
             // Нарушающая реализация: подменяем объявленные файлы (П2).
             let swaps = t.violating_for(lang);
             let swaps: Vec<&ViolatingSwap> =
@@ -1355,7 +1366,15 @@ pub fn verify_all(runner: &Runner, lang: Lang, require_python: bool) -> Result<V
                 continue;
             }
             apply_swaps(&root, TARGET_REL, &t.manifest.id, &swaps, &t)?;
-            run_stage(&mut report, &t, half, Stage::Violating, &command, &root, timeout)?;
+            run_stage(
+                &mut report,
+                &t,
+                half,
+                Stage::Violating,
+                &command,
+                &root,
+                timeout,
+            )?;
         }
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1634,7 +1653,15 @@ pub fn verify_dir(case: &Path, runner: &Runner, lang: Lang) -> Result<VerifyRepo
             } else {
                 Duration::from_secs(t.manifest.rule.timeout_secs.max(1))
             };
-            run_stage(&mut report, &t, half, Stage::Violating, &command, &root, timeout)?;
+            run_stage(
+                &mut report,
+                &t,
+                half,
+                Stage::Violating,
+                &command,
+                &root,
+                timeout,
+            )?;
             let _ = std::fs::remove_dir_all(&root);
         }
     }

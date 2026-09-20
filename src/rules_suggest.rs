@@ -472,10 +472,9 @@ fn detect_executable_invariant_per_ad(case_dir: &Path) -> Result<Vec<Candidate>>
         } else {
             matched
         };
-        let best = templates.first().map_or_else(
-            || rt::GENERIC_TEMPLATE_ID.to_string(),
-            |t| t.id.clone(),
-        );
+        let best = templates
+            .first()
+            .map_or_else(|| rt::GENERIC_TEMPLATE_ID.to_string(), |t| t.id.clone());
         let rules = if entry.rules.is_empty() {
             "правил в `verified_by` нет вовсе".to_string()
         } else {

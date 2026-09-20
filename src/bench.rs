@@ -68,13 +68,83 @@ pub struct BenchReport {
     pub passed: bool,
 }
 
+/// Ожидаемый балл критерия: точка или диапазон.
+///
+/// Смысловая рубрика судит **смысл**, и эталон здесь — диапазон, а не точка
+/// (ADR-051, S4): «противоречие найдено» это 1..2, и требовать от судьи ровно
+/// 1 значило бы мерить не то, что рубрика обещает. Старый формат со скалярами
+/// читается: `context: 5` разбирается как точка.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum GoldenRange {
+    /// Точка (формат 0.3.4): один балл.
+    Point(u8),
+    /// Диапазон включительно.
+    Span {
+        /// Нижняя граница.
+        min: u8,
+        /// Верхняя граница.
+        max: u8,
+    },
+}
+
+impl GoldenRange {
+    /// Попадает ли балл судьи в диапазон.
+    #[must_use]
+    pub fn contains(self, score: u8) -> bool {
+        match self {
+            Self::Point(point) => score == point,
+            Self::Span { min, max } => score >= min && score <= max,
+        }
+    }
+
+    /// Середина диапазона — для MAE, метрики 0.3.4: она остаётся сравнимой с
+    /// историей прогонов, а попадание считается отдельно.
+    #[must_use]
+    pub fn midpoint(self) -> f64 {
+        match self {
+            Self::Point(point) => f64::from(point),
+            Self::Span { min, max } => f64::midpoint(f64::from(min), f64::from(max)),
+        }
+    }
+
+    /// Верхняя граница — по ней проверяется, не выше ли шкалы эталон.
+    #[must_use]
+    pub fn upper(self) -> u8 {
+        match self {
+            Self::Point(point) => point,
+            Self::Span { max, .. } => max,
+        }
+    }
+}
+
+/// Метка golden-кейса: засеянный дефект или чистый документ.
+///
+/// Нужна там, где ошибки судьи несимметричны (ADR-051, S4): ложное обвинение
+/// на чистом документе и пропуск дефекта — разные провалы, и в среднем MAE они
+/// взаимно гасятся. Без метки кейс оценивается только по MAE.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GoldenKind {
+    /// Метка не задана (формат 0.3.4).
+    #[default]
+    Unlabeled,
+    /// Чистый документ: обвинение здесь — ложное.
+    Clean,
+    /// Засеянный дефект: «всё чисто» здесь — пропуск.
+    Defective,
+}
+
 /// Эталонные оценки golden-документа (`<имя>.expected.yaml` рядом с `<имя>.md`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GoldenExpectation {
     /// Имя рубрики: файл в assets/rubrics (расширение `.yaml` опционально).
     pub rubric: String,
-    /// Ожидаемые баллы по критериям (id → `1..=scale_max`).
-    pub scores: BTreeMap<String, u8>,
+    /// Ожидаемые баллы по критериям (id → точка `1..=scale_max` или диапазон).
+    pub scores: BTreeMap<String, GoldenRange>,
+    /// Метка кейса — для раздельного счёта ложных обвинений и пропусков.
+    #[serde(default)]
+    pub kind: GoldenKind,
 }
 
 /// Отчёт по одному golden-документу.
@@ -86,6 +156,9 @@ pub struct GoldenCaseReport {
     pub mae: f64,
     /// Сколько пар «судья × эталон» сравнено.
     pub compared: usize,
+    /// Сколько пар попало в диапазон эталона (для смысловых кейсов эталон —
+    /// диапазон, и попадание считается отдельно от MAE).
+    pub hits: usize,
     /// Взвешенный балл судьи (как в отчёте рубрики).
     pub weighted_judge: f64,
     /// Взвешенный балл эталона (те же веса критериев рубрики).
@@ -126,6 +199,19 @@ pub struct GoldenReport {
     pub mae: f64,
     /// Всего сравненных пар.
     pub compared: usize,
+    /// Пар, попавших в диапазон эталона (ADR-051, S4): у смысловых рубрик
+    /// эталон — диапазон, и попадание важнее близости к середине.
+    pub hits: usize,
+    /// Знаменатель [`Self::hits`] — сравненные пары на момент счёта.
+    pub hits_compared: usize,
+    /// Имена чистых документов, на которых судья выставил обвинение: ложное
+    /// обвинение — отдельный провал судьи, и в среднем MAE он гасится
+    /// пропусками на дефектных.
+    pub false_accusations: Vec<String>,
+    /// Чем подтверждено каждое ложное обвинение (главный критерий и балл).
+    pub false_accusation_notes: Vec<String>,
+    /// Имена дефектных документов, на которых обвинения не было: пропуск.
+    pub misses: Vec<String>,
     /// MAE по критериям (по всем документам), отсортировано по id критерия.
     pub criterion_mae: Vec<CriterionMae>,
     /// Length bias (Спирмен ρ балла с длиной документа); `None`, если
@@ -155,6 +241,33 @@ impl GoldenReport {
                 "  length bias: судья ρ={:.2}, эталон ρ={:.2}",
                 bias.judge_rho, bias.expected_rho
             );
+        }
+        if self.hits_compared > 0 {
+            let _ = writeln!(
+                out,
+                "  попадание в диапазон эталона: {}/{} ({:.0}%)",
+                self.hits,
+                self.hits_compared,
+                100.0 * self.hits as f64 / self.hits_compared as f64
+            );
+        }
+        // Смысловой слой (ADR-051, S4): ошибки судьи несимметричны, и в среднем
+        // MAE они гасятся — поэтому считаются раздельно и печатаются всегда,
+        // даже нулями: «0 ложных обвинений» — это утверждение, а не отсутствие
+        // измерения.
+        if !self.false_accusations.is_empty() || !self.misses.is_empty() {
+            let _ = writeln!(
+                out,
+                "  ложных обвинений на чистых: {}; пропусков на дефектных: {}",
+                self.false_accusations.len(),
+                self.misses.len()
+            );
+            for note in &self.false_accusation_notes {
+                let _ = writeln!(out, "    ложное обвинение — {note}");
+            }
+            for doc in &self.misses {
+                let _ = writeln!(out, "    пропуск — {doc}");
+            }
         }
         out
     }
@@ -287,7 +400,7 @@ pub fn load_golden(dir: &Path) -> Result<Vec<(PathBuf, GoldenExpectation)>> {
                 path.display()
             )));
         }
-        if let Some((id, _)) = expectation.scores.iter().find(|(_, s)| **s == 0) {
+        if let Some((id, _)) = expectation.scores.iter().find(|(_, s)| s.upper() == 0) {
             return Err(HarnessError::Bench(format!(
                 "{}: критерий '{id}' — балл 0 вне шкалы",
                 path.display()
@@ -305,6 +418,39 @@ pub fn load_golden(dir: &Path) -> Result<Vec<(PathBuf, GoldenExpectation)>> {
     }
     out.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(out)
+}
+
+/// Имя golden-документа для отчёта (без каталога).
+fn doc_name(doc_path: &Path) -> String {
+    doc_path.file_name().map_or_else(
+        || doc_path.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    )
+}
+
+/// Обвинение по главному критерию рубрики — и чем оно подтверждено.
+///
+/// «Пойман» для смысловой рубрики (ADR-051, S4) — это главный критерий
+/// (`blocking`) с баллом ≤ 2 И подтверждёнными цитатами: обвинение без цитат
+/// механика сама исключает из итога (`accusation_unconfirmed`), и считать его
+/// поимкой значило бы записывать судье в заслугу выдуманное свидетельство.
+fn main_accusation(
+    rubric: &crate::rubric::Rubric,
+    report: &crate::rubric::RubricReport,
+) -> Option<String> {
+    let main = rubric.criteria.iter().find(|c| c.blocking)?;
+    let score = report.scores.iter().find(|s| s.criterion_id == main.id)?;
+    if score.score > 2 {
+        return None;
+    }
+    if score.flags.iter().any(|f| f.excludes_from_total()) {
+        return None;
+    }
+    Some(if score.checked.is_empty() {
+        format!("'{}' = {} (без перечня проверенного)", main.id, score.score)
+    } else {
+        format!("'{}' = {}", main.id, score.score)
+    })
 }
 
 /// Прогоняет судью по golden-set и считает согласие с эталоном (MAE, ADR-004).
@@ -325,16 +471,56 @@ pub async fn run_golden(
     golden_dir: &Path,
     judge: &JudgeConfig,
 ) -> Result<GoldenReport> {
-    let cases = load_golden(golden_dir)?;
+    run_golden_filtered(provider, rubrics_dir, golden_dir, judge, None).await
+}
+
+/// Прогон golden-набора по одной рубрике (ADR-051, S4): смысловые рубрики
+/// лежат в общем наборе (`assets/benchmarks/golden/semantic/<рубрика>/`), и
+/// калибруют их поимённо — иначе метрика смешала бы оценки разных судейских
+/// задач, а регрессия одной рубрики тонула бы в среднем по всем.
+///
+/// # Errors
+/// Пустой (после фильтра) набор, ошибка чтения, модели или рубрики.
+pub async fn run_golden_filtered(
+    provider: &dyn LlmProvider,
+    rubrics_dir: &Path,
+    golden_dir: &Path,
+    judge: &JudgeConfig,
+    only_rubric: Option<&str>,
+) -> Result<GoldenReport> {
+    // Смысловые рубрики лежат в подкаталоге `semantic/<рубрика>/` (ADR-051,
+    // S4): у каждой свой набор досье, и общий обход верхнего каталога смешал бы
+    // их с ADR-набором `adr_quality`.
+    let dir = only_rubric.map_or_else(
+        || golden_dir.to_path_buf(),
+        |name| {
+            let sub = golden_dir.join("semantic").join(name);
+            if sub.is_dir() {
+                sub
+            } else {
+                golden_dir.to_path_buf()
+            }
+        },
+    );
+    let mut cases = load_golden(&dir)?;
+    if let Some(name) = only_rubric {
+        cases.retain(|(_, e)| e.rubric == name);
+    }
     if cases.is_empty() {
         return Err(HarnessError::Bench(format!(
-            "golden-set пуст: в {} нет пар <имя>.md + <имя>.expected.yaml",
-            golden_dir.display()
+            "golden-set пуст: в {} нет пар <имя>.md + <имя>.expected.yaml{}",
+            golden_dir.display(),
+            only_rubric.map_or_else(String::new, |n| format!(" для рубрики '{n}'")),
         )));
     }
     let mut all_pairs: Vec<(f64, f64)> = Vec::new();
     let mut criterion_pairs: BTreeMap<String, Vec<(f64, f64)>> = BTreeMap::new();
     let mut case_reports = Vec::with_capacity(cases.len());
+    let mut all_hits = 0usize;
+    let mut all_compared = 0usize;
+    let mut false_accusations: Vec<String> = Vec::new();
+    let mut false_accusation_notes: Vec<String> = Vec::new();
+    let mut misses: Vec<String> = Vec::new();
     for (doc_path, expectation) in &cases {
         let rubric_path = {
             let direct = rubrics_dir.join(&expectation.rubric);
@@ -346,14 +532,30 @@ pub async fn run_golden(
         };
         let rubric = crate::rubric::load(&rubric_path)?;
         let text = std::fs::read_to_string(doc_path).map_err(|e| HarnessError::io(doc_path, e))?;
-        let report = crate::rubric::evaluate_with_options(&rubric, &text, provider, judge).await?;
+        // Смысловая рубрика судится по досье (ADR-051, S4): golden-файл — это
+        // замороженное досье с маркерами источников, а не документ. Оценка
+        // идёт тем же кодом, что у собранного досье, — цитаты сверяются по
+        // ролям, покрытие по составу.
+        let report = match rubric.pack {
+            Some(kind) => {
+                let subject = doc_path.file_name().map_or_else(
+                    || doc_path.display().to_string(),
+                    |n| n.to_string_lossy().into_owned(),
+                );
+                let pack = crate::rubric_pack::ContextPack::from_text(kind, &subject, &text)?;
+                crate::rubric::evaluate_pack(&rubric, &pack, provider, judge).await?
+            }
+            None => crate::rubric::evaluate_with_options(&rubric, &text, provider, judge).await?,
+        };
         let mut pairs = Vec::with_capacity(expectation.scores.len());
         let mut expected_scores = Vec::with_capacity(expectation.scores.len());
+        let mut hits = 0usize;
         for (criterion_id, &expected) in &expectation.scores {
-            if expected > rubric.scale_max {
+            if expected.upper() > rubric.scale_max {
                 return Err(HarnessError::Bench(format!(
-                    "эталон {}: критерий '{criterion_id}' — балл {expected} выше шкалы {}",
+                    "эталон {}: критерий '{criterion_id}' — балл {} выше шкалы {}",
                     doc_path.display(),
+                    expected.upper(),
                     rubric.scale_max
                 )));
             }
@@ -369,7 +571,10 @@ pub async fn run_golden(
                         rubric.name
                     ))
                 })?;
-            let pair = (f64::from(got), f64::from(expected));
+            if expected.contains(got) {
+                hits += 1;
+            }
+            let pair = (f64::from(got), expected.midpoint());
             pairs.push(pair);
             criterion_pairs
                 .entry(criterion_id.clone())
@@ -378,14 +583,13 @@ pub async fn run_golden(
             expected_scores.push(crate::rubric::CriterionScore {
                 criterion_id: criterion_id.clone(),
                 weight: 0.0,
-                score: expected,
+                score: expected.midpoint().round() as u8,
                 rationale: String::new(),
                 samples: Vec::new(),
                 stdev: 0.0,
-                flags: Vec::new(),
-                // Ожидание golden-набора не измеряет цитаты: расхождение
-                // свидетельств — свойство прогона, а не эталона (Д10).
                 evidence_unconfirmed_ratio: 0.0,
+                checked: Vec::new(),
+                flags: Vec::new(),
             });
         }
         let case_mae = mean_absolute_error(&pairs).ok_or_else(|| {
@@ -397,13 +601,26 @@ pub async fn run_golden(
         // Взвешенный эталонный балл — той же формулой, что и итог рубрики.
         let weighted_expected = crate::rubric::weighted_total(&rubric.criteria, &expected_scores)?;
         all_pairs.extend(pairs.iter().copied());
+        all_hits += hits;
+        all_compared += pairs.len();
+        // Раздельный счёт ошибок судьи (ADR-051, S4): на чистом документе
+        // обвинение — ложное, на дефектном «всё чисто» — пропуск. В среднем
+        // MAE они взаимно гасятся, и без метки кейса провал не виден.
+        let main_accused = main_accusation(&rubric, &report);
+        match (expectation.kind, &main_accused) {
+            (GoldenKind::Clean, Some(reason)) => {
+                false_accusations.push(doc_name(doc_path));
+                false_accusation_notes
+                    .push(format!("{}: главный критерий {reason}", doc_name(doc_path)));
+            }
+            (GoldenKind::Defective, None) => misses.push(doc_name(doc_path)),
+            _ => {}
+        }
         case_reports.push(GoldenCaseReport {
-            doc: doc_path.file_name().map_or_else(
-                || doc_path.display().to_string(),
-                |n| n.to_string_lossy().into_owned(),
-            ),
+            doc: doc_name(doc_path),
             mae: case_mae,
             compared: pairs.len(),
+            hits,
             weighted_judge: report.weighted_total,
             weighted_expected,
             doc_chars: text.chars().count(),
@@ -437,6 +654,11 @@ pub async fn run_golden(
         cases: case_reports,
         mae,
         compared: all_pairs.len(),
+        hits: all_hits,
+        hits_compared: all_compared,
+        false_accusations,
+        false_accusation_notes,
+        misses,
         criterion_mae,
         length_bias,
     })
@@ -768,7 +990,11 @@ pub fn human_agreement(golden_dir: &Path, humans_dir: &Path) -> Result<HumanAgre
             doc: doc_path
                 .file_name()
                 .map_or_else(|| stem.to_string(), |n| n.to_string_lossy().into_owned()),
-            golden: expectation.scores.clone(),
+            golden: expectation
+                .scores
+                .iter()
+                .map(|(id, range)| (id.clone(), range.midpoint().round() as u8))
+                .collect(),
             medians,
             humans,
         });
@@ -851,7 +1077,7 @@ fn parse_human_expectation(
     let text = std::fs::read_to_string(path).map_err(|e| HarnessError::io(path, e))?;
     let expectation: GoldenExpectation = serde_yaml_ng::from_str(&text)
         .map_err(|e| HarnessError::Bench(format!("{}: разбор анкеты: {e}", path.display())))?;
-    if let Some((id, _)) = expectation.scores.iter().find(|(_, s)| **s == 0) {
+    if let Some((id, _)) = expectation.scores.iter().find(|(_, s)| s.upper() == 0) {
         return Err(HarnessError::Bench(format!(
             "{}: критерий '{id}' — балл 0 вне шкалы",
             path.display()
@@ -870,8 +1096,9 @@ fn parse_human_expectation(
     // Лишние критерии участника игнорируются: сравнение — только по эталону.
     let scores = expectation
         .scores
-        .into_iter()
-        .filter(|(c, _)| golden.scores.contains_key(c))
+        .iter()
+        .filter(|(c, _)| golden.scores.contains_key(*c))
+        .map(|(c, range)| (c.clone(), range.midpoint().round() as u8))
         .collect();
     Ok((participant.to_string(), scores))
 }
@@ -1162,6 +1389,76 @@ tags:
         }
     }
 
+    /// Диапазоны и раздельный счёт ошибок (ADR-051, S4): `--rubric` ищет набор
+    /// в подкаталоге `semantic/<рубрика>`, досье читается как досье (маркеры
+    /// источников), эталон-диапазон считается попаданием, а ложное обвинение
+    /// на чистом кейсе — отдельным провалом, не тонущим в MAE.
+    #[tokio::test]
+    async fn golden_semantic_rubric_counts_hits_and_false_accusations() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let rubrics = tmp.path().join("rubrics");
+        let golden = tmp.path().join("golden/semantic/adr_spine_consistency");
+        std::fs::create_dir_all(&rubrics).expect("mkdir");
+        std::fs::create_dir_all(&golden).expect("mkdir");
+        std::fs::write(
+            rubrics.join("adr_spine_consistency.yaml"),
+            crate::assets::RUBRIC_ADR_SPINE_CONSISTENCY,
+        )
+        .expect("rubric");
+        let dossier = |adr: &str| {
+            format!(
+                "=== ИСТОЧНИК subject: docs/adr/ADR-001.md ===\n{adr}\n\
+                 === КОНЕЦ ИСТОЧНИКА ===\n\
+                 === ИСТОЧНИК reference: ARCHITECTURE-SPINE.md#AD-1 ===\n\
+                 AD-1: Журнал только дописывается\nRule: строки журнала не правятся.\n\
+                 === КОНЕЦ ИСТОЧНИКА ===\n"
+            )
+        };
+        std::fs::write(
+            golden.join("defect.md"),
+            dossier("Прямое противоречие инварианту."),
+        )
+        .expect("doc");
+        std::fs::write(
+            golden.join("defect.expected.yaml"),
+            "rubric: adr_spine_consistency\nkind: defective\nscores:\n  no_contradiction: {min: 1, max: 2}\n",
+        )
+        .expect("exp");
+        std::fs::write(golden.join("clean.md"), dossier("Противоречий нет.")).expect("doc");
+        std::fs::write(
+            golden.join("clean.expected.yaml"),
+            "rubric: adr_spine_consistency\nkind: clean\nscores:\n  no_contradiction: {min: 4, max: 5}\n",
+        )
+        .expect("exp");
+        // Судья: на дефектном кейсе обвинение, на чистом — похвала с полным
+        // перечнем проверенного (иначе критерий исключается как непокрытый).
+        let accuse = r#"{"scores":[{"criterion_id":"no_contradiction","score":1,"rationale":"Цитата subject: \"Прямое противоречие инварианту.\". Цитата reference: \"Rule: строки журнала не правятся.\". противоречие","checked":["AD-1"]}],"verdict":"CONCERNS"}"#;
+        let praise = r#"{"scores":[{"criterion_id":"no_contradiction","score":5,"rationale":"Цитата subject: \"Противоречий нет.\". Цитата reference: \"Rule: строки журнала не правятся.\". чисто","checked":["AD-1"]}],"verdict":"PASS"}"#;
+        // Кейсы отсортированы по имени файла: `clean.md` идёт первым.
+        let llm = QueueLlm::new(&[praise.to_string(), accuse.to_string()]);
+        let cfg = JudgeConfig {
+            samples: 1,
+            ..JudgeConfig::default()
+        };
+        let report = run_golden_filtered(
+            &llm,
+            &rubrics,
+            &tmp.path().join("golden"),
+            &cfg,
+            Some("adr_spine_consistency"),
+        )
+        .await
+        .expect("прогон");
+        assert_eq!(report.cases.len(), 2, "набор найден в подкаталоге рубрики");
+        assert_eq!(report.hits, 2, "оба балла попали в диапазон: {report:?}");
+        assert_eq!(report.hits_compared, 2);
+        assert!(
+            report.false_accusations.is_empty() && report.misses.is_empty(),
+            "ложных обвинений и пропусков нет: {report:?}"
+        );
+        assert!(report.diagnostics_text().contains("попадание в диапазон"));
+    }
+
     /// Пишет golden-set (два документа + эталоны) и рубрику во временный каталог.
     fn golden_dirs() -> (tempfile::TempDir, PathBuf, PathBuf) {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1198,9 +1495,26 @@ tags:
         let cases = load_golden(&golden).expect("load_golden");
         assert_eq!(cases.len(), 2);
         assert!(cases[0].0.ends_with("bad.md"), "сортировка по имени файла");
-        assert_eq!(cases[0].1.scores["context"], 1);
+        assert!(cases[0].1.scores["context"].contains(1));
         assert_eq!(cases[1].1.rubric, "core");
         assert_eq!(cases[1].1.scores.len(), 2);
+    }
+
+    /// Диапазоны эталона (ADR-051, S4): смысловая оценка не точка, но старый
+    /// формат со скалярами обязан читаться как прежде.
+    #[test]
+    fn golden_range_parses_point_and_span() {
+        let doc = "rubric: r\nkind: clean\nscores:\n  a: 4\n  b: {min: 1, max: 2}\n";
+        let exp: GoldenExpectation = serde_yaml_ng::from_str(doc).expect("эталон");
+        assert_eq!(exp.kind, GoldenKind::Clean);
+        assert!(exp.scores["a"].contains(4) && !exp.scores["a"].contains(3));
+        assert!(exp.scores["b"].contains(1) && exp.scores["b"].contains(2));
+        assert!(!exp.scores["b"].contains(3));
+        assert!((exp.scores["b"].midpoint() - 1.5).abs() < f64::EPSILON);
+        // Метка по умолчанию — «без метки»: старые эталоны читаются.
+        let plain: GoldenExpectation =
+            serde_yaml_ng::from_str("rubric: r\nscores:\n  a: 5\n").expect("эталон");
+        assert_eq!(plain.kind, GoldenKind::Unlabeled);
     }
 
     #[test]

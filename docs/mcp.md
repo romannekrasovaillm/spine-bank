@@ -28,7 +28,7 @@ architectural verdict (`passed` + находки) **в момент написа
 arch-be + рендер mermaid-диаграмм — это read-only-инструменты поверх локальных
 каталогов конфига arch-be (`knowledge.dirs`, `plugins.dirs`), не репозитория
 клиента. Отдельная capability — **промпты** (`prompts/list`, `prompts/get`):
-восемь плейбуков spine-workflows как слэш-команды хоста (см. ниже).
+девять плейбуков spine-workflows как слэш-команды хоста (см. ниже).
 
 Помимо ручных инструментов работает **мост в реестр** (`tools::full_registry`):
 белый список read-only доменных инструментов (20 штук: верификаторы
@@ -112,8 +112,8 @@ exit 2, stderr уходит агенту; строки вывода хук не 
 | `trace_check` | `case` | позвенная трассируемость `REQ → NFR → AD/ADR → CMP → правило`: AD без правила и без `unverifiable` — error; verdict + `report_markdown` для evidence bundle; толерантная загрузка модели (E3): битые сущности пропускаются, в ответе `load_issues` |
 | `model_query` | `dir?`, `id?`, `type?` | список сущностей модели (фильтр по типу) или карточка сущности со связями и обратными ссылками; толерантная загрузка (E3): работа по валидному подмножеству, в ответе `load_issues` (битые файлы с причинами) |
 | `rubric_run` | `rubric`, `target` \| `target_text`, `model?`, `cwd?` | оценка документа рубрикой LLM-судьёй (ADR-004; нужен API-ключ из конфига arch-be; для моделей `kind = "cli"` ключ не нужен — судья — внешний CLI-харнесс); относительный `target` резолвится от `cwd` (по умолчанию — cwd процесса сервера) |
-| `rubric_prompt` | `rubric`, `target` \| `target_text` | split-judge, фаза 1 (без ключа): system+user промпты судьи + JSON-схема ответа + `judge_config` (число сэмплов k). Промпт исполняет модель хоста, ответы идут в `rubric_verify` |
-| `rubric_verify` | `rubric`, `target` \| `target_text`, `answers`, `model?`, `judge_model?` | split-judge, фаза 2: отчёт рубрики из сырых ответов хоста (медиана, `unstable`, `evidence_not_found`) тем же кодом, что у `rubric_run`; битые ответы отбрасываются со счётчиком `answers.dropped`; `judge_model` — метка фактического судьи (перекрывает `model`, anti-bias «автор = судья»: эхо в поле `judge_model` и строке «Судья: …» markdown-отчёта) |
+| `rubric_prompt` | `rubric`, `target` \| `target_text` (или `pack`+`subject`+`root?`) | split-judge, фаза 1 (без ключа): system+user промпты судьи + JSON-схема ответа + `judge_config` (число сэмплов k). Промпт исполняет модель хоста, ответы идут в `rubric_verify`. Вместо документа можно оценивать **досье** (ADR-051): `pack` — вид (`adr_vs_spine`, `entity_links`, `nfr_mechanism`, `code_vs_spine`), `subject` — путь к ADR/файлу кода (`src/gate.rs#12-88` для фрагмента) или идентификатор сущности модели; `pack`/`subject` взаимоисключающи с `target`/`target_text`. Ответ несёт `pack` с хэшем досье и поимёнными хэшами источников |
+| `rubric_verify` | `rubric`, `target` \| `target_text` (или `pack`+`subject`+`root?`), `answers`, `model?`, `judge_model?` | split-judge, фаза 2: отчёт рубрики из сырых ответов хоста (медиана, `unstable`, `evidence_not_found`) тем же кодом, что у `rubric_run`; битые ответы отбрасываются со счётчиком `answers.dropped`; `judge_model` — метка фактического судьи (перекрывает `model`, anti-bias «автор = судья»: эхо в поле `judge_model` и строке «Судья: …» markdown-отчёта). Под `--rw` отчёт по досье ложится в `reports/rubric/` с хэшем досье (`pack_sha256`) и списком источников — привязка ко **всем** источникам, а не только к субъекту (ADR-051) |
 | `rules_suggest` | `path`, `cwd?` | кандидатные fitness-правила из содержательных пробелов кейса (read-only эвристики): EARS-критерии приёмки, численные таймауты в контрактах, декомпозиция REQ→работы, RTO/RPO без ADR, аудит операторских действий. Ответ: `candidates` (`id`, `rationale`, `source_skill`, `yaml` — готовый фрагмент CONSTRAINTS.yaml или `null` для честного advisory) + `report_markdown`; CLI-эквивалент: `arch-be control rules-suggest <path>`. Информационный, без `passed` |
 
 Мостовые read-only инструменты реестра (спеки — из `Tool::spec()`, плюс
@@ -198,7 +198,7 @@ false`; `evidence_pack`/`delta_propose` политика R-уровней кла
 
 ### Промпты: плейбуки `spine-*` как слэш-команды хоста
 
-Помимо инструментов сервер отдаёт capability **`prompts`**: восемь плейбуков
+Помимо инструментов сервер отдаёт capability **`prompts`**: девять плейбуков
 встроенного плагина spine-workflows доступны хосту как готовые команды —
 не нужно помнить формулу «действуй по скиллу …», и не важно, куда конкретный
 хост кладёт файлы скиллов: сценарий приезжает прямо от сервера.

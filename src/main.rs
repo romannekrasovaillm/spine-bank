@@ -269,8 +269,12 @@ enum Cmd {
     /// гоняет гейт и печатает карту обнаружения. Read-only к исходному кейсу,
     /// без сети, детерминированно; exit 1, если доля ниже `--min-detection`.
     Redteam {
-        /// Кейс (каталог с model/, CONSTRAINTS.yaml, docs/adr, бандлом…).
-        case: PathBuf,
+        /// Кейс (каталог с model/, CONSTRAINTS.yaml, docs/adr, бандлом…);
+        /// не нужен при подкоманде `semantic-score`.
+        case: Option<PathBuf>,
+        /// Подкоманда: смысловая строка по сохранённым клонам (ADR-051).
+        #[command(subcommand)]
+        cmd: Option<RedteamCmd>,
         /// Формат вывода: text (дефолт, карта обнаружения) | json | markdown.
         #[arg(long, default_value = "text", value_name = "FORMAT")]
         format: String,
@@ -286,6 +290,11 @@ enum Cmd {
         /// должна быть измерена, а не пересказана.
         #[arg(long)]
         save: bool,
+        /// Сохранить клоны смысловых мутантов в каталог и положить рядом
+        /// `SEMANTIC-TODO.json` (ADR-051): судит их модель хоста, а не
+        /// харнесс, — в ядре LLM нет. В долю обнаружения они не входят.
+        #[arg(long, value_name = "КАТАЛОГ")]
+        keep_semantic: Option<PathBuf>,
     },
     /// Составное архитектурное ревью репозитория одним ответом (бэклог
     /// волны 3, п.13): маршрут значимости из git-диффа + весь контур
@@ -539,6 +548,20 @@ enum Cmd {
         /// черновиком, и об этом сказано в «Следующих шагах» и в `doctor`.
         #[arg(long, value_name = "URL")]
         releases_url: Option<String>,
+    },
+}
+
+/// Подкоманды `arch-be redteam` (ADR-051).
+#[derive(Subcommand)]
+enum RedteamCmd {
+    /// Смысловая строка: что судья увидел в сохранённых клонах. В долю
+    /// обнаружения не входит.
+    SemanticScore {
+        /// Каталог, переданный `redteam --keep-semantic`.
+        dir: PathBuf,
+        /// Формат вывода: text (дефолт) | json.
+        #[arg(long, default_value = "text", value_name = "FORMAT")]
+        format: String,
     },
 }
 
@@ -797,8 +820,20 @@ enum RubricCmd {
     Run {
         /// Рубрика (имя файла в assets/rubrics или путь).
         rubric: String,
-        /// Целевой документ (md/txt).
-        target: PathBuf,
+        /// Целевой документ (md/txt); для смысловой рубрики не нужен — там
+        /// задаётся `--pack`/`--subject`.
+        target: Option<PathBuf>,
+        /// Вид досье смысловой рубрики (ADR-051): `adr_vs_spine` |
+        /// `entity_links` | `nfr_mechanism` | `code_vs_spine`.
+        #[arg(long)]
+        pack: Option<String>,
+        /// Субъект досье: путь к ADR или файлу кода либо идентификатор
+        /// сущности модели — вместе с `--pack`.
+        #[arg(long)]
+        subject: Option<String>,
+        /// Корень репозитория для сборки досье (по умолчанию — текущий каталог).
+        #[arg(long)]
+        root: Option<PathBuf>,
         /// Модель-судья.
         #[arg(long)]
         model: Option<String>,
@@ -809,6 +844,17 @@ enum RubricCmd {
         /// работу (метка `judge_is_author` в составляющей `decision_quality`).
         #[arg(long)]
         author_model: Option<String>,
+    },
+    /// Собрать досье судьи (вход смысловой рубрики) и напечатать его с хэшем.
+    Pack {
+        /// Вид досье: `adr_vs_spine` | `entity_links` | `nfr_mechanism` |
+        /// `code_vs_spine`.
+        kind: String,
+        /// Субъект: путь к ADR/файлу кода либо идентификатор сущности модели.
+        subject: String,
+        /// Корень репозитория (по умолчанию — текущий каталог).
+        #[arg(long)]
+        root: Option<PathBuf>,
     },
 }
 
@@ -893,6 +939,10 @@ enum BenchCmd {
         /// согласия с эталоном MAE; выше порога `judge.golden_max_mae` — exit 1.
         #[arg(long)]
         golden: bool,
+        /// Прогон одной рубрики: годен только с `--golden` (смысловые рубрики
+        /// калибруются поимённо, ADR-051).
+        #[arg(long)]
+        rubric: Option<String>,
         /// Дописать результат golden-прогона строкой JSON в evidence-журнал
         /// (M-2, история — `bench golden-history`).
         #[arg(long)]
@@ -2017,12 +2067,62 @@ async fn main() -> Result<()> {
         }
         Some(Cmd::Redteam {
             case,
+            cmd,
             format,
             min_detection,
             no_decision_quality,
             save,
+            keep_semantic,
         }) => {
-            let report = arch_harness::redteam::run(&case, min_detection, !no_decision_quality)?;
+            // Подкоманда `semantic-score` читает уже сохранённые клоны: сам
+            // прогон кейса не нужен и кейс не обязателен.
+            if let Some(RedteamCmd::SemanticScore { dir, format }) = cmd {
+                let score = arch_harness::redteam::semantic_score(&dir, &cfg.paths.rubrics_dir())?;
+                if format.trim().eq_ignore_ascii_case("json") {
+                    let cases: Vec<serde_json::Value> = score
+                        .cases
+                        .iter()
+                        .map(|c| {
+                            serde_json::json!({
+                                "mutant": c.mutant,
+                                "rubric": c.rubric,
+                                "subject": c.subject,
+                                "verdict": c.verdict.label(),
+                                "judge": c.judge,
+                                "judge_is_author": c.judge_is_author,
+                            })
+                        })
+                        .collect();
+                    let out = serde_json::json!({
+                        "schema": "arch-be/semantic-score/v1",
+                        "caught": score.caught(),
+                        "total": score.cases.len(),
+                        "cases": cases,
+                        "note": "смысловой слой не входит в долю обнаружения red-team (ADR-051)",
+                    });
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string())
+                    );
+                } else {
+                    println!("{}", score.render());
+                }
+                return Ok(());
+            }
+            let Some(case) = case else {
+                anyhow::bail!(
+                    "укажите кейс: `arch-be redteam <кейс>` или подкоманду \
+                     `arch-be redteam semantic-score <каталог>`"
+                );
+            };
+            let report = arch_harness::redteam::run_with_options(
+                &case,
+                &arch_harness::redteam::RedteamOptions {
+                    min_detection,
+                    decision_quality: !no_decision_quality,
+                    keep_semantic: keep_semantic.clone(),
+                },
+            )?;
             if save {
                 // Сохраняем в ИСХОДНЫЙ кейс: прогон шёл в копии.
                 let path = arch_harness::redteam::save_summary(&case, &report)?;
@@ -3034,6 +3134,9 @@ async fn cmd_rubric(cfg: &Arc<Config>, cmd: RubricCmd) -> Result<()> {
         RubricCmd::Run {
             rubric,
             target,
+            pack,
+            subject,
+            root,
             model,
             dynamic_subject,
             author_model,
@@ -3043,8 +3146,42 @@ async fn cmd_rubric(cfg: &Arc<Config>, cmd: RubricCmd) -> Result<()> {
                 Some(name) => registry.get(name)?,
                 None => registry.default(),
             };
-            let text = std::fs::read_to_string(&target)
-                .with_context(|| format!("чтение {}", target.display()))?;
+            // Досье (ADR-051): субъект и вид заданы — собираем из репозитория
+            // и судим с проверкой цитат по ролям; иначе обычный документ.
+            let dossier = match (&pack, &subject) {
+                (Some(kind), Some(subject)) => {
+                    let repo = root.clone().unwrap_or_else(|| PathBuf::from("."));
+                    let repo = repo.canonicalize().unwrap_or(repo);
+                    let kind = arch_harness::rubric_pack::PackKind::parse(kind)?;
+                    let packs = arch_harness::rubric_pack::build(&repo, kind, subject)?;
+                    if packs.len() > 1 {
+                        anyhow::bail!(
+                            "досье дробится на {} фрагментов — вызывайте по каждому, \
+                             указав субъект с диапазоном строк (например, '{subject}#1-40')",
+                            packs.len()
+                        );
+                    }
+                    Some(packs.into_iter().next().expect("один фрагмент"))
+                }
+                (None, None) => None,
+                _ => {
+                    anyhow::bail!("`--pack` и `--subject` задаются вместе: вид досье и его субъект")
+                }
+            };
+            if dossier.is_some() && target.is_some() {
+                anyhow::bail!(
+                    "`--pack`/`--subject` несовместимы с целевым документом: досье \
+                     собирается из репозитория"
+                );
+            }
+            let text = match (&dossier, &target) {
+                (Some(pack), _) => pack.text.clone(),
+                (None, Some(target)) => std::fs::read_to_string(target)
+                    .with_context(|| format!("чтение {}", target.display()))?,
+                (None, None) => anyhow::bail!(
+                    "укажите целевой документ или `--pack`/`--subject` (смысловая рубрика)"
+                ),
+            };
             let rub = if let Some(subject) = dynamic_subject {
                 let anchor_path = resolve_asset(&cfg.paths.rubrics_dir(), &rubric, "yaml");
                 let anchor = arch_harness::rubric::load(&anchor_path).ok();
@@ -3054,7 +3191,13 @@ async fn cmd_rubric(cfg: &Arc<Config>, cmd: RubricCmd) -> Result<()> {
                 let path = resolve_asset(&cfg.paths.rubrics_dir(), &rubric, "yaml");
                 arch_harness::rubric::load(&path)?
             };
-            let report = arch_harness::rubric::evaluate(&rub, &text, judge.as_ref()).await?;
+            let report = match &dossier {
+                Some(pack) => {
+                    arch_harness::rubric::evaluate_pack(&rub, pack, judge.as_ref(), &cfg.judge)
+                        .await?
+                }
+                None => arch_harness::rubric::evaluate(&rub, &text, judge.as_ref()).await?,
+            };
             println!("{}", report.to_markdown());
             let out = cfg
                 .paths
@@ -3065,20 +3208,75 @@ async fn cmd_rubric(cfg: &Arc<Config>, cmd: RubricCmd) -> Result<()> {
             }
             std::fs::write(&out, report.to_markdown())?;
             eprintln!("Отчёт: {}", out.display());
-            // Машиночитаемый отчёт (Н7, ADR-042): его читает составляющая
-            // гейта `decision_quality`. Пишем в репозиторий, к которому
-            // относится документ, — иначе гейт его не найдёт.
-            let abs_target = target.canonicalize().unwrap_or_else(|_| target.clone());
-            let repo = arch_harness::rubric::repo_root_of(&abs_target);
-            match arch_harness::rubric::write_artifact(
-                &repo,
-                &report,
-                Some(&abs_target),
-                author_model.as_deref(),
-            ) {
+            // Машиночитаемый отчёт (Н7, ADR-042; досье — ADR-051): его читает
+            // гейт. Пишем в репозиторий, к которому относится вход, — иначе
+            // гейт его не найдёт.
+            let written = match (&dossier, &target) {
+                (Some(pack), _) => {
+                    let repo = root
+                        .clone()
+                        .unwrap_or_else(|| PathBuf::from("."))
+                        .canonicalize()
+                        .unwrap_or_else(|_| PathBuf::from("."));
+                    arch_harness::rubric::write_artifact_for_subject(
+                        &repo,
+                        &report,
+                        &arch_harness::rubric::ArtifactSubject::Pack(pack),
+                        author_model.as_deref(),
+                    )
+                }
+                (None, Some(target)) => {
+                    let abs = target.canonicalize().unwrap_or_else(|_| target.clone());
+                    let repo = arch_harness::rubric::repo_root_of(&abs);
+                    arch_harness::rubric::write_artifact(
+                        &repo,
+                        &report,
+                        Some(&abs),
+                        author_model.as_deref(),
+                    )
+                }
+                (None, None) => unreachable!("вход проверен выше"),
+            };
+            match written {
                 Ok(path) => eprintln!("Отчёт для гейта: {}", path.display()),
                 Err(e) => eprintln!("⚠ машиночитаемый отчёт не записан: {e}"),
             }
+        }
+        RubricCmd::Pack {
+            kind,
+            subject,
+            root,
+        } => {
+            let repo = root.unwrap_or_else(|| PathBuf::from("."));
+            let repo = repo.canonicalize().unwrap_or(repo);
+            let kind = arch_harness::rubric_pack::PackKind::parse(&kind)?;
+            let packs = arch_harness::rubric_pack::build(&repo, kind, &subject)?;
+            for p in &packs {
+                println!("{}", p.text);
+                println!();
+                println!(
+                    "досье '{}' · субъект '{}' · sha256:{} · источников {} (ссылочных {})",
+                    p.kind.as_str(),
+                    p.subject,
+                    p.sha256,
+                    p.inputs.len(),
+                    p.references().len()
+                );
+                for i in &p.inputs {
+                    println!(
+                        "  [{}] {} {}",
+                        i.role.as_str(),
+                        i.path,
+                        i.id.as_deref().unwrap_or("-")
+                    );
+                }
+            }
+            eprintln!(
+                "Досье собрано: {} (субъект '{}', вид '{}')",
+                packs.len(),
+                subject,
+                kind.as_str()
+            );
         }
     }
     Ok(())
@@ -3097,10 +3295,14 @@ async fn cmd_bench(cfg: &Arc<Config>, cmd: BenchCmd) -> Result<()> {
             name,
             model,
             golden,
+            rubric,
             record,
         } => {
             if record.is_some() && !golden {
                 anyhow::bail!("`bench run --record` применим только с --golden");
+            }
+            if rubric.is_some() && !golden {
+                anyhow::bail!("`bench run --rubric` применим только с --golden");
             }
             let registry = LlmRegistry::from_config(cfg)?;
             let provider = match &model {
@@ -3113,11 +3315,12 @@ async fn cmd_bench(cfg: &Arc<Config>, cmd: BenchCmd) -> Result<()> {
                 }
                 // Регрессионный гейт качества судьи (ADR-004): согласие с
                 // эталоном ниже порога — exit 1, как у `control check`.
-                let report = arch_harness::bench::run_golden(
+                let report = arch_harness::bench::run_golden_filtered(
                     provider.as_ref(),
                     &cfg.paths.rubrics_dir(),
                     &cfg.paths.benchmarks_dir().join("golden"),
                     &cfg.judge,
+                    rubric.as_deref(),
                 )
                 .await?;
                 println!(

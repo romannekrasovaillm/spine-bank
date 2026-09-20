@@ -1585,6 +1585,41 @@ impl FitnessRule {
         issue.fix_hint.clone_from(&self.fix_hint);
         issue.skill.clone_from(&self.skill);
     }
+
+    /// Карточка правила как текст — что правило **проверяет**: набор файлов,
+    /// шаблон или команду, серьёзность и заявленный инвариант.
+    ///
+    /// Зачем отдельным текстом: в досье судьи (ADR-051, рубрика
+    /// `model_link_semantics`) ссылка `AD-1 → C-09` без карточки бессмысленна —
+    /// идентификатор правила не говорит, относится ли проверка к формулировке
+    /// инварианта или к чему-то совсем другому.
+    #[must_use]
+    pub fn card(&self) -> String {
+        let mut out = String::new();
+        let id = self.id.as_deref().unwrap_or(&self.name);
+        let _ = writeln!(out, "{id}: {}", self.name); // игнорируется: записи в String не падают
+        let _ = writeln!(out, "Тип: {}", self.kind.as_str()); // игнорируется: записи в String не падают
+        let _ = writeln!(out, "Серьёзность: {}", self.severity); // игнорируется: записи в String не падают
+        if !self.glob.is_empty() {
+            let _ = writeln!(out, "Набор файлов: {}", self.glob.join(", ")); // игнорируется: записи в String не падают
+        }
+        if let Some(path) = &self.path {
+            let _ = writeln!(out, "Путь: {path}"); // игнорируется: записи в String не падают
+        }
+        if let Some(pattern) = &self.pattern {
+            let _ = writeln!(out, "Шаблон (regex): {pattern}"); // игнорируется: записи в String не падают
+        }
+        if let Some(command) = &self.command {
+            let _ = writeln!(out, "Команда: {command}"); // игнорируется: записи в String не падают
+        }
+        if let Some(ad) = &self.ad {
+            let _ = writeln!(out, "Заявленный инвариант: {ad}"); // игнорируется: записи в String не падают
+        }
+        if let Some(rationale) = &self.rationale {
+            let _ = writeln!(out, "Зачем: {rationale}"); // игнорируется: записи в String не падают
+        }
+        out
+    }
 }
 
 fn default_severity() -> String {

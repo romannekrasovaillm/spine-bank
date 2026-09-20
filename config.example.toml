@@ -544,6 +544,24 @@ memory_file = "~/.arch-harness/MEMORY.md"  # глобальная md-памят�
 # Имена — составляющие `arch-be gate`: fitness, delta_guard, rule_weakened,
 # spine_lint, trace_check, sensors, nfr, evidence_verify.
 # -----------------------------------------------------------------------------
+# Составляющая `semantic_quality` (ADR-052): смысловые рубрики по отчётам судьи.
+# ВЫКЛЮЧЕНА по умолчанию — включение только через [gate.required] нужного
+# маршрута, иначе ужесточение покраснило бы чужие пайплайны без предупреждения.
+# Отчёты собирает хост: MCP `rubric_prompt` (pack/subject) → k ответов модели →
+# `rubric_verify` под --rw. Гейт модель не вызывает (AD-2).
+#
+# [gate.semantic_quality]
+# rubrics = ["adr_spine_consistency", "model_link_semantics"]  # обязательные
+# scope = "changed"          # changed (затронутые диффом) | all (весь пакет)
+# min_score = 3.0            # порог взвешенного итога (калибровка — в docs/experiments/semantic-rubrics-2026-09-20.md)
+# require_distinct_judge = false  # true — судья обязан отличаться от автора
+#
+# Включение на маршруте (пример для Critical):
+# [gate.required]
+# critical = ["fitness", "spine_lint", "trace_check", "rule_weakened",
+#             "delta_guard", "sensors", "nfr", "evidence_verify",
+#             "semantic_quality"]
+
 [gate.required]
 fast     = ["fitness", "spine_lint"]
 standard = ["fitness", "spine_lint", "trace_check", "rule_weakened", "nfr"]
