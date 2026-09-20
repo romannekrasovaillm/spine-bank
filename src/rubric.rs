@@ -157,6 +157,21 @@ impl CriterionScore {
     }
 }
 
+/// Правила сборки отчёта: то, что было в секции `[judge]` в момент оценки.
+///
+/// Зачем в отчёте: `arch-be rubric run` и MCP `rubric_run` читают `[judge]`, но
+/// отчёт об этом молчал — по двум отчётам нельзя было понять, почему у одного
+/// три сэмпла, а у другого пять. Поле аддитивное: у старых отчётов его нет.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JudgeConfigSnapshot {
+    /// Сэмплов судьи на критерий.
+    pub samples: usize,
+    /// Порог population-σ сэмплов для метки `unstable`.
+    pub unstable_stdev: f64,
+    /// Порог сходства цитаты-свидетельства.
+    pub evidence_min_similarity: f64,
+}
+
 /// Балл критерия на момент сборки отчёта — то, по чему сверяется
 /// воспроизводимость отчёта из сырых ответов судьи (J2, ADR-048).
 ///
@@ -240,6 +255,11 @@ pub struct RubricArtifact {
     /// Число критериев с `evidence_not_found`.
     #[serde(default)]
     pub evidence_not_found: usize,
+    /// Правила, по которым собран отчёт (J8): число сэмплов и пороги судьи.
+    /// По ним видно, ЧЕМ отчёт отличался бы при другом конфиге, и ими же
+    /// пользуется пересборка при сверке. У старых отчётов поля нет.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub judge_config: Option<JudgeConfigSnapshot>,
     /// Уровень независимости судьи (ADR-049): `none`, `declared`,
     /// `declared_cross_family`, `launched`, `launched_cross_family`. Считается
     /// по тому, что механика знает: метки, режим оценки, семейства моделей.
@@ -324,6 +344,8 @@ pub struct ArtifactExtras {
     /// Семейства моделей (секция `[judge.families]`): по ним считается уровень
     /// независимости (J5). Пусто — работают дефолтные префиксы.
     pub families: BTreeMap<String, String>,
+    /// Правила сборки отчёта (`[judge]` на момент оценки) — J8.
+    pub judge_config: Option<JudgeConfigSnapshot>,
     /// Сырые ответы судьи: сохраняются рядом с отчётом
     /// (`reports/rubric/raw/<slug>/sample-<n>.json`), их хэши идут в
     /// `provenance.samples` (J2, ADR-048). Пусто — ответы не сохранены.
@@ -421,6 +443,7 @@ pub fn write_artifact_with(
             .filter(|s| s.has_flag(CriterionFlag::EvidenceNotFound))
             .count(),
         independence: Some(independence),
+        judge_config: extras.judge_config.clone(),
         author_source: extras.author_source.clone(),
         author_model_declared: extras.author_model_declared.clone(),
         provenance,
@@ -602,23 +625,6 @@ async fn complete_idempotent(llm: &dyn LlmProvider, req: ChatRequest) -> Result<
             llm.complete(req).await.map_err(|_| first_err)
         }
     }
-}
-
-/// Оценивает целевой текст по рубрике через LLM-судью с настройками по
-/// умолчанию ([`JudgeConfig::default`]: 3 сэмпла на критерий).
-///
-/// Эквивалент [`evaluate_with_options`] с дефолтным [`JudgeConfig`];
-/// конфигурируемые вызовы (инструмент агента, bench, golden) используют
-/// [`evaluate_with_options`] с секцией `[judge]` конфига.
-///
-/// # Errors
-/// См. [`evaluate_with_options`].
-pub async fn evaluate(
-    rubric: &Rubric,
-    target: &str,
-    llm: &dyn LlmProvider,
-) -> Result<RubricReport> {
-    evaluate_with_options(rubric, target, llm, &JudgeConfig::default()).await
 }
 
 /// Оценивает целевой текст по рубрике через LLM-судью (ADR-004).
@@ -1495,7 +1501,9 @@ mod tests {
             }],
         };
         let llm = RecLlm(Mutex::new(Vec::new()));
-        evaluate(&rubric, "текст", &llm).await.expect("оценка");
+        evaluate_with_options(&rubric, "текст", &llm, &JudgeConfig::default())
+            .await
+            .expect("оценка");
         assert!(
             llm.0
                 .lock()
@@ -1905,7 +1913,9 @@ mod tests {
         let mut rubric = sample_rubric();
         rubric.criteria.clear();
         let llm = FakeLlm::new(&[]);
-        let err = evaluate(&rubric, "текст", &llm).await.expect_err("ошибка");
+        let err = evaluate_with_options(&rubric, "текст", &llm, &JudgeConfig::default())
+            .await
+            .expect_err("ошибка");
         assert!(err.to_string().contains("не содержит критериев"));
     }
 

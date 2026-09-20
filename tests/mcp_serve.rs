@@ -2571,3 +2571,94 @@ fn envelope_changes_when_raw_answer_changes() {
         "вход judge_raw обязан измениться"
     );
 }
+
+/// J8 (ADR-048): `arch-be rubric run` читает секцию `[judge]` конфига — раньше
+/// CLI подставлял дефолты, а MCP-инструмент брал конфиг, и два пути судили по
+/// разным правилам. Судью подменяет фиктивный CLI-провайдер, поэтому живая
+/// модель не нужна.
+#[test]
+fn cli_rubric_run_respects_judge_config() {
+    let home = tempfile::tempdir().expect("tmp");
+    let (repo, adr, rubric) = judge_gate_case(home.path());
+    // Фиктивный CLI-судья: отвечает заготовленным JSON и считает вызовы.
+    let counter = home.path().join("calls.txt");
+    // Ответ судьи — отдельным файлом: шелл не трогает кавычки внутри JSON.
+    let answer = home.path().join("answer.json");
+    std::fs::write(
+        &answer,
+        r#"{"scores":[{"criterion_id":"context","score":4,"rationale":"Цитата: \"Контекст описан явно\""}],"verdict":"годно"}"#,
+    )
+    .expect("ответ судьи");
+    let script = home.path().join("fake-judge.sh");
+    std::fs::write(
+        &script,
+        format!(
+            // Пауза после ответа: CLI, выходящий мгновенно, обрывает
+            // чтение stdout — ответ доходил не целиком и судья перезапрашивался.
+            "#!/bin/sh\ncat > /dev/null\necho x >> {calls}\ncat {answer}\nsleep 0.2\n",
+            calls = counter.display(),
+            answer = answer.display()
+        ),
+    )
+    .expect("скрипт судьи");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mut perms = std::fs::metadata(&script).expect("stat").permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).expect("chmod +x");
+    }
+    // samples = 5 в секции [judge]: дефолт — 3, поэтому «не прочитал секцию»
+    // видно по числу обращений к судье (их будет меньше пяти).
+    let assets = home.path().join("assets-test");
+    std::fs::write(
+        home.path().join("arch-harness.toml"),
+        format!(
+            "default_model = \"fake-judge\"\n\n[paths]\nassets_dir = \"{}\"\n\n\
+             [judge]\nsamples = 5\n\n[models.fake-judge]\nkind = \"cli\"\n\
+             command = \"{}\"\nargs = []\n",
+            assets.display(),
+            script.display()
+        ),
+    )
+    .expect("конфиг");
+    let out = arch_cmd(home.path())
+        .arg("rubric")
+        .arg("run")
+        .arg(&rubric)
+        .arg(adr.as_os_str())
+        .arg("--model")
+        .arg("fake-judge")
+        .output()
+        .expect("rubric run");
+    assert!(
+        out.status.success(),
+        "прогон судьи: {}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let calls = std::fs::read_to_string(&counter).unwrap_or_default();
+    // В отчёте — правила, по которым он собран.
+    let artifact: Value = serde_json::from_str(
+        &std::fs::read_to_string(repo.join("reports/rubric/ADR-001-pilot.json")).expect("отчёт"),
+    )
+    .expect("JSON отчёта");
+    // Считаем не «ровно пять»: провайдер вправе перезапросить сэмпл, ответ
+    // которого не разобрался (это его штатное поведение). Дискриминирует
+    // нижняя граница: с дефолтными тремя сэмплами обращений было бы меньше.
+    assert!(
+        calls.lines().count() >= 5,
+        "секция [judge] не прочитана: вызовов {}, снимок правил {}",
+        calls.lines().count(),
+        artifact["judge_config"]
+    );
+    assert_eq!(artifact["judge_config"]["samples"], 5, "{artifact}");
+    assert_eq!(artifact["provenance"]["mode"], "launched", "{artifact}");
+    assert_eq!(
+        artifact["provenance"]["launcher"]["command"],
+        json!(script.display().to_string()),
+        "запускатель назван: {artifact}"
+    );
+    // В шапке этого ADR поля автора нет — источник метки честно `none`.
+    assert_eq!(artifact["author_source"], "none", "{artifact}");
+}

@@ -2934,6 +2934,11 @@ async fn cmd_rubric(cfg: &Arc<Config>, cmd: RubricCmd) -> Result<()> {
                 author_source: Some(choice.source.clone()),
                 author_model_declared: choice.declared.clone(),
                 families: cfg.judge.families.clone(),
+                judge_config: Some(arch_harness::rubric::JudgeConfigSnapshot {
+                    samples: cfg.judge.samples.max(1),
+                    unstable_stdev: cfg.judge.unstable_stdev,
+                    evidence_min_similarity: cfg.judge.evidence_min_similarity,
+                }),
                 // Сырые ответы судьи — рядом с отчётом: отчёт обязан
                 // пересобираться из них (J2, ADR-048).
                 raw_answers: raw
