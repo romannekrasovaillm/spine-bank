@@ -1669,7 +1669,11 @@ impl McpServe {
             .judge_model
             .or(args.model)
             .unwrap_or_else(|| "external (split-judge)".into());
-        let report = rubric::build_report(&rub, &judge_model, &runs, &text, &self.cfg.judge)
+        let scope = match &pack {
+            Some(p) => rubric::EvidenceScope::Pack(p),
+            None => rubric::EvidenceScope::Target(&text),
+        };
+        let report = rubric::build_report(&rub, &judge_model, &runs, &scope, &self.cfg.judge)
             .map_err(|e| CallError::execution("rubric_verify", e))?;
         // Машиночитаемый отчёт (Н7, ADR-042; досье — ADR-051) — то, что читает
         // гейт. Пишется только под `--rw`: read-only контур MCP не имеет права
@@ -2248,6 +2252,33 @@ fn pack_json(pack: &crate::rubric_pack::ContextPack) -> Value {
 /// парсер терпимо принимает балл и строкой — схема фиксирует канону).
 fn judge_response_schema(rubric: &rubric::Rubric) -> Value {
     let ids: Vec<&str> = rubric.criteria.iter().map(|c| c.id.as_str()).collect();
+    // Смысловые рубрики (ADR-051) требуют цитат на роли и допускают низкий
+    // балл как обвинение — описание поля это называет, иначе хост, следующий
+    // схеме, пришлёт обвинение без цитат.
+    let needs_low = rubric.criteria.iter().any(|c| c.evidence_on.requires_low());
+    let roles: std::collections::BTreeSet<&str> = rubric
+        .criteria
+        .iter()
+        .flat_map(|c| c.evidence_roles.iter().map(String::as_str))
+        .collect();
+    let rationale_hint = if roles.is_empty() {
+        "При балле ≥ 2 (или ≤ 2 у критериев с пометкой «цитата при оценке ≤ 2») начинается с «Цитата: \"<дословный фрагмент текста>\"» — цитата проверяется механически".to_string()
+    } else {
+        format!(
+            "Для критериев с ролями ({}) — по цитате на каждую роль в формате «Цитата {}: \"<фрагмент из этого источника>\"»; каждая сверяется только со своим источником.{}",
+            roles.iter().copied().collect::<Vec<_>>().join(", "),
+            roles
+                .iter()
+                .copied()
+                .collect::<Vec<_>>()
+                .join(": \"…\". Цитата "),
+            if needs_low {
+                " У критериев с пометкой «цитата при оценке ≤ 2» низкий балл — найденное противоречие, и он тоже требует цитат"
+            } else {
+                ""
+            }
+        )
+    };
     json!({
         "type": "object",
         "properties": {
@@ -2264,7 +2295,7 @@ fn judge_response_schema(rubric: &rubric::Rubric) -> Value {
                         },
                         "rationale": {
                             "type": "string",
-                            "description": "При балле ≥ 2 начинается с «Цитата: \"<дословный фрагмент текста>\"» — цитата проверяется механически",
+                            "description": rationale_hint,
                         },
                     },
                     "required": ["criterion_id", "score", "rationale"],

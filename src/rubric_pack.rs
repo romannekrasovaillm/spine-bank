@@ -216,26 +216,36 @@ impl ContextPack {
             .collect()
     }
 
-    /// Текст источника по роли: `evidence_roles` сверяют цитату только с
-    /// текстом своего источника, а не со всем досье.
+    /// Тексты всех источников роли: `evidence_roles` сверяют цитату только с
+    /// текстами своего источника, а не со всем досье. Цитата засчитывается,
+    /// если подтверждается хотя бы одним источником роли (в `entity_links`
+    /// ссылок несколько, и обвинение может опираться на любую из них).
     #[must_use]
-    pub fn role_text(&self, role: InputRole) -> Option<&str> {
-        let mut rest = self.text.as_str();
-        while let Some(start) = rest.find(SOURCE_BEGIN) {
-            let after = &rest[start..];
-            let head_end = after.find('\n')?;
-            let head = &after[..head_end];
-            let body_start = start + head_end + 1;
-            let tail = &self.text[body_start..];
-            let body_end = tail.find(SOURCE_END).unwrap_or(tail.len());
-            let body = tail[..body_end].trim_end_matches('\n');
+    pub fn role_texts(&self, role: InputRole) -> Vec<&str> {
+        let mut out = Vec::new();
+        let mut cursor = 0usize;
+        while let Some(rel) = self.text.get(cursor..).and_then(|t| t.find(SOURCE_BEGIN)) {
+            let open = cursor + rel;
+            let Some(head_rel) = self.text.get(open..).and_then(|t| t.find('\n')) else {
+                break;
+            };
+            let head = &self.text[open..open + head_rel];
+            let body_start = open + head_rel + 1;
+            let body_end = self
+                .text
+                .get(body_start..)
+                .and_then(|t| t.find(SOURCE_END))
+                .map_or(self.text.len(), |i| body_start + i);
             if head_ends_with_role(head, role) {
-                return Some(body);
+                out.push(self.text[body_start..body_end].trim_end_matches('\n'));
             }
-            let next = body_start + body_end + SOURCE_END.len();
-            rest = self.text.get(next..).unwrap_or("");
+            let next = body_end + SOURCE_END.len();
+            if next >= self.text.len() {
+                break;
+            }
+            cursor = next;
         }
-        None
+        out
     }
 }
 
@@ -1124,7 +1134,8 @@ mod tests {
         let rel = small_adr(tmp.path(), "ADR-001-x.md", "уникальный текст субъекта");
         let packs = build(tmp.path(), PackKind::AdrVsSpine, &rel).expect("pack");
         let pack = &packs[0];
-        let subject = pack.role_text(InputRole::Subject).expect("текст субъекта");
+        let subject = pack.role_texts(InputRole::Subject);
+        let subject = subject.first().copied().expect("текст субъекта");
         assert!(subject.contains("уникальный текст субъекта"), "{subject}");
         assert!(
             !subject.contains("Rule:"),
