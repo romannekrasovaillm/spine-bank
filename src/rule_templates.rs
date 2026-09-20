@@ -1290,7 +1290,7 @@ fn java_jar_command(jar: &Path) -> String {
     let jar = shell_sq(&jar.display().to_string());
     format!(
         "javac -encoding UTF-8 -cp {jar} -d out src/main/java/*.java src/test/java/*.java && \
-         java -jar {jar} execute -cp out --scan-classpath --details=none"
+         java -jar {jar} execute -cp out --scan-classpath --details=summary"
     )
 }
 
@@ -1452,10 +1452,12 @@ fn run_stage(
 
 /// Последние непустые строки вывода (для detail-строки отчёта).
 fn tail_tail(text: &str) -> String {
+    // Баннер JUnit-консоли в хвост не берём: он одинаков на успехе и провале
+    // и вытесняет единственную полезную строку (число пройденных тестов).
     let lines: Vec<&str> = text
         .lines()
         .map(str::trim)
-        .filter(|l| !l.is_empty())
+        .filter(|l| !l.is_empty() && !l.contains("Thanks for using JUnit"))
         .collect();
     let tail = lines
         .iter()
