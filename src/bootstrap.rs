@@ -725,7 +725,7 @@ fn model(name: &str, domain: &str) -> Vec<(String, String)> {
 fn adr(name: &str, domain: &str) -> String {
     format!(
         "# ADR-001. Идемпотентность на каждой точке входа\n\n\
-         - **Статус**: Proposed\n- **Дата**: {today}\n\
+         - **Статус**: Proposed\n- **Дата**: {today}\n- **Модель-автор**: human\n\
          - **Контекст**: {name} — домен {domain}.\n\n\
          ## Context\n\nЗапрос может быть доставлен повторно; без дедупликации это \
          даёт повторный эффект.\n\n\

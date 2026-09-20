@@ -2913,6 +2913,12 @@ async fn cmd_rubric(cfg: &Arc<Config>, cmd: RubricCmd) -> Result<()> {
             // относится документ, — иначе гейт его не найдёт.
             let abs_target = target.canonicalize().unwrap_or_else(|_| target.clone());
             let repo = arch_harness::rubric::repo_root_of(&abs_target);
+            // Автор документа — из шапки ADR, если он там записан: значение из
+            // документа сильнее аргумента вызова (J3, ADR-048).
+            let choice = arch_harness::judge::choose_author(
+                arch_harness::adr_registry::author_model_of(&abs_target),
+                author_model.clone(),
+            );
             // Происхождение `launched`: судью запустил Spine — известны
             // команда и аргументы запуска (или имя API-модели), неизвестна
             // отвечавшая модель (ADR-048).
@@ -2925,6 +2931,8 @@ async fn cmd_rubric(cfg: &Arc<Config>, cmd: RubricCmd) -> Result<()> {
             }
             let extras = arch_harness::rubric::ArtifactExtras {
                 provenance: Some(provenance),
+                author_source: Some(choice.source.clone()),
+                author_model_declared: choice.declared.clone(),
                 // Сырые ответы судьи — рядом с отчётом: отчёт обязан
                 // пересобираться из них (J2, ADR-048).
                 raw_answers: raw
@@ -2939,7 +2947,7 @@ async fn cmd_rubric(cfg: &Arc<Config>, cmd: RubricCmd) -> Result<()> {
                 &repo,
                 &report,
                 Some(&abs_target),
-                author_model.as_deref(),
+                choice.author.as_deref(),
                 &extras,
             ) {
                 Ok(path) => eprintln!("Отчёт для гейта: {}", path.display()),

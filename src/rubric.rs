@@ -239,6 +239,17 @@ pub struct RubricArtifact {
     /// Число критериев с `evidence_not_found`.
     #[serde(default)]
     pub evidence_not_found: usize,
+    /// Откуда взята метка автора: `header` (поле в шапке документа),
+    /// `argument` (аргумент вызова) или `none` (автор не указан) — J3, ADR-048.
+    /// У отчётов до появления поля отсутствует; тогда, как и раньше, о метке
+    /// известно только её значение.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author_source: Option<String>,
+    /// Метка автора, переданная вызовом, если она разошлась с шапкой
+    /// документа (J3, ADR-048): в отчёт идёт значение из шапки, а расхождение
+    /// называется находкой `author_model_mismatch`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author_model_declared: Option<String>,
     /// Происхождение оценки: как получен отчёт, что из этого удостоверено
     /// механикой и что заявлено (ADR-048). Отсутствует у отчётов до появления
     /// блока — это читается как режим `declared` без деталей.
@@ -298,6 +309,10 @@ pub struct ArtifactExtras {
     /// Происхождение оценки: режим, хост, сессия, запускатель, отпечатки
     /// сырых ответов, оператор.
     pub provenance: Option<crate::judge::RubricProvenance>,
+    /// Откуда взята метка автора (J3): `header` | `argument` | `none`.
+    pub author_source: Option<String>,
+    /// Метка автора, переданная вызовом, если она разошлась с шапкой (J3).
+    pub author_model_declared: Option<String>,
     /// Сырые ответы судьи: сохраняются рядом с отчётом
     /// (`reports/rubric/raw/<slug>/sample-<n>.json`), их хэши идут в
     /// `provenance.samples` (J2, ADR-048). Пусто — ответы не сохранены.
@@ -384,6 +399,8 @@ pub fn write_artifact_with(
             .iter()
             .filter(|s| s.has_flag(CriterionFlag::EvidenceNotFound))
             .count(),
+        author_source: extras.author_source.clone(),
+        author_model_declared: extras.author_model_declared.clone(),
         provenance,
         scores: report
             .scores

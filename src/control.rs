@@ -4674,6 +4674,17 @@ fn report_tail(raw: &str) -> String {
 /// # Errors
 /// Каталог недоступен/не создаётся, файл уже существует.
 pub fn adr_new(dir: &Path, title: &str) -> Result<PathBuf> {
+    adr_new_with_author(dir, title, None)
+}
+
+/// То же с явной моделью-автором документа (J3, ADR-048): метка пишется в
+/// шапку (`- Модель-автор: …`) и становится частью документа — судья берёт
+/// автора оттуда, а не со слов в момент судейства. `human` / `human:<имя>` —
+/// документ пишет человек.
+///
+/// # Errors
+/// Как у [`adr_new`].
+pub fn adr_new_with_author(dir: &Path, title: &str, author_model: Option<&str>) -> Result<PathBuf> {
     std::fs::create_dir_all(dir).map_err(|e| HarnessError::io(dir, e))?;
     let re_id = crate::model::id_re()
         .map_err(|e| HarnessError::Control(format!("внутренний regex ID: {e}")))?;
@@ -4706,7 +4717,7 @@ pub fn adr_new(dir: &Path, title: &str) -> Result<PathBuf> {
         )));
     }
     let date = chrono::Local::now().format("%Y-%m-%d").to_string();
-    std::fs::write(&file, adr_template(next, title, &date))
+    std::fs::write(&file, adr_template(next, title, &date, author_model))
         .map_err(|e| HarnessError::io(&file, e))?;
     Ok(file)
 }
@@ -4779,12 +4790,17 @@ pub(crate) fn kebab_slug(title: &str) -> String {
 }
 
 /// Шаблон ADR по AI-DLC с placeholder-комментариями.
-fn adr_template(n: u64, title: &str, date: &str) -> String {
+fn adr_template(n: u64, title: &str, date: &str, author_model: Option<&str>) -> String {
+    // Метка автора — часть шапки: по ней судья отличает автора от судьи
+    // (J3, ADR-048). Не задана — строки нет: выдумывать автора нельзя.
+    let author =
+        author_model.map_or_else(String::new, |author| format!("- Модель-автор: {author}\n"));
     format!(
         "# ADR-{n:03}. {title}\n\
         \n\
         - Date: {date}\n\
         - Status: Proposed\n\
+        {author}\
         \n\
         ## Context\n\
         \n\
@@ -4951,6 +4967,10 @@ struct AdrNewArgs {
     /// Каталог ADR (дефолт `docs/adr`).
     #[serde(alias = "path")]
     dir: Option<String>,
+    /// Модель-автор документа (J3, ADR-048): пишется в шапку
+    /// (`- Модель-автор: …`), чтобы судья брал автора из документа, а не со
+    /// слов в момент судейства. `human` — документ пишет человек.
+    author_model: Option<String>,
 }
 
 #[async_trait]
@@ -4966,7 +4986,8 @@ impl Tool for AdrNewTool {
                 "type": "object",
                 "properties": {
                     "title": {"type": "string", "description": "Заголовок решения"},
-                    "path": {"type": "string", "description": "Каталог ADR (по умолчанию docs/adr)"}
+                    "path": {"type": "string", "description": "Каталог ADR (по умолчанию docs/adr)"},
+                    "author_model": {"type": "string", "description": "Модель-автор документа (в шапку ADR; human — писал человек)"}
                 },
                 "required": ["title"]
             }),
@@ -4983,7 +5004,7 @@ impl Tool for AdrNewTool {
             }
         };
         let dir = ctx.resolve(args.dir.as_deref().unwrap_or("docs/adr"));
-        match adr_new(&dir, &args.title) {
+        match adr_new_with_author(&dir, &args.title, args.author_model.as_deref()) {
             Ok(path) => Ok(ToolOutput::ok(format!("ADR создан: {}", path.display()))),
             Err(e) => Ok(ToolOutput::err(format!("adr_new: {e}"))),
         }

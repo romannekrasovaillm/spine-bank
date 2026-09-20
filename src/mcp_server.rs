@@ -1694,6 +1694,20 @@ impl McpServe {
         // контур MCP не имеет права оставлять след в рабочем каталоге.
         let mut artifact_note = None;
         let mut provenance_out: Option<crate::judge::RubricProvenance> = None;
+        // Автор — из шапки документа, если он там записан: значение из
+        // документа сильнее аргумента вызова (J3, ADR-048). Для inline-текста
+        // шапки нет, поэтому решает аргумент.
+        let target_file = target_path
+            .as_deref()
+            .map(PathBuf::from)
+            .map(|p| p.canonicalize().unwrap_or(p))
+            .filter(|p| p.is_file());
+        let choice = crate::judge::choose_author(
+            target_file
+                .as_deref()
+                .and_then(crate::adr_registry::author_model_of),
+            args.author_model.clone(),
+        );
         if let Some(target) = target_path.as_deref() {
             let path = PathBuf::from(target);
             let abs = path.canonicalize().unwrap_or(path);
@@ -1728,13 +1742,15 @@ impl McpServe {
                 if self.mode.allows_write() {
                     let extras = crate::rubric::ArtifactExtras {
                         provenance: Some(provenance),
+                        author_source: Some(choice.source.clone()),
+                        author_model_declared: choice.declared.clone(),
                         raw_answers: raw_inputs.clone(),
                     };
                     match crate::rubric::write_artifact_with(
                         &repo,
                         &report,
                         Some(&abs),
-                        args.author_model.as_deref(),
+                        choice.author.as_deref(),
                         &extras,
                     ) {
                         Ok(p) => artifact_note = Some(p.display().to_string()),
@@ -1751,7 +1767,8 @@ impl McpServe {
         let mut out = json!({
             "rubric": report.rubric_name,
             "judge_model": report.judge_model,
-            "author_model": args.author_model,
+            "author_model": choice.author,
+            "author_source": choice.source,
             "artifact": artifact_note,
             "provenance": provenance_out,
             "judge_samples": report.judge_samples,

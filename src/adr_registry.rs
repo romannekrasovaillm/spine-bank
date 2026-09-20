@@ -158,6 +158,61 @@ struct ProseAdr {
 /// Имена полей шапки ADR: английские и русские, в любом регистре.
 const DATE_NAMES: [&str; 2] = ["Date", "Дата"];
 const STATUS_NAMES: [&str; 2] = ["Status", "Статус"];
+/// Имена поля шапки ADR с моделью-автором документа (J3, ADR-048): метка
+/// автора живёт в самом документе, а не в памяти сессии.
+const AUTHOR_NAMES: [&str; 2] = ["Author-model", "Модель-автор"];
+/// Сколько строк от начала документа считается шапкой ADR: поля ниже —
+/// часть тела и полем шапки не считаются.
+const HEADER_WINDOW_LINES: usize = 40;
+
+/// Модель-автор документа из шапки ADR-файла (`- Author-model: …`,
+/// `- Модель-автор: …`); `None` — поле не указано.
+///
+/// Терпимость к разметке — та же, что у `Status`/`Статус` (Н9): понимаются
+/// `- **Модель-автор**: X`, `**Author-model**: X` и головное имя со значением
+/// следующей строкой. Значение из шапки закоммичено вместе с документом,
+/// поэтому его нельзя «вспомнить задним числом»: правка шапки меняет хэш
+/// документа и обесценивает отчёт (`rubric_report_stale`).
+///
+/// `human` и `human:<имя>` — документ написан человеком; любая судья-модель от
+/// такого автора отлична (разбор метки — [`crate::judge`]).
+#[must_use]
+pub fn author_model_of(path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    author_model_in(&text)
+}
+
+/// То же по уже прочитанному тексту документа.
+#[must_use]
+pub fn author_model_in(text: &str) -> Option<String> {
+    let mut pending = false;
+    for line in text.lines().take(HEADER_WINDOW_LINES) {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if pending {
+            let value = strip_prefix(line).trim_matches('*').trim().to_string();
+            if !value.is_empty() {
+                return Some(value);
+            }
+        }
+        if let Some(value) = field_value(line, &AUTHOR_NAMES) {
+            if !value.is_empty() {
+                return Some(value);
+            }
+        }
+        pending = bare_author_field(line);
+    }
+    None
+}
+
+/// Строка — ГОЛОВНОЕ имя поля автора без значения (`## Модель-автор`):
+/// значение стоит следующей непустой строкой.
+fn bare_author_field(line: &str) -> bool {
+    let t = strip_prefix(line);
+    let t = t.trim_end_matches(':').trim().trim_matches('*').trim();
+    AUTHOR_NAMES.iter().any(|n| t.eq_ignore_ascii_case(n))
+}
 
 /// Снимает markdown-разметку начала строки: список, заголовок, жирный.
 fn strip_prefix(line: &str) -> String {
@@ -880,6 +935,53 @@ impl Tool for AdrRegistryTool {
         // Сериализация собранного объекта не падает; запасной вариант — компактная форма.
         let text = serde_json::to_string_pretty(&verdict).unwrap_or_else(|_| verdict.to_string());
         Ok(ToolOutput::ok(text))
+    }
+}
+
+#[cfg(test)]
+mod author_tests {
+    use super::*;
+
+    /// Поле автора понимается в тех же формах, что `Status`: английское и
+    /// русское имя, звёздочки, регистр, головное имя со значением следующей
+    /// строкой (J3, ADR-048).
+    #[test]
+    fn author_field_forms_are_understood() {
+        for (text, expected) in [
+            (
+                "# ADR-001\n\n- Author-model: claude-opus-4\n",
+                "claude-opus-4",
+            ),
+            ("# ADR-001\n\n- Модель-автор: glm-5.2\n", "glm-5.2"),
+            (
+                "# ADR-001\n\n- **Модель-автор**: human:Иван\n",
+                "human:Иван",
+            ),
+            ("# ADR-001\n\n**Author-model**: qwen3-max\n", "qwen3-max"),
+            (
+                "# ADR-001\n\n## Модель-автор\n\nclaude-opus-4\n",
+                "claude-opus-4",
+            ),
+        ] {
+            assert_eq!(
+                author_model_in(text).as_deref(),
+                Some(expected),
+                "форма не разобрана: {text:?}"
+            );
+        }
+    }
+
+    /// Поля автора в документе нет — это не ошибка: старые ADR его не несут,
+    /// и выдумывать автора механика не станет.
+    #[test]
+    fn missing_author_field_is_none_not_guess() {
+        assert!(author_model_in("# ADR-001. Решение\n\n- Status: Accepted\n").is_none());
+        // Тело документа ниже шапки полем не считается.
+        let deep = format!(
+            "# ADR-001. Решение\n\n- Status: Accepted\n{}\n- Модель-автор: glm-5.2\n",
+            "текст\n".repeat(50)
+        );
+        assert!(author_model_in(&deep).is_none(), "поле найдено вне шапки");
     }
 }
 

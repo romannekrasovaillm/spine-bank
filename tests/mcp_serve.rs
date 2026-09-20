@@ -2180,3 +2180,187 @@ fn reverify_reproduces_report_and_flags_edits() {
     assert!(legacy.status.success(), "{stdout}");
     assert!(stdout.contains("невоспроизводим"), "{stdout}");
 }
+
+/// J3 (ADR-048): модель-автор берётся из ШАПКИ документа — её значение
+/// закоммичено вместе с документом, поэтому автора нельзя «вспомнить» после
+/// судейства. Аргумент вызова при этом не отбрасывается: расхождение
+/// называется в отчёте (`author_model_declared`) и находкой гейта.
+#[test]
+fn author_model_is_read_from_adr_header() {
+    let home = tempfile::tempdir().expect("tmp");
+    let (repo, adr) = provenance_case(home.path());
+    // Шапка несёт автора-человека: любая судья-модель от него отлична.
+    let text = std::fs::read_to_string(&adr).expect("ADR");
+    let text = text.replace(
+        "- Дата: 2026-09-20",
+        "- Дата: 2026-09-20\n- Модель-автор: human:Архитектор",
+    );
+    std::fs::write(&adr, text).expect("ADR с автором");
+    let rubric = provenance_rubric(home.path());
+    let verify = call(
+        2,
+        "rubric_verify",
+        &json!({
+            "rubric": rubric,
+            "target": adr.display().to_string(),
+            "judge_model": "glm-5.2",
+            "answers": [provenance_answer()],
+        }),
+    );
+    let responses = mcp_serve_with_args(home.path(), &["--rw"], &batch(&[verify]));
+    let verdict = structured(&responses[0], 2);
+    // Судья назвал себя — автор из шапки: метки разные, находки нет.
+    assert_eq!(verdict["author_model"], "human:Архитектор", "{verdict}");
+    assert_eq!(verdict["author_source"], "header", "{verdict}");
+    let artifact: Value = serde_json::from_str(
+        &std::fs::read_to_string(repo.join("reports/rubric/ADR-001-pilot.json")).expect("отчёт"),
+    )
+    .expect("JSON отчёта");
+    assert_eq!(artifact["author_model"], "human:Архитектор", "{artifact}");
+    assert_eq!(artifact["author_source"], "header", "{artifact}");
+    assert!(
+        artifact.get("author_model_declared").is_none(),
+        "{artifact}"
+    );
+}
+
+/// J3 (ADR-048): когда шапка и аргумент расходятся, в отчёт идёт значение
+/// ИЗ ШАПКИ, а расхождение называется — предупреждением гейта
+/// `author_model_mismatch`. Так метка, названная в момент судейства, не
+/// подменяет автора, записанного в документе.
+#[test]
+fn header_wins_over_argument_with_warning() {
+    let home = tempfile::tempdir().expect("tmp");
+    let (repo, adr) = provenance_case(home.path());
+    let text = std::fs::read_to_string(&adr).expect("ADR");
+    std::fs::write(
+        &adr,
+        text.replace(
+            "- Дата: 2026-09-20",
+            "- Дата: 2026-09-20\n- Author-model: claude-opus-4",
+        ),
+    )
+    .expect("ADR с автором");
+    let rubric = provenance_rubric(home.path());
+    let verify = call(
+        2,
+        "rubric_verify",
+        &json!({
+            "rubric": rubric,
+            "target": adr.display().to_string(),
+            "judge_model": "glm-5.2",
+            "author_model": "deepseek-v4-pro",
+            "answers": [provenance_answer()],
+        }),
+    );
+    let responses = mcp_serve_with_args(home.path(), &["--rw"], &batch(&[verify]));
+    let verdict = structured(&responses[0], 2);
+    assert_eq!(
+        verdict["author_model"], "claude-opus-4",
+        "в отчёт идёт значение из шапки: {verdict}"
+    );
+    let artifact: Value = serde_json::from_str(
+        &std::fs::read_to_string(repo.join("reports/rubric/ADR-001-pilot.json")).expect("отчёт"),
+    )
+    .expect("JSON отчёта");
+    assert_eq!(
+        artifact["author_model_declared"], "deepseek-v4-pro",
+        "{artifact}"
+    );
+    // Гейт называет расхождение, но не краснит: метка из вызова — не подлог.
+    let enable_gate = home.path().join("arch-harness.toml");
+    std::fs::write(
+        &enable_gate,
+        "[gate.required]\nfast = [\"decision_quality\"]\n",
+    )
+    .expect("конфиг гейта");
+    let gate = arch_cmd(home.path())
+        .arg("gate")
+        .arg("--repo")
+        .arg(repo.as_os_str())
+        .arg("--route")
+        .arg("fast")
+        .output()
+        .expect("запуск arch-be gate");
+    let stdout = String::from_utf8_lossy(&gate.stdout);
+    assert!(
+        stdout.contains("author_model_mismatch"),
+        "расхождение обязано быть названо: {stdout}"
+    );
+}
+
+/// J3 (ADR-048): правка метки автора в шапке меняет документ — отчёт от
+/// прежней редакции становится устаревшим. Это и есть защита от «вспомнить
+/// автора задним числом»: переписать шапку можно, а перенести на неё старую
+/// оценку — нет.
+#[test]
+fn editing_author_header_makes_report_stale() {
+    let home = tempfile::tempdir().expect("tmp");
+    let (repo, adr, rubric) = judge_gate_case(home.path());
+    let text = std::fs::read_to_string(&adr).expect("ADR");
+    std::fs::write(
+        &adr,
+        text.replace(
+            "- Дата: 2026-09-20",
+            "- Дата: 2026-09-20\n- Модель-автор: claude-opus-4",
+        ),
+    )
+    .expect("ADR с автором");
+    judge_report_via_mcp(home.path(), &adr, &rubric, "glm-5.2");
+    let gate = gate_output(home.path(), &repo);
+    assert!(
+        gate.status.success(),
+        "отчёт по этой редакции должен проходить: {}",
+        String::from_utf8_lossy(&gate.stdout)
+    );
+    // Меняем метку автора в шапке — редакция документа другая.
+    let text = std::fs::read_to_string(&adr).expect("ADR");
+    std::fs::write(&adr, text.replace("claude-opus-4", "deepseek-v4-pro")).expect("ADR правленый");
+    let gate = gate_output(home.path(), &repo);
+    let stdout = String::from_utf8_lossy(&gate.stdout);
+    assert!(!gate.status.success(), "отчёт обязан устареть: {stdout}");
+    assert!(
+        stdout.contains("rubric_report_stale"),
+        "ожидалась находка об устаревшем отчёте: {stdout}"
+    );
+}
+
+/// J3 (ADR-048): `adr_new` пишет метку автора в шапку — иначе автора пришлось
+/// бы называть в каждом вызове судьи, а не фиксировать в документе.
+#[test]
+fn adr_new_writes_author_model() {
+    let home = tempfile::tempdir().expect("tmp");
+    let dir = home.path().join("adr");
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let responses = mcp_serve_with_args(
+        home.path(),
+        &["--rw"],
+        &batch(&[call(
+            1,
+            "adr_new",
+            &json!({
+                "title": "Идемпотентность приёма",
+                "path": dir.display().to_string(),
+                "author_model": "claude-opus-4",
+            }),
+        )]),
+    );
+    let verdict = structured(&responses[0], 1);
+    let created = verdict["output"]
+        .as_str()
+        .expect("вывод adr_new")
+        .to_string();
+    assert!(created.contains("ADR создан"), "{verdict}");
+    // Имя файла берём из ответа инструмента: слаг транслитерируется.
+    let file = dir.join(created.rsplit('/').next().expect("имя созданного файла"));
+    let text = std::fs::read_to_string(&file).expect("новый ADR");
+    assert!(
+        text.contains("- Модель-автор: claude-opus-4"),
+        "шапка нового ADR: {text}"
+    );
+    assert_eq!(
+        arch_harness::adr_registry::author_model_of(&file).as_deref(),
+        Some("claude-opus-4"),
+        "записанная метка обязана читаться тем же разбором"
+    );
+}

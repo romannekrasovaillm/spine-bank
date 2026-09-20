@@ -669,10 +669,16 @@ fn compare(
                 score.criterion_id, recorded.score, score.score
             ));
         }
-        let mut recorded_flags: Vec<&str> =
-            recorded.flags.iter().map(crate::rubric::CriterionFlag::as_str).collect();
-        let mut rebuilt_flags: Vec<&str> =
-            score.flags.iter().map(crate::rubric::CriterionFlag::as_str).collect();
+        let mut recorded_flags: Vec<&str> = recorded
+            .flags
+            .iter()
+            .map(crate::rubric::CriterionFlag::as_str)
+            .collect();
+        let mut rebuilt_flags: Vec<&str> = score
+            .flags
+            .iter()
+            .map(crate::rubric::CriterionFlag::as_str)
+            .collect();
         recorded_flags.sort_unstable();
         rebuilt_flags.sort_unstable();
         if recorded_flags != rebuilt_flags {
@@ -716,6 +722,114 @@ fn compare(
         ));
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// J3: автор документа — из шапки, а не со слов в момент судейства
+// ---------------------------------------------------------------------------
+
+/// Приводит метку модели к сравнимому виду: регистр, пробелы и типовые
+/// разделители (`Claude-Opus`, `claude opus`, `Claude_Opus` → `claude-opus`).
+///
+/// Сравнение меток побайтово ошибочно в обе стороны: `Claude-Opus` и
+/// `claude-opus` — одна модель, а `opus` и `sonnet` — разные метки одного
+/// семейства, то есть судья и автор с общими слепыми зонами.
+#[must_use]
+pub fn normalize_label(label: &str) -> String {
+    let mut out = String::with_capacity(label.len());
+    let mut last_dash = true;
+    for ch in label.trim().chars() {
+        if ch.is_alphanumeric() {
+            out.extend(ch.to_lowercase());
+            last_dash = false;
+        } else if !last_dash {
+            out.push('-');
+            last_dash = true;
+        }
+    }
+    out.trim_matches('-').to_string()
+}
+
+/// Совпадают ли две метки после нормализации.
+#[must_use]
+pub fn same_label(left: &str, right: &str) -> bool {
+    normalize_label(left) == normalize_label(right)
+}
+
+/// Источник метки автора в отчёте: значение поля `author_source`.
+pub const AUTHOR_SOURCE_HEADER: &str = "header";
+/// Источник метки автора: аргумент вызова (в документе поля нет).
+pub const AUTHOR_SOURCE_ARGUMENT: &str = "argument";
+/// Источник метки автора: автора нет ни в документе, ни в вызове.
+pub const AUTHOR_SOURCE_NONE: &str = "none";
+
+/// Кем выбран автор документа и откуда взята метка (J3, ADR-048).
+#[derive(Debug, Clone, Default)]
+pub struct AuthorChoice {
+    /// Метка автора, которая идёт в отчёт.
+    pub author: Option<String>,
+    /// Источник метки: [`AUTHOR_SOURCE_HEADER`], [`AUTHOR_SOURCE_ARGUMENT`]
+    /// или [`AUTHOR_SOURCE_NONE`].
+    pub source: String,
+    /// Метка, переданная вызовом, если она разошлась с шапкой (иначе `None`).
+    pub declared: Option<String>,
+}
+
+impl AuthorChoice {
+    /// Метка автора пришла из шапки документа.
+    #[must_use]
+    pub fn from_header(&self) -> bool {
+        self.source == AUTHOR_SOURCE_HEADER
+    }
+}
+
+/// Выбирает автора документа: **значение из шапки документа сильнее**
+/// аргумента вызова (J3, ADR-048).
+///
+/// Почему так: шапка закоммичена вместе с документом, и её правка меняет хэш
+/// документа — отчёт от новой редакции становится устаревшим
+/// (`rubric_report_stale`). Метка, переданная аргументом, живёт только в
+/// вызове: разрешив ей перекрывать шапку, автор «вспоминался бы задним
+/// числом» — то есть ровно то, от чего происхождение и защищает.
+/// Расхождение аргумента с шапкой не отбрасывается, а называется.
+#[must_use]
+pub fn choose_author(header: Option<String>, declared: Option<String>) -> AuthorChoice {
+    let header = header.filter(|a| !a.trim().is_empty());
+    let declared = declared.filter(|a| !a.trim().is_empty());
+    match (header, declared) {
+        (Some(header), Some(declared)) => {
+            let mismatch = !same_label(&header, &declared);
+            AuthorChoice {
+                author: Some(header),
+                source: AUTHOR_SOURCE_HEADER.to_string(),
+                declared: mismatch.then_some(declared),
+            }
+        }
+        (Some(header), None) => AuthorChoice {
+            author: Some(header),
+            source: AUTHOR_SOURCE_HEADER.to_string(),
+            declared: None,
+        },
+        (None, Some(declared)) => AuthorChoice {
+            author: Some(declared),
+            source: AUTHOR_SOURCE_ARGUMENT.to_string(),
+            declared: None,
+        },
+        (None, None) => AuthorChoice {
+            author: None,
+            source: AUTHOR_SOURCE_NONE.to_string(),
+            declared: None,
+        },
+    }
+}
+
+/// Человек ли автор документа: `human` или `human:<имя>` (J3, ADR-048).
+/// Документ, написанный человеком, отличен от любой судьи-модели — это не
+/// «независимость подтверждена», а факт другого рода автора.
+#[must_use]
+pub fn is_human_author(label: &str) -> bool {
+    let normalized = normalize_label(label);
+    normalized == "human" || normalized.starts_with("human-") || normalized.starts_with("human:")
 }
 
 #[cfg(test)]
@@ -817,6 +931,57 @@ mod tests {
             operator(dir.path()).as_deref(),
             Some("Тест Архитектор <arch@example.invalid>")
         );
+    }
+
+    /// Метки сравниваются после нормализации: регистр, пробелы и разделители
+    /// не делают одну модель двумя, а разные модели одного семейства —
+    /// независимыми судьями (J3/J4, ADR-048).
+    #[test]
+    fn labels_are_normalized_before_comparison() {
+        assert_eq!(normalize_label("Claude-Opus"), "claude-opus");
+        assert_eq!(normalize_label("  claude  opus "), "claude-opus");
+        assert_eq!(normalize_label("GLM_5.2"), "glm-5-2");
+        assert!(same_label("Claude-Opus", "claude opus"));
+        assert!(!same_label("claude-opus", "claude-sonnet"));
+    }
+
+    /// Автор документа — из шапки: значение из документа сильнее аргумента
+    /// вызова, а расхождение не отбрасывается, а называется (J3, ADR-048).
+    #[test]
+    fn author_choice_prefers_document_header() {
+        let from_header = choose_author(Some("claude-opus-4".into()), None);
+        assert_eq!(from_header.author.as_deref(), Some("claude-opus-4"));
+        assert_eq!(from_header.source, AUTHOR_SOURCE_HEADER);
+        assert!(from_header.declared.is_none());
+
+        let from_argument = choose_author(None, Some("glm-5.2".into()));
+        assert_eq!(from_argument.source, AUTHOR_SOURCE_ARGUMENT);
+        assert_eq!(from_argument.author.as_deref(), Some("glm-5.2"));
+
+        // Одна и та же модель, названная по-разному, расхождением не считается.
+        let same = choose_author(Some("Claude-Opus".into()), Some("claude opus".into()));
+        assert!(same.declared.is_none(), "{same:?}");
+        assert_eq!(same.author.as_deref(), Some("Claude-Opus"));
+
+        // Разные метки: в отчёт идёт шапка, расхождение названо.
+        let mismatch = choose_author(Some("claude-opus-4".into()), Some("glm-5.2".into()));
+        assert_eq!(mismatch.author.as_deref(), Some("claude-opus-4"));
+        assert!(mismatch.from_header());
+        assert_eq!(mismatch.declared.as_deref(), Some("glm-5.2"));
+
+        let none = choose_author(None, None);
+        assert_eq!(none.source, AUTHOR_SOURCE_NONE);
+        assert!(none.author.is_none());
+    }
+
+    /// `human` и `human:<имя>` — автор-человек: он отличен от любой
+    /// судьи-модели, и это факт другого рода, а не «независимость» (J3).
+    #[test]
+    fn human_author_is_recognized() {
+        assert!(is_human_author("human"));
+        assert!(is_human_author("HUMAN"));
+        assert!(is_human_author("human:Иван Петров"));
+        assert!(!is_human_author("claude-opus-4"));
     }
 
     /// Ключ промпта не зависит от написания пути: он считается по тексту

@@ -1586,6 +1586,23 @@ fn component_decision_quality(repo: &Path, options: &GateOptions, enabled: bool)
                 ),
             ));
         }
+        // Метка автора из вызова разошлась с шапкой документа: в отчёт пошло
+        // значение из шапки (оно закоммичено вместе с документом), но само
+        // расхождение читателю назвать нужно — это признак того, что автора
+        // «вспоминали» уже после написания (J3, ADR-048).
+        if let ("header", Some(declared)) = (
+            artifact.author_source.as_deref().unwrap_or_default(),
+            artifact.author_model_declared.as_deref(),
+        ) {
+            findings.push(GateFinding::ruled(
+                "warn".to_string(),
+                "author_model_mismatch".to_string(),
+                format!(
+                    "{rel}: вызов назвал автора '{declared}', в шапке документа '{}' —                      в отчёт пошло значение из шапки",
+                    artifact.author_model.as_deref().unwrap_or("не указан")
+                ),
+            ));
+        }
         // «Автор = судья»: вердикт судьи о своей же работе не независим.
         let author_missing = artifact
             .author_model
