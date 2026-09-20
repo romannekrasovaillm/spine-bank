@@ -85,7 +85,7 @@ pub struct JudgingMeta {
     /// Метка модели-автора (если названа).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub author_model: Option<String>,
-    /// Уровень независимости (ADR-049).
+    /// Уровень независимости (ADR-048).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub independence: Option<String>,
     /// Вызовов сессии до судейства — косвенный признак рабочей сессии.

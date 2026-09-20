@@ -363,7 +363,7 @@ fn anchor_verdict(repo: &Path, report: &gate::GateReport, cfg: &Config) -> Ancho
     let judge = judge_is_author(repo);
     gaps.extend(judge.iter().cloned());
     // Уровень независимости: условие ступени не меняется (его задаёт
-    // judge_is_author), но требование проекта поднимает планку (ADR-049).
+    // judge_is_author), но требование проекта поднимает планку (ADR-048).
     let weakest = weakest_independence(repo, cfg);
     if let Some((level, min)) = &weakest {
         if crate::judge::independence_rank(level) < crate::judge::independence_rank(min) {
@@ -396,7 +396,7 @@ fn anchor_verdict(repo: &Path, report: &gate::GateReport, cfg: &Config) -> Ancho
 }
 
 /// Минимальный уровень независимости по отчётам рубрики и порог проекта:
-/// `None` — отчётов с уровнем нет, сравнивать не с чем (ADR-049).
+/// `None` — отчётов с уровнем нет, сравнивать не с чем (ADR-048).
 fn weakest_independence(repo: &Path, cfg: &Config) -> Option<(String, String)> {
     let levels: Vec<String> = crate::rubric::load_artifacts(repo)
         .into_iter()
@@ -612,7 +612,7 @@ mod tests {
     }
 
     /// Отчёт рубрики с уровнем независимости: пятая ступень говорит, какой
-    /// уровень достигнут и какого требует проект (ADR-049).
+    /// уровень достигнут и какого требует проект (ADR-048).
     fn report_with_independence(dir: &Path, level: &str, judge: &str, author: &str) {
         let reports = dir.join("reports/rubric");
         std::fs::create_dir_all(&reports).expect("mkdir");
@@ -627,7 +627,7 @@ mod tests {
 
     /// Пятая ступень называет минимальный уровень независимости по отчётам, а
     /// требование проекта поднимает планку: при пороге `launched` отчёт
-    /// уровня `declared` делает ступень недостижимой (ADR-049).
+    /// уровня `declared` делает ступень недостижимой (ADR-048).
     #[test]
     fn trust_detail_shows_min_independence() {
         let tmp = tempfile::tempdir().expect("tmp");

@@ -1499,7 +1499,7 @@ fn component_decision_quality(repo: &Path, options: &GateOptions, enabled: bool)
     // Отчёты, у которых нет сырых ответов судьи: сверить балл с ответами
     // механика не может (это не находка, а граница проверки — ADR-048).
     let mut not_reproducible = 0usize;
-    // Отчёты, собранные в рабочей сессии (косвенный признак, ADR-049).
+    // Отчёты, собранные в рабочей сессии (косвенный признак, ADR-048).
     let mut session_dirty = 0usize;
     for adr in &adrs {
         let Ok(text) = std::fs::read_to_string(adr) else {
@@ -1588,7 +1588,7 @@ fn component_decision_quality(repo: &Path, options: &GateOptions, enabled: bool)
                 ),
             ));
         }
-        // Уровень независимости ниже порога проекта (ADR-049). Дефолт порога —
+        // Уровень независимости ниже порога проекта (ADR-048). Дефолт порога —
         // `none`: находка не появляется, пока проект сам не попросит строже.
         let independence = artifact.independence.as_deref().unwrap_or_default();
         if !independence.is_empty() {
@@ -1608,7 +1608,7 @@ fn component_decision_quality(repo: &Path, options: &GateOptions, enabled: bool)
             }
         }
         // Судейство шло в рабочей сессии: судья мог видеть контекст автора.
-        // Это КОСВЕННЫЙ признак и примечание паспорта, а не находка (ADR-049).
+        // Это КОСВЕННЫЙ признак и примечание паспорта, а не находка (ADR-048).
         if let Some(prov) = &artifact.provenance {
             if prov.mode() == crate::judge::MODE_DECLARED
                 && prov.session_calls_before > options.judge.clean_session_max_calls
@@ -2144,7 +2144,7 @@ fn collect_inputs(
     );
     // Сырые ответы судьи рубрик: отчёт объявлен собранным ИЗ НИХ, поэтому
     // правка сохранённого ответа меняет вердикт о качестве решения — а значит
-    // обязана менять и аттестацию (J5, ADR-049). Каталога нет (отчётов нет
+    // обязана менять и аттестацию (J5, ADR-048). Каталога нет (отчётов нет
     // либо они до появления сырых ответов) — честное `absent`: аттестация
     // существующих кейсов не меняется.
     push(
