@@ -22,9 +22,11 @@
 //!   `implements` / `affects` / `verified_by` + обратные ссылки) → затронутые
 //!   сущности по типам, правила CONSTRAINTS.yaml (`C-NNN` из `verified_by`,
 //!   с владельцами из карточек правил), контракты достигнутых INT,
-//!   владельцы (достигнутые OWNER). Это отчёт, а не гейт: вердикта
-//!   `passed` нет. Неизвестный `id` — честная ошибка; путь без
-//!   CMP-покрытия — пометка в `gaps` (не ошибка);
+//!   владельцы (достигнутые OWNER-* И владельцы карточек затронутых правил;
+//!   реестр ищется единым резолвером — в корне или `.arch-handoff/`), при
+//!   пустом списке владельцев — `owners_note` с тем, что проверили. Это отчёт,
+//!   а не гейт: вердикта `passed` нет. Неизвестный `id` — честная ошибка; путь
+//!   без CMP-покрытия — пометка в `gaps` (не ошибка);
 //! - инструменты агента: `architect_review`, `change_impact` ([`tools`]);
 //!   CLI: `arch-be review` и `arch-be model impact`; мост MCP — по белому
 //!   списку `mcp_server.rs` (read-only).
@@ -496,6 +498,9 @@ pub struct ImpactReport {
     pub contracts: Vec<String>,
     /// Достигнутые владельцы (`OWNER-* · заголовок`) — с кем согласовывать.
     pub owners: Vec<String>,
+    /// Почему список владельцев пуст (`None` — владельцы названы). Читатель
+    /// обязан видеть, что именно проверили, а не пустой список без объяснения.
+    pub owners_note: Option<String>,
     /// Сводка одной строкой.
     pub summary: String,
 }
@@ -557,7 +562,10 @@ fn cmps_for_path<'m>(model: &'m Model, path: &str) -> Vec<&'m str> {
 /// (name, owner). Файла нет или не парсится — `None` (fail-soft: правила
 /// остаются в отчёте голыми ссылками, имена/владельцы не резолвятся).
 fn rule_cards(case: &Path) -> Option<BTreeMap<String, (String, Option<String>)>> {
-    let path = case.join("CONSTRAINTS.yaml");
+    // Реестр ищется единым резолвером (`control::resolve_constraints_path`),
+    // а не только в корне кейса: после `bootstrap`/`handoff` он лежит в
+    // `.arch-handoff/`, и карточки с владельцами не находились вовсе (T-11).
+    let path = control::resolve_constraints_path(case, None)?;
     if !path.is_file() {
         return None;
     }
@@ -757,11 +765,60 @@ fn impact_core(
         .collect();
 
     // Владельцы: достигнутые сущности OWNER.
-    let owners: Vec<String> = affected
+    // Владельцы: (1) достигнутые сущности OWNER-* и (2) владельцы карточек
+    // затронутых правил (T-11). Раньше считались только первые: модель, где
+    // владелец не связан с компонентом ребром, давала «владельцев: 0» рядом с
+    // «владелец: OWNER-001» в списке правил — два ответа на один вопрос.
+    let mut owners: Vec<String> = affected
         .iter()
         .filter(|a| a.kind == EntityKind::Owner.type_str())
         .map(|a| format!("{} · {}", a.id, a.title))
         .collect();
+    let mut seen: BTreeSet<String> = owners.clone().into_iter().collect();
+    for rule in &rules {
+        let Some(owner) = rule.owner.as_deref() else {
+            continue;
+        };
+        let owner = owner.trim();
+        if owner.is_empty() {
+            continue;
+        }
+        // Владелец, названный идентификатором сущности модели, показывается с
+        // заголовком: с «OWNER-001» согласовывать нельзя, с командой — можно.
+        let rendered = match model.get(owner) {
+            Some(e) if e.kind == EntityKind::Owner => format!("{} · {}", e.id, e.title),
+            _ => owner.to_string(),
+        };
+        if seen.insert(rendered.clone()) {
+            owners.push(rendered);
+        }
+    }
+    // Пустой список владельцев объясняется: что проверили и чего не нашли.
+    let owners_note = if owners.is_empty() {
+        let mut checked: Vec<String> = vec!["среди затронутых сущностей нет OWNER-*".to_string()];
+        if cards.is_none() {
+            // Карточек нет — про поле owner затронутых правил знать нечего:
+            // правила известны только по ссылкам `verified_by`.
+            checked.push(
+                "карточки правил недоступны: реестр CONSTRAINTS.yaml не найден \
+                 (ни в корне, ни в .arch-handoff/)"
+                    .to_string(),
+            );
+        } else if rules.is_empty() {
+            checked.push("затронутых правил с владельцем нет".to_string());
+        } else if rules.iter().all(|r| r.owner.is_none()) {
+            checked.push(format!(
+                "в карточках {} затронутых правил поле owner не заполнено",
+                rules.len()
+            ));
+        }
+        Some(format!(
+            "владельцы не названы — {}. Согласование придётся найти вручную",
+            checked.join("; ")
+        ))
+    } else {
+        None
+    };
 
     let mut by_kind: BTreeMap<&str, usize> = BTreeMap::new();
     for a in &affected {
@@ -780,6 +837,15 @@ fn impact_core(
         contracts.len(),
         owners.len()
     );
+    if owners_note.is_some() {
+        // В сводке — короткий маркер: полная причина рядом (строка рендера и
+        // поле `owners_note` в JSON), дублировать её в одну строку незачем.
+        let _ = write!(
+            summary,
+            "; владельцы не названы: {}",
+            owners_reason_short(&owners)
+        );
+    }
     if !gaps.is_empty() {
         let _ = write!(summary, "; путей без CMP-покрытия (gap): {}", gaps.len());
     }
@@ -792,8 +858,15 @@ fn impact_core(
         rules,
         contracts,
         owners,
+        owners_note,
         summary,
     }
+}
+
+/// Короткая причина «владельцы не названы» для сводки: полная — в
+/// `owners_note` (рендер печатает её отдельной строкой).
+fn owners_reason_short(_owners: &[String]) -> &'static str {
+    "ни сущностей OWNER-*, ни владельцев в карточках правил (подробности — в owners_note)"
 }
 
 /// Текстовый рендер отчёта обхода: источники, gaps, сущности по типам,
@@ -845,6 +918,8 @@ pub fn render_impact(report: &ImpactReport) -> String {
         for o in &report.owners {
             let _ = writeln!(out, "  {o}");
         }
+    } else if let Some(note) = &report.owners_note {
+        let _ = writeln!(out, "С кем согласовывать: {note}");
     }
     let _ = writeln!(out, "Итог: {}", report.summary);
     out
@@ -871,6 +946,7 @@ pub fn impact_json(report: &ImpactReport) -> Value {
         })).collect::<Vec<_>>(),
         "contracts": report.contracts,
         "owners": report.owners,
+        "owners_note": report.owners_note,
         "summary": report.summary,
     })
 }
@@ -1265,13 +1341,135 @@ mod tests {
         assert_eq!(report.contracts, vec!["contracts/api.yaml"]);
         assert_eq!(
             report.owners,
-            vec!["OWNER-1 · Команда процессинга".to_string()]
+            vec![
+                "OWNER-1 · Команда процессинга".to_string(),
+                "Команда платежей".to_string()
+            ],
+            "владелец сущности И владелец правила — оба (T-11)"
         );
         let text = render_impact(&report);
         assert!(text.contains("Согласовать с владельцами"), "{text}");
         assert!(text.contains("C-001 (no_float_money"), "{text}");
         let json = impact_json(&report);
         assert_eq!(json["affected"].as_array().expect("affected").len(), 10);
+    }
+
+    /// T-11: владельцы называются и из КАРТОЧЕК ПРАВИЛ, а не только из
+    /// достигнутых сущностей `OWNER-*`. Отчёт печатал «владелец: Команда
+    /// платежей» в списке правил и «владельцев: 0» в итоге — два ответа на один
+    /// вопрос, и второй неверный.
+    #[test]
+    fn impact_names_owners_from_rule_cards() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let case = tmp.path().join("case");
+        std::fs::create_dir_all(&case).expect("mkdir");
+        make_case(&case);
+        let report = change_impact(&case, Some("CMP-002"), &[]).expect("impact");
+        assert!(
+            report.owners.iter().any(|o| o.contains("Команда платежей")),
+            "владелец из карточки правила обязан быть в списке: {:?}",
+            report.owners
+        );
+        assert!(
+            report.summary.contains("владельцев: 2"),
+            "владелец сущности + владелец правила: {}",
+            report.summary
+        );
+        assert!(report.owners_note.is_none(), "{:?}", report.owners_note);
+        let json = impact_json(&report);
+        assert!(
+            json["owners"]
+                .as_array()
+                .expect("owners")
+                .iter()
+                .any(|o| o.as_str().is_some_and(|s| s.contains("Команда платежей"))),
+            "{json}"
+        );
+    }
+
+    /// T-11: владелец, названный в карточке идентификатором сущности модели,
+    /// показывается с заголовком — «OWNER-1 · Команда процессинга», а не сырым
+    /// «OWNER-1»: с этим владельцем человек идёт согласовывать.
+    #[test]
+    fn impact_resolves_owner_id_to_entity_title() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let case = tmp.path().join("case");
+        std::fs::create_dir_all(&case).expect("mkdir");
+        make_case(&case);
+        let registry = "rules:\n  - id: C-001\n    name: no_float_money\n    \
+             type: must_not_contain\n    glob: \"**/*.rs\"\n    pattern: 'f64'\n    \
+             severity: error\n    owner: OWNER-1\n";
+        std::fs::write(case.join("CONSTRAINTS.yaml"), registry).expect("constraints");
+        std::fs::write(case.join(".arch-handoff/CONSTRAINTS.yaml"), registry).expect("pack");
+        let report = change_impact(&case, Some("CMP-001"), &[]).expect("impact");
+        assert_eq!(
+            report.owners,
+            vec!["OWNER-1 · Команда процессинга".to_string()],
+            "идентификатор и ребро дают одну запись, а не две: {:?}",
+            report.owners
+        );
+    }
+
+    /// T-11: карточки читаются из той копии реестра, которая реально есть:
+    /// реестр, лежащий только в пакете (`.arch-handoff/CONSTRAINTS.yaml`),
+    /// раньше не находился вовсе — правила выходили как «C-001 (?)» и без
+    /// владельцев.
+    #[test]
+    fn impact_reads_registry_from_pack_copy() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let case = tmp.path().join("case");
+        std::fs::create_dir_all(&case).expect("mkdir");
+        make_case(&case);
+        std::fs::remove_file(case.join("CONSTRAINTS.yaml")).expect("снять корневую копию");
+        let report = change_impact(&case, Some("CMP-002"), &[]).expect("impact");
+        assert_eq!(report.rules.len(), 1);
+        assert_eq!(
+            report.rules[0].name.as_deref(),
+            Some("no_float_money"),
+            "карточка из пакетной копии: {:?}",
+            report.rules[0]
+        );
+        assert!(
+            report.owners.iter().any(|o| o.contains("Команда платежей")),
+            "{:?}",
+            report.owners
+        );
+    }
+
+    /// T-11: пустой список владельцев сопровождается объяснением, а не молчит:
+    /// читатель обязан видеть, что проверили (сущности `OWNER-*` и поле `owner`
+    /// в карточках правил) и чего не нашли.
+    #[test]
+    fn impact_explains_absent_owners() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let case = tmp.path().join("case");
+        std::fs::create_dir_all(&case).expect("mkdir");
+        make_case(&case);
+        // Карточка есть, поле owner пустое; сущность OWNER-1 из модели убрана,
+        // чтобы обход её не достиг.
+        let registry = "rules:\n  - id: C-001\n    name: no_float_money\n    \
+             type: must_not_contain\n    glob: \"**/*.rs\"\n    pattern: 'f64'\n    \
+             severity: error\n";
+        std::fs::write(case.join("CONSTRAINTS.yaml"), registry).expect("constraints");
+        std::fs::write(case.join(".arch-handoff/CONSTRAINTS.yaml"), registry).expect("pack");
+        std::fs::remove_file(case.join("model/OWNER-1.md")).expect("снять владельца");
+        let report = change_impact(&case, Some("CMP-002"), &[]).expect("impact");
+        assert!(report.owners.is_empty(), "{:?}", report.owners);
+        let note = report.owners_note.as_deref().unwrap_or_default();
+        assert!(
+            note.contains("owner"),
+            "объяснение обязано называть проверку: {note}"
+        );
+        assert!(
+            report.summary.contains("владельцев: 0"),
+            "{}",
+            report.summary
+        );
+        assert!(
+            render_impact(&report).contains(note),
+            "{}",
+            render_impact(&report)
+        );
     }
 
     #[test]

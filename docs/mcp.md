@@ -156,7 +156,7 @@ false`; `evidence_pack`/`delta_propose` политика R-уровней кла
 | Инструмент | Аргументы | Возвращает |
 |---|---|---|
 | `architect_review` | `path?`, `base?` | единое ревью репозитория одним вызовом: маршрут значимости из git-диффа + весь контур гейта (fitness, delta_guard, rule_weakened, spine_lint, trace_check; на Standard/Critical — nfr, evidence, sensors) + секции `model_validate` и `contracts` (линт OpenAPI/AsyncAPI из `INT.contract` и `contracts/`). JSON: `passed` + `route` + `components` (status/detail/findings) + `summary`; `passed=false` — основание отказать изменению |
-| `change_impact` | `path?`, `id` \| `paths` | радиус изменения по графу модели: `seeds`, `affected` (сущности по типам), `rules` (C-NNN с владельцами), `contracts`, `owners`, `gaps` (пути без CMP-покрытия), `summary` + `load_issues` (битые сущности, E3). Отчёт, не гейт — `passed` не применим; неизвестный `id` — `isError` |
+| `change_impact` | `path?`, `id` \| `paths` | радиус изменения по графу модели: `seeds`, `affected` (сущности по типам), `rules` (C-NNN с владельцами), `contracts`, `owners` (достигнутые `OWNER-*` и владельцы карточек затронутых правил; реестр ищется и в `.arch-handoff/`), `owners_note` (почему список пуст), `gaps` (пути без CMP-покрытия), `summary` + `load_issues` (битые сущности, E3). Отчёт, не гейт — `passed` не применим; неизвестный `id` — `isError` |
 
 Чтение знаний (транш T4, ADR-015; все — read-only, без verdict `passed`):
 
