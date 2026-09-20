@@ -158,6 +158,19 @@ fn is_constraint_ref(raw: &str) -> bool {
 /// # Errors
 /// Каталог модели не читается/ни один файл не разбирается.
 pub fn trace_check(case_dir: &Path) -> Result<TraceReport> {
+    trace_check_with(case_dir, crate::config::ExecutableRequired::Off)
+}
+
+/// Трассировка с требованием исполняемой проверки инвариантов (ADR-050):
+/// звено «AD → исполняемое правило» информационное всегда, а находка
+/// `ad-text-only` появляется только при `executable_required != off`.
+///
+/// # Errors
+/// Те же, что у [`trace_check`].
+pub fn trace_check_with(
+    case_dir: &Path,
+    executable_required: crate::config::ExecutableRequired,
+) -> Result<TraceReport> {
     let model_dir = case_dir.join("model");
     let model = load_model_tolerant(&model_dir)?;
     let constraints = load_constraint_ids(&model_dir);
@@ -167,6 +180,11 @@ pub fn trace_check(case_dir: &Path) -> Result<TraceReport> {
     }
     let constraint_rules = constraints_status(case_dir, &constraints, &mut issues);
     let index = LinkIndex::build(&model);
+    // Звено «AD → исполняемое правило» — представление, а не проверка: оно
+    // не меняет ни существующие шесть звеньев, ни вердикт. Находка
+    // `ad-text-only` (при явном требовании) адресуется несущим инвариантам,
+    // а если признак `load_bearing` нигде не задан — всем без проверки.
+    let executable = executable_level(case_dir, executable_required, &mut issues);
     let levels = vec![
         req_level(&model, &index, &mut issues),
         nfr_level(&model, &index, &mut issues),
@@ -174,6 +192,7 @@ pub fn trace_check(case_dir: &Path) -> Result<TraceReport> {
         adr_level(&model, &mut issues),
         cmp_level(&model, &mut issues),
         int_level(case_dir, &model, &mut issues),
+        executable,
     ];
     let spine_ads = spine_crosscheck(case_dir, &model, &mut issues)?;
     Ok(TraceReport {
@@ -184,6 +203,87 @@ pub fn trace_check(case_dir: &Path) -> Result<TraceReport> {
         spine_ads,
         issues,
     })
+}
+
+/// Название информационного звена «AD → исполняемое правило» (ADR-050).
+const LEVEL_EXECUTABLE: &str = "AD → исполняемое правило";
+
+/// Звено «AD → исполняемое правило» (ADR-050): сколько инвариантов покрыто
+/// правилами, проверяющими ПОВЕДЕНИЕ ([`crate::control::BEHAVIOUR_RULE_KINDS`]),
+/// и кто остался.
+///
+/// Звено информационное: оно не меняет ни вердикт, ни шесть существующих
+/// звеньев. Находка `ad-text-only` появляется только при явном требовании
+/// (`[trace] executable_required`) и адресуется несущим инвариантам, а если
+/// признак `load_bearing` не задан нигде — всем непокрытым: иначе требование
+/// не к чему адресовать и молчало бы на каждом кейсе.
+fn executable_level(
+    case_dir: &Path,
+    required: crate::config::ExecutableRequired,
+    issues: &mut Vec<TraceIssue>,
+) -> LevelReport {
+    let mut level = LevelReport {
+        name: LEVEL_EXECUTABLE,
+        total: 0,
+        covered: 0,
+        unverifiable: 0,
+        orphans: Vec::new(),
+    };
+    // Модели нет или она не читается — звено пустое (своей находки не добавляет).
+    let Ok(Some(coverage)) = crate::rule_templates::ad_coverage(case_dir) else {
+        return level;
+    };
+    level.total = coverage.total();
+    level.covered = coverage.covered().len();
+    let uncovered = coverage.uncovered();
+    for e in &uncovered {
+        if e.unverifiable {
+            // Осознанный отказ от механической проверки — не сирота (как в AD-звене).
+            level.covered += 1;
+            level.unverifiable += 1;
+        } else {
+            level.orphans.push(e.ad.clone());
+        }
+    }
+    if let Some(severity) = required.severity() {
+        let severity = if severity == "error" {
+            Severity::Error
+        } else {
+            Severity::Warn
+        };
+        // Область находки: несущие, если признак где-то задан; иначе — все.
+        let scope: Vec<&crate::rule_templates::AdCoverageEntry> = if coverage.load_bearing_defined {
+            coverage.load_bearing_uncovered()
+        } else {
+            uncovered.clone()
+        };
+        for e in scope.into_iter().filter(|e| !e.unverifiable) {
+            let rules: Vec<String> = e
+                .rules
+                .iter()
+                .map(|r| match r.kind.as_deref() {
+                    Some(kind) => format!("{} ({kind})", r.reference),
+                    None => format!("{} (нет в реестре)", r.reference),
+                })
+                .collect();
+            let rules = if rules.is_empty() {
+                "правил в `verified_by` нет".to_string()
+            } else {
+                rules.join(", ")
+            };
+            issue(
+                issues,
+                severity,
+                "ad-text-only",
+                format!(
+                    "{} «{}»: исполняемой проверки поведения нет — правила ({rules}) судят \
+                     по тексту; шаблон: `arch-be rules template list`",
+                    e.ad, e.title
+                ),
+            );
+        }
+    }
+    level
 }
 
 /// Добавляет находку в отчёт.
@@ -628,7 +728,8 @@ impl Tool for TraceCheckTool {
             }
         };
         let dir = ctx.resolve(args.dir.as_deref().unwrap_or("."));
-        match trace_check(&dir) {
+        // Требование исполняемой проверки — из `[trace]` (ADR-050).
+        match trace_check_with(&dir, ctx.config.trace.executable_required) {
             Ok(report) => Ok(ToolOutput::ok(render_markdown(&report))),
             Err(e) => Ok(ToolOutput::err(format!("trace_check: {e}"))),
         }
@@ -714,11 +815,84 @@ mod tests {
             "ни warn: {:?}",
             report.issues.iter().map(|i| i.rule).collect::<Vec<_>>()
         );
-        for level in &report.levels {
+        for level in report.levels.iter().filter(|l| l.name != LEVEL_EXECUTABLE) {
             assert_eq!(level.percent(), Some(100), "{}", level.name);
         }
         assert_eq!(report.constraint_rules, Some(1));
         assert_eq!(report.spine_ads, Some(1));
+    }
+
+    /// ADR-050: звено «AD → исполняемое правило» информационное — оно видно в
+    /// отчёте (доля и сироты), но вердикт не меняет и находок по умолчанию не
+    /// даёт: требование `[trace] executable_required` по умолчанию выключено.
+    #[test]
+    fn executable_level_is_informational_and_config_drives_the_finding() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let case = write_case(dir.path(), &full_entities(), Some(CONSTRAINTS), Some(SPINE));
+        let report = trace_check(&case).expect("trace");
+        let level = report
+            .levels
+            .iter()
+            .find(|l| l.name == LEVEL_EXECUTABLE)
+            .expect("звено обязано быть в отчёте");
+        assert!(!report.has_errors(), "звено не даёт error по умолчанию");
+        assert!(
+            !report.issues.iter().any(|i| i.rule == "ad-text-only"),
+            "по умолчанию находки нет: {:?}",
+            report.issues.iter().map(|i| i.rule).collect::<Vec<_>>()
+        );
+        // Текстовое правило реестра поведением не является — инвариант в сиротах.
+        assert_eq!(level.orphans.len(), level.total, "{}", level.name);
+
+        let strict = trace_check_with(&case, crate::config::ExecutableRequired::Error)
+            .expect("trace со строгим требованием");
+        let hit = strict
+            .issues
+            .iter()
+            .find(|i| i.rule == "ad-text-only")
+            .expect("строгое требование даёт находку ad-text-only");
+        assert_eq!(hit.severity, Severity::Error);
+        assert!(hit.message.contains("тексту"), "{}", hit.message);
+    }
+
+    /// ADR-050: при заданном `load_bearing` находка адресуется несущим
+    /// инвариантам, а не всем непокрытым.
+    #[test]
+    fn ad_text_only_respects_load_bearing() {
+        let dir = tempfile::tempdir().expect("tmp");
+        // Два инварианта без поведенческих правил: несущий AD-1 и обычный AD-2.
+        let entities = vec![
+            (
+                "AD-1.md",
+                "---\nid: AD-1\ntype: ad\ntitle: Несущий\nstatus: ADOPTED\nload_bearing: true\n\
+                 verified_by: [C-001]",
+            ),
+            (
+                "AD-2.md",
+                "---\nid: AD-2\ntype: ad\ntitle: Обычный\nstatus: ADOPTED\nverified_by: [C-001]",
+            ),
+        ];
+        let spine =
+            "# Spine\n\n## AD-1: Несущий\n\n- **Rule**: …\n\n## AD-2: Обычный\n\n- **Rule**: …\n";
+        let case = write_case(dir.path(), &entities, Some(CONSTRAINTS), Some(spine));
+        let report =
+            trace_check_with(&case, crate::config::ExecutableRequired::Warn).expect("trace");
+        let hits: Vec<&TraceIssue> = report
+            .issues
+            .iter()
+            .filter(|i| i.rule == "ad-text-only")
+            .collect();
+        assert!(!hits.is_empty(), "находка есть");
+        assert!(
+            hits.iter().all(|h| h.message.contains("AD-1 «")),
+            "находка только по несущему: {:?}",
+            hits.iter().map(|h| &h.message).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            hits[0].severity,
+            Severity::Warn,
+            "warn — сигнал, а не блокировка"
+        );
     }
 
     /// E3: битая сущность — warn `load-skip`, звенья валидного подмножества
@@ -741,7 +915,9 @@ mod tests {
         assert_eq!(skip.severity, Severity::Warn);
         assert!(skip.message.contains("1 сущностей пропущено"), "{skip:?}");
         assert!(!report.has_errors(), "{:?}", report.issues);
-        for level in &report.levels {
+        // Информационное звено «AD → исполняемое правило» (ADR-050) в проверку
+        // полноты цепочки не входит: у него своя метрика и своя находка.
+        for level in report.levels.iter().filter(|l| l.name != LEVEL_EXECUTABLE) {
             assert_eq!(level.percent(), Some(100), "{}", level.name);
         }
         assert_eq!(report.entities, 6, "валидные сущности посчитаны");

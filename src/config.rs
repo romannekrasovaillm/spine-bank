@@ -53,6 +53,8 @@ pub struct Config {
     /// Семантика артефактов Evidence Bundle (Н1 волны A 0.3.4, ADR-041):
     /// «артефакт есть» ≠ «артефакт написан».
     pub evidence: EvidenceConfig,
+    /// Требование исполняемой проверки инвариантов (ADR-050).
+    pub trace: TraceConfig,
     /// Пути к ассетам, отчётам и сессиям.
     pub paths: PathsConfig,
     /// Откуда конфиг загружен (нужно `harness_run` для горячего
@@ -934,6 +936,50 @@ impl EvidenceConfig {
     }
 }
 
+/// Строгость требования «у инварианта есть исполняемая проверка» (ADR-050).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ExecutableRequired {
+    /// Требования нет: звено «AD → исполняемое правило» информационное (дефолт).
+    #[default]
+    Off,
+    /// Находка `ad-text-only` уровня warn: сигнал, вердикт не меняется.
+    Warn,
+    /// Находка `ad-text-only` уровня error: гейт краснеет.
+    Error,
+}
+
+/// Секция `[trace]`: требование исполняемой проверки инвариантов (ADR-050).
+///
+/// Дефолт `off` — обратная совместимость: до 0.3.5 находки `ad-text-only` не
+/// существовало, и включение требования — осознанное решение проекта.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TraceConfig {
+    /// Строгость находки `ad-text-only` по инвариантам без исполняемой проверки.
+    pub executable_required: ExecutableRequired,
+}
+
+impl Default for TraceConfig {
+    fn default() -> Self {
+        Self {
+            executable_required: ExecutableRequired::Off,
+        }
+    }
+}
+
+impl ExecutableRequired {
+    /// Severity находки `ad-text-only` (`None` — находки нет).
+    #[must_use]
+    pub fn severity(self) -> Option<&'static str> {
+        match self {
+            Self::Off => None,
+            Self::Warn => Some("warn"),
+            Self::Error => Some("error"),
+        }
+    }
+}
+
 /// Списки обязательных составляющих для Fast / Standard / Critical.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1248,6 +1294,7 @@ impl Default for Config {
             significance: SignificanceConfig::default(),
             gate: GateConfig::default(),
             evidence: EvidenceConfig::default(),
+            trace: TraceConfig::default(),
             paths: PathsConfig::default(),
             loaded_from: None,
         }

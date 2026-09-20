@@ -2127,7 +2127,7 @@ async fn main() -> Result<()> {
             }
         }
         Some(Cmd::Model { cmd }) => cmd_model(cmd)?,
-        Some(Cmd::Trace { cmd }) => cmd_trace(cmd)?,
+        Some(Cmd::Trace { cmd }) => cmd_trace(&cfg, cmd)?,
         Some(Cmd::Nfr { cmd }) => cmd_nfr(cmd)?,
         Some(Cmd::Skills { cmd }) => cmd_skills(&cfg, cmd)?,
         Some(Cmd::Plugins { cmd }) => cmd_plugins(&cfg, cmd)?,
@@ -3915,12 +3915,13 @@ fn cmd_model(cmd: ModelCmd) -> Result<()> {
 }
 
 /// `arch-be trace`: трассируемость модели как fitness-функция (ADR-006).
-fn cmd_trace(cmd: TraceCmd) -> Result<()> {
+fn cmd_trace(cfg: &Config, cmd: TraceCmd) -> Result<()> {
     match cmd {
         TraceCmd::Check { dir, format } => {
             let format = arch_harness::report_fmt::ReportFormat::parse(&format)
                 .map_err(anyhow::Error::msg)?;
-            let report = arch_harness::trace::trace_check(&dir)
+            // Требование исполняемой проверки инвариантов — из `[trace]` (ADR-050).
+            let report = arch_harness::trace::trace_check_with(&dir, cfg.trace.executable_required)
                 .with_context(|| format!("трассировка кейса {}", dir.display()))?;
             match format {
                 arch_harness::report_fmt::ReportFormat::Text => {

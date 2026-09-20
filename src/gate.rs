@@ -727,7 +727,7 @@ fn component_fitness(repo: &Path, constraints: &ConstraintsPath) -> GateComponen
     // «копии реестра различаются» — то есть зелёный там, где контур проверяет
     // не то, что написал архитектор (и где `redteam` D7 не ловил ослабления).
     let divergence = registry_divergence(repo, constraints);
-    let notes = mention_rule_notes(&constraints.path);
+    let notes = mention_rule_notes(repo, &constraints.path);
     let detail = |summary: &str| {
         summary.to_string()
             + &constraints.drift.as_ref().map_or_else(String::new, |d| {
@@ -803,7 +803,7 @@ fn registry_divergence(repo: &Path, constraints: &ConstraintsPath) -> Option<Gat
 /// трассировки: они зеленеют и когда инвариант соблюдён, и когда о нём просто
 /// упомянули (Н10, D11 red-team). Считается по реестру; нечитаемый реестр —
 /// пустой список (составляющая и так ответит своей находкой).
-fn mention_rule_notes(constraints: &Path) -> Vec<String> {
+fn mention_rule_notes(repo: &Path, constraints: &Path) -> Vec<String> {
     let Ok(resolved) = control::load_constraints_resolved(constraints) else {
         return Vec::new();
     };
@@ -820,11 +820,50 @@ fn mention_rule_notes(constraints: &Path) -> Vec<String> {
     if mention == 0 {
         return Vec::new();
     }
-    vec![format!(
+    let mut notes = vec![format!(
         "правил, судящих по ТЕКСТУ файла (наличие/запрет слова), — {mention} из \
          {total}; они зеленеют и когда инвариант соблюдён, и когда о нём просто \
          написали (исполняемых проверок поведения: {behaviour})"
-    )]
+    )];
+    if let Some(line) = ads_without_behaviour(repo) {
+        notes.push(line);
+    }
+    notes
+}
+
+/// Потолок имён инвариантов в строке блока 2 паспорта (W1/ADR-050): дальше —
+/// счётчик. Полный список всегда доступен `arch-be trace`.
+const MAX_AD_NAMES: usize = 8;
+
+/// Блок 2 паспорта, вторая строка: инварианты модели, ни одно правило которых
+/// не проверяет ПОВЕДЕНИЕ (несущие первыми). Модели нет — строки нет; это
+/// представление, вердикт не меняется.
+fn ads_without_behaviour(repo: &Path) -> Option<String> {
+    let coverage = crate::rule_templates::ad_coverage(repo).ok().flatten()?;
+    let uncovered = coverage.uncovered();
+    if uncovered.is_empty() {
+        return None;
+    }
+    let mut names: Vec<String> = uncovered
+        .iter()
+        .take(MAX_AD_NAMES)
+        .map(|e| {
+            if e.load_bearing {
+                format!("{} (несущий)", e.ad)
+            } else {
+                e.ad.clone()
+            }
+        })
+        .collect();
+    let rest = uncovered.len().saturating_sub(names.len());
+    if rest > 0 {
+        names.push(format!("и ещё {rest}"));
+    }
+    Some(format!(
+        "инварианты без проверки поведения: {} — их правила судят по тексту, а не по \
+         поведению системы (несущие первыми; шаблон: `arch-be rules template list`)",
+        names.join(", ")
+    ))
 }
 
 /// Потолок записей покрытия «файл ← дельты» в детали составляющей
