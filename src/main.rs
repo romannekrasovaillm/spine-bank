@@ -511,7 +511,7 @@ enum Cmd {
         /// аддитивные записи в рабочий каталог клиента — `adr_new`,
         ///   `agentsmd_generate`, `archify_compare`, `archify_deliver`,
         ///   `archify_show`, `delta_propose`, `evidence_pack`, `handoff_create`,
-        ///   `reverse_survey`, `skill_distill`.
+        ///   `reverse_survey`, `rule_template_apply`, `skill_distill`.
         #[arg(long)]
         rw: bool,
         /// Не раскладывать скиллы.
@@ -961,12 +961,13 @@ enum McpCmd {
     ///   `delta_guard`, `evidence_verify`, `fleet_audit`, `landscape_report`,
     ///   `model_drift`, `model_graph`, `model_validate`, `nfr_check`,
     ///   `openapi_lint`, `openspec_coverage`, `plugin_list`, `rubric_list`,
-    ///   `rules_report`.
+    ///   `rule_template_list`, `rule_template_show`, `rules_report`.
     Serve {
         /// Открыть rw-контур моста (аддитивные записи в рабочий каталог
         /// клиента: `adr_new`, `agentsmd_generate`, `archify_compare`,
         ///   `archify_deliver`, `archify_show`, `delta_propose`, `evidence_pack`,
-        ///   `handoff_create`, `reverse_survey`, `skill_distill`). По умолчанию
+        ///   `handoff_create`, `reverse_survey`, `rule_template_apply`,
+        ///   `skill_distill`). По умолчанию
         /// сервер строго read-only.
         #[arg(long)]
         rw: bool,
