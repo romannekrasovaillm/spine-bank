@@ -806,8 +806,20 @@ enum RubricCmd {
     Run {
         /// Рубрика (имя файла в assets/rubrics или путь).
         rubric: String,
-        /// Целевой документ (md/txt).
-        target: PathBuf,
+        /// Целевой документ (md/txt); для смысловой рубрики не нужен — там
+        /// задаётся `--pack`/`--subject`.
+        target: Option<PathBuf>,
+        /// Вид досье смысловой рубрики (ADR-051): `adr_vs_spine` |
+        /// `entity_links` | `nfr_mechanism` | `code_vs_spine`.
+        #[arg(long)]
+        pack: Option<String>,
+        /// Субъект досье: путь к ADR или файлу кода либо идентификатор
+        /// сущности модели — вместе с `--pack`.
+        #[arg(long)]
+        subject: Option<String>,
+        /// Корень репозитория для сборки досье (по умолчанию — текущий каталог).
+        #[arg(long)]
+        root: Option<PathBuf>,
         /// Модель-судья.
         #[arg(long)]
         model: Option<String>,
@@ -2933,6 +2945,9 @@ async fn cmd_rubric(cfg: &Arc<Config>, cmd: RubricCmd) -> Result<()> {
         RubricCmd::Run {
             rubric,
             target,
+            pack,
+            subject,
+            root,
             model,
             dynamic_subject,
             author_model,
@@ -2942,8 +2957,42 @@ async fn cmd_rubric(cfg: &Arc<Config>, cmd: RubricCmd) -> Result<()> {
                 Some(name) => registry.get(name)?,
                 None => registry.default(),
             };
-            let text = std::fs::read_to_string(&target)
-                .with_context(|| format!("чтение {}", target.display()))?;
+            // Досье (ADR-051): субъект и вид заданы — собираем из репозитория
+            // и судим с проверкой цитат по ролям; иначе обычный документ.
+            let dossier = match (&pack, &subject) {
+                (Some(kind), Some(subject)) => {
+                    let repo = root.clone().unwrap_or_else(|| PathBuf::from("."));
+                    let repo = repo.canonicalize().unwrap_or(repo);
+                    let kind = arch_harness::rubric_pack::PackKind::parse(kind)?;
+                    let packs = arch_harness::rubric_pack::build(&repo, kind, subject)?;
+                    if packs.len() > 1 {
+                        anyhow::bail!(
+                            "досье дробится на {} фрагментов — вызывайте по каждому, \
+                             указав субъект с диапазоном строк (например, '{subject}#1-40')",
+                            packs.len()
+                        );
+                    }
+                    Some(packs.into_iter().next().expect("один фрагмент"))
+                }
+                (None, None) => None,
+                _ => {
+                    anyhow::bail!("`--pack` и `--subject` задаются вместе: вид досье и его субъект")
+                }
+            };
+            if dossier.is_some() && target.is_some() {
+                anyhow::bail!(
+                    "`--pack`/`--subject` несовместимы с целевым документом: досье \
+                     собирается из репозитория"
+                );
+            }
+            let text = match (&dossier, &target) {
+                (Some(pack), _) => pack.text.clone(),
+                (None, Some(target)) => std::fs::read_to_string(target)
+                    .with_context(|| format!("чтение {}", target.display()))?,
+                (None, None) => anyhow::bail!(
+                    "укажите целевой документ или `--pack`/`--subject` (смысловая рубрика)"
+                ),
+            };
             let rub = if let Some(subject) = dynamic_subject {
                 let anchor_path = resolve_asset(&cfg.paths.rubrics_dir(), &rubric, "yaml");
                 let anchor = arch_harness::rubric::load(&anchor_path).ok();
@@ -2953,7 +3002,13 @@ async fn cmd_rubric(cfg: &Arc<Config>, cmd: RubricCmd) -> Result<()> {
                 let path = resolve_asset(&cfg.paths.rubrics_dir(), &rubric, "yaml");
                 arch_harness::rubric::load(&path)?
             };
-            let report = arch_harness::rubric::evaluate(&rub, &text, judge.as_ref()).await?;
+            let report = match &dossier {
+                Some(pack) => {
+                    arch_harness::rubric::evaluate_pack(&rub, pack, judge.as_ref(), &cfg.judge)
+                        .await?
+                }
+                None => arch_harness::rubric::evaluate(&rub, &text, judge.as_ref()).await?,
+            };
             println!("{}", report.to_markdown());
             let out = cfg
                 .paths
@@ -2964,17 +3019,36 @@ async fn cmd_rubric(cfg: &Arc<Config>, cmd: RubricCmd) -> Result<()> {
             }
             std::fs::write(&out, report.to_markdown())?;
             eprintln!("Отчёт: {}", out.display());
-            // Машиночитаемый отчёт (Н7, ADR-042): его читает составляющая
-            // гейта `decision_quality`. Пишем в репозиторий, к которому
-            // относится документ, — иначе гейт его не найдёт.
-            let abs_target = target.canonicalize().unwrap_or_else(|_| target.clone());
-            let repo = arch_harness::rubric::repo_root_of(&abs_target);
-            match arch_harness::rubric::write_artifact(
-                &repo,
-                &report,
-                Some(&abs_target),
-                author_model.as_deref(),
-            ) {
+            // Машиночитаемый отчёт (Н7, ADR-042; досье — ADR-051): его читает
+            // гейт. Пишем в репозиторий, к которому относится вход, — иначе
+            // гейт его не найдёт.
+            let written = match (&dossier, &target) {
+                (Some(pack), _) => {
+                    let repo = root
+                        .clone()
+                        .unwrap_or_else(|| PathBuf::from("."))
+                        .canonicalize()
+                        .unwrap_or_else(|_| PathBuf::from("."));
+                    arch_harness::rubric::write_artifact_for_subject(
+                        &repo,
+                        &report,
+                        &arch_harness::rubric::ArtifactSubject::Pack(pack),
+                        author_model.as_deref(),
+                    )
+                }
+                (None, Some(target)) => {
+                    let abs = target.canonicalize().unwrap_or_else(|_| target.clone());
+                    let repo = arch_harness::rubric::repo_root_of(&abs);
+                    arch_harness::rubric::write_artifact(
+                        &repo,
+                        &report,
+                        Some(&abs),
+                        author_model.as_deref(),
+                    )
+                }
+                (None, None) => unreachable!("вход проверен выше"),
+            };
+            match written {
                 Ok(path) => eprintln!("Отчёт для гейта: {}", path.display()),
                 Err(e) => eprintln!("⚠ машиночитаемый отчёт не записан: {e}"),
             }
