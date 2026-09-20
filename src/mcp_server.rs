@@ -1163,18 +1163,21 @@ impl McpServe {
             .triggers
             .into_map()
             .map_err(|e| CallError::invalid_params(format!("significance_score: {e}")))?;
+        // T-04: незнакомое имя триггера — ошибка вызова, а не тихо
+        // завышенный маршрут. Раньше «foo» попадал в unknown_triggers и
+        // ОДНОВРЕМЕННО в счёт: пять выдуманных имён давали Critical.
+        let unknown = control::unknown_trigger_names(&triggers);
+        if !unknown.is_empty() {
+            return Err(CallError::invalid_params(format!(
+                "significance_score: {}",
+                control::unknown_triggers_error(&unknown)
+            )));
+        }
         let s = control::significance_score(&triggers);
-        let unknown: Vec<&str> = s
-            .fired
-            .iter()
-            .map(String::as_str)
-            .filter(|f| !control::SIGNIFICANCE_TRIGGERS.contains(f))
-            .collect();
         Ok(json!({
             "score": s.score,
             "fired": s.fired,
             "route": s.route,
-            "unknown_triggers": unknown,
             "summary": format!("Score: {} → маршрут {}", s.score, s.route),
         }))
     }
@@ -1207,6 +1210,16 @@ impl McpServe {
         let args: Args = parse_args(args, "significance_from_diff")?;
         let path = PathBuf::from(args.path.unwrap_or_else(|| ".".to_string()));
         let declared = args.declared.unwrap_or_default();
+        // T-04: незнакомое имя в `declared` — ошибка вызова, как и в
+        // `significance_score`: иначе «new_components» молча терялся бы, а
+        // настоящий триггер остался бы незаявленным.
+        let unknown_declared = control::unknown_trigger_names(&declared);
+        if !unknown_declared.is_empty() {
+            return Err(CallError::invalid_params(format!(
+                "significance_from_diff: {}",
+                control::unknown_triggers_error(&unknown_declared)
+            )));
+        }
         // Пороги маршрутов — из конфига сервера ([significance], ADR-034);
         // невалидные границы — понятный доменный сбой, не protocol error.
         let (fast_max, standard_max) = self
@@ -1254,12 +1267,9 @@ impl McpServe {
                     .map_or_else(|| f.clone(), |s| format!("{f} ({})", s.label()))
             })
             .collect();
-        let unknown: Vec<&str> = declared
-            .iter()
-            .filter(|(_, fired)| **fired)
-            .map(|(k, _)| k.as_str())
-            .filter(|f| !control::SIGNIFICANCE_TRIGGERS.contains(f))
-            .collect();
+        // Незнакомые имена отвергнуты выше — здесь пусто по построению;
+        // поле остаётся в ответе для совместимости читателей.
+        let unknown: Vec<&str> = Vec::new();
         let undeclared_note = if scored.undeclared.is_empty() {
             String::new()
         } else {
@@ -2218,7 +2228,7 @@ fn tool_specs() -> Vec<Value> {
                             {"type": "object", "additionalProperties": {"type": "boolean"}},
                             {"type": "array", "items": {"type": "string"}},
                         ],
-                        "description": "Триггеры: карта «триггер → true/false» (ключи — из 15 канонических) ЛИБО массив строк \"name=true\" / \"name=false\" / голое \"name\" (= true)",
+                        "description": "Триггеры: карта «триггер → true/false» (ключи — из 15 канонических) ЛИБО массив строк \"name=true\" / \"name=false\" / голое \"name\" (= true). Незнакомое имя — ошибка вызова (-32602) с перечнем канонических триггеров и ближайшим совпадением: выдуманный триггер не поднимает маршрут",
                     }
                 },
                 "required": ["triggers"],
@@ -2417,7 +2427,7 @@ fn tool_specs() -> Vec<Value> {
                     },
                     "declared": {
                         "type": "object",
-                        "description": "Опц.: заявленные триггеры («триггер → true/false», ключи — из 15 канонических, как у significance_score)",
+                        "description": "Опц.: заявленные триггеры («триггер → true/false», ключи — из 15 канонических, как у significance_score). Незнакомое имя — ошибка вызова (-32602): опечатка молча оставила бы настоящий триггер незаявленным",
                         "additionalProperties": {"type": "boolean"},
                     },
                 },
@@ -2830,20 +2840,37 @@ mod tests {
         );
     }
 
+    /// T-04: незнакомое имя триггера — ошибка вызова, а не завышенный
+    /// маршрут. Раньше выдуманные имена попадали в `unknown_triggers` И в
+    /// счёт: пять несуществующих триггеров давали Critical.
     #[tokio::test]
-    async fn significance_score_routes_and_flags_unknown() {
+    async fn significance_score_routes_and_rejects_unknown() {
         let responses = run_lines(&[
             r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"significance_score","arguments":{"triggers":{"new_component":true,"security_boundary_change":true}}}}"#,
             r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"significance_score","arguments":{"triggers":{}}}}"#,
             r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"significance_score","arguments":{"triggers":{"alien_trigger":true}}}}"#,
+            r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"significance_score","arguments":{"triggers":{"new_components":true,"new_datastore":true}}}}"#,
         ])
         .await;
         let sc = &responses[0]["result"]["structuredContent"];
         assert_eq!(sc["route"], "Critical");
         assert_eq!(sc["score"], 2);
         assert_eq!(responses[1]["result"]["structuredContent"]["route"], "Fast");
-        let alien = &responses[2]["result"]["structuredContent"];
-        assert_eq!(alien["unknown_triggers"], json!(["alien_trigger"]));
+        let alien = &responses[2]["error"];
+        assert_eq!(alien["code"], INVALID_PARAMS, "{alien}");
+        assert!(
+            alien["message"]
+                .as_str()
+                .expect("сообщение")
+                .contains("Канонические (15)")
+        );
+        // Опечатка в настоящем имени: названо ближайшее каноническое, маршрута
+        // нет — иначе `new_components` тихо занизил бы значимость.
+        let typo = &responses[3]["error"];
+        assert_eq!(typo["code"], INVALID_PARAMS, "{typo}");
+        let text = typo["message"].as_str().expect("сообщение");
+        assert!(text.contains("'new_components'"), "{text}");
+        assert!(text.contains("'new_component'"), "{text}");
         // text-дубль verdict'а — валидный JSON (его разбирает клиент mcp.rs).
         let text = responses[0]["result"]["content"][0]["text"]
             .as_str()
@@ -2855,7 +2882,7 @@ mod tests {
     #[tokio::test]
     async fn significance_score_accepts_trigger_list_form() {
         // Массивная форма (`control score --trigger` стиль): "name=true",
-        // "name=false", голое "name" (= true). unknown_triggers сохраняется.
+        // "name=false", голое "name" (= true). Незнакомое имя отвергается (T-04).
         let responses = run_lines(&[
             r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"significance_score","arguments":{"triggers":["new_component=true","security_boundary_change"]}}}"#,
             r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"significance_score","arguments":{"triggers":["new_component=false"]}}}"#,
@@ -2870,8 +2897,9 @@ mod tests {
         let off = &responses[1]["result"]["structuredContent"];
         assert_eq!(off["route"], "Fast", "{off}");
         assert_eq!(off["fired"], json!([]), "{off}");
-        let alien = &responses[2]["result"]["structuredContent"];
-        assert_eq!(alien["unknown_triggers"], json!(["alien_trigger"]));
+        // T-04: незнакомое имя в массивной форме — та же ошибка вызова.
+        let alien = &responses[2]["error"];
+        assert_eq!(alien["code"], INVALID_PARAMS, "{alien}");
         // Не-bool значение после '=' — понятная ошибка разбора (-32602).
         assert_eq!(responses[3]["error"]["code"], INVALID_PARAMS);
         assert!(

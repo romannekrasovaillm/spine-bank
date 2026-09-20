@@ -172,9 +172,14 @@ pub fn significance_score_with_limits(
     fast_max: usize,
     standard_max: usize,
 ) -> Significance {
+    // T-04: в счёт идут ТОЛЬКО канонические триггеры. Раньше выдуманное имя
+    // («foo») увеличивало score и поднимало маршрут: подсчёт по карте без
+    // словаря превращал опечатку в маршрут. Отвергает такие вызовы граница
+    // (`control score`, MCP `significance_score`) — здесь же защита от того,
+    // чтобы счёт вообще зависел от незнакомого ключа.
     let fired: Vec<String> = answers
         .iter()
-        .filter(|(_, v)| **v)
+        .filter(|(k, v)| **v && SIGNIFICANCE_TRIGGERS.contains(&k.as_str()))
         .map(|(k, _)| k.clone())
         .collect();
     let critical = FORCING_CRITICAL_TRIGGERS
@@ -193,6 +198,84 @@ pub fn significance_score_with_limits(
         fired,
         route,
     }
+}
+
+/// Незнакомые имена триггеров в ответе (T-04): ключи карты, которых нет в
+/// [`SIGNIFICANCE_TRIGGERS`], — в порядке словаря.
+///
+/// Считается по КЛЮЧАМ, а не по сработавшим: опечатка со значением `false`
+/// (`new_components=false`) означает, что архитектор не отметил настоящий
+/// триггер, — молча принять её значит потерять признание значимости.
+#[must_use]
+pub fn unknown_trigger_names(answers: &BTreeMap<String, bool>) -> Vec<String> {
+    answers
+        .keys()
+        .filter(|k| !SIGNIFICANCE_TRIGGERS.contains(&k.as_str()))
+        .cloned()
+        .collect()
+}
+
+/// Ближайшее каноническое имя триггера для опечатки (T-04).
+///
+/// Два признака похожести: незавершённый ввод (`security_boundary` →
+/// `security_boundary_change` — одно имя префикс другого) и опечатка
+/// (`new_components` → `new_component` — расстояние Левенштейна в пределах
+/// трети длины). Порог по длине отсекает случайные совпадения: для `foo`
+/// (3) допустима правка в один символ, но ни одно каноническое имя так близко
+/// не лежит — подсказки нет, и это честнее выдуманной.
+#[must_use]
+pub fn suggest_trigger(name: &str) -> Option<&'static str> {
+    if SIGNIFICANCE_TRIGGERS.contains(&name) {
+        return None;
+    }
+    let limit = (name.chars().count() / 3).max(1);
+    SIGNIFICANCE_TRIGGERS
+        .iter()
+        .map(|t| {
+            let prefix = t.starts_with(name) || name.starts_with(*t);
+            let dist = levenshtein(name, t);
+            (*t, prefix, dist)
+        })
+        .filter(|(_, prefix, dist)| *prefix || *dist <= limit)
+        .min_by_key(|(t, _, dist)| (*dist, t.len()))
+        .map(|(t, _, _)| t)
+}
+
+/// Расстояние Левенштейна по символам (без зависимостей).
+fn levenshtein(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0usize; b.len() + 1];
+    for (i, ca) in a.iter().enumerate() {
+        cur[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != cb);
+            cur[j + 1] = (prev[j] + cost).min(prev[j + 1] + 1).min(cur[j] + 1);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
+}
+
+/// Текст ошибки о незнакомых триггерах (T-04) — единый для CLI и MCP:
+/// перечисляет лишние имена, ближайшее каноническое к каждому и весь
+/// канонический список (спрашивать «а какие есть» второй раз незачем).
+#[must_use]
+pub fn unknown_triggers_error(unknown: &[String]) -> String {
+    let named: Vec<String> = unknown
+        .iter()
+        .map(|u| match suggest_trigger(u) {
+            Some(s) => format!("'{u}' (ближайшее каноническое: '{s}')"),
+            None => format!("'{u}' (похожего канонического нет)"),
+        })
+        .collect();
+    format!(
+        "неизвестные триггеры: {} — в счёт они не идут. Канонические ({}): {}",
+        named.join(", "),
+        SIGNIFICANCE_TRIGGERS.len(),
+        SIGNIFICANCE_TRIGGERS.join(", ")
+    )
 }
 
 // --- S-1: механический anti-bypass floor (триггеры из git-диффа, ADR-034) ---
@@ -4947,7 +5030,7 @@ impl Tool for SignificanceScoreTool {
                 "properties": {
                     "triggers": {
                         "type": "object",
-                        "description": "Карта «триггер → true/false», ключи — из 15 канонических триггеров",
+                        "description": "Карта «триггер → true/false», ключи — из 15 канонических триггеров; незнакомое имя — ошибка инструмента с перечнем канонических (в счёт не идёт)",
                         "additionalProperties": {"type": "boolean"}
                     }
                 },
@@ -4971,29 +5054,26 @@ impl Tool for SignificanceScoreTool {
             Ok(l) => l,
             Err(e) => return Ok(ToolOutput::err(format!("significance_score: {e}"))),
         };
+        // T-04: незнакомое имя — ошибка, а не подсветка после счёта. Раньше
+        // выдуманный триггер увеличивал score и лишь потом назывался «вне
+        // канонических», то есть маршрут уже был завышен.
+        let unknown = unknown_trigger_names(&args.triggers);
+        if !unknown.is_empty() {
+            return Ok(ToolOutput::err(format!(
+                "significance_score: {}",
+                unknown_triggers_error(&unknown)
+            )));
+        }
         let s = significance_score_with_limits(&args.triggers, fast_max, standard_max);
         let fired = if s.fired.is_empty() {
             "нет".to_string()
         } else {
             s.fired.join(", ")
         };
-        let mut out = format!(
+        let out = format!(
             "Score: {} → маршрут {:?}; сработали: {fired}",
             s.score, s.route
         );
-        let unknown: Vec<&str> = s
-            .fired
-            .iter()
-            .map(String::as_str)
-            .filter(|f| !SIGNIFICANCE_TRIGGERS.contains(f))
-            .collect();
-        if !unknown.is_empty() {
-            let _ = write!(
-                out,
-                "\nВнимание: триггеры вне канонических 15: {}",
-                unknown.join(", ")
-            );
-        }
         Ok(ToolOutput::ok(out))
     }
 }
@@ -6187,16 +6267,27 @@ mod tests {
         let tool = SignificanceScoreTool;
         let out = tool
             .call(
-                json!({"triggers": {"new_component": true, "new_vendor": true, "exotic": true}}),
+                json!({"triggers": {"new_component": true, "new_vendor": true}}),
                 &ctx,
             )
             .await
             .unwrap();
         assert!(!out.is_error, "{:?}", out.content);
         assert!(out.content.contains("Standard"), "{}", out.content);
+        assert!(out.content.contains("new_component"), "{}", out.content);
+
+        // T-04: незнакомое имя — ошибка, маршрута нет.
+        let out = tool
+            .call(
+                json!({"triggers": {"new_component": true, "exotic": true}}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert!(out.is_error, "{:?}", out.content);
         assert!(
-            out.content.contains("exotic"),
-            "неизвестный триггер подсвечен: {}",
+            out.content.contains("exotic") && out.content.contains("Канонические"),
+            "незнакомый триггер назван с перечнем канонических: {}",
             out.content
         );
     }
@@ -6799,6 +6890,48 @@ mod tests {
     /// обязаны давать один и тот же набор триггеров: раньше диапазон получал
     /// второй `...HEAD`, git отказывал, и гейт молча уходил в fail-safe
     /// Critical — то есть строгость зависела от записи базы.
+    /// T-04: выдуманные триггеры не поднимают маршрут, а называются ошибкой.
+    /// Раньше счёт шёл по всей карте: `foo=true` был равен каноническому.
+    #[test]
+    fn unknown_triggers_do_not_score() {
+        let mut fake = BTreeMap::new();
+        for name in ["foo", "bar", "baz", "qux", "quux"] {
+            fake.insert(name.to_string(), true);
+        }
+        let s = significance_score(&fake);
+        assert_eq!(s.score, 0, "выдуманные имена не считаются: {:?}", s.fired);
+        assert!(s.fired.is_empty(), "{:?}", s.fired);
+        assert_eq!(s.route, Route::Fast);
+
+        // Смесь: считается только каноническое, лишние называются поимённо.
+        let mut mixed = BTreeMap::new();
+        mixed.insert("new_component".to_string(), true);
+        mixed.insert("new_components".to_string(), true);
+        mixed.insert("new_datastore".to_string(), false);
+        let unknown = unknown_trigger_names(&mixed);
+        assert_eq!(unknown, vec!["new_components".to_string()]);
+        assert_eq!(significance_score(&mixed).score, 1);
+        assert_eq!(suggest_trigger("new_components"), Some("new_component"));
+        assert_eq!(
+            suggest_trigger("security_boundary"),
+            Some("security_boundary_change")
+        );
+        assert_eq!(suggest_trigger("foo"), None);
+        let text = unknown_triggers_error(&unknown);
+        assert!(text.contains("'new_components'"), "{text}");
+        assert!(text.contains("'new_component'"), "{text}");
+        assert!(text.contains("Канонические (15)"), "{text}");
+
+        // Опечатка со значением false — тоже незнакомая (архитектор не
+        // отметил настоящий триггер, и молча это принять нельзя).
+        let mut off = BTreeMap::new();
+        off.insert("new_components".to_string(), false);
+        assert_eq!(
+            unknown_trigger_names(&off),
+            vec!["new_components".to_string()]
+        );
+    }
+
     #[test]
     fn diff_base_forms_are_equivalent() {
         let dir = tempfile::tempdir().unwrap();
@@ -6894,8 +7027,12 @@ mod tests {
             (4, Route::Standard),
             (5, Route::Critical),
         ] {
-            let answers: BTreeMap<String, bool> =
-                (0..count).map(|i| (format!("t{i}"), true)).collect();
+            // T-04: имена обязаны быть каноническими — иначе в счёт не идут.
+            let answers: BTreeMap<String, bool> = SIGNIFICANCE_TRIGGERS
+                .iter()
+                .take(count)
+                .map(|t| ((*t).to_string(), true))
+                .collect();
             assert_eq!(
                 significance_score(&answers).route,
                 significance_score_with_limits(&answers, DEFAULT_FAST_MAX, DEFAULT_STANDARD_MAX)
@@ -6914,7 +7051,11 @@ mod tests {
 
     #[test]
     fn significance_with_limits_custom_thresholds_change_route() {
-        let answers: BTreeMap<String, bool> = (0..3).map(|i| (format!("t{i}"), true)).collect();
+        // T-04: в счёт идут только канонические имена — тест порогов берёт их.
+        let answers: BTreeMap<String, bool> = ["new_component", "new_vendor", "new_datastore"]
+            .iter()
+            .map(|t| ((*t).to_string(), true))
+            .collect();
         // fast_max=2, standard_max=5: те же 3 триггера — Standard, не Fast.
         assert_eq!(
             significance_score_with_limits(&answers, 2, 5).route,

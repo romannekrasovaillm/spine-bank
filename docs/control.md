@@ -59,6 +59,13 @@ arch-be control score --trigger new_component=true --trigger trust_zone_change=t
 # Score: 2 (new_component, trust_zone_change триггеров) → маршрут Standard
 ```
 
+**В счёт идут только 15 канонических имён** (T-04). Незнакомое имя — ошибка
+команды (и ошибка вызова `-32602` в MCP) с перечнем канонических триггеров и
+ближайшим совпадением: `new_components` → `new_component`,
+`security_boundary` → `security_boundary_change`. Раньше выдуманное имя
+увеличивало score и поднимало маршрут («пять несуществующих триггеров» =
+Critical), а опечатка в настоящем имени так же молча занижала значимость.
+
 В TUI: `/score new_component=true ...` (без аргументов — справка по триггерам).
 
 ### Anti-bypass floor: `--from-diff` (S-1, ADR-034)

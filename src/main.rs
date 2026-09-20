@@ -3356,6 +3356,15 @@ fn cmd_control(cfg: &arch_harness::config::Config, cmd: ControlCmd) -> Result<()
                     .with_context(|| format!("триггер '{t}' не вида имя=true"))?;
                 answers.insert(k.to_string(), v == "true");
             }
+            // T-04: незнакомое имя — ошибка, а не завышенный маршрут. Раньше
+            // `--trigger foo=true` попадал в счёт наравне с каноническим.
+            let unknown = arch_harness::control::unknown_trigger_names(&answers);
+            if !unknown.is_empty() {
+                anyhow::bail!(
+                    "control score: {}",
+                    arch_harness::control::unknown_triggers_error(&unknown)
+                );
+            }
             if let Some(git_ref) = from_diff {
                 // S-1 anti-bypass: «HEAD» (дефолт флага) — рабочее дерево
                 // против HEAD; иное значение — GIT_REF...HEAD.
