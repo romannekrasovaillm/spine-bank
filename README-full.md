@@ -114,12 +114,18 @@ TUI, CLI, библиотека.
 дисциплина артефактов: спецификации, architecture-spine, ADR, рубрики,
 fitness functions, handoff-пакеты кодовым агентам.
 
-**Что нового в 0.3.4**: паспорт вердикта (`arch-be gate --explain` — страница
-«чего зелёный НЕ означает»), проводник нового кейса (`arch-be bootstrap`),
-метрика доверия к контуру (`arch-be trust`), мутационное измерение пакета
-(`arch-be redteam`), семантика артефактов Evidence Bundle (заглушка — находка,
-а не «файл на месте»). Полный список и раздел «Что может покраснеть после
-обновления» — [CHANGELOG.md](CHANGELOG.md).
+**Что нового в 0.3.5**: инвариант становится исполняемой проверкой
+(`arch-be rules template` — библиотека шаблонов на python и Java, `verify`
+доказывает зубы правила), а отчёт рубрики несёт проверяемое происхождение
+оценки — уровень независимости («заявлена» или «обеспечена запуском»), хэши
+сырых ответов судьи и находки на правку балла руками. Плюс `rubric handover` /
+`rubric accept` для передачи судейства во второй харнесс и узкая запись
+`--rw=reports`. **Что нового в 0.3.4**: паспорт вердикта (`arch-be gate
+--explain` — страница «чего зелёный НЕ означает»), проводник нового кейса
+(`arch-be bootstrap`), метрика доверия к контуру (`arch-be trust`), мутационное
+измерение пакета (`arch-be redteam`), семантика артефактов Evidence Bundle
+(заглушка — находка, а не «файл на месте»). Полный список и раздел «Что может
+покраснеть после обновления» — [CHANGELOG.md](CHANGELOG.md).
 
 Идеи — разбор SDD-харнессов и корпоративных агентных фреймворков
 (`docs/SOURCE_BRIEF.md`, август 2026: AI-Disrupt PDLC, AWS AI-DLC/Kiro,
@@ -747,13 +753,19 @@ corporate environments): a thin, Rust-built agent that lives in your terminal
 and speaks the language of architecture work — ADRs, architecture-spine
 invariants, rubrics, fitness functions, handoff packages for coding agents.
 
-**New in 0.3.4**: the verdict passport (`arch-be gate --explain` — a page
-stating what a green does NOT mean), a case conductor (`arch-be bootstrap`), a
-trust metric with anchors and evidence (`arch-be trust`), mutation testing of
-the package itself (`arch-be redteam`), and artifact semantics for the evidence
-bundle (a stub is a finding, not "the file is there"). See
-[CHANGELOG.md](CHANGELOG.md) for the full list and the "what may turn red"
-section.
+**New in 0.3.5**: an invariant becomes an executable check (`arch-be rules
+template` — a template library for python and Java whose `verify` proves the
+rule has teeth), and a rubric report now carries the provenance of its score —
+an independence level ("declared" or "ensured by launch"), hashes of the judge's
+raw answers, and findings for a hand-edited score. Plus `rubric handover` /
+`rubric accept` for handing judging to a second harness and the narrow
+`--rw=reports` write mode. **New in 0.3.4**: the verdict passport (`arch-be gate
+--explain` — a page stating what a green does NOT mean), a case conductor
+(`arch-be bootstrap`), a trust metric with anchors and evidence (`arch-be
+trust`), mutation testing of the package itself (`arch-be redteam`), and
+artifact semantics for the evidence bundle (a stub is a finding, not "the file
+is there"). See [CHANGELOG.md](CHANGELOG.md) for the full list and the "what may
+turn red" section.
 One binary, `arch-be`: TUI, CLI, and library.
 
 The harness is deliberately **thin**: core tools (bash, files) plus a small
