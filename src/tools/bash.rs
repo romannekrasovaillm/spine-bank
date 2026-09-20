@@ -400,6 +400,7 @@ fn format_result(
         content,
         is_error,
         images: Vec::new(),
+        data: None,
     }
 }
 

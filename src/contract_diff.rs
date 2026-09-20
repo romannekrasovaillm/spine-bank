@@ -2590,7 +2590,10 @@ impl Tool for ContractDiffTool {
             Ok(r) => r,
             Err(e) => return Ok(ToolOutput::err(format!("contract_diff: {e}"))),
         };
-        Ok(ToolOutput::ok(render_report(&report)))
+        // Текст — человеко-читаемый рендер (его видит модель), разобранный
+        // вердикт — в `data` (T-12): мост MCP кладёт его в `structuredContent`,
+        // и клиенту не приходится разбирать JSON из строки.
+        Ok(ToolOutput::ok(render_report(&report)).with_data(report_json(&report)))
     }
 }
 

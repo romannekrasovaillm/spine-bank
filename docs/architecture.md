@@ -87,8 +87,10 @@ pub trait Tool: Send + Sync {
 }
 ```
 
-- `ToolOutput { content, is_error }` — `ok()` / `err()`; `truncated(max)`
-  усекает с пометкой.
+- `ToolOutput { content, is_error, images, data }` — `ok()` / `err()`;
+  `truncated(max)` усекает с пометкой; `with_data(json)` прикладывает
+  **разобранный** результат (T-12) — его увидят машинные клиенты моста
+  (`structuredContent`), текст `content` остаётся человеко-читаемым.
 - `ToolRegistry::dispatch` превращает ошибку инструмента в
   `ToolOutput::err(...)` — агентный цикл не рвётся на сбое одного вызова.
 - `ToolContext { cwd, config, llm }` — рабочий каталог (все относительные

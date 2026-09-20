@@ -1060,8 +1060,24 @@ impl McpServe {
         if out.is_error {
             return Err(CallError::Execution(out.content));
         }
+        // Разобранный результат (T-12): инструмент отдаёт его полем `data`,
+        // а если структурной формы нет — пробуем разобрать сам текст (часть
+        // инструментов отвечает JSON-вердиктом строкой). Строковое `output`
+        // сохраняется: на него опираются клиенты, написанные раньше.
+        let structured_data = out.data.clone().or_else(|| {
+            serde_json::from_str::<Value>(&out.content)
+                .ok()
+                .filter(Value::is_object)
+        });
         let text = out.truncated(BRIDGE_OUTPUT_MAX_CHARS).content;
-        let structured = json!({"tool": name, "output": text.clone()});
+        let structured = match structured_data {
+            Some(Value::Object(mut map)) => {
+                map.insert("tool".to_string(), json!(name));
+                map.insert("output".to_string(), json!(text.clone()));
+                Value::Object(map)
+            }
+            _ => json!({"tool": name, "output": text.clone()}),
+        };
         Ok(DispatchOutcome::Text { structured, text })
     }
 

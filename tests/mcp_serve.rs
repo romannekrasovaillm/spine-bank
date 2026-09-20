@@ -1063,6 +1063,57 @@ fn tool_calls_are_journaled_to_project_journal() {
     );
 }
 
+/// T-12: мостовой инструмент отдаёт РАЗОБРАННЫЙ объект, а не только JSON
+/// строкой внутри `output`. Проверяется на `contract_diff`: вердикт читается
+/// как `structuredContent.passed` / `structuredContent.breaking`, а строковое
+/// поле `output` остаётся для совместимости клиентов, написанных до правки.
+#[test]
+fn bridge_contract_diff_returns_parsed_verdict() {
+    let home = tempfile::tempdir().expect("tmp");
+    let old = home.path().join("old.yaml");
+    let new = home.path().join("new.yaml");
+    std::fs::write(
+        &old,
+        "openapi: 3.0.3\ninfo:\n  title: wallet\n  version: 1.0.0\npaths:\n  /v1/topup:\n    post:\n      requestBody:\n        content:\n          application/json:\n            schema:\n              type: object\n              properties:\n                amount: {type: integer}\n",
+    )
+    .expect("old");
+    std::fs::write(
+        &new,
+        "openapi: 3.0.3\ninfo:\n  title: wallet\n  version: 1.0.0\npaths:\n  /v1/topup:\n    post:\n      requestBody:\n        content:\n          application/json:\n            schema:\n              type: object\n              required: [source]\n              properties:\n                amount: {type: integer}\n                source: {type: string}\n",
+    )
+    .expect("new");
+    let responses = mcp_serve(
+        home.path(),
+        &batch(&[call(1, "contract_diff", &json!({"old": old, "new": new}))]),
+    );
+    let sc = structured(&responses[0], 1);
+    // Текстовое поле сохраняется (совместимость клиентов): в нём — тот же
+    // человеко-читаемый отчёт, что и в `content[0].text`.
+    let output = sc["output"]
+        .as_str()
+        .unwrap_or_else(|| panic!("output — строка: {sc}"));
+    assert!(
+        output.contains("CD-008"),
+        "output — отчёт инструмента: {output}"
+    );
+    // И тот же вердикт лежит РАЗОБРАННЫМ: числа и находки читаются полями, а
+    // не разбором JSON из строки (T-12).
+    assert_eq!(sc["tool"], "contract_diff");
+    assert_eq!(sc["passed"], false, "ломающее изменение — {sc}");
+    assert!(
+        sc["breaking"].as_u64().expect("breaking — число") >= 1,
+        "breaking читается числом, а не строкой: {sc}"
+    );
+    assert!(
+        sc["findings"].as_array().is_some_and(|f| !f.is_empty()),
+        "findings — массив находок, а не строка: {sc}"
+    );
+    assert_eq!(
+        sc["findings"][0]["rule"], "CD-008",
+        "находка разобрана полями: {sc}"
+    );
+}
+
 /// Транш 2 инверсии: отчётные read-only инструменты по NDJSON.
 /// `adr_registry` — счётчики и strict-гейт по находкам; `openspec_coverage` —
 /// покрытие требований (счётчики + strict); `model_graph` — граф текстом;
