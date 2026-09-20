@@ -2,11 +2,12 @@
 //!
 //! Третий инструмент контрактного контура (транш T1, ADR-015; расширен
 //! бэклогом волны 3, п.14). Форматы:
-//! - `OpenAPI` 3.x (CD-001..CD-007): удалённые пути (CD-001), операции
+//! - `OpenAPI` 3.x (CD-001..CD-008): удалённые пути (CD-001), операции
 //!   (CD-002), обязательные параметры / ставшие required (CD-003), коды
 //!   ответов (CD-004) — breaking (error); добавленные пути/операции/
 //!   необязательные параметры/коды ответов (CD-005) — non-breaking (warn);
-//!   смена типа поля схемы (CD-006) — breaking; **CD-007: ломающий дифф без
+//!   смена типа поля схемы (CD-006) — breaking; обязательное поле в теле
+//!   запроса (CD-008, T-06) — breaking; **CD-007: ломающий дифф без
 //!   смены major-компонента `info.version`** (error);
 //! - protobuf/gRPC (`.proto`, CD-P01..CD-P06): удалённое message (CD-P01),
 //!   удалённое/перенумерованное/переименованное поле (CD-P02; удаление,
@@ -51,6 +52,11 @@
 //! правила и владельцы — «ломающее изменение сразу возвращает потребителей
 //! и владельцев». Ни одного совпадения — честная пометка gap.
 //!
+//! CD-008 (T-06): поле, ставшее обязательным в `requestBody` (новое или
+//! переведённое из необязательных), — ломающее изменение: потребитель,
+//! который поля не присылает, ломается на валидации. Разбираются `$ref`
+//! (в `components.schemas` того же документа), `allOf` и вложенные объекты.
+//!
 //! Известные ограничения скелета `OpenAPI` (Deferred): CD-006 сравнивает
 //! только прямое поле `type` у `components.schemas.*.properties.*`;
 //! обязательность параметра — по полю `required`; удаление необязательного
@@ -77,7 +83,7 @@ use crate::tool::{Tool, ToolContext, ToolOutput};
 pub struct Finding {
     /// Критичность: `error` (breaking) | `warn` (non-breaking).
     pub severity: String,
-    /// Код правила (`CD-001`..`CD-007`, `CD-P01`.., `CD-A01`.., `CD-J01`..,
+    /// Код правила (`CD-001`..`CD-008`, `CD-P01`.., `CD-A01`.., `CD-J01`..,
     /// `CD-S01`..).
     pub rule: String,
     /// JSON Pointer (`#/paths/~1v1~1pets/post`) либо псевдо-поинтер формата
@@ -600,7 +606,7 @@ fn diff_documents(old: &Value, new: &Value) -> Vec<Finding> {
     findings
 }
 
-/// Правила по `paths`: CD-001/CD-002/CD-003/CD-004/CD-005.
+/// Правила по `paths`: CD-001/CD-002/CD-003/CD-004/CD-005/CD-008.
 fn diff_paths(old: &Value, new: &Value, out: &mut Vec<Finding>) {
     let old_paths = old.get("paths").and_then(Value::as_object);
     let new_paths = new.get("paths").and_then(Value::as_object);
@@ -616,7 +622,7 @@ fn diff_paths(old: &Value, new: &Value, out: &mut Vec<Finding>) {
                     location: location(&["paths", path]),
                     message: format!("удалён путь «{path}»"),
                 }),
-                Some(new_item) => diff_path_item(path, old_item, new_item, out),
+                Some(new_item) => diff_path_item(old, new, path, old_item, new_item, out),
             }
         }
     }
@@ -637,8 +643,16 @@ fn diff_paths(old: &Value, new: &Value, out: &mut Vec<Finding>) {
     }
 }
 
-/// Правила одного path item: CD-002 (операции) и CD-003/CD-004 (общие операции).
-fn diff_path_item(path: &str, old: &Value, new: &Value, out: &mut Vec<Finding>) {
+/// Правила одного path item: CD-002 (операции) и CD-003/CD-004/CD-008
+/// (общие операции). Документы нужны для резолва `$ref` (CD-008).
+fn diff_path_item(
+    old_doc: &Value,
+    new_doc: &Value,
+    path: &str,
+    old: &Value,
+    new: &Value,
+    out: &mut Vec<Finding>,
+) {
     for method in OPERATION_METHODS {
         let old_op = old.get(method).filter(|v| v.is_object());
         let new_op = new.get(method).filter(|v| v.is_object());
@@ -658,15 +672,22 @@ fn diff_path_item(path: &str, old: &Value, new: &Value, out: &mut Vec<Finding>) 
                 message: format!("добавлена операция {method}"),
             }),
             (Some(old_op), Some(new_op)) => {
-                diff_operation(path, method, old, new, old_op, new_op, out);
+                diff_operation(
+                    old_doc, new_doc, path, method, old, new, old_op, new_op, out,
+                );
             }
             (None, None) => {}
         }
     }
 }
 
-/// Правила общей операции: CD-003 (параметры) и CD-004 (ответы).
+/// Правила общей операции: CD-003 (параметры), CD-004 (ответы) и CD-008
+/// (обязательные поля тела запроса). Документы — для резолва `$ref` (CD-008),
+/// поэтому аргументов девять; разбор на структуру здесь был бы шумом.
+#[allow(clippy::too_many_arguments)]
 fn diff_operation(
+    old_doc: &Value,
+    new_doc: &Value,
     path: &str,
     method: &str,
     old_item: &Value,
@@ -677,7 +698,165 @@ fn diff_operation(
 ) {
     diff_parameters(path, method, old_item, new_item, old_op, new_op, out);
     diff_responses(path, method, old_op, new_op, out);
+    diff_request_body(old_doc, new_doc, path, method, old_op, new_op, out);
 }
+
+/// CD-008 (T-06): поле, ставшее обязательным в теле запроса, — ломающее
+/// изменение. Потребитель, который его не присылает, ломается на валидации
+/// (в отличие от нового необязательного поля, которое безопасно).
+///
+/// Собираются «пути обязательности» схемы тела запроса: имя поля, которое
+/// `required` у своего объекта, и дальше рекурсивно — обязательные поля
+/// вложенных объектов. Схема раскрывается по `$ref` и `allOf`, поэтому
+/// изменение в `components.schemas.*`, на которую ссылается тело запроса,
+/// видно так же, как правка inline-схемы.
+fn diff_request_body(
+    old_doc: &Value,
+    new_doc: &Value,
+    path: &str,
+    method: &str,
+    old_op: &Value,
+    new_op: &Value,
+    out: &mut Vec<Finding>,
+) {
+    let Some(old_schema) = request_body_schema(old_op) else {
+        return;
+    };
+    let Some(new_schema) = request_body_schema(new_op) else {
+        return;
+    };
+    let old_required = required_field_paths(old_doc, old_schema);
+    let new_required = required_field_paths(new_doc, new_schema);
+    let op_location = location(&["paths", path, method]);
+    for field in new_required.difference(&old_required) {
+        out.push(Finding {
+            severity: "error".into(),
+            rule: "CD-008".into(),
+            location: format!(
+                "{op_location}/requestBody/content/schema/{}",
+                field.replace('.', "/properties/")
+            ),
+            message: format!(
+                "поле «{field}» стало обязательным в теле запроса {method} {path} — \
+                 потребитель, который его не присылает, ломается на валидации"
+            ),
+        });
+    }
+}
+
+/// Схема тела запроса операции (первый `content.*.schema`).
+fn request_body_schema(op: &Value) -> Option<&Value> {
+    op.get("requestBody")?
+        .get("content")?
+        .as_object()?
+        .values()
+        .find_map(|media| media.get("schema"))
+}
+
+/// Пути обязательных полей схемы: `a`, `a.b`, … — от корня тела запроса.
+///
+/// Рекурсия идёт только по обязательным ветвям: необязательный объект со
+/// своим обязательным полем ломает не всех потребителей, и выдавать его за
+/// безусловное «стало обязательным» значило бы поднимать тревогу на
+/// безопасной правке. Незнакомый `$ref` или глубина больше
+/// [`SCHEMA_MAX_DEPTH`] — ветка не раскрывается (лучше пропустить, чем
+/// утверждать несуществующее).
+fn required_field_paths(doc: &Value, schema: &Value) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    collect_required_paths(doc, schema, "", &mut out, 0);
+    out
+}
+
+/// Рекурсивный сбор обязательных полей (внутренняя часть
+/// [`required_field_paths`]).
+fn collect_required_paths(
+    doc: &Value,
+    schema: &Value,
+    prefix: &str,
+    out: &mut BTreeSet<String>,
+    depth: usize,
+) {
+    if depth > SCHEMA_MAX_DEPTH {
+        return;
+    }
+    let schema = resolve_schema(doc, schema, 0);
+    let Some(obj) = schema.as_object() else {
+        return;
+    };
+    let required: Vec<&str> = obj
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let props = obj.get("properties").and_then(Value::as_object);
+    for name in required {
+        let path = if prefix.is_empty() {
+            name.to_string()
+        } else {
+            format!("{prefix}.{name}")
+        };
+        out.insert(path.clone());
+        if let Some(prop) = props.and_then(|p| p.get(name)) {
+            collect_required_paths(doc, prop, &path, out, depth + 1);
+        }
+    }
+}
+
+/// Схема с раскрытыми `$ref` (JSON Pointer внутрь того же документа) и
+/// слитыми ветвями `allOf` (`properties` и `required` объединяются).
+fn resolve_schema(doc: &Value, schema: &Value, depth: usize) -> Value {
+    if depth > SCHEMA_MAX_DEPTH {
+        return schema.clone();
+    }
+    if let Some(reference) = schema.get("$ref").and_then(Value::as_str) {
+        if let Some(target) = resolve_pointer(doc, reference) {
+            return resolve_schema(doc, target, depth + 1);
+        }
+        return schema.clone();
+    }
+    let Some(branches) = schema.get("allOf").and_then(Value::as_array) else {
+        return schema.clone();
+    };
+    let mut merged = schema.clone();
+    let mut props = serde_json::Map::new();
+    let mut required: Vec<Value> = Vec::new();
+    for branch in branches {
+        let branch = resolve_schema(doc, branch, depth + 1);
+        if let Some(p) = branch.get("properties").and_then(Value::as_object) {
+            for (k, v) in p {
+                props.insert(k.clone(), v.clone());
+            }
+        }
+        if let Some(r) = branch.get("required").and_then(Value::as_array) {
+            required.extend(r.iter().cloned());
+        }
+    }
+    if !props.is_empty() {
+        merged["properties"] = Value::Object(props);
+    }
+    if !required.is_empty() {
+        merged["required"] = Value::Array(required);
+    }
+    merged
+}
+
+/// Значение по JSON Pointer (`#/components/schemas/Charge`).
+fn resolve_pointer<'a>(doc: &'a Value, pointer: &str) -> Option<&'a Value> {
+    let path = pointer.strip_prefix('#')?;
+    let mut current = doc;
+    for raw in path.split('/').filter(|s| !s.is_empty()) {
+        let segment = raw.replace("~1", "/").replace("~0", "~");
+        current = match current {
+            Value::Object(map) => map.get(&segment)?,
+            Value::Array(items) => items.get(segment.parse::<usize>().ok()?)?,
+            _ => return None,
+        };
+    }
+    Some(current)
+}
+
+/// Предел рекурсии раскрытия схемы тела запроса (CD-008).
+const SCHEMA_MAX_DEPTH: usize = 12;
 
 /// Эффективный набор параметров операции: `path_item.parameters` +
 /// `operation.parameters` (операция перекрывает path item по ключу `name`+`in`).
@@ -2163,7 +2342,7 @@ pub fn tools() -> Vec<Arc<dyn Tool>> {
 }
 
 /// Инструмент `contract_diff`: сравнение двух версий контракта на breaking
-/// changes — `OpenAPI` 3.x (CD-001..CD-007, транш T1, ADR-015), protobuf/gRPC
+/// changes — `OpenAPI` 3.x (CD-001..CD-008, транш T1+T-06, ADR-015), protobuf/gRPC
 /// (CD-P01..CD-P06), Avro (CD-A01..CD-A05), JSON Schema (CD-J01..CD-J05),
 /// DDL-миграции (CD-S01..CD-S05) (бэклог волны 3, п.14).
 pub struct ContractDiffTool;
@@ -2188,7 +2367,7 @@ impl Tool for ContractDiffTool {
         ToolSpec {
             name: "contract_diff".into(),
             description: "Сравнить две версии контракта на breaking changes: OpenAPI 3.x \
-                          (CD-001..CD-006 + CD-007 — ломающий дифф без смены major \
+                          (CD-001..CD-008 — CD-007: ломающий дифф без смены major \
                           info.version), protobuf/gRPC .proto (удалённые/перенумерованные \
                           поля, rpc, CD-P06 major пакета), Avro .avsc (поля без default, \
                           несовместимые типы), JSON Schema топиков (required/properties/тип), \
@@ -2367,6 +2546,76 @@ components:
         assert!(out.content.contains("Формат: openapi"), "{}", out.content);
         assert!(out.content.contains("Итог: PASS"), "{}", out.content);
         assert!(!out.content.contains("CD-00"), "{}", out.content);
+    }
+
+    /// T-06: новое обязательное поле в теле запроса — ломающее изменение.
+    /// Раньше `contract_diff` показывал breaking 0: схема тела запроса
+    /// (даже inline) вообще не сравнивалась.
+    #[tokio::test]
+    async fn cd008_new_required_request_field_is_breaking() {
+        let old = "openapi: 3.0.3\ninfo:\n  title: Wallets\n  version: 1.0.0\npaths:\n  /v1/topup:\n    post:\n      operationId: topup\n      requestBody:\n        content:\n          application/json:\n            schema:\n              type: object\n              required: [amount]\n              properties:\n                amount:\n                  type: integer\n                source:\n                  type: string\n      responses:\n        '200':\n          description: ok\n";
+        let new = "openapi: 3.0.3\ninfo:\n  title: Wallets\n  version: 1.0.0\npaths:\n  /v1/topup:\n    post:\n      operationId: topup\n      requestBody:\n        content:\n          application/json:\n            schema:\n              type: object\n              required: [amount, source]\n              properties:\n                amount:\n                  type: integer\n                source:\n                  type: string\n      responses:\n        '200':\n          description: ok\n";
+        let out = diff_text(old, new, "old.yaml", "new.yaml").await;
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.contains("CD-008"), "{}", out.content);
+        assert!(
+            out.content.contains("стало обязательным"),
+            "{}",
+            out.content
+        );
+        assert_eq!(
+            out.content.matches("CD-008").count(),
+            1,
+            "одна находка CD-008: {}",
+            out.content
+        );
+        assert!(out.content.contains("Итог: FAIL"), "{}", out.content);
+        // CD-007: ломающий дифф без смены major — отдельное требование.
+        assert!(
+            out.content.contains("major") || out.content.contains("CD-007"),
+            "{}",
+            out.content
+        );
+
+        // Новое НЕобязательное поле — не ломающее.
+        let optional = new.replace("required: [amount, source]", "required: [amount]");
+        let out = diff_text(old, &optional, "old.yaml", "new.yaml").await;
+        assert!(!out.content.contains("CD-008"), "{}", out.content);
+        assert!(out.content.contains("breaking: 0"), "{}", out.content);
+    }
+
+    /// T-06: то же через `$ref` и во вложенном объекте — схема тела запроса
+    /// раскрывается по ссылке и рекурсивно.
+    #[tokio::test]
+    async fn cd008_sees_ref_and_nested_required_fields() {
+        let with_ref = |required: &str| {
+            format!(
+                "openapi: 3.0.3\ninfo:\n  title: Wallets\n  version: 1.0.0\npaths:\n  /v1/topup:\n    post:\n      operationId: topup\n      requestBody:\n        content:\n          application/json:\n            schema:\n              $ref: '#/components/schemas/Topup'\n      responses:\n        '200':\n          description: ok\ncomponents:\n  schemas:\n    Topup:\n      type: object\n      required: {required}\n      properties:\n        amount:\n          type: integer\n        wallet:\n          type: object\n          required: [id]\n          properties:\n            id:\n              type: string\n            label:\n              type: string\n"
+            )
+        };
+        // Вложение: `wallet.id` был обязателен (wallet обязателен) — новое
+        // обязательное `wallet.label` обязано быть названо полным путём.
+        let old = with_ref("[amount, wallet]");
+        let new = with_ref("[amount, wallet, topup_id]").replace(
+            "          required: [id]\n",
+            "          required: [id, label]\n",
+        );
+        let out = diff_text(&old, &new, "old.yaml", "new.yaml").await;
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.contains("CD-008"), "{}", out.content);
+        assert!(out.content.contains("topup_id"), "{}", out.content);
+        assert!(out.content.contains("wallet.label"), "{}", out.content);
+        assert_eq!(
+            out.content.matches("CD-008").count(),
+            2,
+            "две находки CD-008 (вложенное поле и поле через $ref): {}",
+            out.content
+        );
+
+        // Незнакомый $ref не выдумывает полей — дифф молчит о теле запроса.
+        let broken = new.replace("#/components/schemas/Topup", "#/components/schemas/Nope");
+        let out = diff_text(&old, &broken, "old.yaml", "new.yaml").await;
+        assert!(!out.content.contains("CD-008"), "{}", out.content);
     }
 
     #[tokio::test]
