@@ -421,6 +421,11 @@ pub fn guard(repo: &Path, base: Option<&str>, protect: &[String]) -> Result<Guar
     };
     let base = base.unwrap_or("HEAD").to_string();
     let out = std::process::Command::new("git")
+        // `core.quotepath=false`: имена сущностей в кейсах русские, а git по
+        // умолчанию отдаёт такие пути экранированными (`"model/CMP-001-\320…"`)
+        // — путь перестаёт начинаться с `model/`, и правка мимо дельты
+        // выглядела как «защищённых среди них: 0».
+        .args(["-c", "core.quotepath=false"])
         .arg("-C")
         .arg(repo)
         .args(["diff", "--name-only", &base])
@@ -443,6 +448,7 @@ pub fn guard(repo: &Path, base: Option<&str>, protect: &[String]) -> Result<Guar
     // зависел от того, сделан ли `git add` — до него guard пропускал новый
     // `model/AD-009-*.md`, после — краснел. Вердикт обязан совпадать.
     if let Ok(untracked) = std::process::Command::new("git")
+        .args(["-c", "core.quotepath=false"])
         .arg("-C")
         .arg(repo)
         .args(["ls-files", "--others", "--exclude-standard"])
@@ -934,6 +940,30 @@ mod tests {
             "NFR-0051 не покрывает NFR-005: {:?}",
             report.covered
         );
+    }
+
+    /// Защищённый путь с кириллицей в имени: имена сущностей в кейсах русские
+    /// (`model/CMP-001-оркестратор-операций.md`), и такой файл обязан быть
+    /// виден гарду. `git diff --name-only` по умолчанию экранирует не-ASCII
+    /// (`"model/CMP-001-\320\276…"`), из-за чего путь не начинался с `model/`
+    /// и правка мимо дельты выглядела как «защищённых среди них: 0».
+    #[test]
+    fn guard_sees_protected_path_with_cyrillic_name() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("repo");
+        make_guard_repo(&repo);
+        let file = repo.join("model/CMP-001-оркестратор-операций.md");
+        std::fs::write(&file, "---\nid: CMP-001\n---\n\nкарточка\n").expect("write");
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-q", "-m", "cyr"]);
+        std::fs::write(&file, "---\nid: CMP-001\n---\n\nкарточка v2\n").expect("edit");
+        let report = guard(&repo, None, &[]).expect("guard");
+        assert_eq!(
+            report.protected_changed,
+            vec!["model/CMP-001-оркестратор-операций.md".to_string()],
+            "кириллический защищённый путь обязан быть виден: {report:?}"
+        );
+        assert!(!report.passed, "{report:?}");
     }
 
     #[test]
