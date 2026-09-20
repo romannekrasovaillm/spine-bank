@@ -352,7 +352,8 @@ pub fn run() -> SelftestReport {
     //    который в 0.3.5 починили в шаблоне, обязан остаться починенным.
     let hooks_dir = fx.path().join("hooks-case");
     let _ = std::fs::create_dir_all(&hooks_dir);
-    let connect_opts = crate::connect::ConnectOptions::new(crate::connect::Host::Claude, hooks_dir.clone());
+    let connect_opts =
+        crate::connect::ConnectOptions::new(crate::connect::Host::Claude, hooks_dir.clone());
     match crate::connect::connect(&connect_opts) {
         Ok(_) => {
             let settings = std::fs::read_to_string(hooks_dir.join(".claude/settings.json"))
@@ -382,7 +383,9 @@ pub fn run() -> SelftestReport {
     let two = fx.path().join("two-registries");
     let _ = std::fs::create_dir_all(two.join(".arch-handoff"));
     let rule = |name: &str| {
-        format!("rules:\n  - name: {name}\n    type: file_exists\n    path: \"docs/ARCHITECTURE-SPINE.md\"\n    severity: error\n")
+        format!(
+            "rules:\n  - name: {name}\n    type: file_exists\n    path: \"docs/ARCHITECTURE-SPINE.md\"\n    severity: error\n"
+        )
     };
     let _ = std::fs::write(two.join("CONSTRAINTS.yaml"), rule("root_rule"));
     let _ = std::fs::write(
@@ -422,9 +425,7 @@ pub fn run() -> SelftestReport {
     record(
         "base_range_is_normalized_once",
         plain == "origin/main...HEAD" && ranged == plain && twice == plain,
-        format!(
-            "'origin/main' → {plain}; 'origin/main...HEAD' → {ranged}; повтор → {twice}"
-        ),
+        format!("'origin/main' → {plain}; 'origin/main...HEAD' → {ranged}; повтор → {twice}"),
     );
 
     SelftestReport { invariants }
