@@ -2,7 +2,7 @@
 //!
 //! Третий инструмент контрактного контура (транш T1, ADR-015; расширен
 //! бэклогом волны 3, п.14). Форматы:
-//! - `OpenAPI` 3.x (CD-001..CD-008): удалённые пути (CD-001), операции
+//! - `OpenAPI` 3.x (CD-001..CD-010): удалённые пути (CD-001), операции
 //!   (CD-002), обязательные параметры / ставшие required (CD-003), коды
 //!   ответов (CD-004) — breaking (error); добавленные пути/операции/
 //!   необязательные параметры/коды ответов (CD-005) — non-breaking (warn);
@@ -57,6 +57,16 @@
 //! который поля не присылает, ломается на валидации. Разбираются `$ref`
 //! (в `components.schemas` того же документа), `allOf` и вложенные объекты.
 //!
+//! CD-009/CD-010 (Д5, 0.3.5): удалённое поле ТЕЛА ОТВЕТА (CD-009) —
+//! ломающее, направление обратно запросу: потребитель ответ читает, поэтому
+//! появление нового обязательного поля ответа безопасно и находки не даёт.
+//! Тело запроса, ставшее обязательным (`requestBody.required: false → true`,
+//! CD-010), — ломающее: вызов без тела перестаёт работать. Параметры за
+//! `$ref` (`#/components/parameters/…`) резолвятся тем же `resolve_schema`,
+//! что и схемы тел, — иначе CD-003 не видит удаление обязательного параметра,
+//! объявленного через компонент. Все три правила подчиняются CD-007
+//! (ломающий дифф без смены major `info.version`).
+//!
 //! Известные ограничения скелета `OpenAPI` (Deferred): CD-006 сравнивает
 //! только прямое поле `type` у `components.schemas.*.properties.*`;
 //! обязательность параметра — по полю `required`; удаление необязательного
@@ -83,7 +93,7 @@ use crate::tool::{Tool, ToolContext, ToolOutput};
 pub struct Finding {
     /// Критичность: `error` (breaking) | `warn` (non-breaking).
     pub severity: String,
-    /// Код правила (`CD-001`..`CD-008`, `CD-P01`.., `CD-A01`.., `CD-J01`..,
+    /// Код правила (`CD-001`..`CD-010`, `CD-P01`.., `CD-A01`.., `CD-J01`..,
     /// `CD-S01`..).
     pub rule: String,
     /// JSON Pointer (`#/paths/~1v1~1pets/post`) либо псевдо-поинтер формата
@@ -696,8 +706,10 @@ fn diff_operation(
     new_op: &Value,
     out: &mut Vec<Finding>,
 ) {
-    diff_parameters(path, method, old_item, new_item, old_op, new_op, out);
-    diff_responses(path, method, old_op, new_op, out);
+    diff_parameters(
+        old_doc, new_doc, path, method, old_item, new_item, old_op, new_op, out,
+    );
+    diff_responses(old_doc, new_doc, path, method, old_op, new_op, out);
     diff_request_body(old_doc, new_doc, path, method, old_op, new_op, out);
 }
 
@@ -719,15 +731,35 @@ fn diff_request_body(
     new_op: &Value,
     out: &mut Vec<Finding>,
 ) {
-    let Some(old_schema) = request_body_schema(old_op) else {
-        return;
+    let op_location = location(&["paths", path, method]);
+    // CD-010: тело запроса стало обязательным. Раньше потребитель мог звать
+    // операцию без тела, теперь обязан его прислать — вызов без тела ломается.
+    // Сравниваются сами флаги `requestBody.required`, а не схемы: проверка не
+    // зависит от того, читается ли содержимое тела.
+    let body_required = |op: &Value| {
+        op.get("requestBody")
+            .and_then(|b| b.get("required"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
     };
-    let Some(new_schema) = request_body_schema(new_op) else {
+    if !body_required(old_op) && body_required(new_op) {
+        out.push(Finding {
+            severity: "error".into(),
+            rule: "CD-010".into(),
+            location: format!("{op_location}/requestBody/required"),
+            message: format!(
+                "тело запроса {method} {path} стало обязательным (requestBody.required: \
+                 false → true) — вызов без тела ломается"
+            ),
+        });
+    }
+    let (Some(old_schema), Some(new_schema)) =
+        (request_body_schema(old_op), request_body_schema(new_op))
+    else {
         return;
     };
     let old_required = required_field_paths(old_doc, old_schema);
     let new_required = required_field_paths(new_doc, new_schema);
-    let op_location = location(&["paths", path, method]);
     for field in new_required.difference(&old_required) {
         out.push(Finding {
             severity: "error".into(),
@@ -753,6 +785,17 @@ fn request_body_schema(op: &Value) -> Option<&Value> {
         .find_map(|media| media.get("schema"))
 }
 
+/// Какие пути схемы собирать: только обязательные (тело ЗАПРОСА: потребитель
+/// ломается, когда обязан прислать больше) или все подряд (тело ОТВЕТА:
+/// потребитель ломается, когда перестаёт получать то, на что опирался).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PathsMode {
+    /// Только поля из `required` (+ рекурсия по ним).
+    Required,
+    /// Все `properties`, включая необязательные.
+    All,
+}
+
 /// Пути обязательных полей схемы: `a`, `a.b`, … — от корня тела запроса.
 ///
 /// Рекурсия идёт только по обязательным ветвям: необязательный объект со
@@ -762,19 +805,41 @@ fn request_body_schema(op: &Value) -> Option<&Value> {
 /// [`SCHEMA_MAX_DEPTH`] — ветка не раскрывается (лучше пропустить, чем
 /// утверждать несуществующее).
 fn required_field_paths(doc: &Value, schema: &Value) -> BTreeSet<String> {
+    schema_paths(doc, schema, PathsMode::Required)
+}
+
+/// `path` — потомок `ancestor` по сегментам пути (`a.b` — потомок `a`,
+/// `ab` — нет). Сегментное сравнение, а не префикс строки: поля `amount` и
+/// `amount_total` — разные поля.
+fn is_descendant(path: &str, ancestor: &str) -> bool {
+    path.len() > ancestor.len()
+        && path.starts_with(ancestor)
+        && path.as_bytes()[ancestor.len()] == b'.'
+}
+
+/// Все пути полей схемы (включая необязательные) — для тел ОТВЕТОВ (CD-009).
+/// Режим `All` не пропускает необязательные ветви: удаление необязательного
+/// поля ответа тоже ломает потребителя, который его читал.
+fn all_field_paths(doc: &Value, schema: &Value) -> BTreeSet<String> {
+    schema_paths(doc, schema, PathsMode::All)
+}
+
+/// Сбор путей схемы в выбранном режиме — общая рекурсия для тел запросов
+/// (CD-008) и ответов (CD-009): один обход, два вопроса к нему.
+fn schema_paths(doc: &Value, schema: &Value, mode: PathsMode) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
-    collect_required_paths(doc, schema, "", &mut out, 0);
+    collect_paths(doc, schema, "", &mut out, 0, mode);
     out
 }
 
-/// Рекурсивный сбор обязательных полей (внутренняя часть
-/// [`required_field_paths`]).
-fn collect_required_paths(
+/// Рекурсивный сбор путей полей (внутренняя часть [`schema_paths`]).
+fn collect_paths(
     doc: &Value,
     schema: &Value,
     prefix: &str,
     out: &mut BTreeSet<String>,
     depth: usize,
+    mode: PathsMode,
 ) {
     if depth > SCHEMA_MAX_DEPTH {
         return;
@@ -789,7 +854,13 @@ fn collect_required_paths(
         .map(|a| a.iter().filter_map(Value::as_str).collect())
         .unwrap_or_default();
     let props = obj.get("properties").and_then(Value::as_object);
-    for name in required {
+    let names: Vec<&str> = match mode {
+        PathsMode::Required => required,
+        PathsMode::All => props
+            .map(|p| p.keys().map(String::as_str).collect())
+            .unwrap_or_default(),
+    };
+    for name in names {
         let path = if prefix.is_empty() {
             name.to_string()
         } else {
@@ -797,7 +868,7 @@ fn collect_required_paths(
         };
         out.insert(path.clone());
         if let Some(prop) = props.and_then(|p| p.get(name)) {
-            collect_required_paths(doc, prop, &path, out, depth + 1);
+            collect_paths(doc, prop, &path, out, depth + 1, mode);
         }
     }
 }
@@ -860,8 +931,15 @@ const SCHEMA_MAX_DEPTH: usize = 12;
 
 /// Эффективный набор параметров операции: `path_item.parameters` +
 /// `operation.parameters` (операция перекрывает path item по ключу `name`+`in`).
-/// Параметр за `$ref` не резолвится (Deferred) — пропускается.
+///
+/// Параметр за `$ref` резолвится тем же [`resolve_schema`], что схемы тел
+/// (Д5): компоненты параметров — обычная практика (`#/components/parameters/…`),
+/// и пропускать их значило не видеть ни удаления обязательного параметра
+/// (CD-003), ни перевода в `required`. Нерезолвящаяся или внешняя ссылка
+/// (не JSON Pointer внутрь документа) по-прежнему пропускается: выдумывать
+/// параметр по имени файла нельзя.
 fn effective_parameters(
+    doc: &Value,
     path_item: &Value,
     op: &Value,
 ) -> std::collections::HashMap<(String, String), Value> {
@@ -874,16 +952,17 @@ fn effective_parameters(
             continue;
         };
         for param in params {
-            if param.get("$ref").is_some() || !param.is_object() {
+            let resolved = resolve_schema(doc, param, 0);
+            if resolved.get("$ref").is_some() || !resolved.is_object() {
                 continue;
             }
             let (Some(name), Some(in_)) = (
-                param.get("name").and_then(Value::as_str),
-                param.get("in").and_then(Value::as_str),
+                resolved.get("name").and_then(Value::as_str),
+                resolved.get("in").and_then(Value::as_str),
             ) else {
                 continue;
             };
-            map.insert((name.to_string(), in_.to_string()), param.clone());
+            map.insert((name.to_string(), in_.to_string()), resolved);
         }
     }
     map
@@ -898,8 +977,12 @@ fn is_required(param: &Value) -> bool {
 }
 
 /// CD-003/CD-005: удаление обязательного параметра, добавление необязательного,
-/// переход необязательного в required.
+/// переход необязательного в required. Документы — для резолва параметров за
+/// `$ref` (Д5), поэтому аргументов девять, как у [`diff_operation`].
+#[allow(clippy::too_many_arguments)]
 fn diff_parameters(
+    old_doc: &Value,
+    new_doc: &Value,
     path: &str,
     method: &str,
     old_item: &Value,
@@ -909,8 +992,8 @@ fn diff_parameters(
     out: &mut Vec<Finding>,
 ) {
     let op_location = location(&["paths", path, method]);
-    let old_params = effective_parameters(old_item, old_op);
-    let new_params = effective_parameters(new_item, new_op);
+    let old_params = effective_parameters(old_doc, old_item, old_op);
+    let new_params = effective_parameters(new_doc, new_item, new_op);
 
     // CD-003 (error): удалён обязательный параметр.
     for ((name, in_), param) in &old_params {
@@ -952,8 +1035,11 @@ fn diff_parameters(
     }
 }
 
-/// CD-004/CD-005: удалённый/добавленный код ответа.
+/// CD-004/CD-005/CD-009: удалённый/добавленный код ответа и удалённое поле
+/// тела ответа.
 fn diff_responses(
+    old_doc: &Value,
+    new_doc: &Value,
     path: &str,
     method: &str,
     old_op: &Value,
@@ -989,6 +1075,81 @@ fn diff_responses(
                     message: format!("добавлен код ответа {code}"),
                 });
             }
+        }
+    }
+
+    // CD-009 (error): удалённое поле тела ответа.
+    if let (Some(old_responses), Some(new_responses)) = (old_responses, new_responses) {
+        for (code, old_response) in old_responses {
+            let Some(new_response) = new_responses.get(code) else {
+                continue;
+            };
+            diff_response_body(
+                old_doc,
+                new_doc,
+                &format!("{op_location}/responses/{}", escape_segment(code)),
+                old_response,
+                new_response,
+                out,
+            );
+        }
+    }
+}
+
+/// CD-009 (Д5): поле, исчезнувшее из тела ответа, — ломающее изменение.
+/// Направление здесь ОБРАТНОЕ телу запроса: потребитель читает ответ, поэтому
+/// удаление поля ломает его, а появление нового обязательного поля — нет
+/// (потребитель его просто не читал; лишнее поле в ответе безопасно).
+///
+/// Схема ответа резолвится по `$ref` и `allOf` тем же [`resolve_schema`], что
+/// тело запроса, — сравнение идёт по раскрытым схемам. Коды ответов, тела у
+/// которых нет (204, редиректы), пропускаются: сравнивать нечего.
+fn diff_response_body(
+    old_doc: &Value,
+    new_doc: &Value,
+    response_location: &str,
+    old_response: &Value,
+    new_response: &Value,
+    out: &mut Vec<Finding>,
+) {
+    let Some(old_content) = old_response.get("content").and_then(Value::as_object) else {
+        return;
+    };
+    let Some(new_content) = new_response.get("content").and_then(Value::as_object) else {
+        return;
+    };
+    for (media, old_media) in old_content {
+        let Some(old_schema) = old_media.get("schema") else {
+            continue;
+        };
+        let Some(new_schema) = new_content.get(media).and_then(|m| m.get("schema")) else {
+            continue;
+        };
+        let old_fields = all_field_paths(old_doc, old_schema);
+        let new_fields = all_field_paths(new_doc, new_schema);
+        let media_location = format!("{response_location}/content/{}", escape_segment(media));
+        let removed: Vec<&String> = old_fields.difference(&new_fields).collect();
+        for field in &removed {
+            // Удаление поля уносит и всё его поддерево: `a.b` и `a.c` не
+            // сообщения, а следствие «`a` больше нет». Рекурсивные схемы
+            // (дерево, ветка комментариев) иначе дают десяток находок об одном
+            // удалении, и настоящий сигнал тонет в них. Называется минимальный
+            // путь — тот, у которого нет удалённого предка.
+            if removed.iter().any(|other| is_descendant(field, other)) {
+                continue;
+            }
+            out.push(Finding {
+                severity: "error".into(),
+                rule: "CD-009".into(),
+                location: format!(
+                    "{media_location}/schema/{}",
+                    field.replace('.', "/properties/")
+                ),
+                message: format!(
+                    "поле «{field}» удалено из тела ответа ({media}) — потребитель, который \
+                     его читает, ломается"
+                ),
+            });
         }
     }
 }
@@ -2342,7 +2503,7 @@ pub fn tools() -> Vec<Arc<dyn Tool>> {
 }
 
 /// Инструмент `contract_diff`: сравнение двух версий контракта на breaking
-/// changes — `OpenAPI` 3.x (CD-001..CD-008, транш T1+T-06, ADR-015), protobuf/gRPC
+/// changes — `OpenAPI` 3.x (CD-001..CD-010, транш T1+T-06+Д5, ADR-015), protobuf/gRPC
 /// (CD-P01..CD-P06), Avro (CD-A01..CD-A05), JSON Schema (CD-J01..CD-J05),
 /// DDL-миграции (CD-S01..CD-S05) (бэклог волны 3, п.14).
 pub struct ContractDiffTool;
@@ -2367,7 +2528,7 @@ impl Tool for ContractDiffTool {
         ToolSpec {
             name: "contract_diff".into(),
             description: "Сравнить две версии контракта на breaking changes: OpenAPI 3.x \
-                          (CD-001..CD-008 — CD-007: ломающий дифф без смены major \
+                          (CD-001..CD-010 — тело запроса/ответа, CD-007: ломающий дифф без смены major \
                           info.version), protobuf/gRPC .proto (удалённые/перенумерованные \
                           поля, rpc, CD-P06 major пакета), Avro .avsc (поля без default, \
                           несовместимые типы), JSON Schema топиков (required/properties/тип), \
@@ -2616,6 +2777,184 @@ components:
         let broken = new.replace("#/components/schemas/Topup", "#/components/schemas/Nope");
         let out = diff_text(&old, &broken, "old.yaml", "new.yaml").await;
         assert!(!out.content.contains("CD-008"), "{}", out.content);
+    }
+
+    /// Д5: поле, исчезнувшее из тела ОТВЕТА, — ломающее. До 0.3.5
+    /// `diff_responses` сравнивал только коды ответов: удаление поля из схемы
+    /// ответа давало «breaking: 0».
+    #[tokio::test]
+    async fn openapi_removed_response_property_is_breaking() {
+        let contract = |fee: &str, required: &str| {
+            format!(
+                "openapi: 3.0.3\ninfo:\n  title: Wallets\n  version: 1.0.0\npaths:\n  /v1/topup:\n    post:\n      operationId: topup\n      responses:\n        '200':\n          description: ok\n          content:\n            application/json:\n              schema:\n                $ref: '#/components/schemas/Receipt'\ncomponents:\n  schemas:\n    Receipt:\n      type: object\n      required: {required}\n      properties:\n        id:\n          type: string\n{fee}"
+            )
+        };
+        let old = contract("        fee:\n          type: integer\n", "[id, fee]");
+        let new = contract("", "[id]");
+        let out = diff_text(&old, &new, "old.yaml", "new.yaml").await;
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.contains("CD-009"), "{}", out.content);
+        assert!(
+            out.content
+                .contains("/responses/200/content/application~1json/schema/fee"),
+            "путь находки называет код ответа, media type и поле: {}",
+            out.content
+        );
+        assert!(out.content.contains("Итог: FAIL"), "{}", out.content);
+    }
+
+    /// Д5: удаление поля уносит поддерево — сообщается минимальный путь.
+    /// Рекурсивные схемы иначе дают десяток находок об одном удалении.
+    #[tokio::test]
+    async fn removed_response_field_does_not_report_its_subtree() {
+        let contract = |wallet: &str| {
+            format!(
+                "openapi: 3.0.3\ninfo:\n  title: Wallets\n  version: 1.0.0\npaths:\n  /v1/topup:\n    post:\n      operationId: topup\n      responses:\n        '200':\n          description: ok\n          content:\n            application/json:\n              schema:\n                type: object\n                required: [id]\n                properties:\n                  id:\n                    type: string\n{wallet}"
+            )
+        };
+        let old = contract(
+            "                  wallet:\n                    type: object\n                    required: [id]\n                    properties:\n                      id:\n                        type: string\n                      label:\n                        type: string\n",
+        );
+        let new = contract("");
+        let out = diff_text(&old, &new, "old.yaml", "new.yaml").await;
+        assert!(!out.is_error, "{}", out.content);
+        assert_eq!(
+            out.content.matches("CD-009").count(),
+            1,
+            "одна находка на удалённое поддерево: {}",
+            out.content
+        );
+        assert!(
+            out.content.contains("/schema/wallet CD-009"),
+            "{}",
+            out.content
+        );
+        assert!(!out.content.contains("wallet.id"), "{}", out.content);
+        assert!(!out.content.contains("wallet.label"), "{}", out.content);
+    }
+
+    /// Д5: направление у ответов обратное запросам — новое обязательное поле
+    /// ответа НЕ ломает: потребитель его просто не читал.
+    #[tokio::test]
+    async fn openapi_new_required_response_property_is_compatible() {
+        let contract = |extra: &str, required: &str| {
+            format!(
+                "openapi: 3.0.3\ninfo:\n  title: Wallets\n  version: 1.0.0\npaths:\n  /v1/topup:\n    post:\n      operationId: topup\n      responses:\n        '200':\n          description: ok\n          content:\n            application/json:\n              schema:\n                type: object\n                required: {required}\n                properties:\n                  id:\n                    type: string\n{extra}"
+            )
+        };
+        let old = contract("", "[id]");
+        let new = contract(
+            "                  status:\n                    type: string\n",
+            "[id, status]",
+        );
+        let out = diff_text(&old, &new, "old.yaml", "new.yaml").await;
+        assert!(!out.is_error, "{}", out.content);
+        assert!(!out.content.contains("CD-009"), "{}", out.content);
+        assert!(out.content.contains("breaking: 0"), "{}", out.content);
+        assert!(out.content.contains("Итог: PASS"), "{}", out.content);
+    }
+
+    /// Д5: тело запроса, ставшее обязательным, — ломающее: вызов без тела
+    /// перестаёт работать. Сравниваются флаги `requestBody.required`, а не
+    /// содержимое схемы (у тела может не быть схемы вовсе).
+    #[tokio::test]
+    async fn openapi_request_body_became_required_is_breaking() {
+        let contract = |required: &str| {
+            format!(
+                "openapi: 3.0.3\ninfo:\n  title: Wallets\n  version: 1.0.0\npaths:\n  /v1/topup:\n    post:\n      operationId: topup\n      requestBody:\n        required: {required}\n        content:\n          application/json:\n            schema:\n              type: object\n              properties:\n                amount:\n                  type: integer\n      responses:\n        '200':\n          description: ok\n"
+            )
+        };
+        let out = diff_text(
+            &contract("false"),
+            &contract("true"),
+            "old.yaml",
+            "new.yaml",
+        )
+        .await;
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.contains("CD-010"), "{}", out.content);
+        assert!(
+            out.content.contains("/requestBody/required"),
+            "{}",
+            out.content
+        );
+        // Обратное направление (true → false) — ослабление, не ломающее.
+        let out = diff_text(
+            &contract("true"),
+            &contract("false"),
+            "old.yaml",
+            "new.yaml",
+        )
+        .await;
+        assert!(!out.content.contains("CD-010"), "{}", out.content);
+        assert!(out.content.contains("breaking: 0"), "{}", out.content);
+    }
+
+    /// Д5: обязательный параметр, объявленный через компонент (`$ref`), виден
+    /// диффу. Раньше такие параметры пропускались целиком — удаление
+    /// обязательного параметра проходило молча.
+    #[tokio::test]
+    async fn required_ref_parameter_removed_is_breaking() {
+        let contract = |params: &str| {
+            format!(
+                "openapi: 3.0.3\ninfo:\n  title: Wallets\n  version: 1.0.0\npaths:\n  /v1/topup:\n    post:\n      operationId: topup\n{params}      responses:\n        '200':\n          description: ok\ncomponents:\n  parameters:\n    IdempotencyKey:\n      name: Idempotency-Key\n      in: header\n      required: true\n      schema:\n        type: string\n"
+            )
+        };
+        let with_ref = contract(
+            "      parameters:\n        - $ref: '#/components/parameters/IdempotencyKey'\n",
+        );
+        let without = contract("");
+        let out = diff_text(&with_ref, &without, "old.yaml", "new.yaml").await;
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.contains("CD-003"), "{}", out.content);
+        assert!(
+            out.content.contains("Idempotency-Key"),
+            "параметр назван по имени из компонента: {}",
+            out.content
+        );
+        // Необязательный параметр за `$ref` — по-прежнему не ломающий.
+        let optional = with_ref.replace(
+            "      required: true\n      schema:",
+            "      required: false\n      schema:",
+        );
+        let out = diff_text(&optional, &without, "old.yaml", "new.yaml").await;
+        assert!(!out.content.contains("CD-003"), "{}", out.content);
+    }
+
+    /// Д5: циклическая `$ref`-схема не зацикливает обход — потолок глубины
+    /// [`SCHEMA_MAX_DEPTH`] возвращает ветку нераскрытой, а не падает и не
+    /// висит. Проверка идёт по телу запроса, где рекурсия включена.
+    #[tokio::test]
+    async fn ref_cycle_is_bounded() {
+        let contract = |required: &str| {
+            format!(
+                "openapi: 3.0.3\ninfo:\n  title: Wallets\n  version: 1.0.0\npaths:\n  /v1/nodes:\n    post:\n      operationId: addNode\n      requestBody:\n        content:\n          application/json:\n            schema:\n              $ref: '#/components/schemas/Node'\n      responses:\n        '200':\n          description: ok\ncomponents:\n  schemas:\n    Node:\n      type: object\n      required: {required}\n      properties:\n        name:\n          type: string\n        child:\n          $ref: '#/components/schemas/Node'\n"
+            )
+        };
+        let out = diff_text(
+            &contract("[name]"),
+            &contract("[name, child]"),
+            "old.yaml",
+            "new.yaml",
+        )
+        .await;
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.contains("CD-008"), "{}", out.content);
+        // Обход заканчивается: находки есть, но их число конечно и не растёт
+        // экспоненциально (цикл раскрывается до потолка и молча встаёт).
+        let count = out.content.matches("CD-008").count();
+        assert!(
+            (1..60).contains(&count),
+            "обход ограничен потолком глубины, находок {count}: {}",
+            out.content
+        );
+        // Потолок соблюдён: пути глубже SCHEMA_MAX_DEPTH сегментов не строится.
+        let too_deep = "child.".repeat(SCHEMA_MAX_DEPTH + 1);
+        assert!(
+            !out.content.contains(&too_deep),
+            "ветка глубже потолка не раскрывается: {}",
+            out.content
+        );
     }
 
     #[tokio::test]
