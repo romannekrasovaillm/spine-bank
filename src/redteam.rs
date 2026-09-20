@@ -1351,10 +1351,20 @@ fn resolve_semantic_subject(root: &Path, subject: &SemanticSubject) -> Option<St
     let mut names: Vec<String> = rd
         .flatten()
         .filter(|e| e.file_name().to_string_lossy().starts_with(subject.prefix))
-        .map(|e| format!("{}/{}", subject.dir, e.file_name().to_string_lossy()))
+        .map(|e| e.file_name().to_string_lossy().into_owned())
         .collect();
     names.sort();
-    names.into_iter().next()
+    let name = names.into_iter().next()?;
+    // Досье по сущностям адресуется ИДЕНТИФИКАТОРОМ (`CMP-001`), а не путём к
+    // файлу: сборщик досье ищет сущность в модели и путь не разбирает (живой
+    // прогон 2026-09-20 — `pack_subject_not_found` на файле).
+    match subject.pack {
+        crate::rubric_pack::PackKind::EntityLinks | crate::rubric_pack::PackKind::NfrMechanism => {
+            let id: Vec<&str> = name.split('-').take(2).collect();
+            (id.len() == 2).then(|| id.join("-"))
+        }
+        _ => Some(format!("{}/{}", subject.dir, name)),
+    }
 }
 
 /// Копирует клон смыслового мутанта в `dest_root/<D-n>` и кладёт рядом
@@ -1814,7 +1824,10 @@ mod tests {
         assert_eq!(todo["mutant"], "D6");
         assert_eq!(todo["rubric"], "model_link_semantics");
         assert_eq!(todo["pack"], "entity_links");
-        assert_eq!(todo["subject"], "model/CMP-001-jurnal.md");
+        assert_eq!(
+            todo["subject"], "CMP-001",
+            "досье по сущностям адресуется идентификатором, а не путём"
+        );
         assert!(
             todo["instructions"]
                 .as_str()
@@ -1839,6 +1852,26 @@ mod tests {
         assert_eq!(
             resolve_semantic_subject(&root, subject).as_deref(),
             Some("docs/adr/ADR-001-a.md")
+        );
+    }
+
+    /// Досье по сущностям адресуется идентификатором, а не путём к файлу:
+    /// иначе `rubric run --pack entity_links` не находит субъекта.
+    #[test]
+    fn semantic_subject_for_entities_is_an_id() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("clone");
+        std::fs::create_dir_all(root.join("model")).expect("mkdir");
+        std::fs::write(
+            root.join("model/CMP-001-orchestrator-vyplat.md"),
+            "---\nid: CMP-001\ntype: cmp\ntitle: Оркестратор\nstatus: designed\n---\n\nтело\n",
+        )
+        .expect("write");
+        let m = mutator("D6");
+        let subject = m.semantic.as_ref().expect("D6 — смысловой мутант");
+        assert_eq!(
+            resolve_semantic_subject(&root, subject).as_deref(),
+            Some("CMP-001")
         );
     }
 

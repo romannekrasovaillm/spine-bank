@@ -189,8 +189,7 @@ const PLAYBOOK_PROMPTS: &[PlaybookPrompt] = &[
     },
     PlaybookPrompt {
         name: "spine-semantic-judge",
-        embedded:
-            crate::assets::PLUGIN_SPINE_WORKFLOWS_SKILLS_SPINE_SEMANTIC_JUDGE_SKILL_MD,
+        embedded: crate::assets::PLUGIN_SPINE_WORKFLOWS_SKILLS_SPINE_SEMANTIC_JUDGE_SKILL_MD,
         arguments: &[(
             "subject",
             "субъект досье: путь к ADR или файлу кода либо идентификатор сущности модели",

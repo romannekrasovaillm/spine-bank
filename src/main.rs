@@ -264,8 +264,12 @@ enum Cmd {
     /// гоняет гейт и печатает карту обнаружения. Read-only к исходному кейсу,
     /// без сети, детерминированно; exit 1, если доля ниже `--min-detection`.
     Redteam {
-        /// Кейс (каталог с model/, CONSTRAINTS.yaml, docs/adr, бандлом…).
-        case: PathBuf,
+        /// Кейс (каталог с model/, CONSTRAINTS.yaml, docs/adr, бандлом…);
+        /// не нужен при подкоманде `semantic-score`.
+        case: Option<PathBuf>,
+        /// Подкоманда: смысловая строка по сохранённым клонам (ADR-051).
+        #[command(subcommand)]
+        cmd: Option<RedteamCmd>,
         /// Формат вывода: text (дефолт, карта обнаружения) | json | markdown.
         #[arg(long, default_value = "text", value_name = "FORMAT")]
         format: String,
@@ -286,15 +290,6 @@ enum Cmd {
         /// харнесс, — в ядре LLM нет. В долю обнаружения они не входят.
         #[arg(long, value_name = "КАТАЛОГ")]
         keep_semantic: Option<PathBuf>,
-    },
-    /// Смысловой слой red-team: что судья увидел в сохранённых клонах
-    /// (ADR-051). Отдельная строка, в порог доли обнаружения не входит.
-    SemanticScore {
-        /// Каталог, переданный `redteam --keep-semantic`.
-        dir: PathBuf,
-        /// Формат вывода: text (дефолт) | json.
-        #[arg(long, default_value = "text", value_name = "FORMAT")]
-        format: String,
     },
     /// Составное архитектурное ревью репозитория одним ответом (бэклог
     /// волны 3, п.13): маршрут значимости из git-диффа + весь контур
@@ -548,6 +543,20 @@ enum Cmd {
         /// черновиком, и об этом сказано в «Следующих шагах» и в `doctor`.
         #[arg(long, value_name = "URL")]
         releases_url: Option<String>,
+    },
+}
+
+/// Подкоманды `arch-be redteam` (ADR-051).
+#[derive(Subcommand)]
+enum RedteamCmd {
+    /// Смысловая строка: что судья увидел в сохранённых клонах. В долю
+    /// обнаружения не входит.
+    SemanticScore {
+        /// Каталог, переданный `redteam --keep-semantic`.
+        dir: PathBuf,
+        /// Формат вывода: text (дефолт) | json.
+        #[arg(long, default_value = "text", value_name = "FORMAT")]
+        format: String,
     },
 }
 
@@ -1987,12 +1996,54 @@ async fn main() -> Result<()> {
         }
         Some(Cmd::Redteam {
             case,
+            cmd,
             format,
             min_detection,
             no_decision_quality,
             save,
             keep_semantic,
         }) => {
+            // Подкоманда `semantic-score` читает уже сохранённые клоны: сам
+            // прогон кейса не нужен и кейс не обязателен.
+            if let Some(RedteamCmd::SemanticScore { dir, format }) = cmd {
+                let score = arch_harness::redteam::semantic_score(&dir, &cfg.paths.rubrics_dir())?;
+                if format.trim().eq_ignore_ascii_case("json") {
+                    let cases: Vec<serde_json::Value> = score
+                        .cases
+                        .iter()
+                        .map(|c| {
+                            serde_json::json!({
+                                "mutant": c.mutant,
+                                "rubric": c.rubric,
+                                "subject": c.subject,
+                                "verdict": c.verdict.label(),
+                                "judge": c.judge,
+                                "judge_is_author": c.judge_is_author,
+                            })
+                        })
+                        .collect();
+                    let out = serde_json::json!({
+                        "schema": "arch-be/semantic-score/v1",
+                        "caught": score.caught(),
+                        "total": score.cases.len(),
+                        "cases": cases,
+                        "note": "смысловой слой не входит в долю обнаружения red-team (ADR-051)",
+                    });
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string())
+                    );
+                } else {
+                    println!("{}", score.render());
+                }
+                return Ok(());
+            }
+            let Some(case) = case else {
+                anyhow::bail!(
+                    "укажите кейс: `arch-be redteam <кейс>` или подкоманду \
+                     `arch-be redteam semantic-score <каталог>`"
+                );
+            };
             let report = arch_harness::redteam::run_with_options(
                 &case,
                 &arch_harness::redteam::RedteamOptions {
@@ -2019,38 +2070,6 @@ async fn main() -> Result<()> {
             }
             if !report.passed() {
                 std::process::exit(1);
-            }
-        }
-        Some(Cmd::SemanticScore { dir, format }) => {
-            let score = arch_harness::redteam::semantic_score(&dir, &cfg.paths.rubrics_dir())?;
-            if format.trim().eq_ignore_ascii_case("json") {
-                let cases: Vec<serde_json::Value> = score
-                    .cases
-                    .iter()
-                    .map(|c| {
-                        serde_json::json!({
-                            "mutant": c.mutant,
-                            "rubric": c.rubric,
-                            "subject": c.subject,
-                            "verdict": c.verdict.label(),
-                            "judge": c.judge,
-                            "judge_is_author": c.judge_is_author,
-                        })
-                    })
-                    .collect();
-                let out = serde_json::json!({
-                    "schema": "arch-be/semantic-score/v1",
-                    "caught": score.caught(),
-                    "total": score.cases.len(),
-                    "cases": cases,
-                    "note": "смысловой слой не входит в долю обнаружения red-team (ADR-051)",
-                });
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string())
-                );
-            } else {
-                println!("{}", score.render());
             }
         }
         Some(Cmd::Adr { cmd }) => cmd_adr(cmd)?,
