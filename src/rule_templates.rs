@@ -1093,7 +1093,10 @@ fn lock_entry(
         });
     }
     files.sort_by(|a, b| a.path.cmp(&b.path));
-    let python = t.command_for("python").map(str::to_string).unwrap_or_default();
+    let python = t
+        .command_for("python")
+        .map(str::to_string)
+        .unwrap_or_default();
     LockEntry {
         id: t.manifest.id.clone(),
         version: t.manifest.version,
@@ -1162,10 +1165,47 @@ impl Runner {
     #[must_use]
     pub fn detect(java_jar: Option<&Path>) -> Self {
         Self {
-            python: which("python3"),
+            python: python_runner(),
             maven: which("mvn"),
             java_jar: java_jar.map(Path::to_path_buf),
         }
+    }
+
+    /// Почему половина не проверяется — для честной строки пропуска.
+    #[must_use]
+    pub fn absent_reason(&self, half: &str) -> String {
+        if half == "java" {
+            "нет прогонщика: ни `mvn` в PATH, ни `--java-jar <junit-platform-console-standalone.jar>`"
+                .to_string()
+        } else if self.python.is_none() {
+            python_absent_reason().to_string()
+        } else {
+            "питон-прогонщик недоступен".to_string()
+        }
+    }
+}
+
+/// `python3` с установленным pytest — иначе прогон теста шаблона падает
+/// `No module named pytest`, и проверка зубов приняла бы это за провал
+/// эталонной реализации (ложный красный вместо честного пропуска).
+fn python_runner() -> Option<PathBuf> {
+    let python = which("python3")?;
+    let ok = Command::new(&python)
+        .args(["-c", "import pytest"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success());
+    ok.then_some(python)
+}
+
+/// Человеческая причина отсутствия питон-прогонщика.
+fn python_absent_reason() -> &'static str {
+    if which("python3").is_none() {
+        "нет `python3` в PATH"
+    } else {
+        "`python3` есть, но нет модуля pytest (`python3 -m pip install pytest`)"
     }
 }
 
@@ -1322,8 +1362,9 @@ pub fn verify_all(runner: &Runner, lang: Lang, require_python: bool) -> Result<V
             write_files(&root, TARGET_REL, &t.manifest.id, &files, &t)?;
             let Some(command) = command_for(&t, half, &root, None, runner) else {
                 report.skipped.push(format!(
-                    "{} [{half}]: нет прогонщика — проверка не выполнена",
-                    t.manifest.id
+                    "{} [{half}]: {} — проверка не выполнена",
+                    t.manifest.id,
+                    runner.absent_reason(half)
                 ));
                 if *half == "python" && require_python {
                     report.checks.push(VerifyCheck {
@@ -1331,8 +1372,10 @@ pub fn verify_all(runner: &Runner, lang: Lang, require_python: bool) -> Result<V
                         lang: (*half).to_string(),
                         stage: "reference",
                         ok: false,
-                        detail: "python3 не найден в PATH, а без него проверка зубов невозможна"
-                            .to_string(),
+                        detail: format!(
+                            "{} — а без питон-прогонщика проверка зубов невозможна (`--require-python`)",
+                            python_absent_reason()
+                        ),
                     });
                 }
                 continue;
@@ -1342,7 +1385,15 @@ pub fn verify_all(runner: &Runner, lang: Lang, require_python: bool) -> Result<V
             } else {
                 Duration::from_secs(t.manifest.rule.timeout_secs.max(1))
             };
-            run_stage(&mut report, &t, half, Stage::Reference, &command, &root, timeout)?;
+            run_stage(
+                &mut report,
+                &t,
+                half,
+                Stage::Reference,
+                &command,
+                &root,
+                timeout,
+            )?;
             // Нарушающая реализация: подменяем объявленные файлы (П2).
             let swaps = t.violating_for(lang);
             let swaps: Vec<&ViolatingSwap> =
@@ -1355,7 +1406,15 @@ pub fn verify_all(runner: &Runner, lang: Lang, require_python: bool) -> Result<V
                 continue;
             }
             apply_swaps(&root, TARGET_REL, &t.manifest.id, &swaps, &t)?;
-            run_stage(&mut report, &t, half, Stage::Violating, &command, &root, timeout)?;
+            run_stage(
+                &mut report,
+                &t,
+                half,
+                Stage::Violating,
+                &command,
+                &root,
+                timeout,
+            )?;
         }
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1617,8 +1676,10 @@ pub fn verify_dir(case: &Path, runner: &Runner, lang: Lang) -> Result<VerifyRepo
         for half in halves {
             let Some(command) = command_for(&t, half, case, Some(&entry.command), runner) else {
                 report.skipped.push(format!(
-                    "{} ({}) [{half}]: нет прогонщика — проверка не выполнена",
-                    entry.id, entry.ad
+                    "{} ({}) [{half}]: {} — проверка не выполнена",
+                    entry.id,
+                    entry.ad,
+                    runner.absent_reason(half)
                 ));
                 continue;
             };
@@ -1634,7 +1695,15 @@ pub fn verify_dir(case: &Path, runner: &Runner, lang: Lang) -> Result<VerifyRepo
             } else {
                 Duration::from_secs(t.manifest.rule.timeout_secs.max(1))
             };
-            run_stage(&mut report, &t, half, Stage::Violating, &command, &root, timeout)?;
+            run_stage(
+                &mut report,
+                &t,
+                half,
+                Stage::Violating,
+                &command,
+                &root,
+                timeout,
+            )?;
             let _ = std::fs::remove_dir_all(&root);
         }
     }
