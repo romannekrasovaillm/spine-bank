@@ -67,7 +67,8 @@ claude mcp add arch-spine -- arch-be mcp serve
 
 Запуск из каталога целевого проекта: относительные пути аргументов
 (`model`, `model/` для `model_query` по умолчанию) резолвятся от cwd
-процесса сервера, который задаёт клиент.
+процесса сервера, который задаёт клиент. Инструменты модели принимают и корень
+кейса, и каталог `model/` — модель находится сама (T-13).
 
 ### Подключение одной командой: `arch-be connect <host>`
 
@@ -121,7 +122,8 @@ exit 2, stderr уходит агенту; строки вывода хук не 
 OpenAPI/proto/Avro/JSON Schema/DDL и связка с моделью по `INT.contract`,
 ADR-035), `fleet_audit`, `agentsmd_lint` (`repo`),
 `archify_validate` (`type`, `path`), `rubric_list`, `plugin_list`,
-`nfr_check` (`path`, `kind`), `model_validate` (`dir`), `model_drift` (`dir`),
+`nfr_check` (`path`, `kind`), `model_validate`/`model_drift` (`path` — корень
+кейса или каталог `model/`),
 `delta_guard` (`path`, `base`, `protect`), `evidence_verify` (`change_dir`),
 `architect_review` (`path`, `base`), `change_impact` (`path`, `id` | `paths`).
 
