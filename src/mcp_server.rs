@@ -2413,7 +2413,7 @@ fn tool_specs() -> Vec<Value> {
                     },
                     "base_ref": {
                         "type": "string",
-                        "description": "Опц.: база диффа (git diff BASE_REF...HEAD); без неё — рабочее дерево против HEAD (staged + unstaged + untracked)",
+                        "description": "Опц.: база диффа — голая ревизия (git diff BASE_REF...HEAD) или готовый диапазон A...HEAD как есть; без неё — рабочее дерево против HEAD (staged + unstaged + untracked)",
                     },
                     "declared": {
                         "type": "object",

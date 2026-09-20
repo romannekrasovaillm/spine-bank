@@ -183,7 +183,8 @@ enum Cmd {
         #[arg(long, default_value = "auto")]
         route: String,
         /// База git для диффа и сравнения правил (по умолчанию — рабочее
-        /// дерево против HEAD; для CI — напр. origin/main...HEAD).
+        /// дерево против HEAD; голая ревизия — напр. origin/main — или
+        /// готовый диапазон origin/main...HEAD).
         #[arg(long)]
         base: Option<String>,
         /// Файл ограничений (по умолчанию <repo>/.arch-handoff/`CONSTRAINTS.yaml`).
@@ -291,7 +292,7 @@ enum Cmd {
         /// Репозиторий.
         dir: PathBuf,
         /// База git для диффа и сравнения правил (по умолчанию — рабочее
-        /// дерево против HEAD; для CI — напр. origin/main...HEAD).
+        /// дерево против HEAD; голая ревизия или готовый диапазон A...HEAD).
         #[arg(long)]
         base: Option<String>,
         /// Файл ограничений (по умолчанию <dir>/.arch-handoff/`CONSTRAINTS.yaml`).
@@ -966,7 +967,8 @@ enum ControlCmd {
         /// Anti-bypass floor (ADR-034): механически вывести триггеры из
         /// git-диффа и объединить с заявленными (fail-safe — детектор только
         /// добавляет). Без значения — рабочее дерево против HEAD; со
-        /// значением — `git diff GIT_REF...HEAD`.
+        /// значением — `git diff GIT_REF...HEAD` (готовый диапазон `A...B`
+        /// принимается как есть).
         #[arg(long, num_args = 0..=1, default_missing_value = "HEAD", value_name = "GIT_REF")]
         from_diff: Option<String>,
     },

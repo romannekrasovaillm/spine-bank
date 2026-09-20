@@ -82,7 +82,7 @@ arch-be connect ci --provider gitlab \
 
 Без флага «Следующие шаги» называют эту команду, а `arch-be doctor` выдаёт
 предупреждение `ci-releases` — молчащая заглушка выглядит как рабочая настройка.
-| `git-hooks` | `.git/hooks/pre-commit` (быстрый `arch-be control check .`) и `pre-push` (полный `arch-be gate --route auto --base <remote sha>...HEAD` — база берётся из stdin git'а, для новой ветки `merge-base` с основной); в worktree — в hooks основного git-каталога | блоки между маркерами, чужие строки хуков сохраняются; fail-soft: нет `arch-be` в PATH — молча пропуск; расположение реестра хуки не проверяют (резолвит бинарь) |
+| `git-hooks` | `.git/hooks/pre-commit` (быстрый `arch-be control check .`) и `pre-push` (полный `arch-be gate --route auto --base <remote sha>` — база берётся из stdin git'а, для новой ветки `merge-base` с основной); в worktree — в hooks основного git-каталога | блоки между маркерами, чужие строки хуков сохраняются; fail-soft: нет `arch-be` в PATH — молча пропуск; расположение реестра хуки не проверяют (резолвит бинарь), база уходит ГОЛОЙ ревизией — дописать `...HEAD` — работа гейта, иначе вышло бы `rev...HEAD...HEAD` |
 
 Установка бинаря в CI-джобах — curl из релизов (в публичных релизах GitHub
 артефакты — сырые бинари `arch-be-linux-x86_64` + `SHA256SUMS`; tar.gz —
@@ -205,7 +205,7 @@ project-scoped сервер из `.mcp.json` и доверие каталогу 
 
 А Stop-хук (записан в `.claude/settings.json`) не даёт агенту завершить
 работу, пока гейт красный: при попытке остановки хук запускает
-`arch-be gate --route auto --base <merge-base с основной веткой>...HEAD` (единый
+`arch-be gate --route auto --base <merge-base с основной веткой>` (единый
 гейт: fitness + delta guard + rule_weakened + spine + trace + целостность
 модели, на маршрутах Standard/Critical ещё nfr и evidence — см.
 `docs/control.md`), и при ненулевом коде возврата завершение блокируется

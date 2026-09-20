@@ -540,11 +540,10 @@ impl GitProbe {
 
 /// Левая сторона диапазона диффа как одиночная ревизия для `git show`
 /// (`origin/main...HEAD` → `origin/main`): `git show` диапазон не принимает.
+/// Реализация — единая с диффом ([`control::base_rev`]), чтобы формы базы не
+/// разъезжались между составляющими гейта (T-03).
 fn base_rev(base: &str) -> &str {
-    match base.split_once("...") {
-        Some((left, _)) => left,
-        None => base.split_once("..").map_or(base, |(left, _)| left),
-    }
+    control::base_rev(base)
 }
 
 /// Ревизия существует (`git rev-parse --verify <rev>^{commit}`)?
@@ -2019,8 +2018,11 @@ fn collect_inputs(
     );
     // База диффа — коммитом, а не строкой аргумента: `HEAD~1` и его SHA
     // описывают одно состояние и обязаны дать одну аттестацию.
+    // T-03: база приходит и голой ревизией, и диапазоном (`origin/main...HEAD`)
+    // — для `git rev-parse` годится только одиночная ревизия, иначе коммит
+    // базы молча уезжал в `absent`.
     let base_commit = if git.repo {
-        git_resolve(repo, base.unwrap_or("HEAD"))
+        git_resolve(repo, control::base_rev(base.unwrap_or("HEAD")))
     } else {
         None
     };

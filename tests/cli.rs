@@ -2478,3 +2478,60 @@ fn stop_hook_blocks_red_root_registry_case_and_names_missing_registry() {
         "причина названа прямо: {err}"
     );
 }
+
+/// T-03: форма записи базы не меняет маршрут. «‹ревизия›» и
+/// «‹ревизия›...HEAD» обязаны дать один и тот же маршрут: раньше гейт
+/// дописывал `...HEAD` второй раз, git отказывал, и гейт молча уходил в
+/// fail-safe Critical — строгость зависела от записи базы, а не от изменения.
+#[test]
+fn gate_base_forms_agree_and_failsafe_names_the_reason() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let home = tmp.path();
+    let repo = green_root_repo(home, "case");
+    let base = {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .expect("git");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+
+    let route = |arg: String| -> String {
+        let out = arch_cmd(home)
+            .args(["gate", "--repo"])
+            .arg(repo.as_os_str())
+            .args(["--route", "auto", "--base", &arg])
+            .output()
+            .expect("gate");
+        let text = String::from_utf8_lossy(&out.stdout).to_string();
+        assert!(
+            !text.contains("HEAD...HEAD"),
+            "двойной ...HEAD вернулся: {text}"
+        );
+        text.lines()
+            .find(|l| l.starts_with("Маршрут:"))
+            .unwrap_or_default()
+            .to_string()
+    };
+    assert_eq!(
+        route(base.clone()),
+        route(format!("{base}...HEAD")),
+        "формы базы дают разные маршруты"
+    );
+
+    // Несуществующая ревизия: fail-safe Critical остаётся, но причина названа.
+    let out = arch_cmd(home)
+        .args(["gate", "--repo"])
+        .arg(repo.as_os_str())
+        .args(["--route", "auto", "--base", "no-such-rev-42"])
+        .output()
+        .expect("gate");
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(text.contains("fail-safe"), "{text}");
+    assert!(
+        text.contains("дифф недоступен") || text.contains("база диффа недоступна"),
+        "причина fail-safe обязана быть названа: {text}"
+    );
+}

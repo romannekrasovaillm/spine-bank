@@ -561,6 +561,10 @@ fn merge_mcp_servers_json(
 /// [`crate::control::default_anchor_base`]. Ветка не найдена — пусто, и хук
 /// работает без базы (как 0.3.3). После Н5 хуки обязаны видеть УЖЕ
 /// закоммиченное ослабление правила: без базы сравнение шло с `HEAD`.
+///
+/// T-03: в `--base` уходит ГОЛАЯ ревизия. Раньше шаблоны передавали готовый
+/// диапазон `$BASE...HEAD`, гейт дописывал `...HEAD` второй раз, и дифф не
+/// вычислялся вовсе — гейт молча уходил в fail-safe Critical.
 const ANCHOR_BASE_SNIPPET: &str = "\
 BASE=\"\"\n\
 for anchor in origin/main main origin/master master; do\n\
@@ -588,7 +592,7 @@ fn stop_hook_command() -> String {
         "if command -v arch-be >/dev/null 2>&1; then \
          {ANCHOR_BASE_SNIPPET}\
          if [ -n \"$BASE\" ]; then \
-         if ! out=$(arch-be gate --route auto --base \"$BASE...HEAD\" 2>&1); then \
+         if ! out=$(arch-be gate --route auto --base \"$BASE\" 2>&1); then \
          printf '%s\\n\\n%s\\n' \"$out\" \
          \"{HOOK_MARKER}: архитектурный гейт FAIL — исправьте находки error перед завершением \
          (подробности выше; гейт: arch-be gate)\" >&2; exit 2; fi; \
@@ -607,7 +611,7 @@ fn post_tool_use_hook_command() -> String {
         "if command -v arch-be >/dev/null 2>&1; then \
          {ANCHOR_BASE_SNIPPET}\
          if [ -n \"$BASE\" ]; then \
-         if ! out=$(arch-be gate --route auto --base \"$BASE...HEAD\" 2>&1); then \
+         if ! out=$(arch-be gate --route auto --base \"$BASE\" 2>&1); then \
          printf '%s\\n\\n%s\\n' \"$out\" \
          \"{HOOK_MARKER}: правка не проходит архитектурный гейт (arch-be gate FAIL) — \
          исправьте находки error\" >&2; exit 2; fi; \
@@ -1754,9 +1758,9 @@ fn gitlab_ci_block() -> String {
          \x20   - arch-be --version\n\
          \x20 script:\n\
          \x20   # Машинный отчёт — в файл артефакта; при провале гейта джоба красная (exit 1).\n\
-         \x20   - arch-be gate --route auto --base \"origin/${CI_MERGE_REQUEST_TARGET_BRANCH_NAME:-main}...HEAD\" --format gitlab-codequality > codequality-spine.json || GATE_EXIT=$?\n\
+         \x20   - arch-be gate --route auto --base \"origin/${CI_MERGE_REQUEST_TARGET_BRANCH_NAME:-main}\" --format gitlab-codequality > codequality-spine.json || GATE_EXIT=$?\n\
          \x20   # Текстовая сводка в лог джобы (при дорогих правилах command_succeeds строку можно убрать).\n\
-         \x20   - arch-be gate --route auto --base \"origin/${CI_MERGE_REQUEST_TARGET_BRANCH_NAME:-main}...HEAD\" || true\n\
+         \x20   - arch-be gate --route auto --base \"origin/${CI_MERGE_REQUEST_TARGET_BRANCH_NAME:-main}\" || true\n\
          \x20   - exit ${GATE_EXIT:-0}\n\
          \x20 artifacts:\n\
          \x20   when: always\n\
@@ -1799,8 +1803,8 @@ fn github_workflow_block() -> String {
          \x20     - name: Архитектурный гейт\n\
          \x20       run: |\n\
          \x20         BASE=\"origin/${{ github.base_ref || 'main' }}\"\n\
-         \x20         arch-be gate --route auto --base \"${BASE}...HEAD\" --format sarif > spine-gate.sarif || GATE_EXIT=$?\n\
-         \x20         arch-be gate --route auto --base \"${BASE}...HEAD\" --format markdown >> \"$GITHUB_STEP_SUMMARY\" || true\n\
+         \x20         arch-be gate --route auto --base \"${BASE}\" --format sarif > spine-gate.sarif || GATE_EXIT=$?\n\
+         \x20         arch-be gate --route auto --base \"${BASE}\" --format markdown >> \"$GITHUB_STEP_SUMMARY\" || true\n\
          \x20         exit ${GATE_EXIT:-0}\n\
          \x20     - name: Отчёт SARIF артефактом\n\
          \x20       if: always()\n\
@@ -2128,7 +2132,7 @@ fn pre_push_hook_block() -> String {
          if command -v arch-be >/dev/null 2>&1; then\n\
          {PRE_PUSH_BASE_SNIPPET}\
          \x20 if [ -n \"$BASE\" ]; then\n\
-         \x20   if ! arch-be gate --route auto --base \"$BASE...HEAD\"; then\n\
+         \x20   if ! arch-be gate --route auto --base \"$BASE\"; then\n\
          \x20     echo \"spine-connect: pre-push FAIL — arch-be gate не пройден (находки выше)\" >&2\n\
          \x20     exit 1\n\
          \x20   fi\n\
@@ -3017,6 +3021,37 @@ mod tests {
         }
         assert!(stop_hook_command().contains("# spine-connect:stop"));
         assert!(post_tool_use_hook_command().contains("# spine-connect:post-tool-use"));
+    }
+
+    /// T-03: шаблоны передают базу ГОЛОЙ ревизией. Готовый диапазон
+    /// `rev...HEAD` гейт дополнял вторым `...HEAD`, git отказывал, и гейт
+    /// молча уходил в fail-safe Critical — строгость зависела от формы записи
+    /// базы, а не от изменения.
+    #[test]
+    fn templates_pass_a_bare_base_revision() {
+        let mut blocks = vec![
+            ("stop-хук", stop_hook_command()),
+            ("post-tool-use", post_tool_use_hook_command()),
+            ("pre-push", pre_push_hook_block()),
+        ];
+        for provider in [CiProvider::GitLab, CiProvider::GitHub, CiProvider::Jenkins] {
+            blocks.push((provider.name(), provider.job_block()));
+        }
+        for (name, block) in blocks {
+            assert!(
+                !block.contains("...HEAD"),
+                "{name}: база обязана быть голой ревизией: {block}"
+            );
+            // Jenkins-шаблон базу не передаёт вовсе (гейт считает дифф
+            // рабочего дерева против HEAD) — это отдельная тема, не двойной
+            // `...HEAD`; проверяем те шаблоны, где база есть.
+            if name != "jenkins" {
+                assert!(
+                    block.contains("--base "),
+                    "{name}: гейт вызывается с базой: {block}"
+                );
+            }
+        }
     }
 
     /// T-01: та же ошибка в git-хуках и CI-шаблонах — гард по

@@ -426,10 +426,41 @@ fn segment_match(pat: &str, seg: &str) -> bool {
     true
 }
 
+/// База диффа в форме, которую понимает git (T-03).
+///
+/// `--base` приходит из трёх источников с разными привычками: человек пишет
+/// `origin/main` или `origin/main...HEAD` (так подсказывает `--help`), шаблоны
+/// `connect` писали уже готовый диапазон `rev...HEAD`, CI — третью форму.
+/// Дописывание `...HEAD` к готовому диапазону давало `rev...HEAD...HEAD`:
+/// git отказывал, дифф не вычислялся, и гейт молча уходил в fail-safe Critical
+/// — то есть строгость зависела от формы записи базы, а не от изменения.
+///
+/// Правило одно: значение с `..` — это уже диапазон, используется как есть;
+/// голая ревизия получает `...HEAD`.
+#[must_use]
+pub fn normalize_base_range(base: &str) -> String {
+    if base.contains("..") {
+        base.to_string()
+    } else {
+        format!("{base}...HEAD")
+    }
+}
+
+/// Одиночная ревизия из базы диффа: `origin/main...HEAD` → `origin/main`
+/// (для `git show`/`git rev-parse`, которые диапазон не принимают).
+#[must_use]
+pub fn base_rev(base: &str) -> &str {
+    match base.split_once("...") {
+        Some((left, _)) => left,
+        None => base.split_once("..").map_or(base, |(left, _)| left),
+    }
+}
+
 /// Механический вывод триггеров значимости из git-диффа (S-1, ADR-034).
 ///
 /// Диапазон: `git_ref = None` — рабочее дерево против `HEAD` (staged +
-/// unstaged + untracked); `Some(r)` — `git diff r...HEAD`. Детекторы
+/// unstaged + untracked); `Some(r)` — `git diff` по [`normalize_base_range`]
+/// (`r...HEAD` для голой ревизии, диапазон как есть). Детекторы
 /// (эвристики, fail-safe — только расширяют множество):
 ///
 /// - `new_component` — добавлен каталог верхнего/второго уровня с манифестом
@@ -449,7 +480,7 @@ fn segment_match(pat: &str, seg: &str) -> bool {
 pub fn detect_diff_triggers(repo: &Path, git_ref: Option<&str>) -> Result<DiffTriggers> {
     let range: Vec<String> = match git_ref {
         None => vec!["HEAD".to_string()],
-        Some(r) => vec![format!("{r}...HEAD")],
+        Some(r) => vec![normalize_base_range(r)],
     };
     let name_status = git_diff_out(repo, &range, &["--name-status"])?;
     let patch_text = git_diff_out(repo, &range, &[])?;
@@ -6762,6 +6793,43 @@ mod tests {
         // Чистый дифф (HEAD против самого себя) — триггеров нет.
         let clean = detect_diff_triggers(&repo, None).unwrap();
         assert!(clean.triggers.is_empty(), "{:?}", clean.triggers);
+    }
+
+    /// T-03: форма базы не меняет вердикт. Голая ревизия и готовый диапазон
+    /// обязаны давать один и тот же набор триггеров: раньше диапазон получал
+    /// второй `...HEAD`, git отказывал, и гейт молча уходил в fail-safe
+    /// Critical — то есть строгость зависела от записи базы.
+    #[test]
+    fn diff_base_forms_are_equivalent() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = git_repo(dir.path());
+        write_file(
+            &repo,
+            "billing/Cargo.toml",
+            "[package]\nname = \"billing\"\n",
+        );
+        write_file(&repo, "billing/src/main.rs", "fn main() {}\n");
+        git_in(&repo, &["add", "."]);
+        git_in(&repo, &["commit", "-q", "-m", "feature"]);
+
+        let bare = detect_diff_triggers(&repo, Some("HEAD~1")).unwrap();
+        let range = detect_diff_triggers(&repo, Some("HEAD~1...HEAD")).unwrap();
+        assert_eq!(bare.triggers, range.triggers, "формы базы разошлись");
+        assert!(
+            bare.triggers.contains("new_component"),
+            "{:?}",
+            bare.triggers
+        );
+        // Ни в одной форме в выводе не появляется двойной `...HEAD`.
+        assert!(!bare.evidence.iter().any(|e| e.contains("HEAD...HEAD")));
+        assert_eq!(normalize_base_range("origin/main"), "origin/main...HEAD");
+        assert_eq!(
+            normalize_base_range("origin/main...HEAD"),
+            "origin/main...HEAD"
+        );
+        assert_eq!(normalize_base_range("HEAD~1..HEAD"), "HEAD~1..HEAD");
+        assert_eq!(base_rev("origin/main...HEAD"), "origin/main");
+        assert_eq!(base_rev("HEAD~1"), "HEAD~1");
     }
 
     #[test]
