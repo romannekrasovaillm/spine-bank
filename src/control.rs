@@ -4716,63 +4716,16 @@ fn match_glob_segments(pat: &[&str], parts: &[&str]) -> bool {
     segment_matches(pat[0], parts[0]) && match_glob_segments(&pat[1..], &parts[1..])
 }
 
-/// Запускает `bash -c <command>` в `repo` с ручным таймаутом:
-/// spawn + опрос `try_wait` каждые 50 мс + `kill` по истечении.
-/// `Ok(None)` — команда превысила таймаут и была убита.
+/// Запускает `bash -c <command>` в `repo` с ручным таймаутом.
+/// `Ok(None)` в статусе — команда превысила таймаут и была убита.
+/// Механика (процессная группа, читатели с дедлайном) — [`crate::proc`]:
+/// таймаут убивает группу целиком, внуки не держат гейт (A1).
 fn run_with_timeout(repo: &Path, command: &str, timeout: Duration) -> Result<CommandOutcome> {
-    let mut child = Command::new("bash")
-        .arg("-c")
-        .arg(command)
-        .current_dir(repo)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| HarnessError::Control(format!("не удалось запустить bash: {e}")))?;
-    // Читатели живут отдельно от ожидания (как в bash-инструменте агента):
-    // иначе полный pipe заблокирует дочерний процесс задолго до таймаута.
-    let out_task = child
-        .stdout
-        .take()
-        .map(|p| std::thread::spawn(move || drain_tail(p)));
-    let err_task = child
-        .stderr
-        .take()
-        .map(|p| std::thread::spawn(move || drain_tail(p)));
-    let start = Instant::now();
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break Some(status),
-            Ok(None) => {
-                if start.elapsed() >= timeout {
-                    let _ = child.kill();
-                    let _ = child.wait(); // забрать зомби
-                    break None;
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            Err(e) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(HarnessError::Control(format!(
-                    "ошибка ожидания команды '{command}': {e}"
-                )));
-            }
-        }
-    };
-    let mut captured = Vec::new();
-    if let Some(t) = out_task {
-        if let Ok(mut bytes) = t.join() {
-            captured.append(&mut bytes);
-        }
-    }
-    if let Some(t) = err_task {
-        if let Ok(mut bytes) = t.join() {
-            captured.append(&mut bytes);
-        }
-    }
+    let outcome = crate::proc::run_shell(repo, "bash", command, timeout)?;
+    let mut captured = outcome.stdout;
+    captured.extend_from_slice(&outcome.stderr);
     Ok(CommandOutcome {
-        status,
+        status: outcome.status,
         tail: String::from_utf8_lossy(&captured).into_owned(),
     })
 }
@@ -4781,38 +4734,12 @@ fn run_with_timeout(repo: &Path, command: &str, timeout: Duration) -> Result<Com
 struct CommandOutcome {
     /// `Some`, если команда завершилась сама (иначе — убита по таймауту).
     status: Option<ExitStatus>,
-    /// Последние байты stdout+stderr (обрезаны до [`MAX_CAPTURE_BYTES`]).
+    /// Последние байты stdout+stderr (обрезаны до [`crate::proc::MAX_CAPTURE_BYTES`]).
     tail: String,
 }
 
-/// Сколько байт вывода храним для отчёта об упавшей команде (хвост).
-const MAX_CAPTURE_BYTES: usize = 16 * 1024;
 /// Сколько последних строк хвоста включаем в отчёт об упавшей команде.
 const REPORT_TAIL_LINES: usize = 15;
-
-/// Читает pipe до конца, храня только хвост в [`MAX_CAPTURE_BYTES`]
-/// (вывод упавшей команды может быть мегабайтным — в отчёт нужен конец).
-fn drain_tail(mut pipe: impl std::io::Read) -> Vec<u8> {
-    let mut buf = Vec::new();
-    let mut chunk = [0u8; 8192];
-    loop {
-        match pipe.read(&mut chunk) {
-            Ok(0) | Err(_) => break,
-            Ok(n) => {
-                buf.extend_from_slice(&chunk[..n]);
-                if buf.len() > MAX_CAPTURE_BYTES * 2 {
-                    let keep = buf.split_off(buf.len() - MAX_CAPTURE_BYTES);
-                    buf = keep;
-                }
-            }
-        }
-    }
-    if buf.len() > MAX_CAPTURE_BYTES {
-        buf.split_off(buf.len() - MAX_CAPTURE_BYTES)
-    } else {
-        buf
-    }
-}
 
 /// Хвост вывода упавшей команды для отчёта: последние [`REPORT_TAIL_LINES`]
 /// строк, пропущенные через редактор секретов (AD-3: вывод может содержать
@@ -8056,13 +7983,6 @@ mod command_capture_tests {
             !tail.contains("sk-0123456789abcdef0123456789"),
             "секрет обязан быть замаскирован: {tail}"
         );
-    }
-
-    #[test]
-    fn drain_tail_bounds_memory_to_capture_limit() {
-        let big = vec![b'x'; MAX_CAPTURE_BYTES * 3];
-        let tail = drain_tail(&big[..]);
-        assert_eq!(tail.len(), MAX_CAPTURE_BYTES);
     }
 
     /// Инструмент `rules_report`: счётчики + markdown-отчёт на фикстуре

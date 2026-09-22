@@ -28,7 +28,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -1251,66 +1251,19 @@ impl VerifyReport {
     }
 }
 
-/// Прогоняет `bash -c <command>` в каталоге `dir` с таймаутом
-/// (spawn + опрос `try_wait` + `kill` по истечении; читатели вывода — в
-/// отдельных потоках, иначе полный pipe блокирует дочерний процесс).
-/// Идиома та же, что у `command_succeeds` в `control`.
+/// Прогоняет `bash -c <command>` в каталоге `dir` с таймаутом — тонкая
+/// обёртка над [`crate::proc::run_shell`] (процессная группа убивается
+/// целиком, читатели вывода с дедлайном: внуки тестовых прогонов не
+/// подвешивают проверку зубов, A1). Возвращает код выхода
+/// (`None` — убита по таймауту; `-1` — сигнал) и хвост stdout+stderr
+/// (каждый обрезан до [`crate::proc::MAX_CAPTURE_BYTES`]).
 fn run_shell(dir: &Path, command: &str, timeout: Duration) -> Result<(Option<i32>, String)> {
-    let mut child = Command::new("bash")
-        .arg("-c")
-        .arg(command)
-        .current_dir(dir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| HarnessError::Control(format!("не удалось запустить bash: {e}")))?;
-    let out_task = child
-        .stdout
-        .take()
-        .map(|p| std::thread::spawn(move || drain(p)));
-    let err_task = child
-        .stderr
-        .take()
-        .map(|p| std::thread::spawn(move || drain(p)));
-    let start = Instant::now();
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break Some(status),
-            Ok(None) => {
-                if start.elapsed() >= timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    break None;
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            Err(e) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(HarnessError::Control(format!(
-                    "ошибка ожидания команды '{command}': {e}"
-                )));
-            }
-        }
-    };
-    let mut captured = Vec::new();
-    for task in [out_task, err_task].into_iter().flatten() {
-        if let Ok(mut bytes) = task.join() {
-            captured.append(&mut bytes);
-        }
-    }
+    let outcome = crate::proc::run_shell(dir, "bash", command, timeout)?;
+    let mut captured = outcome.stdout;
+    captured.extend_from_slice(&outcome.stderr);
     let tail = String::from_utf8_lossy(&captured).into_owned();
-    let code = status.map(|s| s.code().unwrap_or(-1));
+    let code = outcome.status.map(|s| s.code().unwrap_or(-1));
     Ok((code, tail))
-}
-
-/// Читает поток целиком (короткий хвост держим в памяти как есть).
-fn drain(pipe: impl std::io::Read) -> Vec<u8> {
-    let mut buf = Vec::new();
-    let mut reader = std::io::BufReader::new(pipe);
-    let _ = std::io::Read::read_to_end(&mut reader, &mut buf);
-    buf
 }
 
 /// Скаляр в одинарных кавычках для `bash`: кавычка внутри — `'\''`

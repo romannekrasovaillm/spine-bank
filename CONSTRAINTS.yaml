@@ -469,3 +469,30 @@ constraints:
     owner: "solution-архитектор BE"
     expiry: "2027-09-20"
     effort_hours: 1
+
+  # --- A1 (0.3.7): таймаут command_succeeds убивает процессную группу -------
+  # Прямой запуск shell-интерпретатора в обход src/proc.rs возвращает баг:
+  # kill по таймауту убивал только интерпретатор, внуки (pytest-воркеры,
+  # `server &`) оставались сиротами и, держа унаследованные pipe,
+  # подвешивали гейт на EOF читателей вывода.
+  - id: C-32
+    name: no_direct_shell_spawn
+    type: must_not_contain
+    glob: "src/**/*.rs"
+    exclude_glob: ["src/proc.rs"]
+    pattern: 'Command::new\("bash"\)|Command::new\("sh"\)'
+    severity: critical
+    ad: AD-9
+    rationale: >-
+      прямой запуск bash/sh в обход src/proc.rs возвращает баг A1: таймаут
+      убивал только интерпретатор, а внуки (pytest-воркеры, `server &`)
+      оставались сиротами и подвешивали сам гейт — гейт обязан быть живучее
+      проверяемого кода (AD-9)
+    fix_hint: >-
+      запуск shell-команд — только через crate::proc (run_shell либо
+      shell_command + kill_process_group_sync / kill_process_group): команда
+      стартует в собственной процессной группе, таймаут убивает группу
+      целиком (TERM → KILL по -pgid), читатели вывода — с дедлайном
+    skill: fitness-functions
+    owner: "solution-архитектор BE"
+    expiry: "2027-09-22"

@@ -607,22 +607,24 @@ fn screen_step(command: &str) -> Result<Option<String>> {
 /// Выполняет шаг в репетиционном worktree: `bash -c` с таймаутом
 /// [`STEP_TIMEOUT_SECS`]; вывод (stdout+stderr) уходит в лог-файл внутри
 /// одноразового worktree (не в pipe — без риска дедлока на буфере), в отчёт
-/// попадает хвост [`STEP_LOG_TAIL`] символов.
+/// попадает хвост [`STEP_LOG_TAIL`] символов. Команда стартует в собственной
+/// процессной группе ([`crate::proc`]): таймаут убивает группу целиком —
+/// потомки шага не остаются сиротами в убранном worktree (A1).
 fn run_step(dir: &Path, name: &str, command: &str) -> Result<StepReport> {
     let log_file = dir.join(".arch-rehearsal-step.log");
     let out = std::fs::File::create(&log_file).map_err(|e| HarnessError::io(&log_file, e))?;
     let err = out
         .try_clone()
         .map_err(|e| HarnessError::io(&log_file, e))?;
-    let mut child = Command::new("bash")
-        .arg("-c")
-        .arg(command)
-        .current_dir(dir)
+    let mut cmd = crate::proc::shell_command("bash", command);
+    cmd.current_dir(dir)
         .stdin(Stdio::null())
         .stdout(Stdio::from(out))
-        .stderr(Stdio::from(err))
+        .stderr(Stdio::from(err));
+    let mut child = cmd
         .spawn()
         .map_err(|e| HarnessError::Control(format!("не удалось запустить bash: {e}")))?;
+    let pid = child.id();
     let started = Instant::now();
     let timeout = Duration::from_secs(STEP_TIMEOUT_SECS);
     let status = loop {
@@ -630,15 +632,13 @@ fn run_step(dir: &Path, name: &str, command: &str) -> Result<StepReport> {
             Ok(Some(status)) => break Some(status),
             Ok(None) => {
                 if started.elapsed() >= timeout {
-                    let _ = child.kill();
-                    let _ = child.wait(); // забрать зомби
+                    crate::proc::kill_process_group_sync(pid, &mut child);
                     break None;
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
             Err(e) => {
-                let _ = child.kill();
-                let _ = child.wait();
+                crate::proc::kill_process_group_sync(pid, &mut child);
                 return Err(HarnessError::Control(format!(
                     "ошибка ожидания шага '{name}': {e}"
                 )));

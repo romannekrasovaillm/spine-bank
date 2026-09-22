@@ -81,6 +81,7 @@ pub mod openspec;
 pub mod passport;
 pub mod plugin;
 pub mod policy;
+pub(crate) mod proc;
 pub mod publish;
 #[cfg(feature = "harness")]
 pub mod ralph;

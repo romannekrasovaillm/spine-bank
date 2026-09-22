@@ -306,10 +306,12 @@ pub struct CommandOutcome {
 }
 
 /// Исполняет `bash -c <команда>` в контексте сьюта с захватом вывода и
-/// таймаутом (читатели stdout/stderr — отдельные задачи tokio, по таймауту
-/// процесс убивается). Команды сьюта — доверенная конфигурация (как правила
-/// CONSTRAINTS.yaml), окружение наследуется; `ARCH_HOME` переопределяется
-/// домом прогона.
+/// таймаутом (читатели stdout/stderr — отдельные задачи tokio). Команды
+/// сьюта — доверенная конфигурация (как правила CONSTRAINTS.yaml), окружение
+/// наследуется; `ARCH_HOME` переопределяется домом прогона.
+/// Команда стартует в собственной процессной группе ([`crate::proc`]):
+/// по таймауту убивается группа целиком, а ожидание читателей ограничено
+/// дедлайном — потомки команды не подвешивают прогон сьюта (A1).
 ///
 /// # Errors
 /// Не удалось запустить/дождаться процесс или прочитать его вывод.
@@ -318,17 +320,17 @@ pub async fn run_command(
     ctx: &SuiteContext,
     timeout: Duration,
 ) -> Result<CommandOutcome> {
-    let mut child = tokio::process::Command::new("bash")
-        .arg("-c")
-        .arg(command)
-        .current_dir(&ctx.cwd)
+    let mut cmd = crate::proc::shell_command_tokio("bash", command);
+    cmd.current_dir(&ctx.cwd)
         .env("ARCH_HOME", &ctx.home)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
+        .kill_on_drop(true);
+    let mut child = cmd
         .spawn()
         .map_err(|e| HarnessError::Eval(format!("не удалось запустить bash: {e}")))?;
+    let pid = child.id().unwrap_or(0);
     // stdout/stderr piped выше — take() гарантированно Some.
     let mut out_pipe = child
         .stdout
@@ -352,15 +354,18 @@ pub async fn run_command(
             false,
         )
     } else {
-        // Игнорируем ошибку kill: процесс мог завершиться в гонке с таймаутом.
-        let _ = child.start_kill();
-        let _ = child.wait().await; // забрать зомби
+        crate::proc::kill_process_group(pid, &mut child).await;
         (None, true)
     };
     let read = |r: tokio::task::JoinHandle<std::io::Result<Vec<u8>>>| async move {
-        r.await
-            .map_err(|e| HarnessError::Eval(format!("задача чтения вывода: {e}")))?
-            .map_err(|e| HarnessError::Eval(format!("чтение вывода команды: {e}")))
+        match tokio::time::timeout(crate::proc::READER_JOIN_TIMEOUT, r).await {
+            Ok(joined) => joined
+                .map_err(|e| HarnessError::Eval(format!("задача чтения вывода: {e}")))?
+                .map_err(|e| HarnessError::Eval(format!("чтение вывода команды: {e}"))),
+            // Потомок вне убитой группы держал pipe — отчитываемся без этой
+            // части вывода: ждать её EOF значило бы подвесить прогон.
+            Err(_) => Ok(Vec::new()),
+        }
     };
     let out_bytes = read(reader_out).await?;
     let err_bytes = read(reader_err).await?;

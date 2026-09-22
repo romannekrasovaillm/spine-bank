@@ -34,6 +34,7 @@ use crate::config::{CodingHarnessConfig, Config, PromptMode};
 use crate::error::{HarnessError, Result};
 use crate::handoff::{HANDOFF_DIR, git_out, recommended_timeout_secs};
 use crate::llm::ToolSpec;
+use crate::proc::kill_process_group;
 use crate::tool::{Tool, ToolContext, ToolOutput};
 
 /// Минимальный абсолютный таймаут прогона кодового харнесса, секунд:
@@ -412,38 +413,6 @@ fn auto_commit_leftovers(repo: &Path, harness: &str, task: &str) -> Option<AutoC
         hash,
         message,
     })
-}
-
-/// Мягко, затем жёстко завершает процессную группу `pid` (TERM → 3 с → KILL).
-/// Убивает и дочерние процессы харнесса — сирот после таймаута не остаётся.
-/// Вне unix (где `process_group` не ставился) завершает только сам процесс —
-/// дерево процессов там не создавалось.
-async fn kill_process_group(pid: u32, child: &mut tokio::process::Child) {
-    if pid > 0 && cfg!(unix) {
-        // kill из coreutils есть всегда; unsafe/libc запрещены линтом проекта.
-        // ВАЖНО: разделитель `--` обязателен — procps `/bin/kill -TERM -PGID`
-        // без него молча (rc=0!) трактует отрицательное число как опцию и
-        // никого не сигналит (проверено опытом; bash-builtin kill работал и так).
-        let _ = std::process::Command::new("kill")
-            .args(["-TERM", "--", &format!("-{pid}")])
-            .status();
-        for _ in 0..10 {
-            if matches!(child.try_wait(), Ok(Some(_))) {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(300)).await;
-        }
-        let _ = std::process::Command::new("kill")
-            .args(["-KILL", "--", &format!("-{pid}")])
-            .status();
-    } else {
-        // pgid неизвестен (теоретический случай) или ОС без процессных групп —
-        // хотя бы самого ребёнка.
-        let _ = child.kill().await;
-        return;
-    }
-    // Забираем zombie, чтобы try_wait наверняка отдал статус.
-    let _ = tokio::time::timeout(Duration::from_secs(3), child.wait()).await;
 }
 
 /// Есть ли в репозитории файлы, изменённые после `since` (heartbeat активности

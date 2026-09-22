@@ -16,7 +16,6 @@
 //!   в outcome, ход продолжается.
 
 use std::fmt::Write as _;
-use std::io::Read as _;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -269,19 +268,22 @@ impl HookSet {
 }
 
 /// Исполнение одного хука: `sh -c`, env-контекст, таймаут с опросом.
+/// Команда стартует в собственной процессной группе ([`crate::proc`]):
+/// таймаут убивает группу целиком, а чтение stdout ограничено дедлайном —
+/// фоновой потомок хука, держащий pipe, не подвешивает агента (A1).
 fn run_hook(spec: &HookSpec, event: HookEvent, tool: Option<&str>, context: &str) -> HookOutcome {
     let timeout = Duration::from_secs(spec.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS).max(1));
     let ctx_trunc: String = context.chars().take(MAX_CONTEXT_BYTES).collect();
-    let spawned = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(&spec.command)
-        .env("ARCH_HOOK_EVENT", event.as_str())
-        .env("ARCH_HOOK_TOOL", tool.unwrap_or(""))
-        .env("ARCH_HOOK_CONTEXT", &ctx_trunc)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn();
+    let spawned = {
+        let mut cmd = crate::proc::shell_command("sh", &spec.command);
+        cmd.env("ARCH_HOOK_EVENT", event.as_str())
+            .env("ARCH_HOOK_TOOL", tool.unwrap_or(""))
+            .env("ARCH_HOOK_CONTEXT", &ctx_trunc)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null());
+        cmd.spawn()
+    };
     let mut child = match spawned {
         Ok(c) => c,
         Err(e) => {
@@ -293,19 +295,20 @@ fn run_hook(spec: &HookSpec, event: HookEvent, tool: Option<&str>, context: &str
             };
         }
     };
+    let pid = child.id();
+    // Читатель stdout живёт отдельно от ожидания: полный pipe заблокировал бы
+    // дочерний процесс, а join после убийства ждёт не дольше дедлайна.
+    let out_reader = child.stdout.take().map(crate::proc::PipeReader::spawn);
     let deadline = Instant::now() + timeout;
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let mut stdout = String::new();
-                if let Some(mut pipe) = child.stdout.take() {
-                    let mut buf = Vec::new();
-                    let _ = pipe.read_to_end(&mut buf);
-                    stdout = String::from_utf8_lossy(&buf)
-                        .chars()
-                        .take(MAX_HOOK_OUTPUT)
-                        .collect();
-                }
+                let captured =
+                    out_reader.map_or_else(Vec::new, crate::proc::PipeReader::join_bounded);
+                let stdout: String = String::from_utf8_lossy(&captured)
+                    .chars()
+                    .take(MAX_HOOK_OUTPUT)
+                    .collect();
                 return HookOutcome {
                     command: spec.command.clone(),
                     code: status.code(),
@@ -315,8 +318,7 @@ fn run_hook(spec: &HookSpec, event: HookEvent, tool: Option<&str>, context: &str
             }
             Ok(None) => {
                 if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    crate::proc::kill_process_group_sync(pid, &mut child);
                     return HookOutcome {
                         command: spec.command.clone(),
                         code: None,
