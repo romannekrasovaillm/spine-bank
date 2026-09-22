@@ -70,6 +70,35 @@ jobs:
       - run: cargo check --no-default-features --features core
       - run: cargo test --no-default-features --features core
 
+  hermetic:
+    # A2 (0.3.7): тесты и каркас не зависят от установленного pytest.
+    # Контейнер без python: исполняемые правила без прогонщика обязаны
+    # честно пропускаться (SKIP с причиной, bootstrap → INCOMPLETE), тесты
+    # без внешних зависимостей — зелёные, а реально требующие pytest —
+    # guard «skipped: no pytest». Соседние джобы ставят pytest и прячут
+    # регресс этой герметичности — здесь он ловится по построению.
+    name: hermetic (no python)
+    runs-on: ubuntu-latest
+    container:
+      # MSRV (Cargo.toml rust-version = "1.85"); slim — без python в базе.
+      image: rust:1.85-slim-bookworm
+    steps:
+      # git нужен и checkout'у, и тестам (init/commit в песочницах); в
+      # slim-образе его нет. Python git за собой не тянет — инвариант ниже.
+      - run: apt-get update && apt-get install -y --no-install-recommends git
+      - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2
+      # rust-toolchain.toml пиннит stable — в контейнере rustup скачивал бы
+      # второй toolchain поверх нужного 1.85; файл здесь не нужен.
+      - run: rm rust-toolchain.toml
+      # Инвариант джобы: python отсутствует по построению.
+      - run: |
+          echo "python3: $(command -v python3 || echo 'отсутствует')"
+          echo "pytest: $(command -v pytest || echo 'отсутствует')"
+          ! command -v python3 && ! command -v pytest
+      - run: cargo test
+      - run: cargo test --no-default-features --features core
+
   msrv:
     name: MSRV 1.85 (cargo check)
     runs-on: ubuntu-latest

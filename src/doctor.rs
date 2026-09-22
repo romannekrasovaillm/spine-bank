@@ -71,6 +71,7 @@ pub fn run_checks(cfg: &Config) -> Vec<Check> {
         check_archify(cfg),
         check_judge(cfg),
         check_git(),
+        check_rule_runners(),
         check_ci_releases_url(),
     ]
 }
@@ -962,6 +963,100 @@ fn check_git() -> Check {
     }
 }
 
+/// Прогонщики исполняемых правил (A2): `python3`+pytest — python-половины
+/// шаблонов правил, JDK/Maven — java-половины. Отсутствие — WARN, а не FAIL:
+/// репозиторию без java-шаблонов Maven не нужен, а правило с недоступным
+/// прогонщиком `control check` честно пропускает (SKIP с причиной), гейт
+/// отвечает INCOMPLETE — среда не «больна», проверка просто неполна.
+fn check_rule_runners() -> Check {
+    use crate::rule_templates as rt;
+    let python3 = binary_in_path("python3");
+    let pytest = rt::runner_available(rt::RunnerKind::Pytest);
+    let jdk = rt::runner_available(rt::RunnerKind::Java);
+    let maven = rt::runner_available(rt::RunnerKind::Maven);
+    // Применённые в текущем кейсе шаблоны (lock-файл) — пометка, кому именно
+    // прогонщик нужен; без кейса причина называет половину библиотеки.
+    let applied = applied_rule_templates();
+    let needed_by_case = |kind: rt::RunnerKind| -> Vec<String> {
+        applied
+            .iter()
+            .filter(|e| {
+                rt::required_runners(&e.command).contains(&kind)
+                    || (kind == rt::RunnerKind::Pytest && e.lang == "python")
+                    || (kind != rt::RunnerKind::Pytest && e.lang != "python")
+            })
+            .map(|e| e.id.clone())
+            .collect()
+    };
+    let consumer = |kind: rt::RunnerKind, default: &str| -> String {
+        let ids = needed_by_case(kind);
+        if ids.is_empty() {
+            default.to_string()
+        } else {
+            format!("нужен применённым шаблонам кейса: {}", ids.join(", "))
+        }
+    };
+    let mut missing: Vec<String> = Vec::new();
+    if !python3 {
+        missing.push(format!(
+            "python3 не найден → установите Python 3 ({})",
+            consumer(
+                rt::RunnerKind::Pytest,
+                "нужен python-половинам шаблонов правил"
+            )
+        ));
+    } else if !pytest {
+        missing.push(format!(
+            "pytest не найден → `python3 -m pip install pytest` ({})",
+            consumer(
+                rt::RunnerKind::Pytest,
+                "нужен python-половинам шаблонов правил"
+            )
+        ));
+    }
+    if !jdk {
+        missing.push(format!(
+            "JDK (java/javac) не найден → установите JDK, например `apt install default-jdk` ({})",
+            consumer(rt::RunnerKind::Java, "нужен java-половинам шаблонов правил")
+        ));
+    }
+    if !maven {
+        missing.push(format!(
+            "mvn не найден → установите Maven (`apt install maven`) или прогоняйте \
+             `--java-jar <junit-platform-console-standalone.jar>` ({})",
+            consumer(
+                rt::RunnerKind::Maven,
+                "нужен java-половинам шаблонов правил"
+            )
+        ));
+    }
+    if missing.is_empty() {
+        return Check {
+            name: "rule-runners",
+            verdict: Verdict::Ok,
+            text: "python3+pytest, JDK, Maven — в PATH".to_string(),
+        };
+    }
+    Check {
+        name: "rule-runners",
+        verdict: Verdict::Warn,
+        text: format!(
+            "прогонщики исполняемых правил неполные: {}",
+            missing.join("; ")
+        ),
+    }
+}
+
+/// Применённые в текущем каталоге шаблоны правил (lock-файл кейса). Нет
+/// файла или он не читается — пустой список: doctor тогда называет
+/// потребителей по половинам библиотеки, а не по кейсу.
+fn applied_rule_templates() -> Vec<crate::rule_templates::LockEntry> {
+    let Ok(cwd) = std::env::current_dir() else {
+        return Vec::new();
+    };
+    crate::rule_templates::read_lock(&cwd.join(crate::rule_templates::LOCK_REL)).unwrap_or_default()
+}
+
 /// Бинарь доступен в PATH (через `which`, без запуска самого бинаря).
 fn binary_in_path(name: &str) -> bool {
     std::process::Command::new("which")
@@ -985,6 +1080,28 @@ mod tests {
         cfg.cron.file = dir.join("cron.toml");
         cfg.mcp.servers_file = dir.join("mcp.json");
         cfg
+    }
+
+    /// A2: проверка прогонщиков правил присутствует в списке и НИКОГДА не
+    /// FAIL (максимум WARN с подсказкой по установке): отсутствие pytest не
+    /// делает окружение больным — репозиторию без шаблонов он и не нужен.
+    #[test]
+    fn rule_runners_check_is_present_and_never_fails() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let cfg = test_config(tmp.path());
+        let checks = run_checks(&cfg);
+        let check = checks
+            .iter()
+            .find(|c| c.name == "rule-runners")
+            .expect("проверка rule-runners в списке");
+        assert_ne!(check.verdict, Verdict::Fail, "{}", check.text);
+        if check.verdict == Verdict::Warn {
+            assert!(
+                check.text.contains("→"),
+                "WARN обязан вести к установке: {}",
+                check.text
+            );
+        }
     }
 
     #[test]

@@ -32,7 +32,7 @@ use std::path::{Path, PathBuf};
 use crate::config::Config;
 use crate::control::Route;
 use crate::error::{HarnessError, Result};
-use crate::gate::{self, GateReport, GateStatus};
+use crate::gate::{self, GateComponent, GateReport, GateStatus};
 use crate::rule_templates::{Lang, LockEntry, LockFile};
 
 /// Стадия «дорожки до зелёного»: человеческое имя и итог по составляющим.
@@ -42,7 +42,8 @@ pub struct Stage {
     pub key: &'static str,
     /// Человеческое имя для строки прогресса.
     pub title: &'static str,
-    /// Метка: `✓`, `✗` либо `7/13` у бандла.
+    /// Метка: `✓`, `✗`, `⊘` (skip — проверка не выполнялась) либо `7/13` у
+    /// бандла.
     pub mark: String,
     /// Число находок `error` (для `✗ (N находок)`).
     pub findings: usize,
@@ -362,6 +363,7 @@ fn progress(dir: &Path, report: &GateReport, cfg: &Config) -> Progress {
             }
             let mut findings = 0usize;
             let mut failing: Option<String> = None;
+            let mut skipped: Option<String> = None;
             for name in *components {
                 let Some(c) = report.components.iter().find(|c| c.name == *name) else {
                     continue;
@@ -373,16 +375,26 @@ fn progress(dir: &Path, report: &GateReport, cfg: &Config) -> Progress {
                         failing.get_or_insert_with(|| c.detail.clone());
                     }
                     GateStatus::Skip => {
-                        failing.get_or_insert_with(|| format!("нет входа: {}", c.detail));
+                        skipped.get_or_insert_with(|| format!("нет входа: {}", c.detail));
                     }
                 }
             }
+            // Три состояния, а не «✓/✗»: SKIP — не красный, проверка просто
+            // не выполнялась (нет входа или прогонщика, A2); FAIL доминирует
+            // над SKIP, если у стадии несколько составляющих.
+            let (mark, detail) = if let Some(d) = failing {
+                ("✗", d)
+            } else if let Some(d) = skipped {
+                ("⊘", d)
+            } else {
+                ("✓", "готово".to_string())
+            };
             Stage {
                 key,
                 title,
-                mark: if failing.is_none() { "✓" } else { "✗" }.to_string(),
+                mark: mark.to_string(),
                 findings,
-                detail: failing.unwrap_or_else(|| "готово".to_string()),
+                detail,
             }
         })
         .collect();
@@ -391,7 +403,7 @@ fn progress(dir: &Path, report: &GateReport, cfg: &Config) -> Progress {
         route: report.route.to_string(),
         stages,
         next: next_step(dir, report, cfg),
-        outcome: report.outcome.label().to_string(),
+        outcome: displayed_outcome(report),
         notes: Vec::new(),
         attestation: report.attestation.clone(),
     }
@@ -447,9 +459,34 @@ fn bundle_dir(dir: &Path) -> Option<PathBuf> {
     found.into_iter().next()
 }
 
-/// Следующая красная находка с подсказкой: первая по порядку прогона
-/// проваленная составляющая, иначе первая обязательная пропущенная.
+/// Следующая красная находка с подсказкой: пропуск из-за отсутствующего
+/// прогонщика (A2) — ПЕРВЫМ шагом (без раннера контур не может проверить
+/// исполняемые правила, и чинить проверяющую машинерию нужно до наполнения
+/// артефактов); иначе первая по порядку прогона проваленная составляющая,
+/// иначе первая обязательная пропущенная.
 fn next_step(dir: &Path, report: &GateReport, cfg: &Config) -> Option<NextStep> {
+    if let Some(skipped) = runner_skip_component(report) {
+        // Подсказка называет прогонщики, нужные ПРАВИЛАМ КЕЙСА, а не все
+        // отсутствующие на машине: кейсу без java-половин Maven не нужен.
+        let missing = missing_case_runners(dir);
+        if !missing.is_empty() {
+            let hints: Vec<String> = missing
+                .iter()
+                .map(|kind| format!("{} — {}", kind.label(), kind.install_hint()))
+                .collect();
+            return Some(NextStep {
+                stage: stage_of(skipped.name).to_string(),
+                component: skipped.name.to_string(),
+                problem: format!("составляющая без входа: {}", skipped.detail),
+                fix_hint: format!(
+                    "установите прогонщик: {} — затем повторите \
+                     `arch-be bootstrap --status --dir {}`",
+                    hints.join("; "),
+                    dir.display()
+                ),
+            });
+        }
+    }
     for c in &report.components {
         if c.status != GateStatus::Fail {
             continue;
@@ -528,6 +565,55 @@ fn next_step(dir: &Path, report: &GateReport, cfg: &Config) -> Option<NextStep> 
         problem: format!("составляющая без входа: {}", skipped.detail),
         fix_hint: stage_fix_hint(skipped.name).to_string(),
     })
+}
+
+/// Обязательная составляющая, пропущенная из-за отсутствующего прогонщика
+/// (A2): причина размечена префиксом
+/// [`crate::rule_templates::RUNNER_ABSENT_PREFIX`] в детали составляющей.
+fn runner_skip_component(report: &GateReport) -> Option<&GateComponent> {
+    report
+        .not_checked
+        .iter()
+        .filter_map(|name| report.components.iter().find(|c| c.name == name.as_str()))
+        .find(|c| {
+            c.detail
+                .contains(crate::rule_templates::RUNNER_ABSENT_PREFIX)
+        })
+}
+
+/// Прогонщики, которые требуют исполняемые правила кейса, но которых нет в
+/// окружении (A2): подсказка шага называет именно их. Реестр не читается —
+/// пусто (шаг откатится к общему виду).
+fn missing_case_runners(dir: &Path) -> Vec<crate::rule_templates::RunnerKind> {
+    let mut out: Vec<crate::rule_templates::RunnerKind> = Vec::new();
+    let Some(resolved) = crate::control::resolve_constraints_path_detailed(dir, None) else {
+        return out;
+    };
+    let Ok(cards) = crate::control::rule_cards(&resolved.path) else {
+        return out;
+    };
+    for card in cards.iter().filter(|c| c.kind == "command_succeeds") {
+        let Some(cmd) = card.command.as_deref() else {
+            continue;
+        };
+        for kind in crate::rule_templates::required_runners(cmd) {
+            if !crate::rule_templates::runner_available(kind) && !out.contains(&kind) {
+                out.push(kind);
+            }
+        }
+    }
+    out
+}
+
+/// Итог для человека: при блокирующем пропуске прогонщика — INCOMPLETE, даже
+/// когда есть и красные составляющие (A2): «контур не смог проверить» —
+/// честнее «проверил и нашёл», если часть правил не прогонялась вовсе.
+/// Аттестация при этом остаётся аттестацией исходного вердикта гейта.
+fn displayed_outcome(report: &GateReport) -> String {
+    if report.outcome != crate::gate::GateOutcome::Pass && runner_skip_component(report).is_some() {
+        return crate::gate::GateOutcome::Incomplete.label().to_string();
+    }
+    report.outcome.label().to_string()
 }
 
 /// Человеческое имя артефакта бандла по его ключу: находка «problem: …» хуже
@@ -1151,10 +1237,23 @@ mod tests {
         create(dir, name, "payments", &Config::default()).expect("bootstrap")
     }
 
+    /// Доступен ли прогонщик pytest в этом окружении: без него исполняемое
+    /// правило каркаса честно пропускается (A2), и тесты ПОЛНОГО пути до
+    /// зелёного пропускаются следом — падать они обязаны только от дефекта,
+    /// а не от отсутствия python на машине разработчика. Семантику «без
+    /// pytest» держат тесты пропуска (они ниже) и hermetic-джоба CI.
+    fn pytest_available() -> bool {
+        crate::rule_templates::runner_available(crate::rule_templates::RunnerKind::Pytest)
+    }
+
     /// Каркас красный и говорит, что делать: три стадии пройдены, четвёртая
     /// ждёт работы, следующий шаг назван с подсказкой.
     #[test]
     fn bootstrap_creates_a_red_skeleton_with_a_next_step() {
+        if !pytest_available() {
+            eprintln!("skipped: no pytest");
+            return;
+        }
         let tmp = tempfile::tempdir().expect("tmp");
         let dir = tmp.path().join("case");
         let progress = bootstrapped(&dir, "Зарплатные выплаты");
@@ -1190,6 +1289,10 @@ mod tests {
     /// первой строки своего кода увидеть не на чем.
     #[test]
     fn bootstrap_skeleton_carries_a_working_behavioural_rule() {
+        if !pytest_available() {
+            eprintln!("skipped: no pytest");
+            return;
+        }
         let tmp = tempfile::tempdir().expect("tmp");
         let dir = tmp.path().join("case");
         bootstrapped(&dir, "Зарплатные выплаты");
@@ -1390,6 +1493,10 @@ mod tests {
     /// конца, а не заканчивается на «создано».
     #[test]
     fn bootstrap_walks_to_green_when_artifacts_are_written() {
+        if !pytest_available() {
+            eprintln!("skipped: no pytest");
+            return;
+        }
         let tmp = tempfile::tempdir().expect("tmp");
         let dir = tmp.path().join("case");
         bootstrapped(&dir, "Зарплатные выплаты");
@@ -1456,6 +1563,51 @@ mod tests {
             progress.line()
         );
         assert!(progress.next.is_none(), "шагов не осталось");
+    }
+
+    /// A2: на машине без pytest свежий python-каркас — INCOMPLETE, а не
+    /// красный `правила ✗`: стадия правил размечена `⊘`, а первый шаг —
+    /// установка прогонщика. Тест пропускается там, где pytest есть (там
+    /// семантику покрывают тесты полного пути), и ОБЯЗАН прогоняться в
+    /// hermetic-джобе CI, где python отсутствует по построению.
+    #[test]
+    fn bootstrap_status_without_pytest_is_incomplete_with_runner_step() {
+        if pytest_available() {
+            eprintln!("skipped: pytest present (прогоняется в hermetic-джобе CI)");
+            return;
+        }
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path().join("case");
+        let progress = bootstrapped(&dir, "Зарплатные выплаты");
+
+        assert_eq!(
+            progress.outcome,
+            "INCOMPLETE",
+            "без прогонщика каркас — неполный, а не красный: {}",
+            progress.line()
+        );
+        let marks: Vec<(&str, &str)> = progress
+            .stages
+            .iter()
+            .map(|s| (s.key, s.mark.as_str()))
+            .collect();
+        assert_eq!(
+            marks,
+            vec![
+                ("spine", "✓"),
+                ("rules", "⊘"),
+                ("model", "✓"),
+                ("bundle", "13/13")
+            ],
+            "пропуск правил — не «красная» стадия: {marks:?}"
+        );
+        let next = progress.next.expect("следующий шаг назван");
+        assert_eq!(next.component, "fitness", "{next:?}");
+        assert!(
+            next.fix_hint.contains("pip install pytest"),
+            "шаг обязан вести к установке прогонщика: {}",
+            next.fix_hint
+        );
     }
 
     /// Правдоподобное содержание артефакта — по его роли в бандле. Заглушек

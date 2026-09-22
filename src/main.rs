@@ -3957,6 +3957,18 @@ fn cmd_control(cfg: &arch_harness::config::Config, cmd: ControlCmd) -> Result<()
                         println!("  {:.1}s {}", d.ms as f64 / 1000.0, d.rule);
                     }
                 }
+                // Пропущенные из-за отсутствия прогонщика (A2): не находки,
+                // но и не проверенные правила — отдельный блок, чтобы
+                // «Итог: PASS» не читался как «прогнано всё».
+                if !report.runner_skipped.is_empty() {
+                    println!(
+                        "Пропущены правила (нет прогонщика): {}",
+                        report.runner_skipped.len()
+                    );
+                    for s in &report.runner_skipped {
+                        println!("  [skip] {} — {}", s.rule, s.reason);
+                    }
+                }
                 println!("Итог: {}", if report.passed { "PASS" } else { "FAIL" });
             }
             if !report.passed {

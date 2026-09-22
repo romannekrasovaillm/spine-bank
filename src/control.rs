@@ -1292,6 +1292,24 @@ pub struct RulesFingerprint {
     pub errors: usize,
 }
 
+/// Правило, не прогонявшееся из-за отсутствия внешнего прогонщика (A2):
+/// pytest/mvn/JDK нет в PATH — правило пропущено с причиной и подсказкой по
+/// установке, а не провалено. Гейт переводит пропуск error-правила в SKIP
+/// составляющей `fitness` (вердикт неполон → INCOMPLETE), warn-правила
+/// остаются заметкой в текстовом выводе.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunnerSkippedRule {
+    /// Имя правила.
+    pub rule: String,
+    /// Нормализованный severity правила (`error`/`warn`).
+    pub severity: String,
+    /// Отсутствующие прогонщики (метки `pytest`, `mvn`, `JDK (java/javac)`).
+    pub runners: Vec<String>,
+    /// Причина и подсказка по установке (с префиксом
+    /// [`crate::rule_templates::RUNNER_ABSENT_PREFIX`]).
+    pub reason: String,
+}
+
 /// Отчёт fitness-контроля.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FitnessReport {
@@ -1338,6 +1356,11 @@ pub struct FitnessReport {
     /// v1.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skipped_unknown: Vec<SkippedUnknownRule>,
+    /// Правила, не прогонявшиеся из-за отсутствия внешнего прогонщика
+    /// (pytest/mvn/JDK, A2): пропуск с причиной, а не находка — в `issues`
+    /// не попадают и `passed` не меняют. Аддитивное поле SDK-контракта v1.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runner_skipped: Vec<RunnerSkippedRule>,
     /// Отпечаток состава реестра правил (П5). Аддитивное поле SDK-контракта v1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fingerprint: Option<RulesFingerprint>,
@@ -2617,6 +2640,18 @@ pub fn check_with_options(
     let mechanics_len = issues.len();
     let mut durations = Vec::new();
     let mut skipped: Vec<baseline::SkippedRule> = Vec::new();
+    let mut runner_skipped: Vec<RunnerSkippedRule> = Vec::new();
+    // Прогонщики внешних команд (pytest/mvn/JDK) — один снимок на весь
+    // прогон (A2). Детект — только когда в реестре есть исполняемые правила:
+    // `python3 -c "import pytest"` — лишний подпроцесс там, где команд нет.
+    let runner = if rule_refs
+        .iter()
+        .any(|r| matches!(r.kind, RuleKind::CommandSucceeds))
+    {
+        crate::rule_templates::Runner::detect(None)
+    } else {
+        crate::rule_templates::Runner::unavailable()
+    };
     for rule in &rule_refs {
         let started = Instant::now();
         run_rule(
@@ -2625,6 +2660,8 @@ pub fn check_with_options(
             &rule_refs,
             changed.as_ref(),
             &mut skipped,
+            &mut runner_skipped,
+            &runner,
             &mut issues,
         )?;
         // u128 → u64 с насыщением: переполнение недостижимо практически
@@ -2772,6 +2809,15 @@ pub fn check_with_options(
             types.into_iter().collect::<Vec<_>>().join(", ")
         );
     }
+    if !runner_skipped.is_empty() {
+        // Не нарушения, но и не проверенные правила: вердикт неполон, и это
+        // видно в сводке (в гейте пропуск error-правила — SKIP составляющей).
+        let _ = write!(
+            summary,
+            "; не прогонялись (нет прогонщика): {}",
+            runner_skipped.len()
+        );
+    }
     if let Some(fp) = &fingerprint {
         // Запись в String не может завершиться ошибкой — игнор безопасен.
         let _ = write!(
@@ -2795,6 +2841,7 @@ pub fn check_with_options(
         changed_since: options.changed_since.clone(),
         changed_files: changed.as_ref().map(BTreeSet::len),
         skipped_unknown,
+        runner_skipped,
         fingerprint,
     })
 }
@@ -3762,12 +3809,21 @@ pub(crate) fn normalize_severity(raw: &str, rule_name: &str) -> Result<&'static 
 /// `changed` — срез режима `--changed-since` (модуль [`baseline`]): при
 /// `Some` глобальные правила пропускаются (запись в `skipped`), а файловые
 /// исполняются на подмножестве изменённых файлов.
+///
+/// `runner`/`runner_skipped` — A2: правило `command_succeeds`, чья команда
+/// требует отсутствующий в PATH прогонщик (pytest/mvn/JDK), НЕ исполняется и
+/// НЕ краснеет: запись уходит в `runner_skipped` с причиной и подсказкой по
+/// установке. Гейт переводит такой пропуск error-правила в SKIP
+/// составляющей, а не в PASS.
+#[allow(clippy::too_many_arguments)]
 fn run_rule(
     rule: &FitnessRule,
     repo: &Path,
     all_rules: &[&FitnessRule],
     changed: Option<&BTreeSet<String>>,
     skipped: &mut Vec<baseline::SkippedRule>,
+    runner_skipped: &mut Vec<RunnerSkippedRule>,
+    runner: &crate::rule_templates::Runner,
     issues: &mut Vec<LintIssue>,
 ) -> Result<()> {
     let severity = normalize_severity(&rule.severity, &rule.name)?;
@@ -3970,6 +4026,23 @@ fn run_rule(
                     rule.name
                 ))
             })?;
+            // A2: команда требует внешний прогонщик (pytest/mvn/JDK), которого
+            // нет в PATH, — пропуск с причиной, а не провал. Падение прогона
+            // (`No module named pytest`) читалось бы как нарушение правила,
+            // хотя дефект — в окружении, а не в коде репозитория.
+            let missing = crate::rule_templates::missing_runners(cmd, runner);
+            if !missing.is_empty() {
+                runner_skipped.push(RunnerSkippedRule {
+                    rule: rule.name.clone(),
+                    severity: severity.to_string(),
+                    runners: missing
+                        .iter()
+                        .map(|kind| kind.label().to_string())
+                        .collect(),
+                    reason: crate::rule_templates::runners_absent_reason(&missing),
+                });
+                return Ok(());
+            }
             let timeout_secs = rule.timeout_secs.unwrap_or(COMMAND_TIMEOUT_DEFAULT_SECS);
             match run_with_timeout(repo, cmd, Duration::from_secs(timeout_secs))? {
                 outcome if outcome.status.is_some_and(|s| s.success()) => {}
@@ -7047,15 +7120,13 @@ mod tests {
 
     // --- E7: зубы применённых шаблонов в отчёте реестра (П2) --------------------
 
-    /// Прогонщик с заведомо непустым полем `python`: `verify_dir` берёт его как
-    /// признак «интерпретатор есть», а саму команду читает из лока. Тест кладёт
-    /// в лок тривиальные команды (`true`/`false`), поэтому интерпретатор в PATH
-    /// не нужен — прогон детерминирован и дешёв.
+    /// Прогонщик с непустым полем `python` (команды в локе тривиальные —
+    /// `true`/`false`, — им прогонщик и не нужен: `verify_dir` смотрит
+    /// требование по тексту команды, A2). Прогон детерминирован и дешёв.
     fn fake_runner() -> crate::rule_templates::Runner {
         crate::rule_templates::Runner {
             python: Some(PathBuf::from("python3")),
-            maven: None,
-            java_jar: None,
+            ..crate::rule_templates::Runner::unavailable()
         }
     }
 
@@ -7154,6 +7225,75 @@ mod tests {
         );
         // Тело отчёта до раздела не изменилось: сводка реестра на месте.
         assert!(before.contains("Всего правил: 2"), "{before}");
+    }
+
+    /// A2: правило `command_succeeds`, чья команда требует отсутствующий в
+    /// PATH прогонщик, — пропуск с причиной (`runner_skipped`), а не
+    /// error-находка; самодостаточная команда исполняется как раньше (и
+    /// падает, как раньше). Отсутствие раннера имитируется снимком
+    /// `Runner::unavailable()` — детерминированно, без троганья окружения.
+    #[test]
+    fn command_succeeds_without_runner_is_skipped_not_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let constraints = write_file(
+            dir.path(),
+            "CONSTRAINTS.yaml",
+            "rules:\n  - name: needs_pytest\n    type: command_succeeds\n    \
+             command: 'python3 -m pytest -q tests/x.py'\n    severity: error\n\
+             \x20 - name: needs_maven\n    type: command_succeeds\n    \
+             command: 'mvn -q test'\n    severity: warn\n\
+             \x20 - name: plain_fail\n    type: command_succeeds\n    \
+             command: 'false'\n    severity: error\n\
+             \x20 - name: plain_ok\n    type: command_succeeds\n    \
+             command: 'true'\n    severity: error\n",
+        );
+        let (rules, _unknown) = load_fitness_rules_with_skips(&constraints).unwrap();
+        let refs: Vec<&FitnessRule> = rules.iter().collect();
+        let mut skipped = Vec::new();
+        let mut runner_skipped = Vec::new();
+        let mut issues = Vec::new();
+        for rule in &refs {
+            run_rule(
+                rule,
+                dir.path(),
+                &refs,
+                None,
+                &mut skipped,
+                &mut runner_skipped,
+                &crate::rule_templates::Runner::unavailable(),
+                &mut issues,
+            )
+            .unwrap();
+        }
+        // Правила с раннерами — пропущены, а не провалены.
+        assert_eq!(runner_skipped.len(), 2, "{runner_skipped:?}");
+        let pytest_skip = runner_skipped
+            .iter()
+            .find(|s| s.rule == "needs_pytest")
+            .expect("пропуск needs_pytest");
+        assert_eq!(pytest_skip.severity, "error");
+        assert_eq!(pytest_skip.runners, vec!["pytest".to_string()]);
+        assert!(
+            pytest_skip.reason.contains("pip install pytest"),
+            "{}",
+            pytest_skip.reason
+        );
+        let maven_skip = runner_skipped
+            .iter()
+            .find(|s| s.rule == "needs_maven")
+            .expect("пропуск needs_maven");
+        assert_eq!(maven_skip.severity, "warn");
+        // Самодостаточные команды исполняются: `false` — находка, `true` — чисто.
+        assert!(issues.iter().any(|i| i.rule == "plain_fail"), "{issues:?}");
+        assert!(issues.iter().all(|i| i.rule != "plain_ok"), "{issues:?}");
+        // Пропущенные правила в находки не попали: пропуск — не провал.
+        assert!(
+            issues
+                .iter()
+                .all(|i| i.rule != "needs_pytest" && i.rule != "needs_maven"),
+            "{issues:?}"
+        );
+        assert!(skipped.is_empty(), "{skipped:?}");
     }
 
     // --- S-1: anti-bypass floor (триггеры из диффа) -----------------------------

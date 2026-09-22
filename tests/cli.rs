@@ -13,6 +13,19 @@ use predicates::str::contains;
 
 use common::arch_cmd;
 
+/// Доступен ли прогонщик pytest в окружении (A2): та же проверка по
+/// существу, что делает харнесс (`python3 -c "import pytest"` — бинаря
+/// `pytest` может не быть, когда модуль есть, и наоборот).
+fn pytest_available() -> bool {
+    std::process::Command::new("python3")
+        .args(["-c", "import pytest"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
 /// Пишет исполняемый shell-скрипт фейкового кодового харнесса: печатает
 /// в stdout headless JSON-контракт результата (fenced json-блок со
 /// `status`) и завершается нулём. Возвращает путь к скрипту.
@@ -2388,6 +2401,13 @@ fn connected_skills_are_searchable_without_init() {
 /// помогает.
 #[test]
 fn bootstrap_walks_a_new_case_towards_green() {
+    // A2: полный путь до зелёного требует pytest (правило каркаса прогоняет
+    // тесты шаблона); без него проводник честно отвечает INCOMPLETE — ту
+    // семантику держат модульные тесты и hermetic-джоба CI.
+    if !pytest_available() {
+        eprintln!("skipped: no pytest");
+        return;
+    }
     let tmp = tempfile::tempdir().expect("tmp");
     let home = tmp.path();
     let case = home.join("salary");

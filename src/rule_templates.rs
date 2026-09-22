@@ -1108,7 +1108,7 @@ fn lock_entry(
     }
 }
 
-fn read_lock(path: &Path) -> Result<Vec<LockEntry>> {
+pub(crate) fn read_lock(path: &Path) -> Result<Vec<LockEntry>> {
     let Ok(text) = std::fs::read_to_string(path) else {
         return Ok(Vec::new());
     };
@@ -1150,24 +1150,42 @@ fn write_lock(path: &Path, entries: &[LockEntry]) -> Result<()> {
 /// Кто исполняет тесты: чем богато окружение.
 #[derive(Debug, Clone)]
 pub struct Runner {
-    /// `python3` из PATH.
+    /// `python3` с модулем pytest (иначе прогон падает `No module named
+    /// pytest`, и проверка зубов приняла бы это за провал эталонной
+    /// реализации — ложный красный вместо честного пропуска).
     pub python: Option<PathBuf>,
     /// `mvn` из PATH.
     pub maven: Option<PathBuf>,
+    /// JDK (`javac` + `java`) из PATH; `Some` — найдены оба.
+    pub java: Option<PathBuf>,
     /// JUnit-консоль, переданная флагом `--java-jar`.
     pub java_jar: Option<PathBuf>,
 }
 
 impl Runner {
-    /// Определяет доступные прогонщики: `python3`/`mvn` ищутся в `PATH`,
-    /// JUnit-консоль — только явным флагом (встраивать бинарный jar в ассеты
-    /// нельзя, а тянуть его из сети харнесс не имеет права).
+    /// Определяет доступные прогонщики: `python3`+pytest/`mvn`/JDK ищутся в
+    /// `PATH`, JUnit-консоль — только явным флагом (встраивать бинарный jar в
+    /// ассеты нельзя, а тянуть его из сети харнесс не имеет права).
     #[must_use]
     pub fn detect(java_jar: Option<&Path>) -> Self {
         Self {
             python: python_runner(),
             maven: which("mvn"),
+            java: java_toolchain(),
             java_jar: java_jar.map(Path::to_path_buf),
+        }
+    }
+
+    /// Снимок «пустого» окружения: все прогонщики отсутствуют. Для тестов
+    /// (детерминированная имитация машины без раннеров, A2) и веток, где
+    /// исполняемых правил заведомо нет и детект был бы лишней работой.
+    #[must_use]
+    pub fn unavailable() -> Self {
+        Self {
+            python: None,
+            maven: None,
+            java: None,
+            java_jar: None,
         }
     }
 
@@ -1183,6 +1201,122 @@ impl Runner {
             "питон-прогонщик недоступен".to_string()
         }
     }
+}
+
+/// Внешний прогонщик, от которого зависит команда исполняемого правила (A2):
+/// pytest — python-половины шаблонов, Maven/JDK — java-половины.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunnerKind {
+    /// `python3` с установленным модулем pytest.
+    Pytest,
+    /// Maven (`mvn … test`).
+    Maven,
+    /// JDK (`javac` + `java`): прогон JUnit-консолью без Maven.
+    Java,
+}
+
+impl RunnerKind {
+    /// Все виды прогонщиков (диагностика окружения, подсказки).
+    pub const ALL: [Self; 3] = [Self::Pytest, Self::Maven, Self::Java];
+
+    /// Метка для сообщений.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Pytest => "pytest",
+            Self::Maven => "mvn",
+            Self::Java => "JDK (java/javac)",
+        }
+    }
+
+    /// Подсказка по установке.
+    #[must_use]
+    pub fn install_hint(self) -> &'static str {
+        match self {
+            Self::Pytest => "`python3 -m pip install pytest`",
+            Self::Maven => {
+                "установите Maven (например, `apt install maven`) либо прогоняйте \
+                 JUnit-консолью: `--java-jar <junit-platform-console-standalone.jar>`"
+            }
+            Self::Java => "установите JDK (например, `apt install default-jdk`)",
+        }
+    }
+}
+
+/// Префикс причины пропуска «прогонщик отсутствует в PATH» (A2): по нему
+/// проводник (`arch-be bootstrap`) узнаёт этот вид пропуска и предлагает
+/// установку раннера, а не общий шаг «приведите репозиторий в соответствие».
+pub const RUNNER_ABSENT_PREFIX: &str = "нет прогонщика";
+
+/// Какие прогонщики нужны команде `command_succeeds` — по токенам командной
+/// строки (A2). Команда без известных прогонщиков (`true`, `bash check.sh`,
+/// `./target/debug/arch-be …`) самодостаточна: список пуст, и такая команда
+/// обязана прогоняться даже на машине без pytest.
+///
+/// Распознаются: `pytest` (в т.ч. форма `python3 -m pytest`), `mvn`,
+/// `java`/`javac` (прогон JUnit-консолью). Сравнение — по ГОЛОМУ токену без
+/// кавычек: токен с разделителем пути — аргумент (`skeleton/x/java`,
+/// `src/main/java/*.java`), а не вызов программы, и ложных срабатываний не
+/// даёт. Дубликаты схлопываются (`javac … && java …` → один JDK).
+#[must_use]
+pub fn required_runners(command: &str) -> Vec<RunnerKind> {
+    let mut out: Vec<RunnerKind> = Vec::new();
+    for token in command.split(|c: char| c.is_whitespace() || "|&;()<>".contains(c)) {
+        let name = token.trim_matches(|c| c == '\'' || c == '"');
+        let kind = match name {
+            "pytest" | "py.test" => RunnerKind::Pytest,
+            "mvn" | "mvn.cmd" => RunnerKind::Maven,
+            // Обертка Maven тянет сам дистрибутив, но JDK ей нужен в любом
+            // случае — как и прогону JUnit-консолью.
+            "mvnw" | "mvnw.cmd" | "java" | "javac" => RunnerKind::Java,
+            _ => continue,
+        };
+        if !out.contains(&kind) {
+            out.push(kind);
+        }
+    }
+    out
+}
+
+/// Доступен ли прогонщик в текущем окружении (`PATH`). Проверка по существу:
+/// для pytest — `python3 -c "import pytest"` (бинаря `pytest` может не быть,
+/// когда модуль есть, — и наоборот).
+#[must_use]
+pub fn runner_available(kind: RunnerKind) -> bool {
+    match kind {
+        RunnerKind::Pytest => python_runner().is_some(),
+        RunnerKind::Maven => which("mvn").is_some(),
+        RunnerKind::Java => java_toolchain().is_some(),
+    }
+}
+
+/// Требуемые командой прогонщики, отсутствующие в снимке `runner` (A2).
+#[must_use]
+pub fn missing_runners(command: &str, runner: &Runner) -> Vec<RunnerKind> {
+    required_runners(command)
+        .into_iter()
+        .filter(|kind| match kind {
+            RunnerKind::Pytest => runner.python.is_none(),
+            RunnerKind::Maven => runner.maven.is_none(),
+            RunnerKind::Java => runner.java.is_none(),
+        })
+        .collect()
+}
+
+/// Причина пропуска из-за отсутствующих прогонщиков: с префиксом
+/// [`RUNNER_ABSENT_PREFIX`] и подсказкой по установке каждого.
+#[must_use]
+pub fn runners_absent_reason(missing: &[RunnerKind]) -> String {
+    let parts: Vec<String> = missing
+        .iter()
+        .map(|kind| match kind {
+            // У pytest причина точнее общей: «нет python3» и «python3 есть,
+            // модуля нет» лечатся по-разному.
+            RunnerKind::Pytest => format!("pytest: {}", python_absent_reason()),
+            kind => format!("{}: {}", kind.label(), kind.install_hint()),
+        })
+        .collect();
+    format!("{RUNNER_ABSENT_PREFIX} {}", parts.join("; "))
 }
 
 /// `python3` с установленным pytest — иначе прогон теста шаблона падает
@@ -1207,6 +1341,13 @@ fn python_absent_reason() -> &'static str {
     } else {
         "`python3` есть, но нет модуля pytest (`python3 -m pip install pytest`)"
     }
+}
+
+/// JDK в PATH: и компилятор, и рантайм (прогон JUnit-консолью — это
+/// `javac … && java -jar …`; одного `java` без компилятора мало).
+fn java_toolchain() -> Option<PathBuf> {
+    which("javac")?;
+    which("java")
 }
 
 /// Поиск программы в `PATH`.
@@ -1314,10 +1455,22 @@ pub fn verify_all(runner: &Runner, lang: Lang, require_python: bool) -> Result<V
             }
             write_files(&root, TARGET_REL, &t.manifest.id, &files, &t)?;
             let Some(command) = command_for(&t, half, &root, None, runner) else {
+                // Команду не собрать: у java-половины нет ни `mvn`, ни jar.
                 report.skipped.push(format!(
                     "{} [{half}]: {} — проверка не выполнена",
                     t.manifest.id,
                     runner.absent_reason(half)
+                ));
+                continue;
+            };
+            // Прогонщик, нужный КОМАНДЕ, отсутствует: честный пропуск с
+            // причиной, а не прогон, падающий `No module named pytest` (A2).
+            let missing = missing_runners(&command, runner);
+            if !missing.is_empty() {
+                let reason = runners_absent_reason(&missing);
+                report.skipped.push(format!(
+                    "{} [{half}]: {reason} — проверка не выполнена",
+                    t.manifest.id
                 ));
                 if *half == "python" && require_python {
                     report.checks.push(VerifyCheck {
@@ -1326,13 +1479,12 @@ pub fn verify_all(runner: &Runner, lang: Lang, require_python: bool) -> Result<V
                         stage: "reference",
                         ok: false,
                         detail: format!(
-                            "{} — а без питон-прогонщика проверка зубов невозможна (`--require-python`)",
-                            python_absent_reason()
+                            "{reason} — а без питон-прогонщика проверка зубов невозможна (`--require-python`)"
                         ),
                     });
                 }
                 continue;
-            };
+            }
             let timeout = if *half == "java" {
                 JAVA_RUN_TIMEOUT
             } else {
@@ -1375,8 +1527,13 @@ pub fn verify_all(runner: &Runner, lang: Lang, require_python: bool) -> Result<V
 }
 
 /// Команда прогона половины: python — из манифеста (или записанная в lock),
-/// java — JUnit-консолью (если передан jar), иначе Maven’ом из манифеста.
-/// `None` — прогонщика в окружении нет.
+/// java — JUnit-консолью (если передан jar), иначе Maven'ом из манифеста.
+/// `None` — команду не собрать: у java-половины нет ни `mvn`, ни `--java-jar`.
+///
+/// Доступность прогонщика здесь НЕ проверяется: вызывающий смотрит
+/// [`missing_runners`] по тексту готовой команды — тогда команда без
+/// внешнего раннера (`true` в тестовых lock'ах) прогоняется и на машине без
+/// pytest, а зависимость видна из самой команды, а не из языка половины (A2).
 fn command_for(
     t: &Template,
     half: &str,
@@ -1396,7 +1553,6 @@ fn command_for(
         }
         return t.command_for("java").map(str::to_string);
     }
-    runner.python.as_ref()?;
     python_command
         .map(str::to_string)
         .or_else(|| t.command_for("python").map(str::to_string))
@@ -1628,6 +1784,7 @@ pub fn verify_dir(case: &Path, runner: &Runner, lang: Lang) -> Result<VerifyRepo
         };
         for half in halves {
             let Some(command) = command_for(&t, half, case, Some(&entry.command), runner) else {
+                // Команду не собрать: у java-половины нет ни `mvn`, ни jar.
                 report.skipped.push(format!(
                     "{} ({}) [{half}]: {} — проверка не выполнена",
                     entry.id,
@@ -1636,6 +1793,19 @@ pub fn verify_dir(case: &Path, runner: &Runner, lang: Lang) -> Result<VerifyRepo
                 ));
                 continue;
             };
+            // Прогонщик, нужный КОМАНДЕ из lock, отсутствует: пропуск с
+            // причиной, а не падение прогона (A2). Команда без раннера
+            // (`true`) прогоняется на любой машине.
+            let missing = missing_runners(&command, runner);
+            if !missing.is_empty() {
+                report.skipped.push(format!(
+                    "{} ({}) [{half}]: {} — проверка не выполнена",
+                    entry.id,
+                    entry.ad,
+                    runners_absent_reason(&missing)
+                ));
+                continue;
+            }
             let root = case_copy(case, &entry.id, &entry.ad);
             let swaps: Vec<&ViolatingSwap> = t
                 .violating_for(Lang::parse(&entry.lang).unwrap_or(Lang::Both))
@@ -2132,5 +2302,146 @@ mod tests {
         let (code, _) =
             run_shell(dir.path(), "sleep 30", Duration::from_millis(200)).expect("таймаут");
         assert_eq!(code, None, "команда должна быть убита по таймауту");
+    }
+
+    // --- A2: отсутствующий прогонщик — честный SKIP, а не падение ------------
+
+    /// Распознавание прогонщиков по токенам команды: шаблонные формы
+    /// (`python3 -m pytest`, `mvn … test`, `javac … && java -jar …`)
+    /// находятся, самодостаточные команды (`true`, `bash …`, `arch-be …`)
+    /// прогонщика не требуют.
+    #[test]
+    fn required_runners_detects_known_runners() {
+        assert_eq!(
+            required_runners("python3 -m pytest -q -p no:cacheprovider skeleton/x/test_a.py"),
+            vec![RunnerKind::Pytest]
+        );
+        assert_eq!(required_runners("pytest -q"), vec![RunnerKind::Pytest]);
+        assert_eq!(
+            required_runners("cd t && python3 -m pytest -q test_a.py"),
+            vec![RunnerKind::Pytest]
+        );
+        assert_eq!(
+            required_runners("mvn -q -f skeleton/x/java test"),
+            vec![RunnerKind::Maven]
+        );
+        // `javac` и `java` — один и тот же JDK: без дублей.
+        assert_eq!(
+            required_runners("cd j && javac -d out A.java && java -jar j.jar execute -cp out"),
+            vec![RunnerKind::Java]
+        );
+        for cmd in [
+            "true",
+            "bash scripts/check.sh",
+            "./target/debug/arch-be rules template verify --all --require-python",
+            "cargo test --lib",
+        ] {
+            assert!(required_runners(cmd).is_empty(), "{cmd}");
+        }
+    }
+
+    /// Кейс с применённым шаблоном `id`: файлы поставки, lock-запись с
+    /// командой `command` и реестр с правилом шаблона той же командой —
+    /// иначе проверка зубов сочтёт применение адаптированным и пропустит его
+    /// до всякой проверки прогонщика.
+    fn case_with_applied(id: &str, command: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tmp");
+        let case = dir.path();
+        let t = template(id).expect("читается").expect("встроен в сборку");
+        let tdir = format!("{TARGET_REL}/{id}");
+        let mut files_yaml = String::new();
+        for f in t.files_for(Lang::Python) {
+            let content = t.file(&f.from).expect("файл шаблона есть в сборке");
+            let rel = format!("{tdir}/{}", f.to);
+            let path = case.join(&rel);
+            std::fs::create_dir_all(path.parent().expect("родитель")).expect("mkdir");
+            std::fs::write(&path, content).expect("write");
+            let _ = writeln!(
+                files_yaml,
+                "      - path: {rel}\n        sha256: '{}'",
+                crate::hash::sha256_hex(content.as_bytes())
+            );
+        }
+        let lock = format!(
+            "# тест\ntemplates:\n  - id: {id}\n    version: {}\n    ad: AD-1\n    \
+             lang: python\n    dir: {tdir}\n    command: '{command}'\n    files:\n{files_yaml}",
+            t.manifest.version
+        );
+        let lock_path = case.join(LOCK_REL);
+        std::fs::create_dir_all(lock_path.parent().expect("родитель")).expect("mkdir");
+        std::fs::write(lock_path, lock).expect("lock");
+        std::fs::write(
+            case.join("CONSTRAINTS.yaml"),
+            format!(
+                "rules:\n  - name: {}\n    type: command_succeeds\n    \
+                 command: '{command}'\n    severity: error\n",
+                t.manifest.rule.name
+            ),
+        )
+        .expect("реестр");
+        dir
+    }
+
+    /// Прогонщик, нужный команде из lock, отсутствует: честный пропуск с
+    /// причиной и подсказкой по установке — не упавшая проверка (раньше
+    /// `No module named pytest` читался как красный эталонной реализации).
+    #[test]
+    fn verify_dir_skips_python_check_when_pytest_absent() {
+        let case = case_with_applied("idempotency-key", "python3 -m pytest -q x.py");
+        let report = verify_dir(case.path(), &Runner::unavailable(), Lang::Python).expect("lock");
+        assert!(
+            report.checks.is_empty(),
+            "проверок не было: {:?}",
+            report.checks
+        );
+        assert!(
+            report.findings.is_empty(),
+            "находок нет: {:?}",
+            report.findings
+        );
+        assert_eq!(report.skipped.len(), 1, "{:?}", report.skipped);
+        let reason = &report.skipped[0];
+        assert!(reason.contains(RUNNER_ABSENT_PREFIX), "{reason}");
+        assert!(reason.contains("pip install pytest"), "{reason}");
+    }
+
+    /// Команда без внешнего прогонщика (`false` — зубы на месте) прогоняется
+    /// и на машине вообще без раннеров: требование смотрится по тексту
+    /// команды, а не по языку половины — `rules report` от этого кейса больше
+    /// не зависит от pytest на машине.
+    #[test]
+    fn verify_dir_runs_self_sufficient_command_without_any_runner() {
+        let case = case_with_applied("no-pii-in-logs", "false");
+        let report = verify_dir(case.path(), &Runner::unavailable(), Lang::Python).expect("lock");
+        assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+        assert_eq!(report.checks.len(), 1, "{:?}", report.checks);
+        assert!(
+            report.checks[0].ok,
+            "ожидание FAIL совпало с исходом: {:?}",
+            report.checks
+        );
+        assert!(report.findings.is_empty(), "{:?}", report.findings);
+    }
+
+    /// Без питон-прогонщика проверка зубов всех шаблонов — пропуск с
+    /// причиной; `--require-python` (догфуд C-31) переводит пропуск в провал.
+    #[test]
+    fn verify_all_skip_vs_require_python_when_runner_absent() {
+        let soft = verify_all(&Runner::unavailable(), Lang::Python, false).expect("verify");
+        assert!(soft.checks.is_empty(), "{:?}", soft.checks);
+        assert!(soft.findings.is_empty(), "{:?}", soft.findings);
+        assert!(
+            soft.skipped
+                .iter()
+                .any(|s| s.contains(RUNNER_ABSENT_PREFIX)),
+            "{:?}",
+            soft.skipped
+        );
+        let strict = verify_all(&Runner::unavailable(), Lang::Python, true).expect("verify");
+        assert!(
+            !strict.passed(),
+            "require-python обязан краснеть без прогонщика"
+        );
+        assert!(strict.checks.iter().all(|c| !c.ok), "{:?}", strict.checks);
     }
 }

@@ -768,11 +768,23 @@ fn component_fitness(repo: &Path, constraints: &ConstraintsPath) -> GateComponen
         return GateComponent::fail("fitness", detail(&summary), findings).noting(notes);
     }
     match control::check(repo, &constraints.path) {
-        Ok(report) if report.passed => GateComponent::pass(
-            "fitness",
-            format!("{} — файл: {label}", detail(&report.summary)),
-        )
-        .noting(notes),
+        Ok(report) if report.passed => {
+            // A2: исполняемые правила, не прогонявшиеся из-за отсутствия
+            // прогонщика (pytest/mvn/JDK), — не PASS («нарушений нет»), а SKIP:
+            // вердикт неполон, обязательная составляющая даёт INCOMPLETE.
+            if let Some(skip_detail) = runner_skip_detail(&report) {
+                return GateComponent::skip(
+                    "fitness",
+                    format!("{} — файл: {label}", detail(&skip_detail)),
+                )
+                .noting(notes);
+            }
+            GateComponent::pass(
+                "fitness",
+                format!("{} — файл: {label}", detail(&report.summary)),
+            )
+            .noting(notes)
+        }
         Ok(report) => GateComponent::fail(
             "fitness",
             format!("{} — файл: {label}", detail(&report.summary)),
@@ -781,6 +793,31 @@ fn component_fitness(repo: &Path, constraints: &ConstraintsPath) -> GateComponen
         .noting(notes),
         Err(e) => GateComponent::fail("fitness", format!("сбой выполнения: {e}"), Vec::new()),
     }
+}
+
+/// Деталь составляющей `fitness`, когда исполняемые правила не прогонялись
+/// из-за отсутствия внешнего прогонщика (A2). Блокирующими считаются пропуски
+/// error-правил: составляющая обязана уйти в SKIP («проверить не удалось»),
+/// а не в PASS — «правила зелёные» при непрогнанных правилах был бы ложным
+/// зелёным. Пропуски warn-правил вердикт не меняют (их находки гейт и раньше
+/// не печатал). `None` — блокирующих пропусков нет.
+fn runner_skip_detail(report: &control::FitnessReport) -> Option<String> {
+    let blocking: Vec<&control::RunnerSkippedRule> = report
+        .runner_skipped
+        .iter()
+        .filter(|s| s.severity == "error")
+        .collect();
+    if blocking.is_empty() {
+        return None;
+    }
+    let names: Vec<&str> = blocking.iter().map(|s| s.rule.as_str()).collect();
+    let mut reasons: Vec<&str> = blocking.iter().map(|s| s.reason.as_str()).collect();
+    reasons.dedup();
+    Some(format!(
+        "исполняемые правила не прогонялись ({}) — {}",
+        names.join(", "),
+        reasons.join("; ")
+    ))
 }
 
 /// Находка `registry_diverged` (T-02): в проекте две копии реестра правил, и
@@ -4152,6 +4189,54 @@ mod tests {
         assert_eq!(status_of(&report, "fitness"), GateStatus::Fail);
         // spine_lint пропущен: файла нет — входа нет (fail-soft).
         assert_eq!(status_of(&report, "spine_lint"), GateStatus::Skip);
+    }
+
+    /// A2: пропуск error-правила из-за отсутствия прогонщика — составляющая
+    /// fitness уходит в SKIP (деталь для `GateComponent::skip`), warn-пропуск
+    /// вердикт не меняет. Детерминировано: отчёт собран руками, окружение не
+    /// участвует.
+    #[test]
+    fn runner_skip_detail_only_for_error_severity() {
+        let skip = |rule: &str, severity: &str| control::RunnerSkippedRule {
+            rule: rule.to_string(),
+            severity: severity.to_string(),
+            runners: vec!["pytest".to_string()],
+            reason: "нет прогонщика pytest: `python3` есть, но нет модуля pytest \
+                     (`python3 -m pip install pytest`)"
+                .to_string(),
+        };
+        let report = |runner_skipped: Vec<control::RunnerSkippedRule>| control::FitnessReport {
+            repo: PathBuf::from("."),
+            passed: true,
+            issues: Vec::new(),
+            summary: String::new(),
+            durations: Vec::new(),
+            inherited: Vec::new(),
+            overrides: Vec::new(),
+            baseline: None,
+            skipped: Vec::new(),
+            changed_since: None,
+            changed_files: None,
+            skipped_unknown: Vec::new(),
+            runner_skipped,
+            fingerprint: None,
+        };
+        let detail = runner_skip_detail(&report(vec![
+            skip("r_err", "error"),
+            skip("r_warn", "warn"),
+        ]))
+        .expect("error-пропуск блокирует");
+        assert!(detail.contains("r_err"), "{detail}");
+        assert!(
+            !detail.contains("r_warn"),
+            "warn-пропуск не блокирует: {detail}"
+        );
+        assert!(detail.contains("pip install pytest"), "{detail}");
+        assert!(
+            runner_skip_detail(&report(vec![skip("r_warn", "warn")])).is_none(),
+            "warn-пропуски не меняют вердикт"
+        );
+        assert!(runner_skip_detail(&report(Vec::new())).is_none());
     }
 
     #[test]
