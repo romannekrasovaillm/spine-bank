@@ -496,3 +496,26 @@ constraints:
     skill: fitness-functions
     owner: "solution-архитектор BE"
     expiry: "2027-09-22"
+
+  # --- B1 ревью 0.3.6: предельный размер продового модуля -------------------
+  # Исполняемая проверка (не текстовая): падает, перечисляя src-файлы длиннее
+  # 3000 строк. Прецеденты разбиения: src/control/, src/gate/, src/cli/,
+  # src/mcp_server/, src/connect/, src/rubric/, src/contract_diff/.
+  - id: C-33
+    name: prod_file_length_limit
+    type: command_succeeds
+    command: "bash scripts/check_file_length.sh"
+    timeout_secs: 60
+    severity: critical
+    ad: AD-9
+    rationale: >-
+      модули за 3–8 тысяч строк не ревьюируются и конфликтуют при параллельной
+      работе агентов; граница 3000 строк — критерий успеха волны B1,
+      удерживается гейтом, а не памятью
+    fix_hint: >-
+      разбей модуль на подмодули чистым перемещением с реэкспортами pub use
+      в mod.rs — публичные пути crate::<module>::… не меняются
+      (прецеденты: src/control/, src/gate/, src/mcp_server/, src/cli/)
+    skill: fitness-functions
+    owner: "solution-архитектор BE"
+    expiry: "2027-09-23"
