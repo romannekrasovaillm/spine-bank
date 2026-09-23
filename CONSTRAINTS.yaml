@@ -2,10 +2,10 @@
 #
 # Прогон:  arch-be control check . --constraints CONSTRAINTS.yaml
 # CI:      джоба dogfood (.github/workflows/ci.yml).
-# Схема:   src/control.rs (FitnessRule); корни rules:|constraints:;
+# Схема:   src/control/types.rs (FitnessRule); корни rules:|constraints:;
 #          severity critical|high → error (ломает итог, exit 1), medium → warn.
 # Обход пропускает .git, target, node_modules, dist, __pycache__, .next,
-# .pytest_cache, .arch-handoff (src/control.rs, collect_files).
+# .pytest_cache, .arch-handoff (src/control/exec.rs, collect_files).
 constraints:
   # --- AD-6: безопасный Rust -----------------------------------------------
 
