@@ -6,7 +6,7 @@
 
 mod common;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
@@ -449,6 +449,121 @@ fn fitness_check_issue_carries_card_context() {
         "{issue}"
     );
     assert_eq!(issue["skill"], "spine-invariants", "{issue}");
+}
+
+/// Репозиторий-фикстура с command_succeeds-правилом, создающим файл-маяк
+/// (для тестов модели доверия A3: исполнилась ли команда — видно по маяку).
+fn command_repo_fixture(home: &Path, name: &str, marker: &str) -> PathBuf {
+    let dir = home.join(name);
+    std::fs::create_dir_all(dir.join(".arch-handoff")).expect("mkdir");
+    std::fs::write(
+        dir.join(".arch-handoff/CONSTRAINTS.yaml"),
+        format!(
+            "rules:\n  - name: touched\n    type: command_succeeds\n    command: 'touch {marker}'\n    severity: error\n"
+        ),
+    )
+    .expect("constraints");
+    dir
+}
+
+/// A3 (модель доверия, ADR-053): MCP-сервер по умолчанию работает с
+/// no-exec=вкл — `command_succeeds` реестра НЕ исполняются (пропуск
+/// `command_untrusted` в поле `untrusted_skipped`, файл-маяк не создан,
+/// passed не страдает: пропуск — не провал); `ARCH_NO_EXEC=0` в окружении
+/// сервера снимает запрет (маяк создан, пропусков нет).
+#[test]
+fn fitness_check_no_exec_default_and_exec_override() {
+    let home = tempfile::tempdir().expect("tmp");
+    let repo = command_repo_fixture(home.path(), "cmd-repo", "marker.txt");
+
+    // Дефолт сервера: no-exec — команда не исполняется.
+    let responses = mcp_serve(
+        home.path(),
+        &batch(&[call(
+            1,
+            "fitness_check",
+            &json!({"repo": repo.display().to_string()}),
+        )]),
+    );
+    let verdict = structured(&responses[0], 1);
+    assert_eq!(verdict["passed"], true, "пропуск — не провал: {verdict}");
+    let skipped = verdict["untrusted_skipped"]
+        .as_array()
+        .expect("поле untrusted_skipped");
+    assert_eq!(skipped.len(), 1, "{verdict}");
+    assert_eq!(skipped[0]["rule"], "touched");
+    assert!(
+        skipped[0]["reason"]
+            .as_str()
+            .expect("reason")
+            .contains("command_untrusted"),
+        "{verdict}"
+    );
+    assert!(!repo.join("marker.txt").exists(), "команда не запускалась");
+
+    // ARCH_NO_EXEC=0 в окружении сервера снимает запрет.
+    let mut cmd = arch_cmd(home.path());
+    cmd.arg("mcp").arg("serve").env("ARCH_NO_EXEC", "0");
+    let output = cmd
+        .write_stdin(batch(&[call(
+            1,
+            "fitness_check",
+            &json!({"repo": repo.display().to_string()}),
+        )]))
+        .output()
+        .expect("запуск arch-be mcp serve");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("stdout — utf8");
+    let responses: Vec<Value> = stdout
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).expect("каждая строка — валидный JSON-RPC"))
+        .collect();
+    let verdict = structured(&responses[0], 1);
+    assert_eq!(verdict["passed"], true, "{verdict}");
+    assert!(
+        verdict["untrusted_skipped"]
+            .as_array()
+            .is_none_or(Vec::is_empty),
+        "запрет снят — пропусков нет: {verdict}"
+    );
+    assert!(repo.join("marker.txt").exists(), "команда исполнилась");
+}
+
+/// A3: мостовой `architect_review` наследует серверную политику no-exec
+/// (через `ToolContext.exec`, а не библиотечный дефолт): секция `fitness`
+/// SKIP с находкой `command_untrusted`, команда не исполнялась.
+#[test]
+fn architect_review_bridge_inherits_no_exec() {
+    let home = tempfile::tempdir().expect("tmp");
+    let repo = command_repo_fixture(home.path(), "review-repo", "marker.txt");
+    let responses = mcp_serve(
+        home.path(),
+        &batch(&[call(
+            1,
+            "architect_review",
+            &json!({"path": repo.display().to_string()}),
+        )]),
+    );
+    let verdict = structured(&responses[0], 1);
+    let components = verdict["components"].as_array().expect("components");
+    let fitness = components
+        .iter()
+        .find(|c| c["name"] == "fitness")
+        .expect("секция fitness");
+    assert_eq!(fitness["status"], "SKIP", "{verdict}");
+    assert!(
+        fitness["detail"]
+            .as_str()
+            .expect("detail")
+            .contains("command_untrusted"),
+        "{verdict}"
+    );
+    assert!(!repo.join("marker.txt").exists(), "команда не запускалась");
 }
 
 #[test]

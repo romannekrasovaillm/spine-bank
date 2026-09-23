@@ -201,6 +201,172 @@ fn control_check_shows_card_context_in_text_and_json() {
     assert_eq!(issue["rationale"], "гейт, а не документация задним числом");
 }
 
+/// CONSTRAINTS.yaml с одним command_succeeds-правилом, создающим файл-маяк.
+fn command_constraints_yaml(marker: &str) -> String {
+    format!(
+        "rules:\n  - name: touched\n    type: command_succeeds\n    command: 'touch {marker}'\n    severity: error\n"
+    )
+}
+
+/// A3 (модель доверия, ADR-053): `control check` на репо с
+/// command_succeeds-правилом по умолчанию исполняет команду (маяк создан),
+/// а с `--no-exec` — пропуск `command_untrusted` в выводе, exit 0 и маяк НЕ
+/// создан (команда не запускалась вообще).
+#[test]
+fn control_check_no_exec_skips_command_without_running_it() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = repo_with_constraints(tmp.path(), &command_constraints_yaml("marker.txt"));
+
+    // Дефолт CLI: исполнение разрешено (обратная совместимость).
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("control").arg("check").arg(repo.as_os_str());
+    cmd.assert().success().stdout(contains("Итог: PASS"));
+    assert!(repo.join("marker.txt").exists(), "маяк создан");
+    std::fs::remove_file(repo.join("marker.txt")).expect("cleanup");
+
+    // --no-exec: пропуск command_untrusted, команда не запускалась, exit 0.
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("control")
+        .arg("check")
+        .arg(repo.as_os_str())
+        .arg("--no-exec");
+    cmd.assert()
+        .success()
+        .stdout(contains("command_untrusted"))
+        .stdout(contains("[skip] touched"))
+        .stdout(contains("Итог: PASS"));
+    assert!(!repo.join("marker.txt").exists(), "команда не запускалась");
+}
+
+/// A3: `ARCH_NO_EXEC=1` в окружении действует как флаг `--no-exec`; явное
+/// `ARCH_NO_EXEC=0` — разрешает исполнение.
+#[test]
+fn control_check_no_exec_env_switch() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = repo_with_constraints(tmp.path(), &command_constraints_yaml("marker.txt"));
+
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("control")
+        .arg("check")
+        .arg(repo.as_os_str())
+        .env("ARCH_NO_EXEC", "1");
+    cmd.assert().success().stdout(contains("command_untrusted"));
+    assert!(!repo.join("marker.txt").exists(), "env=1: не запускалась");
+
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("control")
+        .arg("check")
+        .arg(repo.as_os_str())
+        .env("ARCH_NO_EXEC", "0");
+    cmd.assert()
+        .success()
+        .stdout(contains("Итог: PASS"))
+        .stdout(contains("command_untrusted").not());
+    assert!(repo.join("marker.txt").exists(), "env=0: исполнилась");
+}
+
+/// A3, allow-файл: `rules allow` пишет trusted.json (в изолированном доме);
+/// совпадение отпечатка — исполнение; изменение реестра — пропуск
+/// `command_untrusted` (команда не запускалась); повторное `rules allow` —
+/// снова исполнение.
+#[test]
+fn rules_allow_lifecycle() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = repo_with_constraints(tmp.path(), &command_constraints_yaml("marker.txt"));
+
+    // rules allow: запись доверия в temp-HOME (arch_cmd перенаправляет HOME).
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("rules").arg("allow").arg(repo.as_os_str());
+    cmd.assert()
+        .success()
+        .stdout(contains("Доверие записано"))
+        .stdout(contains("команд command_succeeds: 1"));
+    let trust = tmp.path().join(".arch-harness/trusted.json");
+    assert!(trust.is_file(), "trusted.json создан в изолированном доме");
+    let text = std::fs::read_to_string(&trust).expect("read trusted.json");
+    assert!(text.contains("\"sha256\""), "{text}");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&trust)
+            .expect("stat")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600, "allow-файл только для владельца");
+    }
+
+    // Совпадение отпечатка: исполнение.
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("control").arg("check").arg(repo.as_os_str());
+    cmd.assert().success().stdout(contains("Итог: PASS"));
+    assert!(repo.join("marker.txt").exists(), "маяк создан");
+    std::fs::remove_file(repo.join("marker.txt")).expect("cleanup");
+
+    // Реестр меняется после доверия: SKIP command_untrusted, команда не
+    // запускалась (маяк изменённой команды отсутствует).
+    repo_with_constraints(tmp.path(), &command_constraints_yaml("other.txt"));
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("control").arg("check").arg(repo.as_os_str());
+    cmd.assert()
+        .success()
+        .stdout(contains("command_untrusted"))
+        .stdout(contains("rules allow"));
+    assert!(
+        !repo.join("other.txt").exists(),
+        "изменённая команда не запускалась"
+    );
+
+    // Переподтверждение: снова исполнение.
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("rules").arg("allow").arg(repo.as_os_str());
+    cmd.assert().success();
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("control").arg("check").arg(repo.as_os_str());
+    cmd.assert().success().stdout(contains("Итог: PASS"));
+    assert!(
+        repo.join("other.txt").exists(),
+        "после повторного allow исполняется"
+    );
+}
+
+/// A3 в гейте: `--no-exec` — составляющая fitness SKIP с маркером
+/// `command_untrusted` и именем правила, вердикт INCOMPLETE (exit 3,
+/// обязательная составляющая без входа), команда не исполнялась. Без флага
+/// тот же гейт зелёный (контроль, что SKIP — именно от no-exec).
+#[test]
+fn gate_no_exec_fitness_skip_is_incomplete() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = gate_repo(tmp.path());
+    // Исполняемое правило добавляем ДО коммита — иначе анти-ослабление
+    // (rule_weakened против HEAD) дало бы FAIL не по теме теста.
+    std::fs::write(
+        repo.join(".arch-handoff/CONSTRAINTS.yaml"),
+        "rules:\n  - name: spine_present\n    type: file_exists\n    path: \"ARCHITECTURE-SPINE.md\"\n    severity: error\n  - name: no_pan\n    type: must_not_contain\n    glob: \"**/*.py\"\n    pattern: 'PAN'\n    severity: error\n  - name: touched\n    type: command_succeeds\n    command: 'touch marker.txt'\n    severity: error\n",
+    )
+    .expect("constraints");
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "add command rule"]);
+
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("gate")
+        .arg("--repo")
+        .arg(repo.as_os_str())
+        .arg("--no-exec");
+    cmd.assert()
+        .code(3)
+        .stdout(contains("[SKIP] fitness"))
+        .stdout(contains("command_untrusted"))
+        .stdout(contains("touched"))
+        .stdout(contains("INCOMPLETE"));
+    assert!(!repo.join("marker.txt").exists(), "команда не исполнялась");
+
+    // Контроль: без флага гейт зелёный (команды исполняются).
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("gate").arg("--repo").arg(repo.as_os_str());
+    cmd.assert().success().stdout(contains("Итог: PASS"));
+    assert!(repo.join("marker.txt").exists(), "без no-exec маяк создан");
+}
+
 /// `arch-be control spine` на чистом spine-файле → exit 0.
 #[test]
 fn control_spine_clean_exits_0() {

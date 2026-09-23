@@ -97,10 +97,30 @@ impl Trust {
 /// # Errors
 /// Репозиторий недоступен либо конфигурация маршрутов невалидна.
 pub fn assess(repo: &Path, cfg: &Config) -> Result<Trust> {
+    assess_with(repo, cfg, &crate::cmd_trust::ExecPolicy::default())
+}
+
+/// Полная форма [`assess`] со снимком модели доверия `command_succeeds`
+/// (A3, ADR-053): прогон гейта внутри оценки наследует политику края —
+/// CLI `trust` передаёт CLI-снимок (флаг/переменная/allow-файл), MCP
+/// `trust_report` — серверный (no-exec по умолчанию); библиотечный вызов
+/// ([`assess`]) — детерминированный legacy-режим (AD-7).
+///
+/// # Errors
+/// Те же, что у [`assess`].
+pub fn assess_with(
+    repo: &Path,
+    cfg: &Config,
+    exec: &crate::cmd_trust::ExecPolicy,
+) -> Result<Trust> {
     let limits = cfg
         .significance
         .limits()
         .map_err(|e| crate::error::HarnessError::Config(format!("маршруты значимости: {e}")))?;
+    let options = gate::GateOptions {
+        exec: exec.clone(),
+        ..gate::GateOptions::from_config(cfg)
+    };
     let report = gate::run_opts(
         repo,
         None,
@@ -108,7 +128,7 @@ pub fn assess(repo: &Path, cfg: &Config) -> Result<Trust> {
         None,
         limits,
         &gate::GateRequirements::from_config(&cfg.gate),
-        &gate::GateOptions::from_config(cfg),
+        &options,
     )?;
 
     let anchors = vec![

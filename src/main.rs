@@ -212,6 +212,12 @@ enum Cmd {
         /// в конверт вердикта (exit-код и состав конверта не меняются).
         #[arg(long)]
         explain: bool,
+        /// НЕ исполнять правила `command_succeeds` (модель доверия A3,
+        /// ADR-053): составляющая `fitness` уходит в SKIP `command_untrusted`
+        /// — для гейта на чужом репозитории (PR из форка). То же делает
+        /// `ARCH_NO_EXEC=1`; приоритет над allow-файлом `rules allow`.
+        #[arg(long)]
+        no_exec: bool,
     },
     /// Метрика доверия к контуру (W4): положение на шкале 1–5 с ЯКОРЯМИ и
     /// ДОКАЗАТЕЛЬСТВАМИ — какие якоря выполнены, какие нет и почему. Источники:
@@ -315,6 +321,11 @@ enum Cmd {
         /// Машиночитаемый вывод: JSON-отчёт (passed + секции + находки).
         #[arg(long)]
         json: bool,
+        /// НЕ исполнять правила `command_succeeds` (модель доверия A3,
+        /// ADR-053): секция `fitness` уходит в SKIP `command_untrusted` — для
+        /// ревью чужого репозитория. То же делает `ARCH_NO_EXEC=1`.
+        #[arg(long)]
+        no_exec: bool,
     },
     /// Дифф двух версий контракта на ломающие изменения (бэклог волны 3,
     /// п.14): `OpenAPI` 3.x (CD-001..CD-007), protobuf/gRPC (.proto),
@@ -916,6 +927,22 @@ enum RulesCmd {
         #[command(subcommand)]
         cmd: RulesTemplateCmd,
     },
+    /// Подтвердить доверие исполняемым правилам реестра (модель доверия A3,
+    /// ADR-053): записывает SHA-256 канонизированного набора command-строк всех
+    /// `command_succeeds`-правил в `~/.arch-harness/trusted.json`. После этого
+    /// изменение набора команд реестра даёт пропуск `command_untrusted` (команды
+    /// не исполняются), пока доверие не подтвердят повторно. Без записи —
+    /// поведение прежнее (исполнение разрешено); `--no-exec`/`ARCH_NO_EXEC=1`
+    /// приоритетнее записи.
+    Allow {
+        /// Репозиторий с реестром правил (по умолчанию — текущий каталог).
+        #[arg(default_value = ".")]
+        repo: PathBuf,
+        /// Файл ограничений (по умолчанию — единый резолвер: явный путь →
+        /// `.arch-handoff/CONSTRAINTS.yaml` → корневой `CONSTRAINTS.yaml`).
+        #[arg(long)]
+        constraints: Option<PathBuf>,
+    },
 }
 
 /// Подкоманды `arch-be rules template`.
@@ -1117,6 +1144,12 @@ enum ControlCmd {
         /// ослаблено; недоступность базы честно печатается в сводке.
         #[arg(long, value_name = "GIT_REF")]
         base: Option<String>,
+        /// НЕ исполнять правила `command_succeeds` (модель доверия A3,
+        /// ADR-053): они уходят в пропуск `command_untrusted` — для проверки
+        /// чужих репозиториев. То же делает `ARCH_NO_EXEC=1` (явное `0` —
+        /// выключить); приоритет над allow-файлом `rules allow`.
+        #[arg(long)]
+        no_exec: bool,
     },
     /// Линтер ARCHITECTURE-SPINE.md.
     Spine {
@@ -1908,6 +1941,7 @@ async fn main() -> Result<()> {
             format,
             verify_envelope,
             explain,
+            no_exec,
         }) => {
             let repo = repo.unwrap_or_else(|| PathBuf::from("."));
             // Режим сверки конверта: пересчитывает входы на текущем дереве и
@@ -1965,6 +1999,13 @@ async fn main() -> Result<()> {
                 .significance
                 .limits()
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
+            // A3: политика исполнения command_succeeds — снимок CLI-края
+            // (--no-exec / ARCH_NO_EXEC / allow-файл), библиотека получает
+            // готовое решение (детерминированные дефолты не тронуты, AD-7).
+            let gate_options = arch_harness::gate::GateOptions {
+                exec: arch_harness::cmd_trust::ExecPolicy::cli(no_exec),
+                ..arch_harness::gate::GateOptions::from_config(&cfg)
+            };
             let report = arch_harness::gate::run_opts(
                 &repo,
                 route,
@@ -1972,7 +2013,7 @@ async fn main() -> Result<()> {
                 constraints.as_deref(),
                 limits,
                 &arch_harness::gate::GateRequirements::from_config(&cfg.gate),
-                &arch_harness::gate::GateOptions::from_config(&cfg),
+                &gate_options,
             )?;
             // Паспорт вердикта (W1): строится ДО печати, но вердикт не
             // меняет — страница описывает тот же прогон, а не второй.
@@ -2014,7 +2055,14 @@ async fn main() -> Result<()> {
             }
         }
         Some(Cmd::Trust { dir, format }) => {
-            let trust = arch_harness::trust::assess(&dir, &cfg)?;
+            // A3: прогон гейта внутри оценки наследует CLI-политику доверия
+            // (ARCH_NO_EXEC / allow-файл; флага у команды нет — она
+            // диагностическая, свой контур).
+            let trust = arch_harness::trust::assess_with(
+                &dir,
+                &cfg,
+                &arch_harness::cmd_trust::ExecPolicy::cli(false),
+            )?;
             if format.trim().eq_ignore_ascii_case("json") {
                 let out = arch_harness::trust::to_json(&trust);
                 println!(
@@ -2198,17 +2246,21 @@ async fn main() -> Result<()> {
             base,
             constraints,
             json,
+            no_exec,
         }) => {
             // Пороги маршрутов — из конфига ([significance], ADR-034).
             let limits = cfg
                 .significance
                 .limits()
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
-            let report = arch_harness::review::architect_review(
+            // A3: политика исполнения command_succeeds — снимок CLI-края,
+            // как у `gate` (--no-exec / ARCH_NO_EXEC / allow-файл).
+            let report = arch_harness::review::architect_review_opts(
                 &dir,
                 base.as_deref(),
                 constraints.as_deref(),
                 limits,
+                &arch_harness::cmd_trust::ExecPolicy::cli(no_exec),
             )?;
             if json {
                 let verdict = arch_harness::review::review_json(&report);
@@ -3092,6 +3144,56 @@ fn cmd_rules(cmd: RulesCmd) -> Result<()> {
             Ok(())
         }
         RulesCmd::Template { cmd } => cmd_rules_template(cmd),
+        RulesCmd::Allow { repo, constraints } => {
+            // A3: доверие фиксируется на канонизированный отпечаток набора
+            // command-строк ВСЕГО разрешённого реестра (extends учтён —
+            // загрузчик тот же, что у `control check`).
+            let c = resolve_constraints_cli(&repo, constraints);
+            if !c.is_file() {
+                anyhow::bail!(
+                    "реестр правил не найден: ни {} в корне, ни {} — нечего подтверждать",
+                    arch_harness::control::ROOT_CONSTRAINTS_PATH,
+                    arch_harness::control::HANDOFF_CONSTRAINTS_PATH
+                );
+            }
+            let resolved = arch_harness::control::load_constraints_resolved(&c)?;
+            let commands = arch_harness::control::command_strings(&resolved.rules);
+            let fingerprint =
+                arch_harness::cmd_trust::commands_fingerprint(commands.iter().copied());
+            let trust_file = arch_harness::cmd_trust::default_trust_file();
+            let label = c.strip_prefix(&repo).unwrap_or(&c).display().to_string();
+            let entry = arch_harness::cmd_trust::record_allow(
+                &trust_file,
+                &repo,
+                &fingerprint,
+                commands.len(),
+                &label,
+            )?;
+            let repo_label = repo.canonicalize().unwrap_or_else(|_| repo.clone());
+            println!(
+                "Доверие записано: {} → репозиторий {}",
+                trust_file.display(),
+                repo_label.display()
+            );
+            println!(
+                "  реестр: {label}; команд command_succeeds: {}; отпечаток sha256:{}…",
+                entry.commands,
+                fingerprint.get(..12).unwrap_or(fingerprint.as_str())
+            );
+            if entry.commands == 0 {
+                println!(
+                    "  в реестре нет command_succeeds-правил — зафиксировано их отсутствие: \
+                     добавление такого правила потребует повторного `rules allow`"
+                );
+            }
+            println!(
+                "Изменение набора команд реестра теперь даст пропуск {} (команды не \
+                 исполняются), пока доверие не подтвердят повторно: `arch-be rules allow`. \
+                 --no-exec/ARCH_NO_EXEC=1 приоритетнее этой записи.",
+                arch_harness::cmd_trust::COMMAND_UNTRUSTED
+            );
+            Ok(())
+        }
     }
 }
 
@@ -3834,6 +3936,7 @@ fn cmd_control(cfg: &arch_harness::config::Config, cmd: ControlCmd) -> Result<()
             changed_since,
             format,
             base,
+            no_exec,
         } => {
             let explicit = constraints.is_some();
             let c = resolve_constraints_cli(&repo, constraints);
@@ -3852,6 +3955,9 @@ fn cmd_control(cfg: &arch_harness::config::Config, cmd: ControlCmd) -> Result<()
                 baseline,
                 baseline_update,
                 changed_since,
+                // A3: политика исполнения команд реестра — флаг + ARCH_NO_EXEC
+                // + allow-файл (CLI-край вычисляет, библиотека получает снимок).
+                exec: arch_harness::cmd_trust::ExecPolicy::cli(no_exec),
             };
             // П5: сверка состава правил с git-базой — «правило выполняется»
             // плюс «правило ещё существует» в любом канале, не только в gate.
@@ -3966,6 +4072,18 @@ fn cmd_control(cfg: &arch_harness::config::Config, cmd: ControlCmd) -> Result<()
                         report.runner_skipped.len()
                     );
                     for s in &report.runner_skipped {
+                        println!("  [skip] {} — {}", s.rule, s.reason);
+                    }
+                }
+                // Пропущенные по модели доверия (A3): команды НЕ исполнялись —
+                // тем более отдельный блок с подсказкой, как разрешить.
+                if !report.untrusted_skipped.is_empty() {
+                    println!(
+                        "Пропущены правила ({}): {}",
+                        arch_harness::cmd_trust::COMMAND_UNTRUSTED,
+                        report.untrusted_skipped.len()
+                    );
+                    for s in &report.untrusted_skipped {
                         println!("  [skip] {} — {}", s.rule, s.reason);
                     }
                 }

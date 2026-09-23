@@ -61,7 +61,10 @@ stdout — ОДНА строка JSON (сериализация `FitnessReport`)
   (`ad`/`adr`/`rationale`/`owner`/`fix_hint`/`skill`); режим baseline/ratchet
   (`--baseline`) — `baseline: {path, updated, debt[], closed[], debt_total,
   closed_total}`; режим среза (`--changed-since`) — `skipped[]`,
-  `changed_since`, `changed_files` (семантика — `docs/control.md`).
+  `changed_since`, `changed_files` (семантика — `docs/control.md`); модель
+  доверия (A3, ADR-053) — `untrusted_skipped[]` (`{rule, severity, reason}`:
+  правила `command_succeeds`, не исполненные по no-exec/allow-файлу; reason
+  с префиксом `command_untrusted`).
 
 ## 3. `archify` — диаграммы (validate / deliver / compare)
 

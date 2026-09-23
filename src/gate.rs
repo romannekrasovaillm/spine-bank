@@ -366,6 +366,11 @@ pub struct GateOptions {
     /// Составляющая `semantic_quality` (ADR-052): какие смысловые рубрики
     /// обязательны и на какой области субъектов.
     pub semantic_quality: crate::config::SemanticQualityConfig,
+    /// Модель доверия `command_succeeds` (A3, ADR-053): снимок решения
+    /// «исполнять ли команды реестра» для составляющей `fitness`. `Default` —
+    /// детерминированный legacy-режим (исполнять, allow-файл не
+    /// консультируется): библиотека без края не зависит от машины (AD-7).
+    pub exec: crate::cmd_trust::ExecPolicy,
 }
 
 impl GateOptions {
@@ -381,6 +386,7 @@ impl GateOptions {
             rubrics_dir: cfg.paths.rubrics_dir(),
             executable_required: cfg.trace.executable_required,
             semantic_quality: cfg.gate.semantic_quality.clone(),
+            exec: crate::cmd_trust::ExecPolicy::default(),
         }
     }
 }
@@ -716,7 +722,16 @@ fn canonical_rel(repo: &Path, file: &Path) -> Option<PathBuf> {
 }
 
 /// Составляющая `fitness`: прогон `CONSTRAINTS.yaml` ([`control::check`]).
-fn component_fitness(repo: &Path, constraints: &ConstraintsPath) -> GateComponent {
+///
+/// `exec` — снимок модели доверия `command_succeeds` (A3, ADR-053):
+/// пропущенные по no-exec/untrusted правила переводят составляющую в SKIP
+/// (см. [`exec_skip_detail`]) — «зелёный при неисполненных командах» был бы
+/// молчаливой ложью.
+fn component_fitness(
+    repo: &Path,
+    constraints: &ConstraintsPath,
+    exec: &crate::cmd_trust::ExecPolicy,
+) -> GateComponent {
     if !constraints.path.is_file() {
         // T-01: реестра нет НИГДЕ (резолвер пробует корень, затем
         // `.arch-handoff/`) — это не «нечего прогонять» по недосмотру, а
@@ -747,6 +762,12 @@ fn component_fitness(repo: &Path, constraints: &ConstraintsPath) -> GateComponen
     // не то, что написал архитектор (и где `redteam` D7 не ловил ослабления).
     let divergence = registry_divergence(repo, constraints);
     let notes = mention_rule_notes(repo, &constraints.path);
+    // A3: политика исполнения команд реестра — из опций гейта (CLI/MCP-край
+    // выставил; библиотечный дефолт — legacy, AD-7).
+    let check_options = control::baseline::CheckOptions {
+        exec: exec.clone(),
+        ..control::baseline::CheckOptions::default()
+    };
     let detail = |summary: &str| {
         summary.to_string()
             + &constraints.drift.as_ref().map_or_else(String::new, |d| {
@@ -758,7 +779,7 @@ fn component_fitness(repo: &Path, constraints: &ConstraintsPath) -> GateComponen
     };
     if let Some(finding) = divergence {
         let mut findings = vec![finding];
-        let summary = match control::check(repo, &constraints.path) {
+        let summary = match control::check_with_options(repo, &constraints.path, &check_options) {
             Ok(report) => {
                 findings.extend(report.issues.iter().map(GateFinding::lint));
                 report.summary
@@ -767,12 +788,13 @@ fn component_fitness(repo: &Path, constraints: &ConstraintsPath) -> GateComponen
         };
         return GateComponent::fail("fitness", detail(&summary), findings).noting(notes);
     }
-    match control::check(repo, &constraints.path) {
+    match control::check_with_options(repo, &constraints.path, &check_options) {
         Ok(report) if report.passed => {
-            // A2: исполняемые правила, не прогонявшиеся из-за отсутствия
-            // прогонщика (pytest/mvn/JDK), — не PASS («нарушений нет»), а SKIP:
+            // Пропуски исполняемых правил — не PASS («нарушений нет»), а SKIP:
             // вердикт неполон, обязательная составляющая даёт INCOMPLETE.
-            if let Some(skip_detail) = runner_skip_detail(&report) {
+            // A2: отсутствующий прогонщик (error-правила); A3: запрет доверия
+            // (любое severity — пропуск по решению политики).
+            if let Some(skip_detail) = exec_skip_detail(&report) {
                 return GateComponent::skip(
                     "fitness",
                     format!("{} — файл: {label}", detail(&skip_detail)),
@@ -795,23 +817,37 @@ fn component_fitness(repo: &Path, constraints: &ConstraintsPath) -> GateComponen
     }
 }
 
-/// Деталь составляющей `fitness`, когда исполняемые правила не прогонялись
-/// из-за отсутствия внешнего прогонщика (A2). Блокирующими считаются пропуски
-/// error-правил: составляющая обязана уйти в SKIP («проверить не удалось»),
-/// а не в PASS — «правила зелёные» при непрогнанных правилах был бы ложным
-/// зелёным. Пропуски warn-правил вердикт не меняют (их находки гейт и раньше
-/// не печатал). `None` — блокирующих пропусков нет.
-fn runner_skip_detail(report: &control::FitnessReport) -> Option<String> {
-    let blocking: Vec<&control::RunnerSkippedRule> = report
+/// Деталь составляющей `fitness`, когда исполняемые правила не прогонялись.
+///
+/// Два вида пропусков с разной блокирующей семантикой:
+///
+/// - **A2** (`runner_skipped`, нет прогонщика pytest/mvn/JDK): блокирующими
+///   считаются пропуски error-правил — составляющая обязана уйти в SKIP
+///   («проверить не удалось»), а не в PASS. Пропуски warn-правил вердикт не
+///   меняют (их находки гейт и раньше не печатал).
+/// - **A3** (`untrusted_skipped`, запрет модели доверия — no-exec или
+///   несовпадающий allow-файл, ADR-053): блокирующий пропуск при ЛЮБОМ
+///   severity. Пропуск по решению о доверии — событие политики, а не разрыв
+///   окружения: зелёный PASS при неисполненных по политике правилах был бы
+///   молчаливой ложью, а блок 3 паспорта обязан перечислить такие правила
+///   (находка `command_untrusted`).
+///
+/// `None` — блокирующих пропусков нет.
+fn exec_skip_detail(report: &control::FitnessReport) -> Option<String> {
+    let blocking_runners: Vec<&control::RunnerSkippedRule> = report
         .runner_skipped
         .iter()
         .filter(|s| s.severity == "error")
         .collect();
-    if blocking.is_empty() {
+    if blocking_runners.is_empty() && report.untrusted_skipped.is_empty() {
         return None;
     }
-    let names: Vec<&str> = blocking.iter().map(|s| s.rule.as_str()).collect();
-    let mut reasons: Vec<&str> = blocking.iter().map(|s| s.reason.as_str()).collect();
+    let mut names: Vec<&str> = blocking_runners.iter().map(|s| s.rule.as_str()).collect();
+    let mut reasons: Vec<&str> = blocking_runners.iter().map(|s| s.reason.as_str()).collect();
+    for skip in &report.untrusted_skipped {
+        names.push(skip.rule.as_str());
+        reasons.push(skip.reason.as_str());
+    }
     reasons.dedup();
     Some(format!(
         "исполняемые правила не прогонялись ({}) — {}",
@@ -2653,7 +2689,7 @@ fn run_inner(
     let git = GitProbe::probe(repo);
 
     let mut components = vec![
-        component_fitness(repo, &constraints),
+        component_fitness(repo, &constraints, &options.exec),
         component_delta_guard(repo, base, &git),
         component_rule_weakened(repo, &constraints, base.unwrap_or("HEAD"), &git),
         component_spine_lint(repo),
@@ -4219,9 +4255,10 @@ mod tests {
             changed_files: None,
             skipped_unknown: Vec::new(),
             runner_skipped,
+            untrusted_skipped: Vec::new(),
             fingerprint: None,
         };
-        let detail = runner_skip_detail(&report(vec![
+        let detail = exec_skip_detail(&report(vec![
             skip("r_err", "error"),
             skip("r_warn", "warn"),
         ]))
@@ -4233,10 +4270,123 @@ mod tests {
         );
         assert!(detail.contains("pip install pytest"), "{detail}");
         assert!(
-            runner_skip_detail(&report(vec![skip("r_warn", "warn")])).is_none(),
+            exec_skip_detail(&report(vec![skip("r_warn", "warn")])).is_none(),
             "warn-пропуски не меняют вердикт"
         );
-        assert!(runner_skip_detail(&report(Vec::new())).is_none());
+        assert!(exec_skip_detail(&report(Vec::new())).is_none());
+    }
+
+    /// A3: пропуск по модели доверия (no-exec/untrusted) блокирует при ЛЮБОМ
+    /// severity — иначе блок 3 паспорта не увидел бы warn-правила, не
+    /// исполненные по решению политики. Отчёт собран руками (детерминированно).
+    #[test]
+    fn untrusted_skip_detail_blocks_at_any_severity() {
+        let report =
+            |untrusted_skipped: Vec<control::UntrustedSkippedRule>| control::FitnessReport {
+                repo: PathBuf::from("."),
+                passed: true,
+                issues: Vec::new(),
+                summary: String::new(),
+                durations: Vec::new(),
+                inherited: Vec::new(),
+                overrides: Vec::new(),
+                baseline: None,
+                skipped: Vec::new(),
+                changed_since: None,
+                changed_files: None,
+                skipped_unknown: Vec::new(),
+                runner_skipped: Vec::new(),
+                untrusted_skipped,
+                fingerprint: None,
+            };
+        let skip = |rule: &str, severity: &str| control::UntrustedSkippedRule {
+            rule: rule.to_string(),
+            severity: severity.to_string(),
+            reason: crate::cmd_trust::deny_reason_text(crate::cmd_trust::DenyReason::NoExec),
+        };
+        let detail = exec_skip_detail(&report(vec![skip("warn_rule", "warn")]))
+            .expect("warn-пропуск по доверию блокирует (A3)");
+        assert!(detail.contains("warn_rule"), "{detail}");
+        assert!(
+            detail.contains(crate::cmd_trust::COMMAND_UNTRUSTED),
+            "маркер находки в детали: {detail}"
+        );
+        assert!(exec_skip_detail(&report(Vec::new())).is_none());
+    }
+
+    /// A3 в гейте целиком: реестр с command-правилом при no-exec — составляющая
+    /// `fitness` SKIP с маркером `command_untrusted` и именем правила, вердикт
+    /// INCOMPLETE (fitness обязательна на всех маршрутах), а блок 3 паспорта
+    /// перечисляет пропущенное с причиной. Команда при этом НЕ исполняется
+    /// (маяк не создан). Политика инжектируется опцией — окружение не трогается.
+    #[test]
+    fn gate_no_exec_skips_fitness_and_passport_lists_it() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(repo.join(".arch-handoff")).expect("mkdir");
+        std::fs::write(
+            repo.join(".arch-handoff/CONSTRAINTS.yaml"),
+            "rules:\n  - name: touched\n    type: command_succeeds\n    \
+             command: 'touch marker.txt'\n    severity: error\n  - name: spine_present\n    \
+             type: file_exists\n    path: \"ARCHITECTURE-SPINE.md\"\n    severity: error\n",
+        )
+        .expect("constraints");
+        std::fs::write(repo.join("ARCHITECTURE-SPINE.md"), "# Spine\n").expect("spine");
+        let options = GateOptions {
+            exec: crate::cmd_trust::ExecPolicy {
+                no_exec: true,
+                trust_file: None,
+            },
+            ..GateOptions::default()
+        };
+        let report = run_opts(
+            &repo,
+            Some(crate::control::Route::Fast),
+            None,
+            None,
+            (50, 50),
+            &GateRequirements::default(),
+            &options,
+        )
+        .expect("гейт");
+        let fitness = report
+            .components
+            .iter()
+            .find(|c| c.name == "fitness")
+            .expect("составляющая fitness");
+        assert_eq!(fitness.status, GateStatus::Skip, "{}", fitness.detail);
+        assert!(
+            fitness.detail.contains(crate::cmd_trust::COMMAND_UNTRUSTED),
+            "{}",
+            fitness.detail
+        );
+        assert!(fitness.detail.contains("touched"), "{}", fitness.detail);
+        assert_eq!(
+            report.outcome,
+            GateOutcome::Incomplete,
+            "обязательная составляющая в SKIP — зелёный неполон"
+        );
+        assert!(!repo.join("marker.txt").exists(), "команда не исполнялась");
+        // Паспорт (блок 3): пропущенное по доверию перечислено с причиной.
+        let passport = crate::passport::Passport::build(&report, &repo);
+        let fitness_nc = passport
+            .not_checked
+            .iter()
+            .find(|n| n.name == "fitness")
+            .expect("fitness в блоке 3 паспорта");
+        assert!(
+            fitness_nc
+                .reason
+                .contains(crate::cmd_trust::COMMAND_UNTRUSTED),
+            "{}",
+            fitness_nc.reason
+        );
+        assert!(
+            fitness_nc.reason.contains("touched"),
+            "{}",
+            fitness_nc.reason
+        );
+        assert!(fitness_nc.required, "fitness обязательна для Fast");
     }
 
     #[test]

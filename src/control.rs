@@ -1310,6 +1310,24 @@ pub struct RunnerSkippedRule {
     pub reason: String,
 }
 
+/// Правило, не прогонявшееся по решению модели доверия (A3, ADR-053):
+/// активен no-exec (флаг/переменная/дефолт MCP) либо allow-файл
+/// `trusted.json` не совпадает с реестром (реестр менялся после доверия).
+/// Пропуск с причиной `command_untrusted`, а не провал: команда НЕ
+/// запускалась вообще. Гейт переводит такой пропуск ЛЮБОГО severity в SKIP
+/// составляющей `fitness` (строже A2: пропуск по решению о доверии —
+/// событие политики, а не разрыв окружения).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UntrustedSkippedRule {
+    /// Имя правила.
+    pub rule: String,
+    /// Нормализованный severity правила (`error`/`warn`).
+    pub severity: String,
+    /// Причина и подсказка, как разрешить исполнение (с префиксом
+    /// [`crate::cmd_trust::COMMAND_UNTRUSTED`]).
+    pub reason: String,
+}
+
 /// Отчёт fitness-контроля.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FitnessReport {
@@ -1361,6 +1379,11 @@ pub struct FitnessReport {
     /// не попадают и `passed` не меняют. Аддитивное поле SDK-контракта v1.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub runner_skipped: Vec<RunnerSkippedRule>,
+    /// Правила, не прогонявшиеся по решению модели доверия (A3, ADR-053):
+    /// no-exec или allow-файл не совпадает с реестром — пропуск с причиной
+    /// `command_untrusted`, а не находка. Аддитивное поле SDK-контракта v1.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub untrusted_skipped: Vec<UntrustedSkippedRule>,
     /// Отпечаток состава реестра правил (П5). Аддитивное поле SDK-контракта v1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fingerprint: Option<RulesFingerprint>,
@@ -2641,16 +2664,34 @@ pub fn check_with_options(
     let mut durations = Vec::new();
     let mut skipped: Vec<baseline::SkippedRule> = Vec::new();
     let mut runner_skipped: Vec<RunnerSkippedRule> = Vec::new();
+    let mut untrusted_skipped: Vec<UntrustedSkippedRule> = Vec::new();
+    // A3: решение об исполнении команд реестра — ОДИН снимок на весь прогон
+    // (модель доверия, ADR-053): no-exec (флаг/переменная/дефолт MCP) или
+    // allow-файл, не совпадающий с отпечатком набора команд. Отпечаток
+    // считается по ВСЕМ разрешённым (resolved) command_succeeds-правилам —
+    // тем же набором пользуется `arch-be rules allow`. Реестра без команд
+    // решение не касается: он не может ничего исполнить.
+    let exec = {
+        let commands = command_strings(&rules);
+        if commands.is_empty() {
+            crate::cmd_trust::ExecDecision::Allow
+        } else {
+            let fingerprint = crate::cmd_trust::commands_fingerprint(commands);
+            crate::cmd_trust::resolve(&options.exec, repo, &fingerprint)?
+        }
+    };
     // Прогонщики внешних команд (pytest/mvn/JDK) — один снимок на весь
-    // прогон (A2). Детект — только когда в реестре есть исполняемые правила:
-    // `python3 -c "import pytest"` — лишний подпроцесс там, где команд нет.
-    let runner = if rule_refs
-        .iter()
-        .any(|r| matches!(r.kind, RuleKind::CommandSucceeds))
+    // прогон (A2). Детект — только когда в реестре есть исполняемые правила
+    // и исполнение РАЗРЕШЕНО: под запретом доверия команды не прогоняются,
+    // и лишний подпроцесс (`python3 -c "import pytest"`) не нужен.
+    let runner = if exec.is_deny()
+        || !rule_refs
+            .iter()
+            .any(|r| matches!(r.kind, RuleKind::CommandSucceeds))
     {
-        crate::rule_templates::Runner::detect(None)
-    } else {
         crate::rule_templates::Runner::unavailable()
+    } else {
+        crate::rule_templates::Runner::detect(None)
     };
     for rule in &rule_refs {
         let started = Instant::now();
@@ -2661,7 +2702,9 @@ pub fn check_with_options(
             changed.as_ref(),
             &mut skipped,
             &mut runner_skipped,
+            &mut untrusted_skipped,
             &runner,
+            exec,
             &mut issues,
         )?;
         // u128 → u64 с насыщением: переполнение недостижимо практически
@@ -2818,6 +2861,16 @@ pub fn check_with_options(
             runner_skipped.len()
         );
     }
+    if !untrusted_skipped.is_empty() {
+        // A3: пропуск по решению о доверии — событие политики: в сводке
+        // маркером, в гейте — SKIP составляющей при любом severity.
+        let _ = write!(
+            summary,
+            "; не исполнялись ({}): {}",
+            crate::cmd_trust::COMMAND_UNTRUSTED,
+            untrusted_skipped.len()
+        );
+    }
     if let Some(fp) = &fingerprint {
         // Запись в String не может завершиться ошибкой — игнор безопасен.
         let _ = write!(
@@ -2842,8 +2895,21 @@ pub fn check_with_options(
         changed_files: changed.as_ref().map(BTreeSet::len),
         skipped_unknown,
         runner_skipped,
+        untrusted_skipped,
         fingerprint,
     })
+}
+
+/// Command-строки всех `command_succeeds`-правил набора (вербатим, в
+/// порядке набора): вход отпечатка доверия A3 ([`crate::cmd_trust`]) и
+/// подкоманды `arch-be rules allow`.
+#[must_use]
+pub fn command_strings(rules: &[FitnessRule]) -> Vec<&str> {
+    rules
+        .iter()
+        .filter(|r| matches!(r.kind, RuleKind::CommandSucceeds))
+        .filter_map(|r| r.command.as_deref())
+        .collect()
 }
 
 /// Отпечаток состава реестра правил (П5): SHA-256 отсортированного набора
@@ -3815,6 +3881,13 @@ pub(crate) fn normalize_severity(raw: &str, rule_name: &str) -> Result<&'static 
 /// НЕ краснеет: запись уходит в `runner_skipped` с причиной и подсказкой по
 /// установке. Гейт переводит такой пропуск error-правила в SKIP
 /// составляющей, а не в PASS.
+///
+/// `exec`/`untrusted_skipped` — A3 (модель доверия, ADR-053): при запрете
+/// исполнения (no-exec или несовпадающий allow-файл) правило
+/// `command_succeeds` НЕ запускается вообще: запись уходит в
+/// `untrusted_skipped` с причиной `command_untrusted`. Проверка доверия
+/// предшествует проверке прогонщика: под запретом даже детект окружения
+/// не нужен.
 #[allow(clippy::too_many_arguments)]
 fn run_rule(
     rule: &FitnessRule,
@@ -3823,7 +3896,9 @@ fn run_rule(
     changed: Option<&BTreeSet<String>>,
     skipped: &mut Vec<baseline::SkippedRule>,
     runner_skipped: &mut Vec<RunnerSkippedRule>,
+    untrusted_skipped: &mut Vec<UntrustedSkippedRule>,
     runner: &crate::rule_templates::Runner,
+    exec: crate::cmd_trust::ExecDecision,
     issues: &mut Vec<LintIssue>,
 ) -> Result<()> {
     let severity = normalize_severity(&rule.severity, &rule.name)?;
@@ -4026,6 +4101,19 @@ fn run_rule(
                     rule.name
                 ))
             })?;
+            // A3: исполнение запрещено моделью доверия (no-exec или allow-файл
+            // не совпадает с реестром) — команда НЕ запускается: пропуск
+            // `command_untrusted` с подсказкой, как разрешить. Проверка
+            // доверия — ДО проверки прогонщика (A2): под запретом и детект
+            // окружения не нужен.
+            if let crate::cmd_trust::ExecDecision::Deny(reason) = exec {
+                untrusted_skipped.push(UntrustedSkippedRule {
+                    rule: rule.name.clone(),
+                    severity: severity.to_string(),
+                    reason: crate::cmd_trust::deny_reason_text(reason),
+                });
+                return Ok(());
+            }
             // A2: команда требует внешний прогонщик (pytest/mvn/JDK), которого
             // нет в PATH, — пропуск с причиной, а не провал. Падение прогона
             // (`No module named pytest`) читалось бы как нарушение правила,
@@ -7251,6 +7339,7 @@ mod tests {
         let refs: Vec<&FitnessRule> = rules.iter().collect();
         let mut skipped = Vec::new();
         let mut runner_skipped = Vec::new();
+        let mut untrusted_skipped = Vec::new();
         let mut issues = Vec::new();
         for rule in &refs {
             run_rule(
@@ -7260,7 +7349,9 @@ mod tests {
                 None,
                 &mut skipped,
                 &mut runner_skipped,
+                &mut untrusted_skipped,
                 &crate::rule_templates::Runner::unavailable(),
+                crate::cmd_trust::ExecDecision::Allow,
                 &mut issues,
             )
             .unwrap();
@@ -7294,6 +7385,178 @@ mod tests {
             "{issues:?}"
         );
         assert!(skipped.is_empty(), "{skipped:?}");
+    }
+
+    /// A3: запрет исполнения (no-exec) — правило `command_succeeds` НЕ
+    /// запускается вообще: пропуск `command_untrusted` с подсказкой, а
+    /// файл-маяк, который создала бы команда, отсутствует. Решение
+    /// инжектируется снимком `ExecDecision` — без мутаций окружения (A2-паттерн).
+    #[test]
+    fn command_succeeds_under_no_exec_is_skipped_and_never_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let constraints = write_file(
+            dir.path(),
+            "CONSTRAINTS.yaml",
+            "rules:\n  - name: touched\n    type: command_succeeds\n    \
+             command: 'touch marker.txt'\n    severity: error\n",
+        );
+        let (rules, _unknown) = load_fitness_rules_with_skips(&constraints).unwrap();
+        let refs: Vec<&FitnessRule> = rules.iter().collect();
+        let mut skipped = Vec::new();
+        let mut runner_skipped = Vec::new();
+        let mut untrusted_skipped = Vec::new();
+        let mut issues = Vec::new();
+        for rule in &refs {
+            run_rule(
+                rule,
+                dir.path(),
+                &refs,
+                None,
+                &mut skipped,
+                &mut runner_skipped,
+                &mut untrusted_skipped,
+                &crate::rule_templates::Runner::unavailable(),
+                crate::cmd_trust::ExecDecision::Deny(crate::cmd_trust::DenyReason::NoExec),
+                &mut issues,
+            )
+            .unwrap();
+        }
+        assert_eq!(untrusted_skipped.len(), 1, "{untrusted_skipped:?}");
+        let skip = &untrusted_skipped[0];
+        assert_eq!(skip.rule, "touched");
+        assert_eq!(skip.severity, "error");
+        assert!(
+            skip.reason.starts_with(crate::cmd_trust::COMMAND_UNTRUSTED),
+            "{}",
+            skip.reason
+        );
+        assert!(
+            skip.reason.contains("ARCH_NO_EXEC=0"),
+            "подсказка по разрешению: {}",
+            skip.reason
+        );
+        assert!(
+            !dir.path().join("marker.txt").exists(),
+            "команда НЕ исполнялась: файл-маяк отсутствует"
+        );
+        assert!(issues.is_empty(), "пропуск — не находка: {issues:?}");
+        assert!(runner_skipped.is_empty(), "{runner_skipped:?}");
+
+        // Контроль маяка: при разрешении та же команда исполняется.
+        let mut issues = Vec::new();
+        let mut untrusted_skipped = Vec::new();
+        for rule in &refs {
+            run_rule(
+                rule,
+                dir.path(),
+                &refs,
+                None,
+                &mut skipped,
+                &mut runner_skipped,
+                &mut untrusted_skipped,
+                &crate::rule_templates::Runner::unavailable(),
+                crate::cmd_trust::ExecDecision::Allow,
+                &mut issues,
+            )
+            .unwrap();
+        }
+        assert!(dir.path().join("marker.txt").exists(), "Allow: маяк создан");
+        assert!(untrusted_skipped.is_empty());
+    }
+
+    /// A3 на уровне прогона: политика no-exec — все command_succeeds-правила
+    /// в пропуске `command_untrusted`, `passed` не страдает (пропуск — не
+    /// находка), маяк не создан, сводка несёт маркер. Политика инжектируется
+    /// через `CheckOptions.exec` — окружение не трогается.
+    #[test]
+    fn check_with_no_exec_policy_skips_commands_without_failing() {
+        let dir = tempfile::tempdir().unwrap();
+        let constraints = write_file(
+            dir.path(),
+            "CONSTRAINTS.yaml",
+            "rules:\n  - name: touched\n    type: command_succeeds\n    \
+             command: 'touch marker.txt'\n    severity: error\n  - name: doc_present\n    \
+             type: file_exists\n    path: \"README.md\"\n    severity: error\n",
+        );
+        std::fs::write(dir.path().join("README.md"), "x").unwrap();
+        let options = baseline::CheckOptions {
+            exec: crate::cmd_trust::ExecPolicy {
+                no_exec: true,
+                trust_file: None,
+            },
+            ..baseline::CheckOptions::default()
+        };
+        let report = check_with_options(dir.path(), &constraints, &options).unwrap();
+        assert!(report.passed, "{}", report.summary);
+        assert_eq!(report.untrusted_skipped.len(), 1, "{report:?}");
+        assert_eq!(report.untrusted_skipped[0].rule, "touched");
+        assert!(
+            report.summary.contains(crate::cmd_trust::COMMAND_UNTRUSTED),
+            "{}",
+            report.summary
+        );
+        assert!(
+            !dir.path().join("marker.txt").exists(),
+            "команда не запускалась"
+        );
+        assert!(report.issues.is_empty(), "{:?}", report.issues);
+    }
+
+    /// A3, allow-файл: записи нет — исполнение (обратная совместимость);
+    /// `record_allow` → совпадение отпечатка — исполнение (маяк создан);
+    /// изменение реестра — SKIP `command_untrusted` (`StaleTrust`, маяк НЕ
+    /// создан). allow-файл живёт в tempdir — окружение и дом не трогаются.
+    #[test]
+    fn check_allow_file_matrix() {
+        let dir = tempfile::tempdir().unwrap();
+        let trust = dir.path().join("trusted.json");
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let v1 = "rules:\n  - name: touched\n    type: command_succeeds\n    \
+             command: 'touch marker.txt'\n    severity: error\n";
+        let v2 = "rules:\n  - name: touched\n    type: command_succeeds\n    \
+             command: 'touch other.txt'\n    severity: error\n";
+        let constraints = write_file(&repo, "CONSTRAINTS.yaml", v1);
+        let options = baseline::CheckOptions {
+            exec: crate::cmd_trust::ExecPolicy {
+                no_exec: false,
+                trust_file: Some(trust.clone()),
+            },
+            ..baseline::CheckOptions::default()
+        };
+        // Файла нет — исполнение, как сегодня.
+        let report = check_with_options(&repo, &constraints, &options).unwrap();
+        assert!(
+            report.passed && report.untrusted_skipped.is_empty(),
+            "{}",
+            report.summary
+        );
+        assert!(repo.join("marker.txt").exists(), "маяк создан");
+        // Подтверждение доверия тем же каноном отпечатка, что у прогона.
+        let fp = crate::cmd_trust::commands_fingerprint(["touch marker.txt"]);
+        crate::cmd_trust::record_allow(&trust, &repo, &fp, 1, "CONSTRAINTS.yaml").unwrap();
+        std::fs::remove_file(repo.join("marker.txt")).unwrap();
+        let report = check_with_options(&repo, &constraints, &options).unwrap();
+        assert!(
+            report.untrusted_skipped.is_empty(),
+            "совпадение — исполнение: {}",
+            report.summary
+        );
+        assert!(repo.join("marker.txt").exists(), "маяк создан снова");
+        // Реестр изменился после доверия — SKIP StaleTrust, команда не запускалась.
+        write_file(&repo, "CONSTRAINTS.yaml", v2);
+        let report = check_with_options(&repo, &constraints, &options).unwrap();
+        assert_eq!(report.untrusted_skipped.len(), 1, "{}", report.summary);
+        assert!(
+            report.untrusted_skipped[0].reason.contains("rules allow"),
+            "подсказка переподтверждения: {}",
+            report.untrusted_skipped[0].reason
+        );
+        assert!(
+            !repo.join("other.txt").exists(),
+            "команда изменённого реестра не запускалась"
+        );
+        assert!(report.passed, "пропуск — не провал: {}", report.summary);
     }
 
     // --- S-1: anti-bypass floor (триггеры из диффа) -----------------------------

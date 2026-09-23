@@ -14,7 +14,9 @@ use assert_cmd::Command;
 ///   `dirs::config_dir()` резолвятся туда, `arch-be init` пишет только
 ///   в tempdir;
 /// - `ARCH_HOME` снимается — иначе он переопределяет `~/.arch-harness`
-///   (`Config::home_dir`) и файлы ушли бы мимо tempdir;
+///   (`Config::home_dir`) и файлы ушли бы мимо tempdir; `ARCH_NO_EXEC`
+///   снимается — иначе экспортированная переменная меняла бы семантику
+///   прогонов `command_succeeds` (A3) под ногами теста;
 /// - API-ключи LLM-провайдеров снимаются — смоуки обязаны проходить без
 ///   ключей и не зависеть от окружения разработчика;
 /// - `cwd` — тот же tempdir: `./arch-harness.toml` из реального каталога
@@ -26,6 +28,7 @@ pub fn arch_cmd(home: &Path) -> Command {
         .current_dir(home);
     for var in [
         "ARCH_HOME",
+        "ARCH_NO_EXEC",
         "DEEPSEEK_API_KEY",
         "ZHIPU_API_KEY",
         "KIMI_API_KEY",

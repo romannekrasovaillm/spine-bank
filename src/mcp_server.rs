@@ -482,6 +482,13 @@ pub struct McpServe {
     cfg: Arc<Config>,
     mode: ServeMode,
     registry: ToolRegistry,
+    /// Модель доверия `command_succeeds` (A3, ADR-053): серверный снимок,
+    /// вычисленный один раз при старте из `ARCH_NO_EXEC` — по умолчанию
+    /// no-exec=вкл (сервер обслуживает агента на потенциально чужом
+    /// репозитории), снятие — явным `ARCH_NO_EXEC=0`. Наследуется всеми
+    /// инструментами, доходящими до исполнения правил реестра (ручными —
+    /// напрямую, мостовыми — через `ToolContext.exec`).
+    exec: crate::cmd_trust::ExecPolicy,
     /// Состояние сессии: хост из рукопожатия, выданный идентификатор, счётчик
     /// вызовов и выданные промпты судьи (ADR-048). Транспорт stdio — один
     /// процесс на сессию, поэтому состояние живёт в сервере, а не в соединении;
@@ -620,6 +627,9 @@ impl McpServe {
     /// Сервер поверх конфигурации харнесса с явным режимом [`ServeMode`].
     /// Реестр инструментов строится один раз здесь: `dispatch` запросов
     /// моста идёт в разделяемый реестр (политика R-уровней внутри него).
+    /// Политика исполнения `command_succeeds` — серверный снимок
+    /// [`crate::cmd_trust::ExecPolicy::mcp`] (A3): no-exec=вкл, пока
+    /// окружение сервера не задаст явное `ARCH_NO_EXEC=0`.
     #[must_use]
     pub fn with_mode(cfg: Arc<Config>, mode: ServeMode) -> Self {
         let registry = crate::tools::full_registry(&cfg);
@@ -627,8 +637,18 @@ impl McpServe {
             cfg,
             mode,
             registry,
+            exec: crate::cmd_trust::ExecPolicy::mcp(),
             session: std::sync::Mutex::new(crate::judge::SessionState::new()),
         }
+    }
+
+    /// Подменяет политику исполнения `command_succeeds` явным снимком —
+    /// для тестов без мутаций окружения (многопоточный прогон, `std::env`
+    /// трогать нельзя) и для встраивающих вызовов с собственным решением.
+    #[must_use]
+    pub fn with_exec_policy(mut self, exec: crate::cmd_trust::ExecPolicy) -> Self {
+        self.exec = exec;
+        self
     }
 
     /// Состояние сессии. Захват яда мьютекса не ошибка: паника внутри
@@ -1186,7 +1206,7 @@ impl McpServe {
             .get("cwd")
             .and_then(Value::as_str)
             .map_or_else(|| PathBuf::from("."), PathBuf::from);
-        let ctx = ToolContext::new(cwd, Arc::clone(&self.cfg));
+        let ctx = ToolContext::new(cwd, Arc::clone(&self.cfg)).with_exec(self.exec.clone());
         let out = self.registry.dispatch(name, args, &ctx).await;
         if out.is_error {
             return Err(CallError::Execution(out.content));
@@ -1275,12 +1295,18 @@ impl McpServe {
         let constraints_label = constraints.display().to_string();
         let base = args.base;
         // П5: сверка состава правил с git-базой — анти-ослабление доступно
-        // не только составному гейту.
+        // не только составному гейту. A3: серверный снимок модели доверия —
+        // по умолчанию no-exec (команды реестра не исполняются), снимается
+        // ARCH_NO_EXEC=0 в окружении сервера.
+        let exec = self.exec.clone();
         let report = blocking("fitness_check", move || {
             control::check_anchored(
                 &repo,
                 &constraints,
-                &control::baseline::CheckOptions::default(),
+                &control::baseline::CheckOptions {
+                    exec,
+                    ..control::baseline::CheckOptions::default()
+                },
                 base.as_deref(),
             )
         })
@@ -1293,6 +1319,7 @@ impl McpServe {
             "issue_count": report.issues.len(),
             "issues": report.issues,
             "fingerprint": report.fingerprint,
+            "untrusted_skipped": report.untrusted_skipped,
             "summary": report.summary,
         }))
     }
@@ -2258,8 +2285,11 @@ impl McpServe {
         };
         let cfg = self.cfg.clone();
         let repo_for_run = repo.clone();
+        // A3: серверный снимок модели доверия — прогон гейта внутри оценки
+        // наследует no-exec (дефолт сервера), как у fitness_check.
+        let exec = self.exec.clone();
         let trust = blocking("trust_report", move || {
-            crate::trust::assess(&repo_for_run, &cfg)
+            crate::trust::assess_with(&repo_for_run, &cfg, &exec)
         })
         .await?;
         let mut out = crate::trust::to_json(&trust);
@@ -2306,7 +2336,12 @@ impl McpServe {
             .limits()
             .map_err(|e| CallError::Execution(format!("verdict_explain: {e}")))?;
         let requirements = crate::gate::GateRequirements::from_config(&self.cfg.gate);
-        let options = crate::gate::GateOptions::from_config(&self.cfg);
+        // A3: серверный снимок модели доверия — прогон гейта наследует
+        // no-exec (дефолт сервера) / allow-файл, как ручной fitness_check.
+        let options = crate::gate::GateOptions {
+            exec: self.exec.clone(),
+            ..crate::gate::GateOptions::from_config(&self.cfg)
+        };
         let repo_for_run = repo.clone();
         let report = blocking("verdict_explain", move || {
             crate::gate::run_opts(
@@ -2713,7 +2748,11 @@ fn tool_specs() -> Vec<Value> {
                             must_not_contain (regex по glob), file_exists, command_succeeds \
                             (с таймаутом). Вызывать ПЕРЕД коммитом: verdict passed=false — \
                             изменение нарушает архитектурные правила (AD-*), отказать и \
-                            перечислить находки",
+                            перечислить находки. Модель доверия (ADR-053): в MCP-режиме \
+                            command_succeeds по умолчанию НЕ исполняются (no-exec) — такие \
+                            правила возвращаются пропусками command_untrusted (поле \
+                            untrusted_skipped); снятие — ARCH_NO_EXEC=0 в окружении сервера, \
+                            доверие реестру — `arch-be rules allow` (CLI)",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2992,7 +3031,10 @@ fn tool_specs() -> Vec<Value> {
                             (владелец, срок, проверка поведения), пакет защищён измеренно \
                             (доля обнаружения redteam), вердикт полон и подписан. У каждого \
                             якоря: чем подтверждён и почему не достигнут. Ничего не \
-                            блокирует: отвечает, насколько можно верить зелёному контура",
+                            блокирует: отвечает, насколько можно верить зелёному контура. \
+                            Прогон гейта внутри оценки подчиняется модели доверия (ADR-053): \
+                            command_succeeds по умолчанию не исполняются (no-exec, снятие — \
+                            ARCH_NO_EXEC=0 в окружении сервера)",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -3009,7 +3051,10 @@ fn tool_specs() -> Vec<Value> {
                             механикой не проверяется (подпись A3, семантика ссылок, независимость \
                             судьи и ревьюера, адекватность решения), не проверено (SKIP с \
                             причиной). Отвечает тем же вердиктом, что `arch-be gate`, и его \
-                            границами; решения не принимает",
+                            границами; решения не принимает. Модель доверия (ADR-053): в \
+                            MCP-режиме command_succeeds по умолчанию не исполняются (no-exec) — \
+                            блок «не проверено» перечисляет их как command_untrusted; снятие — \
+                            ARCH_NO_EXEC=0 в окружении сервера",
             "inputSchema": {
                 "type": "object",
                 "properties": {

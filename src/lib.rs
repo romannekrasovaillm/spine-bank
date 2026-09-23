@@ -35,6 +35,7 @@ pub mod asyncapi;
 pub mod bench;
 pub mod bootstrap;
 pub mod clipboard;
+pub mod cmd_trust;
 pub mod config;
 pub mod connect;
 pub mod contract_diff;

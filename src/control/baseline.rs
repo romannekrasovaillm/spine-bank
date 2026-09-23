@@ -85,6 +85,11 @@ pub struct CheckOptions {
     pub baseline_update: bool,
     /// Проверять только файлы, изменённые против этого git-рефа (+untracked).
     pub changed_since: Option<String>,
+    /// Модель доверия `command_succeeds` (A3, ADR-053): снимок решения
+    /// «исполнять ли команды реестра» (no-exec, allow-файл). `Default` —
+    /// детерминированный legacy-режим (исполнять, allow-файл не
+    /// консультируется): библиотека без края не зависит от машины (AD-7).
+    pub exec: crate::cmd_trust::ExecPolicy,
 }
 
 /// Baseline-файл долга: снимок error-находок `control check`, которые гейт

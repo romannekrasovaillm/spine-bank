@@ -63,6 +63,12 @@ pub struct ToolContext {
     /// Только сборка `harness` (модуль `subagent` под фичей).
     #[cfg(feature = "harness")]
     pub subagents: Option<crate::subagent::SubagentRegistry>,
+    /// Модель доверия `command_succeeds` (A3, ADR-053): снимок решения
+    /// «исполнять ли команды реестра» для инструментов, транзитивно
+    /// прогоняющих fitness (`architect_review` и др.). `ToolContext::new` —
+    /// детерминированный legacy-дефолт (AD-7); MCP-сервер подменяет на
+    /// серверную политику (no-exec по умолчанию) — см. [`Self::with_exec`].
+    pub exec: crate::cmd_trust::ExecPolicy,
 }
 
 impl ToolContext {
@@ -77,6 +83,7 @@ impl ToolContext {
             provider: None,
             #[cfg(feature = "harness")]
             subagents: None,
+            exec: crate::cmd_trust::ExecPolicy::default(),
         }
     }
 
@@ -98,6 +105,16 @@ impl ToolContext {
     #[must_use]
     pub fn with_provider(mut self, provider: Arc<dyn crate::llm::LlmProvider>) -> Self {
         self.provider = Some(provider);
+        self
+    }
+
+    /// Подменяет политику исполнения `command_succeeds` (A3): MCP-сервер
+    /// передаёт серверный снимок (no-exec по умолчанию), чтобы мостовые
+    /// инструменты, доходящие до fitness-прогона, наследовали ту же модель
+    /// доверия, что и ручные.
+    #[must_use]
+    pub fn with_exec(mut self, exec: crate::cmd_trust::ExecPolicy) -> Self {
+        self.exec = exec;
         self
     }
 

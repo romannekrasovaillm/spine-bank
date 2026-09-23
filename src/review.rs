@@ -41,7 +41,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::error::{HarnessError, Result};
-use crate::gate::{self, GateComponent, GateFinding, GateReport, GateStatus};
+use crate::gate::{GateComponent, GateFinding, GateReport, GateStatus};
 use crate::llm::ToolSpec;
 use crate::model::{EntityKind, LinkKind, Model, load_model_tolerant};
 use crate::tool::{Tool, ToolContext, ToolOutput};
@@ -350,9 +350,44 @@ pub fn architect_review(
     constraints: Option<&Path>,
     limits: (usize, usize),
 ) -> Result<ReviewReport> {
+    architect_review_opts(
+        repo,
+        base,
+        constraints,
+        limits,
+        &crate::cmd_trust::ExecPolicy::default(),
+    )
+}
+
+/// Полная форма [`architect_review`] со снимком модели доверия
+/// `command_succeeds` (A3, ADR-053): CLI/MCP-край передаёт вычисленную
+/// политику; библиотечный вызов ([`architect_review`]) — детерминированный
+/// legacy-режим (AD-7).
+///
+/// # Errors
+/// Те же, что у [`architect_review`].
+pub fn architect_review_opts(
+    repo: &Path,
+    base: Option<&str>,
+    constraints: Option<&Path>,
+    limits: (usize, usize),
+    exec: &crate::cmd_trust::ExecPolicy,
+) -> Result<ReviewReport> {
     // Аргумент принимает и корень кейса, и каталог `model/` (T-13).
     let repo = &crate::model::case_root_from(repo);
-    let mut gate_report = gate::run(repo, None, base, constraints, limits)?;
+    let gate_options = crate::gate::GateOptions {
+        exec: exec.clone(),
+        ..crate::gate::GateOptions::default()
+    };
+    let mut gate_report = crate::gate::run_opts(
+        repo,
+        None,
+        base,
+        constraints,
+        limits,
+        &crate::gate::GateRequirements::default(),
+        &gate_options,
+    )?;
     // `model_validate` уже пришла из гейта (Н2): вторая секция означала бы
     // двойной счёт одной проверки. Ревью = gate + контракты.
     gate_report.components.push(component_contracts(repo));
@@ -982,7 +1017,11 @@ impl Tool for ArchitectReviewTool {
                           docs/spec, NFR и evidence) + \
                           целостность модели + линт контрактов OpenAPI/AsyncAPI. Ответ — JSON: \
                           passed + route + components (секции со статусами PASS/FAIL/SKIP и \
-                          находками) + summary; passed=false — основание отказать изменению"
+                          находками) + summary; passed=false — основание отказать изменению. \
+                          Правила command_succeeds подчиняются модели доверия (ADR-053): при \
+                          no-exec (дефолт MCP-сервера) команды не исполняются — секция fitness \
+                          SKIP с находкой command_untrusted; снятие — ARCH_NO_EXEC=0 в окружении \
+                          сервера"
                 .into(),
             parameters: json!({
                 "type": "object",
@@ -1012,10 +1051,11 @@ impl Tool for ArchitectReviewTool {
                 )));
             }
         };
-        let report = match architect_review(&repo, args.base.as_deref(), None, limits) {
-            Ok(r) => r,
-            Err(e) => return Ok(ToolOutput::err(format!("architect_review: {e}"))),
-        };
+        let report =
+            match architect_review_opts(&repo, args.base.as_deref(), None, limits, &ctx.exec) {
+                Ok(r) => r,
+                Err(e) => return Ok(ToolOutput::err(format!("architect_review: {e}"))),
+            };
         let verdict = review_json(&report);
         // Сериализация собранного объекта не падает; запасной вариант — компактная форма.
         let text = serde_json::to_string_pretty(&verdict).unwrap_or_else(|_| verdict.to_string());
