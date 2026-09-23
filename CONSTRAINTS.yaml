@@ -519,3 +519,31 @@ constraints:
     skill: fitness-functions
     owner: "solution-архитектор BE"
     expiry: "2027-09-23"
+
+  # --- B2 (0.3.7): граница будущего ядра spine-core — без TUI/сети ---------
+  # Слим-профиль core (`--no-default-features --features core`) не должен
+  # тянуть опциональные harness-крейты (reqwest/ratatui/crossterm/arboard/
+  # scraper/tokio-util): иначе выделение crates/spine-core в cargo workspace
+  # (план 0.4.0, ADR-054) превращается в перепроводку фич по всему дереву.
+  # Исполняемая проверка по выводу cargo tree; tokio — неопциональная
+  # зависимость ядра и нарушением не считается.
+  - id: C-34
+    name: core_boundary_no_tui_net
+    type: command_succeeds
+    command: "bash scripts/check_core_deps.sh"
+    timeout_secs: 120
+    severity: critical
+    ad: AD-1
+    rationale: >-
+      тонкое ядро (AD-1) — будущий crates/spine-core (ADR-054): если
+      core-профиль потянет TUI или сеть, физический сплит workspace
+      превратится в перепроводку фич по всему дереву; граница удерживается
+      гейтом, а не памятью
+    fix_hint: >-
+      верни гейтинг #[cfg(feature = "harness")] на модуль или импорт
+      нарушителя (прецеденты: src/tui/, src/llm/deepseek.rs, src/net.rs)
+      либо вынеси использование за трейт-инжекцию (образцы: &dyn LlmProvider
+      в src/rubric/judge.rs, Tool в src/tool.rs)
+    skill: fitness-functions
+    owner: "solution-архитектор BE"
+    expiry: "2027-09-23"
