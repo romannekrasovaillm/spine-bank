@@ -37,6 +37,7 @@ use crate::config::Config;
 use crate::error::{HarnessError, Result};
 
 pub(crate) mod app;
+mod input;
 mod intro;
 mod render;
 #[cfg(test)]

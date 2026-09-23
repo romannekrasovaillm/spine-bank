@@ -22,15 +22,13 @@ use crate::subagent::BackgroundNotice;
 use crate::tool::{AskRequest, ToolContext};
 use crate::tools;
 
-use super::text;
+use super::input::InputState;
 use super::theme::Theme;
 
 /// Максимум блоков в истории чата (сверху отбрасываются самые старые).
 const MAX_BLOCKS: usize = 500;
 /// Ёмкость канала событий агента (bounded — backpressure до модели).
 const AGENT_EVENTS_CAP: usize = 64;
-/// Максимум записей в истории ввода.
-const MAX_HISTORY: usize = 100;
 /// Максимум сообщений в очереди ожидания (пока агент занят).
 const MAX_QUEUE: usize = 32;
 /// Кадры спиннера ожидания модели (брайлевская анимация).
@@ -197,242 +195,6 @@ pub(crate) enum AppMessage {
     },
     /// Фоновая задача (субагент, `harness_run`, ralph) завершилась.
     BackgroundFinished(BackgroundNotice),
-}
-
-/// Состояние строки ввода: текст, курсор, история, автодополнение.
-#[derive(Debug, Default)]
-pub(crate) struct InputState {
-    /// Текст ввода.
-    text: String,
-    /// Позиция курсора (байтовый индекс, всегда на границе char).
-    cursor: usize,
-    /// История отправленных строк (старые — в начале).
-    history: VecDeque<String>,
-    /// Индекс навигации по истории (None — редактируется черновик).
-    hist_idx: Option<usize>,
-    /// Черновик, сохранённый при уходе в историю.
-    draft: String,
-    /// Активные кандидаты автодополнения и текущий индекс (цикл по Tab).
-    completion: Option<(Vec<&'static str>, usize)>,
-}
-
-impl InputState {
-    /// Текущий текст.
-    pub(crate) fn text(&self) -> &str {
-        &self.text
-    }
-
-    /// Позиция курсора (байтовый индекс).
-    pub(crate) fn cursor(&self) -> usize {
-        self.cursor
-    }
-
-    /// Устанавливает текст, курсор — в конец; сбрасывает автодополнение.
-    pub(crate) fn set_text(&mut self, text: String) {
-        self.text = text;
-        self.cursor = self.text.len();
-        self.completion = None;
-    }
-
-    /// Вставляет символ в позицию курсора.
-    fn insert_char(&mut self, c: char) {
-        self.completion = None;
-        self.text.insert(self.cursor, c);
-        self.cursor += c.len_utf8();
-    }
-
-    /// Вставляет перевод строки (многострочный ввод: Ctrl+J / Shift+Enter).
-    fn insert_newline(&mut self) {
-        self.completion = None;
-        self.text.insert(self.cursor, '\n');
-        self.cursor += 1;
-    }
-
-    /// Логическая строка (по '\n') и колонка в символах под курсором.
-    fn line_col(&self) -> (usize, usize) {
-        let before = &self.text[..self.cursor];
-        let line = before.matches('\n').count();
-        let col = before.rsplit('\n').next().map_or(0, |s| s.chars().count());
-        (line, col)
-    }
-
-    /// Байтовый индекс колонки `col` логической строки `line`
-    /// (col клампится по длине строки).
-    fn byte_at_line_col(&self, line: usize, col: usize) -> usize {
-        let mut start = 0;
-        for (n, part) in self.text.split('\n').enumerate() {
-            if n == line {
-                return part
-                    .char_indices()
-                    .nth(col)
-                    .map_or(start + part.len(), |(i, _)| start + i);
-            }
-            start += part.len() + 1; // + '\n'
-        }
-        self.text.len()
-    }
-
-    /// Up внутри многострочного ввода: true, если курсор ушёл на строку выше
-    /// (false — курсор на первой строке, Up свободен для истории).
-    fn move_up_line(&mut self) -> bool {
-        let (line, col) = self.line_col();
-        if line == 0 {
-            return false;
-        }
-        self.cursor = self.byte_at_line_col(line - 1, col);
-        true
-    }
-
-    /// Down внутри многострочного ввода: true, если курсор ушёл на строку
-    /// ниже (false — курсор на последней строке, Down свободен для истории).
-    fn move_down_line(&mut self) -> bool {
-        let (line, col) = self.line_col();
-        if line >= self.text.matches('\n').count() {
-            return false;
-        }
-        self.cursor = self.byte_at_line_col(line + 1, col);
-        true
-    }
-
-    /// Удаляет символ перед курсором.
-    fn backspace(&mut self) {
-        self.completion = None;
-        if self.cursor == 0 {
-            return;
-        }
-        let prev = self.text[..self.cursor]
-            .chars()
-            .next_back()
-            .map_or(1, char::len_utf8);
-        self.text.replace_range(self.cursor - prev..self.cursor, "");
-        self.cursor -= prev;
-    }
-
-    /// Удаляет символ под курсором.
-    fn delete(&mut self) {
-        self.completion = None;
-        if let Some(c) = self.text[self.cursor..].chars().next() {
-            self.text
-                .replace_range(self.cursor..self.cursor + c.len_utf8(), "");
-        }
-    }
-
-    /// Курсор на символ влево.
-    fn move_left(&mut self) {
-        if self.cursor > 0 {
-            self.cursor = self.text[..self.cursor]
-                .chars()
-                .next_back()
-                .map_or(0, |c| self.cursor - c.len_utf8());
-        }
-    }
-
-    /// Курсор на символ вправо.
-    fn move_right(&mut self) {
-        if let Some(c) = self.text[self.cursor..].chars().next() {
-            self.cursor += c.len_utf8();
-        }
-    }
-
-    /// Курсор в начало текущей логической строки (по '\n').
-    fn move_home(&mut self) {
-        let (line, _) = self.line_col();
-        self.cursor = self.byte_at_line_col(line, 0);
-    }
-
-    /// Курсор в конец текущей логической строки (по '\n').
-    fn move_end(&mut self) {
-        let (line, _) = self.line_col();
-        let len = self
-            .text
-            .split('\n')
-            .nth(line)
-            .map_or(0, |s| s.chars().count());
-        self.cursor = self.byte_at_line_col(line, len);
-    }
-
-    /// Забирает введённую строку, сохраняя непустую в истории.
-    fn submit(&mut self) -> String {
-        let text = self.text.trim().to_string();
-        if !text.is_empty() && self.history.back() != Some(&text) {
-            self.history.push_back(text.clone());
-            while self.history.len() > MAX_HISTORY {
-                self.history.pop_front();
-            }
-        }
-        self.text.clear();
-        self.cursor = 0;
-        self.hist_idx = None;
-        self.draft.clear();
-        self.completion = None;
-        text
-    }
-
-    /// Up: шаг назад по истории (черновик сохраняется).
-    fn history_up(&mut self) {
-        if self.history.is_empty() {
-            return;
-        }
-        let idx = match self.hist_idx {
-            None => {
-                self.draft.clone_from(&self.text);
-                self.history.len() - 1
-            }
-            Some(0) => 0,
-            Some(i) => i - 1,
-        };
-        self.hist_idx = Some(idx);
-        if let Some(entry) = self.history.get(idx) {
-            self.set_text(entry.clone());
-        }
-    }
-
-    /// Down: шаг вперёд по истории; за последней записью — черновик.
-    fn history_down(&mut self) {
-        let Some(idx) = self.hist_idx else {
-            return;
-        };
-        if idx + 1 < self.history.len() {
-            self.hist_idx = Some(idx + 1);
-            if let Some(entry) = self.history.get(idx + 1) {
-                self.set_text(entry.clone());
-            }
-        } else {
-            self.hist_idx = None;
-            let draft = std::mem::take(&mut self.draft);
-            self.set_text(draft);
-        }
-    }
-
-    /// Tab: дополняет слэш-команду; повторные Tab циклят кандидатов.
-    /// Возвращает false, если кандидатов нет (Tab свободен для вкладок).
-    fn complete_tab(&mut self) -> bool {
-        // Уже в цикле дополнения и текст не редактировали — следующий кандидат.
-        if let Some((cands, idx)) = &mut self.completion {
-            if self.text == cands[*idx] {
-                *idx = (*idx + 1) % cands.len();
-                let candidate = cands[*idx];
-                // Напрямую, не через set_text: цикл кандидатов сохраняем.
-                self.text = candidate.to_string();
-                self.cursor = self.text.len();
-                return true;
-            }
-        }
-        self.completion = None;
-        let cands = text::completion_candidates(&self.text);
-        if cands.is_empty() {
-            return false;
-        }
-        self.set_text(cands[0].to_string());
-        self.completion = Some((cands, 0));
-        true
-    }
-
-    /// Приглушённая подсказка-дополнение справа от ввода (суффикс кандидата).
-    pub(crate) fn ghost_hint(&self) -> Option<String> {
-        let first = text::completion_candidates(&self.text).into_iter().next()?;
-        Some(first[self.text.len()..].to_string())
-    }
 }
 
 /// Приложение TUI: владеет всем состоянием, события приходят по каналу.
@@ -1055,7 +817,7 @@ impl App {
             KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.input.insert_newline();
             }
-            KeyCode::Char('q') if self.input.text.is_empty() && key.modifiers.is_empty() => {
+            KeyCode::Char('q') if self.input.text().is_empty() && key.modifiers.is_empty() => {
                 self.should_quit = true;
             }
             KeyCode::Char(c)
