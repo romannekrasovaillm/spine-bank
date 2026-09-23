@@ -401,7 +401,7 @@ constraints:
   # Волна 2 (п.10): генерация handoff-пакета вынесена из harness.rs в
   # core-модуль src/handoff.rs (чисто файловая: без запрещённых крейтов —
   # исключения ему не нужны); инструмент handoff_create отдаётся и в core
-  # (`mcp serve --rw`), охраняется тестами реестра (tools.rs, mcp_server.rs,
+  # (`mcp serve --rw`), охраняется тестами реестра (tools.rs, mcp_server/,
   # tests/mcp_serve.rs).
   - id: C-29
     name: core_free_of_network_and_tui_crates
