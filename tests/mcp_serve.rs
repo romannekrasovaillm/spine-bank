@@ -873,6 +873,7 @@ fn rw_mode_lists_bridge_write_tools_over_stdio() {
     let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
     // handoff_create — в обеих сборках (генерация пакета — core-модуль
     // `crate::handoff`, волна 2 п.10); skill_distill — только в harness.
+    #[allow(unused_mut)] // в core-сборке push ниже выключен cfg'ом
     let mut rw_want = vec![
         "handoff_create",
         "adr_new",
@@ -895,12 +896,10 @@ fn rw_mode_lists_bridge_write_tools_over_stdio() {
         );
     }
     #[cfg(not(feature = "harness"))]
-    for banned in ["skill_distill"] {
-        assert!(
-            !names.contains(&banned),
-            "harness-инструмент {banned} не должен отдаваться в core: {names:?}"
-        );
-    }
+    assert!(
+        !names.contains(&"skill_distill"),
+        "harness-инструмент skill_distill не должен отдаваться в core: {names:?}"
+    );
     // Принадлежность хоста не отдаётся ни в одном режиме.
     for banned in [
         "bash",
