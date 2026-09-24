@@ -1,0 +1,56 @@
+name: Предложение (feature request)
+description: Новая возможность, изменение поведения, расширение контура контроля
+title: "[feat]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Опишите задачу, а не только решение: Spine — контур контроля,
+        поэтому важно, какой проверяемый инвариант или вердикт меняется.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Какая задача решается
+      description: Сценарий использования и боль; что сейчас невозможно или неудобно
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Предлагаемое изменение
+      description: Что должно появиться/измениться; новая команда, правило, MCP-инструмент
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Рассмотренные альтернативы
+      description: Почему обходные пути не подходят (обязательно для контурных изменений)
+    validations:
+      required: false
+  - type: dropdown
+    id: area
+    attributes:
+      label: Зона изменения
+      options:
+        - Гейт / fitness-правила (control, CONSTRAINTS.yaml)
+        - Спайн и трассировка (ARCHITECTURE-SPINE.md, model/)
+        - MCP-сервер и инструменты
+        - Рубрики и судья
+        - Контракты (openapi/asyncapi/contract_diff)
+        - TUI
+        - CLI / headless
+        - Документация / скиллы
+        - Другое
+    validations:
+      required: true
+  - type: checkboxes
+    id: awareness
+    attributes:
+      label: Осознанность последствий
+      options:
+        - label: Понимаю, что изменение контура контроля может менять вердикты гейта («Что может покраснеть» в CHANGELOG.md)
+          required: false
+        - label: Готов(а) оформить изменение дельтой/ADR, если оно трогает CONSTRAINTS.yaml, спайн или model/
+          required: false
