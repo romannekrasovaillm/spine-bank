@@ -323,8 +323,8 @@ fn draw_splash(f: &mut Frame, area: Rect, theme: &Theme, ticks: u32) {
     // Первые две строки логотипа видны сразу (кадр не открывается пустым),
     // дальше — построчное раскрытие по тику.
     let shown = (ticks as usize + 2).min(logo.len());
-    // Центрирование по вертикали: логотип + издание + подпись ≈ 16 строк.
-    let top = area.height.saturating_sub(16) / 2;
+    // Центрирование по вертикали: логотип + издание + версия + подпись ≈ 17 строк.
+    let top = area.height.saturating_sub(17) / 2;
     let mut lines: Vec<Line> = logo[..shown]
         .iter()
         .map(|l| Line::from(Span::styled((*l).to_string(), theme.heading())))
@@ -334,6 +334,12 @@ fn draw_splash(f: &mut Frame, area: Rect, theme: &Theme, ticks: u32) {
         lines.push(Line::from(Span::styled(
             "B A N K I N G   E D I T I O N".to_string(),
             theme.accent(),
+        )));
+        // Номер версии — на стартовом экране с первых кадров: компакт-сплэш
+        // при каждом запуске показывает только эту фазу.
+        lines.push(Line::from(Span::styled(
+            concat!("v", env!("CARGO_PKG_VERSION")).to_string(),
+            theme.muted(),
         )));
     }
     if ticks >= SPLASH_TICKS {
@@ -599,6 +605,22 @@ mod tests {
         let late = buffer_text(&terminal);
         assert!(late.contains("очередь"), "к финалу ждём очередь:\n{late}");
         assert!(late.contains(STATUS_MODEL), "к финалу ждём статус:\n{late}");
+    }
+
+    #[test]
+    fn splash_shows_version_from_first_frames() {
+        let mut app = test_app();
+        app.start_intro();
+        for _ in 0..SPLASH_TICKS {
+            app.tick();
+        }
+        let mut terminal = Terminal::new(TestBackend::new(140, 44)).expect("terminal");
+        terminal.draw(|f| app.render(f)).expect("draw splash");
+        let splash = buffer_text(&terminal);
+        assert!(
+            splash.contains(concat!("v", env!("CARGO_PKG_VERSION"))),
+            "стартовый сплэш без номера версии:\n{splash}"
+        );
     }
 
     #[test]
