@@ -114,6 +114,14 @@ TUI, CLI, библиотека.
 дисциплина артефактов: спецификации, architecture-spine, ADR, рубрики,
 fitness functions, handoff-пакеты кодовым агентам.
 
+**Что нового в 0.3.7**: таймаут `command_succeeds` убивает процессную группу
+(внуки-сироты больше не держат гейт), модель доверия к исполняемым правилам
+(ADR-053: `--no-exec`/`ARCH_NO_EXEC`, auto-no-exec в MCP, `rules allow`,
+находка `command_untrusted` в паспорте), честный SKIP/INCOMPLETE вместо ✗
+при отсутствующем раннере (+ CI-джоба `hermetic` без Python), декомпозиция
+всех модулей длиннее 3000 строк под фитнес-правилом C-33, граница будущего
+ядра `spine-core` под правилом C-34 (план сплита — ADR-054), ночные прогоны
+fuzz/mutants/llvm-cov, `CONTRIBUTING.md` + `README.en.md` + шаблоны issue/PR.
 **Что нового в 0.3.6**: проверяемое происхождение оценки — уровень
 независимости судьи («заявлена» или «обеспечена запуском»), хэши сырых ответов
 и находки на правку балла руками; передача судейства во второй харнесс
@@ -765,6 +773,15 @@ corporate environments): a thin, Rust-built agent that lives in your terminal
 and speaks the language of architecture work — ADRs, architecture-spine
 invariants, rubrics, fitness functions, handoff packages for coding agents.
 
+**New in 0.3.7**: the `command_succeeds` timeout now kills the whole process
+group (orphaned grandchildren no longer hold the gate open), a trust model for
+executable rules (ADR-053: `--no-exec`/`ARCH_NO_EXEC`, auto-no-exec in MCP
+mode, `rules allow` fingerprints, the `command_untrusted` finding in the
+verdict passport), an honest SKIP/INCOMPLETE instead of ✗ when a rule runner
+is missing (plus a Python-free `hermetic` CI job), decomposition of every
+module over 3000 lines under fitness rule C-33, the future `spine-core`
+boundary under rule C-34 (split plan — ADR-054), nightly fuzz/mutants/llvm-cov
+runs, and `CONTRIBUTING.md` + `README.en.md` + issue/PR templates.
 **New in 0.3.6**: the provenance of a rubric score — an independence
 level ("declared" or "ensured by launch"), hashes of the judge's raw answers and
 findings for a hand-edited score; plus `rubric handover` / `rubric accept` for
