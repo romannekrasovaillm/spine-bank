@@ -1,0 +1,54 @@
+# Nightly: тяжёлые и медленные проверки надёжности — ночным трендом,
+# а не гейтом PR (волна C, 0.3.7):
+# - fuzz (C1): cargo-fuzz по публичным парсерам (контракты, модель,
+#   CONSTRAINTS.yaml, база диффа) — 300 секунд на таргет;
+# Падение джобы fuzz = найден краш/зависание: вход из артефакта `artifacts`
+# переносится в tests/fixtures/fuzz-regressions/ и чинится парсер.
+on:
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fuzz:
+    name: cargo-fuzz (4 таргета × 300s)
+    runs-on: ubuntu-latest
+    # Сборка libFuzzer-таргетов (полная деп-дерево на nightly) + 4 × 300s
+    # прогона + запас на установку cargo-fuzz.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          # rust-src нужен -Zbuild-std санитайзера libFuzzer.
+          components: rust-src
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Ночной toolchain и кэш основного workspace не смешиваем.
+          key: nightly-fuzz
+          workspaces: fuzz
+      # rust-cache кэширует $CARGO_HOME/bin — cargo-fuzz собирается раз.
+      - run: cargo install cargo-fuzz --locked
+      - name: smoke по всем таргетам
+        # max_total_time — бюджет на таргет; timeout=25 ловит зависания
+        # одного входа; max_len даёт YAML-парсерам глубокие входы.
+        # Выход ненулевой только при краше/таймауте входа — тогда джоба
+        # красная и вход уезжает в артефакты (см. шаг ниже).
+        run: |
+          set -e
+          for t in fuzz_contract_diff fuzz_model_parse fuzz_constraints fuzz_diff_base; do
+            echo "=== $t ==="
+            cargo +nightly fuzz run "$t" -- -max_total_time=300 -timeout=25 -max_len=65536
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fuzz-corpus-crashes
+          path: |
+            fuzz/corpus/
+            fuzz/artifacts/
+          retention-days: 30
+

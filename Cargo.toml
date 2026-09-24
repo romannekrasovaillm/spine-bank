@@ -15,6 +15,12 @@ path = "src/main.rs"
 name = "arch_harness"
 path = "src/lib.rs"
 
+# Фаззеры cargo-fuzz (волна C1, 0.3.7) живут отдельным workspace в fuzz/
+# (свой манифест, своя сборка `cargo +nightly fuzz`): в зависимости крейта
+# ничего не добавляется, а корневой workspace каталог явно исключает.
+[workspace]
+exclude = ["fuzz"]
+
 # Фичи сборки (шаг 4 плана «Spine без собственной LLM»,
 # Загрузки/spine-bank-inversion.md):
 # - `harness` (по умолчанию) — полная сборка: TUI (ratatui/crossterm/arboard),

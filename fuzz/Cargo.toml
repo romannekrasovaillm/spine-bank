@@ -1,0 +1,51 @@
+# Отдельный workspace cargo-fuzz (волна C1, 0.3.7): фаззинг публичных
+# парсеров библиотеки. НЕ член корневого workspace (там `[workspace]
+# exclude = ["fuzz"]`) и НЕ зависимость крейта — собирается только через
+# `cargo +nightly fuzz`; в [dependencies] корня ничего не добавляется.
+[package]
+name = "arch-harness-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+# tempfile — для таргетов, которым нужен реальный файл на диске
+# (CONSTRAINTS.yaml, пара контрактов): API библиотеки файловые.
+tempfile = "3"
+
+[dependencies.arch-harness]
+path = ".."
+
+# Собственный корень workspace: cargo не поднимается к корневому манифесту.
+[workspace]
+members = ["."]
+
+# По [[bin]] на таргет — как генерирует `cargo fuzz add`: таргеты не
+# участвуют в `cargo test`/`cargo doc` самого fuzz-пакета.
+[[bin]]
+name = "fuzz_contract_diff"
+path = "fuzz_targets/fuzz_contract_diff.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_model_parse"
+path = "fuzz_targets/fuzz_model_parse.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_constraints"
+path = "fuzz_targets/fuzz_constraints.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_diff_base"
+path = "fuzz_targets/fuzz_diff_base.rs"
+test = false
+doc = false

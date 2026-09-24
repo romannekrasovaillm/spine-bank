@@ -1,0 +1,5 @@
+# Артефакты прогонов cargo-fuzz в репозиторий не входят: регрессионные
+# входы из найденных крашей кладутся текстом в tests/fixtures/fuzz-regressions/.
+target
+artifacts
+corpus
