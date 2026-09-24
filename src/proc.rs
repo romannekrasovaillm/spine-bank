@@ -84,19 +84,22 @@ fn signal_group(pgid: u32, sig: &str) {
         .status();
 }
 
-/// Жив ли процесс `pid` — bash-builtin `kill -0` (без внешнего `/bin/kill`,
-/// которого нет в slim-образах, — см. [`signal_group`]). Зомби считается
-/// ЖИВЫМ (kill -0 на зомби успешен): вызывающий, ждущий исчезновения, обязан
-/// опрашивать в цикле — сироту init забирает не мгновенно.
+/// Жив ли процесс `pid` — по `/proc/<pid>/stat`: файл отсутствует или
+/// состояние `Z`/`X` (зомби/мёртв) — считается НЕЖИВЫМ. Точнее `kill -0`:
+/// зомби отвечает на сигнал 0 успехом, а в контейнерах, где PID 1 не
+/// reaper (GitHub Actions container jobs), убитая сирота может висеть
+/// зомби вечно — проверка сирот через `kill -0` там флачит.
 #[cfg(test)]
 fn pid_alive(pid: u32) -> bool {
-    Command::new("bash")
-        .args(["-c", &format!("kill -0 {pid}")])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return false; // процесса нет
+    };
+    // Поле state — после ПОСЛЕДНЕГО ") " (comm в скобках может содержать
+    // пробелы и скобки). Нет поля — считаем мёртвым.
+    let Some((_, rest)) = stat.rsplit_once(") ") else {
+        return false;
+    };
+    !matches!(rest.chars().next(), Some('Z' | 'X'))
 }
 
 /// Мягко, затем жёстко завершает процессную группу `pid`
@@ -327,9 +330,9 @@ mod tests {
         assert!(outcome.status.is_none(), "команда убита по таймауту");
         let pid = std::fs::read_to_string(&pidfile).expect("child.pid записан");
         let pid: u32 = pid.trim().parse().expect("$! — числовой pid");
-        // Опрос до 2 с: убитый потомок мог ещё не быть забран init'ом
-        // (зомби отвечает на kill -0 успехом — pid_alive считает его живым)
-        // — ждём фактического исчезновения.
+        // Опрос до 2 с: убитый потомок может умирать не мгновенно; зомби
+        // при этом считается мёртвым (pid_alive читает /proc — см. выше),
+        // поэтому поведение не зависит от reaper'а контейнера.
         let mut alive = true;
         for _ in 0..40 {
             if !pid_alive(pid) {
