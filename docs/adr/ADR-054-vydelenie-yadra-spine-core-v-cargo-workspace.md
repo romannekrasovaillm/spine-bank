@@ -23,7 +23,7 @@ cargo-фичи: `harness` (полная сборка по умолчанию) и
 (2026-09-23, v0.3.6, коммит `cae89dc`):
 
 ```
-arch-harness v0.3.6 (/home/roman/spine-core)
+arch-harness v0.3.6 (/home/user/spine-core)
 ├── anyhow v1.0.104
 ├── async-trait v0.1.92 (proc-macro)
 ├── chrono v0.4.45

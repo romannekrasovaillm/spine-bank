@@ -2633,7 +2633,24 @@ mod tests {
         assert_eq!(pytest_skip.severity, "error");
         assert_eq!(pytest_skip.runners, vec!["pytest".to_string()]);
         assert!(
-            pytest_skip.reason.contains("pip install pytest"),
+            pytest_skip
+                .reason
+                .starts_with(crate::rule_templates::RUNNER_ABSENT_PREFIX),
+            "{}",
+            pytest_skip.reason
+        );
+        assert!(
+            pytest_skip.reason.contains("pytest:"),
+            "{}",
+            pytest_skip.reason
+        );
+        // Уточнение причины средо-зависимое: «python3 есть, модуля pytest
+        // нет» → подсказка `pip install pytest`; «python3 нет вообще»
+        // (hermetic-контейнер CI без python3) → «нет `python3` в PATH».
+        // Обе формы — честный SKIP про нужный раннер, а не ✗.
+        assert!(
+            pytest_skip.reason.contains("pip install pytest")
+                || pytest_skip.reason.contains("нет `python3` в PATH"),
             "{}",
             pytest_skip.reason
         );

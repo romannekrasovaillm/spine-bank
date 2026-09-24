@@ -2402,7 +2402,15 @@ mod tests {
         assert_eq!(report.skipped.len(), 1, "{:?}", report.skipped);
         let reason = &report.skipped[0];
         assert!(reason.contains(RUNNER_ABSENT_PREFIX), "{reason}");
-        assert!(reason.contains("pip install pytest"), "{reason}");
+        assert!(reason.contains("pytest:"), "{reason}");
+        // Уточнение причины средо-зависимое: «python3 есть, модуля pytest
+        // нет» → подсказка `pip install pytest`; «python3 нет вообще»
+        // (hermetic-контейнер CI без python3) → «нет `python3` в PATH».
+        // Обе формы — честный SKIP про нужный раннер, а не ✗.
+        assert!(
+            reason.contains("pip install pytest") || reason.contains("нет `python3` в PATH"),
+            "{reason}"
+        );
     }
 
     /// Команда без внешнего прогонщика (`false` — зубы на месте) прогоняется

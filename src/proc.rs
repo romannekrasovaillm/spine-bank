@@ -59,19 +59,53 @@ pub(crate) fn shell_command_tokio(shell: &str, command: &str) -> tokio::process:
     cmd
 }
 
+/// Посылает сигнал `sig` процессной группе `pgid` через bash-builtin kill.
+///
+/// Почему не внешний `/bin/kill`: slim-образы контейнеров
+/// (`rust:1.85-slim-bookworm`) НЕ содержат procps — `Command::new("kill")`
+/// падает `NotFound`, а проглоченная ошибка (`let _ =`) оставляла группу
+/// живой (красная hermetic-джоба CI 2026-09-24: внуки переживали таймаут).
+/// bash — уже жёсткая зависимость исполнителя ([`shell_command`]), его
+/// builtin kill есть всегда; unsafe/libc запрещены линтом проекта.
+///
+/// ВАЖНО: разделитель `--` обязателен — procps `/bin/kill -TERM -PGID` без
+/// него молча (rc=0!) трактует отрицательное число как опцию и никого не
+/// сигналит (проверено опытом). builtin работал бы и так, но форма держится
+/// единой и безопасной для обеих реализаций.
+///
+/// Исход намеренно не возвращается: ESRCH (группа завершилась сама раньше)
+/// — штатная ситуация на пути убийства.
+fn signal_group(pgid: u32, sig: &str) {
+    let _ = Command::new("bash")
+        .args(["-c", &format!("kill -{sig} -- -{pgid}")])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+/// Жив ли процесс `pid` — bash-builtin `kill -0` (без внешнего `/bin/kill`,
+/// которого нет в slim-образах, — см. [`signal_group`]). Зомби считается
+/// ЖИВЫМ (kill -0 на зомби успешен): вызывающий, ждущий исчезновения, обязан
+/// опрашивать в цикле — сироту init забирает не мгновенно.
+#[cfg(test)]
+fn pid_alive(pid: u32) -> bool {
+    Command::new("bash")
+        .args(["-c", &format!("kill -0 {pid}")])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
 /// Мягко, затем жёстко завершает процессную группу `pid`
 /// (TERM → [`TERM_GRACE`] → KILL) и забирает зомби. Убивает и потомков
 /// команды — сирот после таймаута не остаётся. Вне unix (где группа не
 /// ставилась) завершает только сам процесс — дерева там не создавалось.
 pub(crate) fn kill_process_group_sync(pid: u32, child: &mut Child) {
     if pid > 0 && cfg!(unix) {
-        // kill из coreutils есть всегда; unsafe/libc запрещены линтом проекта.
-        // ВАЖНО: разделитель `--` обязателен — procps `/bin/kill -TERM -PGID`
-        // без него молча (rc=0!) трактует отрицательное число как опцию и
-        // никого не сигналит (проверено опытом; bash-builtin kill работал и так).
-        let _ = Command::new("kill")
-            .args(["-TERM", "--", &format!("-{pid}")])
-            .status();
+        signal_group(pid, "TERM");
         let deadline = Instant::now() + TERM_GRACE;
         while Instant::now() < deadline {
             if matches!(child.try_wait(), Ok(Some(_))) {
@@ -79,9 +113,7 @@ pub(crate) fn kill_process_group_sync(pid: u32, child: &mut Child) {
             }
             std::thread::sleep(POLL_INTERVAL);
         }
-        let _ = Command::new("kill")
-            .args(["-KILL", "--", &format!("-{pid}")])
-            .status();
+        signal_group(pid, "KILL");
     } else {
         // pgid неизвестен (теоретический случай) или ОС без процессных групп —
         // хотя бы сам процесс.
@@ -101,22 +133,14 @@ pub(crate) fn kill_process_group_sync(pid: u32, child: &mut Child) {
 #[cfg(feature = "harness")]
 pub(crate) async fn kill_process_group(pid: u32, child: &mut tokio::process::Child) {
     if pid > 0 && cfg!(unix) {
-        // kill из coreutils есть всегда; unsafe/libc запрещены линтом проекта.
-        // ВАЖНО: разделитель `--` обязателен — procps `/bin/kill -TERM -PGID`
-        // без него молча (rc=0!) трактует отрицательное число как опцию и
-        // никого не сигналит (проверено опытом; bash-builtin kill работал и так).
-        let _ = std::process::Command::new("kill")
-            .args(["-TERM", "--", &format!("-{pid}")])
-            .status();
+        signal_group(pid, "TERM");
         for _ in 0..10 {
             if matches!(child.try_wait(), Ok(Some(_))) {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(300)).await;
         }
-        let _ = std::process::Command::new("kill")
-            .args(["-KILL", "--", &format!("-{pid}")])
-            .status();
+        signal_group(pid, "KILL");
     } else {
         // pgid неизвестен (теоретический случай) или ОС без процессных групп —
         // хотя бы самого ребёнка.
@@ -302,19 +326,13 @@ mod tests {
             run_shell(tmp.path(), "bash", &cmd, Duration::from_secs(1)).expect("прогон команды");
         assert!(outcome.status.is_none(), "команда убита по таймауту");
         let pid = std::fs::read_to_string(&pidfile).expect("child.pid записан");
-        let pid = pid.trim();
+        let pid: u32 = pid.trim().parse().expect("$! — числовой pid");
         // Опрос до 2 с: убитый потомок мог ещё не быть забран init'ом
-        // (зомби отвечает на kill -0 успехом) — ждём фактического исчезновения.
+        // (зомби отвечает на kill -0 успехом — pid_alive считает его живым)
+        // — ждём фактического исчезновения.
         let mut alive = true;
         for _ in 0..40 {
-            let gone = Command::new("kill")
-                .args(["-0", pid])
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .is_ok_and(|s| !s.success());
-            if gone {
+            if !pid_alive(pid) {
                 alive = false;
                 break;
             }
