@@ -96,3 +96,47 @@ pub fn report_json(report: &DiffReport) -> Value {
         ),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::contract_diff::types::{ContractFormat, Finding};
+
+    fn finding(severity: &str) -> Finding {
+        Finding {
+            severity: severity.to_string(),
+            rule: "CD-001".to_string(),
+            location: "#/paths/~1v1~1pets".to_string(),
+            message: "сообщение".to_string(),
+        }
+    }
+
+    /// Счётчики breaking/non-breaking в шапке — мутант `-`→`+` в
+    /// `findings.len() - breaking` (пойман cargo-mutants 2026-09-24, волна C2).
+    #[test]
+    fn render_report_counts_breaking_and_non_breaking() {
+        let report = DiffReport {
+            format: ContractFormat::OpenApi,
+            findings: vec![finding("error"), finding("error"), finding("warn")],
+            impact: None,
+        };
+        let text = render_report(&report);
+        assert!(
+            text.contains("3 изменений (breaking: 2, non-breaking: 1)"),
+            "{text}"
+        );
+        assert!(text.contains("Итог: FAIL"), "{text}");
+
+        let clean = DiffReport {
+            format: ContractFormat::OpenApi,
+            findings: vec![finding("warn")],
+            impact: None,
+        };
+        let text = render_report(&clean);
+        assert!(
+            text.contains("1 изменений (breaking: 0, non-breaking: 1)"),
+            "{text}"
+        );
+        assert!(text.contains("Итог: PASS"), "{text}");
+    }
+}

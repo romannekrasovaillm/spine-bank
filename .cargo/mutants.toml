@@ -1,0 +1,25 @@
+# Мутационное тестирование (волна C2, 0.3.7) — cargo-mutants.
+# Скоуп: детерминированное ядро контроля — единый гейт (src/gate), дифф
+# контрактов (src/contract_diff), пакеты доказательств (src/evidence.rs).
+# Остальное (TUI, сеть, LLM) в мутациях смысла не имеет: не детерминировано.
+#
+# Прогон полного скоупа — ночная джоба `mutants` в .github/workflows/nightly.yml
+# (шардирование). Локально — точечно по файлу:
+#   cargo mutants --file src/contract_diff/detect.rs
+
+# Какие файлы мутируем.
+examine_globs = ["src/gate/**", "src/contract_diff/**", "src/evidence.rs"]
+
+# testkit — фикстуры для тестов, mod.rs — реэкспорты: мутировать нечего.
+exclude_globs = [
+  "src/gate/testkit.rs",
+  "src/contract_diff/testkit.rs",
+  "src/gate/mod.rs",
+  "src/contract_diff/mod.rs",
+]
+
+# Таймаут одного прогона тестов мутанта: замеренная база × 3 (запас на
+# шумную машину), но не меньше двух минут — короткий таймаут даёт ложные
+# «убитые» мутанты на холодном инкрементальном билде.
+timeout_multiplier = 3.0
+minimum_test_timeout = 120

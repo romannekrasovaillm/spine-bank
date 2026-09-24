@@ -2,8 +2,16 @@
 # а не гейтом PR (волна C, 0.3.7):
 # - fuzz (C1): cargo-fuzz по публичным парсерам (контракты, модель,
 #   CONSTRAINTS.yaml, база диффа) — 300 секунд на таргет;
+# - mutants (C2): cargo-mutants по скоупу ядра (.cargo/mutants.toml:
+#   src/gate, src/contract_diff, src/evidence.rs) — 12 шардов матрицей;
+# - coverage (C3): cargo llvm-cov по default-профилю — lcov + тренд
+#   суммарного процента (порогов нет, только наблюдение).
 # Падение джобы fuzz = найден краш/зависание: вход из артефакта `artifacts`
 # переносится в tests/fixtures/fuzz-regressions/ и чинится парсер.
+# Падение джобы mutants = выжившие мутанты: смотреть mutants.out в
+# артефактах шарда, добавлять тесты или обоснование в docs/experiments/.
+name: Nightly
+
 on:
   schedule:
     - cron: "17 2 * * *"
@@ -52,3 +60,72 @@ jobs:
             fuzz/artifacts/
           retention-days: 30
 
+  mutants:
+    # Полный прогон скоупа .cargo/mutants.toml (823 мутанта на 2026-09-24)
+    # шардированием по матрице: каждый шард ≈ 69 мутантов (замер 24.09:
+    # ~80 с на мутанта на 12 потоках → на 4-ядерном раннере с -j 2 ≈ 2,5–3,5 ч
+    # на шард при лимите джобы 6 ч). Сборка деп-дерева
+    # в каждом шарде одна (копия дерева cargo-mutants кэшу Swatinem не
+    # подхватывает), дальше инкрементальные сборки мутантов.
+    # Красная джоба = выжившие мутанты (cargo-mutants exit≠0) — это сигнал
+    # добавить тесты, а не поломка сборки; mutants.out уезжает в артефакт
+    # даже при таймауте (if: always()) с частичными результатами.
+    name: cargo-mutants (шард ${{ matrix.shard }}/12)
+    runs-on: ubuntu-latest
+    # Лимит GitHub на джобу — 6 часов; если шард систематически не
+    # укладывается, увеличивать число шардов в matrix.shard и --shard */N.
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: nightly-mutants
+      # rust-cache кэширует $CARGO_HOME/bin — cargo-mutants собирается раз.
+      - run: cargo install cargo-mutants --locked
+      # -j 2: на 4-ядерном раннере два параллельных сценария; shuffle выкл.,
+      # чтобы состав шарда был воспроизводим между ночами.
+      - run: cargo mutants --shard ${{ matrix.shard }}/12 -j 2 --no-shuffle
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mutants-out-shard-${{ matrix.shard }}
+          path: mutants.out/
+          retention-days: 30
+
+  coverage:
+    # Покрытие default-профиля (llvm-cov). ПОРОГ НЕ ВВОДИТЬ: джоба всегда
+    # зелёная при успешном прогоне тестов — смотрим только тренд суммарного
+    # процента между ночами (step summary + lcov-артефакт).
+    name: покрытие llvm-cov (тренд, без порога)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: nightly-coverage
+      # rust-cache кэширует $CARGO_HOME/bin — cargo-llvm-cov собирается раз.
+      - run: cargo install cargo-llvm-cov --locked
+      - run: cargo llvm-cov --lcov --output-path lcov.info
+      - name: суммарный процент в step summary
+        run: |
+          {
+            echo "### Покрытие (llvm-cov, default-профиль)"
+            echo
+            echo '```'
+            cargo llvm-cov report --summary-only
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: lcov.info
+          retention-days: 30

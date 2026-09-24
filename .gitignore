@@ -19,7 +19,13 @@ __pycache__/
 .codewhale/
 .qwen/
 .playwright-mcp/
-.cargo/
+# .cargo — служебный (песочница сборки), КРОМЕ конфига cargo-mutants (волна
+# C2): cargo-mutants 27 читает только .cargo/mutants.toml, поэтому он в VCS.
+.cargo/*
+!.cargo/mutants.toml
+# Результаты локальных прогонов cargo-mutants (отчёт — docs/experiments/,
+# сам каталог с логами и копиями дерева — не для VCS)
+mutants.out/
 .cargo-tmp/
 target-check/
 .target-fresh/
