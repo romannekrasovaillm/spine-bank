@@ -2863,4 +2863,255 @@ mod tests {
         assert_eq!(comp.status, GateStatus::Pass, "{}", render(&fast));
         assert_eq!(fast.outcome, GateOutcome::Pass, "{}", render(&fast));
     }
+
+    /// Реестра нет нигде — сообщение «создайте каркас»; явный путь вне
+    /// репозитория — «нечего прогонять»: это разные диагнозы.
+    #[test]
+    fn fitness_message_distinguishes_absent_contour_from_wrong_path() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("mkdir");
+        let exec = crate::cmd_trust::ExecPolicy {
+            no_exec: false,
+            trust_file: None,
+        };
+        let implicit = ConstraintsPath {
+            path: repo.join("CONSTRAINTS.yaml"),
+            explicit: false,
+            drift: None,
+        };
+        let component = component_fitness(&repo, &implicit, &exec);
+        assert_eq!(component.status, GateStatus::Skip);
+        assert!(
+            component.detail.contains("создайте каркас"),
+            "{}",
+            component.detail
+        );
+        let explicit = ConstraintsPath {
+            path: repo.join("CONSTRAINTS.yaml"),
+            explicit: true,
+            drift: None,
+        };
+        let component = component_fitness(&repo, &explicit, &exec);
+        assert_eq!(component.status, GateStatus::Skip);
+        assert!(
+            component.detail.contains("нечего прогонять"),
+            "{}",
+            component.detail
+        );
+    }
+
+    /// Граница вердикта `fitness` считает долю правил «по тексту»: два
+    /// правила, из которых одно исполняемое, — это «1 из 2».
+    #[test]
+    fn mention_rule_notes_counts_text_rules_against_total() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("mkdir");
+        let registry = repo.join("CONSTRAINTS.yaml");
+        std::fs::write(
+            &registry,
+            "rules:\n  - name: spine_present\n    type: file_exists\n    path: \"ARCHITECTURE-SPINE.md\"\n    severity: error\n  - name: tests_run\n    type: command_succeeds\n    command: 'true'\n    severity: error\n",
+        )
+        .expect("registry");
+        let notes = mention_rule_notes(&repo, &registry);
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("— 1 из 2"), "{}", notes[0]);
+        assert!(
+            notes[0].contains("исполняемых проверок поведения: 1"),
+            "{}",
+            notes[0]
+        );
+        // Все правила исполняемые — примечания нет вовсе.
+        std::fs::write(
+            &registry,
+            "rules:\n  - name: tests_run\n    type: command_succeeds\n    command: 'true'\n    severity: error\n",
+        )
+        .expect("registry");
+        assert!(mention_rule_notes(&repo, &registry).is_empty());
+    }
+
+    /// Непокрытые инварианты называются поимённо, а сверх потолка имён —
+    /// счётчиком «и ещё N»; ровно потолок — счётчика нет.
+    #[test]
+    fn ads_without_behaviour_names_uncovered_and_counts_the_rest() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("repo");
+        let model = repo.join("model");
+        std::fs::create_dir_all(&model).expect("mkdir model");
+        let write_rules = |count: usize| {
+            let mut registry = String::from("rules:\n");
+            for k in 1..=count {
+                let _ = write!(
+                    registry,
+                    "  - id: C-{k:03}\n    name: text_rule_{k}\n    type: must_contain\n    glob: '**/*.py'\n    pattern: 'x'\n    severity: error\n    ad: AD-{k:03}\n"
+                );
+            }
+            std::fs::write(repo.join("CONSTRAINTS.yaml"), registry).expect("registry");
+        };
+        // MAX_AD_NAMES + 2 инварианта, каждый проверяется текстовым правилом.
+        for k in 1..=(MAX_AD_NAMES + 2) {
+            std::fs::write(
+                model.join(format!("AD-{k:03}.md")),
+                format!(
+                    "---\nid: AD-{k:03}\ntype: ad\ntitle: \"AD {k}\"\nstatus: \"ADOPTED\"\nverified_by: [C-{k:03}]\n---\n\nТело.\n"
+                ),
+            )
+            .expect("ad");
+        }
+        write_rules(MAX_AD_NAMES + 2);
+        let line = ads_without_behaviour(&repo).expect("инварианты без поведения есть");
+        assert!(line.contains("и ещё 2"), "{line}");
+        assert!(line.contains("AD-001"), "{line}");
+        // Непокрытых ровно MAX_AD_NAMES — счётчика нет: первые два
+        // инварианта закрыты исполняемыми правилами, остальные восемь —
+        // по-прежнему судят по тексту.
+        let mut registry = String::from("rules:\n");
+        for k in 1..=2 {
+            let _ = write!(
+                registry,
+                "  - id: C-{k:03}\n    name: behaviour_rule_{k}\n    type: command_succeeds\n    command: 'true'\n    severity: error\n    ad: AD-{k:03}\n"
+            );
+        }
+        for k in 3..=(MAX_AD_NAMES + 2) {
+            let _ = write!(
+                registry,
+                "  - id: C-{k:03}\n    name: text_rule_{k}\n    type: must_contain\n    glob: '**/*.py'\n    pattern: 'x'\n    severity: error\n    ad: AD-{k:03}\n"
+            );
+        }
+        std::fs::write(repo.join("CONSTRAINTS.yaml"), registry).expect("registry");
+        let line = ads_without_behaviour(&repo).expect("есть непокрытые");
+        assert!(line.contains("AD-003"), "{line}");
+        assert!(!line.contains("и ещё"), "{line}");
+    }
+
+    /// Сводка покрытия `delta_guard`: пустые упоминания не печатаются, а
+    /// сверх потолка записей идёт счётчик.
+    #[test]
+    fn coverage_note_skips_empty_mentions_and_caps_entries() {
+        let report = |mentions: Vec<(String, Vec<String>)>| delta::GuardReport {
+            base: "HEAD".to_string(),
+            changed: mentions.len(),
+            changed_files: Vec::new(),
+            protected_changed: mentions.iter().map(|(f, _)| f.clone()).collect(),
+            covered: Vec::new(),
+            violations: Vec::new(),
+            passed: true,
+            active_deltas: 1,
+            archived_in_range: Vec::new(),
+            mentions,
+            reasons: Vec::new(),
+        };
+        let deltas = |names: &[&str]| names.iter().map(|n| (*n).to_string()).collect::<Vec<_>>();
+        // Пустое упоминание в первых трёх не превращается в «file ← ».
+        let note = coverage_note(&report(vec![
+            ("empty.md".to_string(), Vec::new()),
+            ("a.md".to_string(), deltas(&["d1"])),
+        ]));
+        assert_eq!(note, "a.md ← 'd1'", "{note}");
+        // Ровно потолок — счётчика нет; сверх — «и ещё 1».
+        let note = coverage_note(&report(vec![
+            ("a.md".to_string(), deltas(&["d1"])),
+            ("b.md".to_string(), deltas(&["d1"])),
+            ("c.md".to_string(), deltas(&["d1"])),
+        ]));
+        assert!(!note.contains("и ещё"), "{note}");
+        let note = coverage_note(&report(vec![
+            ("a.md".to_string(), deltas(&["d1"])),
+            ("b.md".to_string(), deltas(&["d1"])),
+            ("c.md".to_string(), deltas(&["d1"])),
+            ("d.md".to_string(), deltas(&["d1"])),
+        ]));
+        assert!(note.contains("… и ещё 1"), "{note}");
+    }
+
+    /// Защищённая правка без активных дельт: FAIL и находка говорит именно
+    /// «активных дельт нет», а не «не упоминается ни в одной из 0».
+    #[test]
+    fn delta_guard_names_absence_of_active_deltas() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("mkdir");
+        make_gate_repo(&repo);
+        std::fs::write(repo.join("ARCHITECTURE-SPINE.md"), "# Spine v2\n").expect("edit");
+        let report = run(&repo, None, None, None, (1, 4)).expect("гейт");
+        assert_eq!(status_of(&report, "delta_guard"), GateStatus::Fail);
+        let component = report
+            .components
+            .iter()
+            .find(|c| c.name == "delta_guard")
+            .expect("составляющая");
+        assert!(
+            component.detail.contains("активных дельт: 0"),
+            "{}",
+            component.detail
+        );
+        assert!(
+            component
+                .findings
+                .iter()
+                .any(|f| f.message.contains("активных дельт нет")),
+            "{:?}",
+            component.findings
+        );
+    }
+
+    /// Только warn-находки спайна — это PASS с «error: 0», а не FAIL.
+    #[test]
+    fn spine_lint_warn_only_passes_with_zero_errors() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("mkdir");
+        std::fs::write(
+            repo.join("ARCHITECTURE-SPINE.md"),
+            "# Spine\n\n## AD-1: Идемпотентность\n\n- **Binds:** Processor.authorize\n- **Prevents:** двойное списание\n- **Rule:** ключ из команды; TODO уточнить формулировку\n",
+        )
+        .expect("spine");
+        let component = component_spine_lint(&repo);
+        assert_eq!(component.status, GateStatus::Pass, "{}", component.detail);
+        assert!(
+            component.detail.contains("error: 0"),
+            "{}",
+            component.detail
+        );
+        assert!(
+            component.detail.contains("находок: 1"),
+            "warn-находка видна: {}",
+            component.detail
+        );
+    }
+
+    /// Каталог `docs/spec` без markdown-спек — SKIP, а не «проверили и чисто».
+    #[test]
+    fn sensors_skip_when_spec_dir_has_no_markdown() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(repo.join("docs/spec")).expect("mkdir spec");
+        std::fs::write(repo.join("docs/spec/notes.txt"), "не спека\n").expect("txt");
+        let component = component_sensors(&repo);
+        assert_eq!(component.status, GateStatus::Skip, "{}", component.detail);
+        assert!(
+            component.detail.contains("нет *.md"),
+            "{}",
+            component.detail
+        );
+    }
+
+    /// Пакеты доказательств: файл в `changes/` — не пакет, `changes/archive/`
+    /// — архив, а не активная дельта; корневой и дельта-пакеты видны.
+    #[test]
+    fn evidence_bundle_dirs_selects_only_real_bundles() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(repo.join("changes/one")).expect("mkdir one");
+        std::fs::create_dir_all(repo.join("changes/archive")).expect("mkdir archive");
+        std::fs::write(repo.join("changes/one/EVIDENCE.yaml"), "bundle: 1\n").expect("bundle");
+        std::fs::write(repo.join("changes/archive/EVIDENCE.yaml"), "bundle: old\n").expect("arch");
+        std::fs::write(repo.join("changes/README.md"), "не пакет\n").expect("file");
+        std::fs::write(repo.join("EVIDENCE.yaml"), "bundle: root\n").expect("root");
+        let found = evidence_bundle_dirs(&repo);
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert!(found.contains(&repo), "{found:?}");
+        assert!(found.contains(&repo.join("changes/one")), "{found:?}");
+    }
 }
