@@ -228,17 +228,22 @@ mod tests {
                     vec![finding("error"), finding("warn"), finding("error")],
                 ),
                 component("spine_lint", GateStatus::Fail, vec![finding("error")]),
+                // Провалов три, непровалов четыре: числа разные, иначе подмена
+                // «статус == Fail» на «!=» дала бы тот же счёт.
+                component("model_validate", GateStatus::Fail, vec![finding("error")]),
                 component("delta_guard", GateStatus::Pass, vec![]),
                 component("trace_check", GateStatus::Skip, vec![]),
+                component("route_lock", GateStatus::Pass, vec![]),
+                component("nfr", GateStatus::Pass, vec![]),
             ],
             GateOutcome::Fail,
             vec![],
             vec![],
         ));
         assert!(
-            out.contains("Итог: FAIL — провалено составляющих: 2 (exit 1)"),
+            out.contains("Итог: FAIL — провалено составляющих: 3 (exit 1)"),
             "{out}"
         );
-        assert!(out.contains("Гейт поймал 3 нарушений до ревью"), "{out}");
+        assert!(out.contains("Гейт поймал 4 нарушений до ревью"), "{out}");
     }
 }

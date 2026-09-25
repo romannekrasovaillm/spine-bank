@@ -1743,11 +1743,75 @@ mod tests {
             "{:?}",
             semantic_rules(&report)
         );
+        // Счётчик называет именно инъекцию, а не «качество ответа судьи»:
+        // это разные причины неподтверждаемости, и решение человека по ним
+        // принимается по-разному.
+        let comp = report
+            .components
+            .iter()
+            .find(|c| c.name == "semantic_quality")
+            .expect("составляющая");
+        assert!(
+            comp.detail.contains("вход с инъекцией: 1"),
+            "{}",
+            comp.detail
+        );
+        assert!(
+            comp.detail.contains("качество ответа судьи: 0"),
+            "{}",
+            comp.detail
+        );
         assert_eq!(
             report.outcome,
             GateOutcome::Incomplete,
             "{}",
             crate::gate::render(&report)
+        );
+    }
+
+    /// Потолок числа субъектов в пакете: ровно потолок — без пометки о
+    /// срезе, потолок + 1 — с пометкой (сравнение строгое).
+    #[test]
+    fn semantic_subject_cap_marks_truncation_exactly_above_limit() {
+        let make = |count: usize| {
+            let tmp = tempfile::tempdir().expect("tmp");
+            let dir = tmp.path();
+            make_semantic_repo(dir);
+            for k in 1..=count {
+                std::fs::write(
+                    dir.join(format!("docs/adr/ADR-{k:03}-reshenie.md")),
+                    format!(
+                        "# ADR-{k:03}
+
+- Status: Accepted
+"
+                    ),
+                )
+                .expect("adr");
+            }
+            let rubrics = semantic_rubrics_dir(dir);
+            let report = run_semantic(
+                dir,
+                None,
+                semantic_cfg(crate::config::SemanticScope::All),
+                &rubrics,
+            );
+            let comp = report
+                .components
+                .iter()
+                .find(|c| c.name == "semantic_quality")
+                .expect("составляющая");
+            comp.detail.clone()
+        };
+        let at_limit = make(MAX_SEMANTIC_SUBJECTS);
+        assert!(
+            !at_limit.contains("больше потолка"),
+            "на потолке среза нет: {at_limit}"
+        );
+        let over_limit = make(MAX_SEMANTIC_SUBJECTS + 1);
+        assert!(
+            over_limit.contains("больше потолка"),
+            "сверх потолка — пометка о срезе: {over_limit}"
         );
     }
 
