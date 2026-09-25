@@ -1837,4 +1837,96 @@ mod tests {
             .is_empty()
         );
     }
+
+    /// Доля невалидных сэмплов ровно на пороге — предупреждение, а не
+    /// эскалация: строгое «больше порога» отделяет шум от сломанного судьи.
+    #[test]
+    fn semantic_invalid_ratio_at_threshold_is_warning_not_escalation() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        make_semantic_repo(dir);
+        let rubrics = semantic_rubrics_dir(dir);
+        write_semantic_report(dir, "docs/adr/ADR-001-reshenie.md", 5, &[], 4.6, None);
+        let path = dir
+            .join(crate::rubric::RUBRIC_REPORTS_DIR)
+            .join("semantic.json");
+        let mut artifact: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("отчёт")).expect("JSON");
+        artifact["invalid_samples_ratio"] = serde_json::json!(0.5);
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&artifact).expect("json"),
+        )
+        .expect("write report");
+        let report = run_semantic(
+            dir,
+            None,
+            semantic_cfg(crate::config::SemanticScope::All),
+            &rubrics,
+        );
+        assert_ne!(
+            status_of(&report, "semantic_quality"),
+            GateStatus::Skip,
+            "на пороге решение механике ещё подтверждаемо: {}",
+            crate::gate::render(&report)
+        );
+        let warn_only = report
+            .components
+            .iter()
+            .find(|c| c.name == "semantic_quality")
+            .expect("составляющая")
+            .findings
+            .iter()
+            .filter(|f| f.rule.as_deref() == Some("semantic_invalid_samples"))
+            .all(|f| f.severity == "warn");
+        assert!(warn_only, "{}", crate::gate::render(&report));
+    }
+
+    /// Допуск судьи включается проектом: при `require_qualified_judge = false`
+    /// неквалифицированный судья на блокирующем маршруте не останавливает
+    /// вердикт (проверка включается осознанно, E6.3).
+    #[test]
+    fn semantic_qualification_is_not_required_when_flag_is_off() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        make_semantic_repo(dir);
+        let rubrics = semantic_rubrics_dir(dir);
+        write_semantic_report(dir, "docs/adr/ADR-001-reshenie.md", 5, &[], 4.6, None);
+        let mut cfg = semantic_cfg(crate::config::SemanticScope::All);
+        cfg.require_qualified_judge = false;
+        let report = run_semantic_on(
+            dir,
+            Route::Critical,
+            crate::config::DecisionPolicyConfig::default(),
+            cfg,
+            &rubrics,
+        );
+        assert!(
+            !semantic_rules(&report).contains(&"judge_unqualified".to_string()),
+            "флаг выключен — допуск не требуется: {:?}",
+            semantic_rules(&report)
+        );
+    }
+
+    /// На неблокирующем маршруте (политика без человека) допуск судьи не
+    /// спрашивается даже при включённом флаге: останавливать нечего.
+    #[test]
+    fn semantic_qualification_is_not_checked_under_warn_policy() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        make_semantic_repo(dir);
+        let rubrics = semantic_rubrics_dir(dir);
+        write_semantic_report(dir, "docs/adr/ADR-001-reshenie.md", 5, &[], 4.6, None);
+        let report = run_semantic(
+            dir,
+            None,
+            semantic_cfg(crate::config::SemanticScope::All),
+            &rubrics,
+        );
+        assert!(
+            !semantic_rules(&report).contains(&"judge_unqualified".to_string()),
+            "на Fast политика без человека: {:?}",
+            semantic_rules(&report)
+        );
+    }
 }
