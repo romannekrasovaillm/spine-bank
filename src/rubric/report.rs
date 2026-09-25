@@ -47,6 +47,11 @@ pub struct RubricReport {
     /// «не сканировали», а не как «чисто».
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub input_injections: Vec<InputInjection>,
+    /// Доля сэмплов судьи с баллом вне шкалы (E3.1/E3.2): невалидный сэмпл не
+    /// голосует за балл, а его доля — повод для гейта отправить решение
+    /// человеку. Поле аддитивное: у отчётов до 0.3.9 его нет (читается как 0).
+    #[serde(default)]
+    pub invalid_samples_ratio: f64,
 }
 
 /// Строка входа с паттерном prompt-инъекции (E2.1): номер строки и сработавший
@@ -148,7 +153,8 @@ impl RubricReport {
                     | CriterionFlag::EvidencePartial
                     | CriterionFlag::AccusationUnconfirmed
                     | CriterionFlag::CoverageIncomplete
-                    | CriterionFlag::InjectionQuote => f.as_str().to_string(),
+                    | CriterionFlag::InjectionQuote
+                    | CriterionFlag::InvalidSamples => f.as_str().to_string(),
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
@@ -166,7 +172,30 @@ impl RubricReport {
                 s.criterion_id, s.weight, score_cell, flags, rationale
             );
         }
-        let _ = writeln!(out, "\n**Взвешенный итог:** {:.2}/5", self.weighted_total);
+        // Находка живого прогона 2026-09-25 (E3): когда не засчитан ни один
+        // критерий, «голое» число в шапке читается как подтверждённая оценка —
+        // а его поставил судья, и механика его не подтверждает.
+        let counted = self
+            .scores
+            .iter()
+            .filter(|s| !s.flags.iter().any(|f| f.excludes_from_total()))
+            .count();
+        if counted == 0 && !self.scores.is_empty() {
+            let _ = writeln!(
+                out,
+                "**Взвешенный итог:** {:.2}/5 — **не подтверждён**: ни один критерий не засчитан \
+                 (все исключены метками{}). Число выше — то, что поставил судья; решением оно не \
+                 является, решение принимает человек.",
+                self.weighted_total,
+                if self.invalid_samples_ratio > 0.0 {
+                    ", среди них невалидные сэмплы (балл вне шкалы)"
+                } else {
+                    ""
+                }
+            );
+        } else {
+            let _ = writeln!(out, "\n**Взвешенный итог:** {:.2}/5", self.weighted_total);
+        }
         let excluded: Vec<&str> = self
             .scores
             .iter()
@@ -204,6 +233,28 @@ impl RubricReport {
                 out,
                 "**Свидетельства частично не подтвердились (evidence_partial):** {}",
                 partial.join(", ")
+            );
+        }
+        // E3.1/E3.2: невалидные сэмплы — отдельная строка: «балл вне шкалы» не
+        // то же самое, что «цитата не подтвердилась», и лечится не тем же.
+        let invalid: Vec<String> = self
+            .scores
+            .iter()
+            .filter(|s| s.invalid_samples > 0)
+            .map(|s| {
+                format!(
+                    "{} ({} сэмплов вне шкалы)",
+                    s.criterion_id, s.invalid_samples
+                )
+            })
+            .collect();
+        if !invalid.is_empty() {
+            let _ = writeln!(
+                out,
+                "**Невалидные сэмплы (invalid_samples):** {} — балл вне шкалы рубрики, сэмплы \
+                 в расчёт не вошли; доля по отчёту {:.0}%",
+                invalid.join(", "),
+                self.invalid_samples_ratio * 100.0
             );
         }
         // Смысловые рубрики (ADR-051): два своих повода исключить критерий —
@@ -262,9 +313,10 @@ impl RubricReport {
 /// только через [`build_report`].
 #[derive(Debug, Deserialize)]
 pub(crate) struct JudgeResponse {
-    /// Оценки по критериям (могут покрывать не все).
+    /// Оценки по критериям (могут покрывать не все). `pub(super)`: по баллам
+    /// решается повторный запрос при невалидном сэмпле (E3.1, `rubric::judge`).
     #[serde(default)]
-    scores: Vec<JudgeScore>,
+    pub(super) scores: Vec<JudgeScore>,
     /// Общий вердикт.
     #[serde(default)]
     verdict: String,
@@ -272,12 +324,12 @@ pub(crate) struct JudgeResponse {
 
 /// Сырая оценка одного критерия от судьи.
 #[derive(Debug, Deserialize)]
-struct JudgeScore {
+pub(super) struct JudgeScore {
     /// Идентификатор критерия.
-    criterion_id: String,
+    pub(super) criterion_id: String,
     /// Балл (терпимо: число или строка с числом).
     #[serde(default, deserialize_with = "de_lenient_f64")]
-    score: f64,
+    pub(super) score: f64,
     /// Обоснование.
     #[serde(default)]
     rationale: String,
@@ -541,6 +593,9 @@ pub(crate) fn build_report(
     let mut scores = Vec::with_capacity(rubric.criteria.len());
     let mut unconfirmed_samples = 0usize;
     let mut counted_samples = 0usize;
+    // E3.2: суммарная доля невалидных сэмплов — то, по чему гейт решает,
+    // отправлять ли решение человеку.
+    let mut invalid_samples = 0usize;
     for c in &rubric.criteria {
         let mut samples: Vec<u8> = Vec::with_capacity(runs.len());
         // Д10: цитата сверяется в КАЖДОМ сэмпле, а не только у обоснования,
@@ -553,10 +608,16 @@ pub(crate) fn build_report(
         // E2.2: свидетельство, которое держится ТОЛЬКО на строке-инъекции,
         // доказательством не засчитывается.
         let mut injection_quotes = 0usize;
+        // E3.1: сэмплы с баллом вне шкалы — невалидные: не голосуют.
+        let mut invalid = 0usize;
         for run in runs {
             let sample = run.scores.iter().find(|s| s.criterion_id == c.id);
             let value = sample.map_or(1, |s| clamp_score(s.score, rubric.scale_max));
             samples.push(value);
+            if sample.is_some_and(|s| score_is_invalid(s.score, rubric.scale_max)) {
+                invalid += 1;
+                continue;
+            }
             let confirmed = value < 2
                 || sample.is_some_and(|s| {
                     evidence_confirmed(&s.rationale, scope.whole(), cfg.evidence_min_similarity)
@@ -600,6 +661,11 @@ pub(crate) fn build_report(
         let mut flags = Vec::new();
         if stdev > cfg.unstable_stdev {
             flags.push(CriterionFlag::Unstable);
+        }
+        // E3.1: невалидные сэмплы названы меткой — «балл 9 при шкале 5» должен
+        // быть виден читателю, а не выглядеть обрезанной пятёркой.
+        if invalid > 0 {
+            flags.push(CriterionFlag::InvalidSamples);
         }
         let roles = c.evidence_role_list()?;
         let rationale = pick_rationale(
@@ -674,6 +740,7 @@ pub(crate) fn build_report(
             fabricated as f64 / samples_count as f64
         };
         let checked = checked_ids(runs, &c.id);
+        invalid_samples += invalid;
         scores.push(CriterionScore {
             criterion_id: c.id.clone(),
             weight: c.weight,
@@ -683,18 +750,20 @@ pub(crate) fn build_report(
             stdev,
             flags,
             evidence_unconfirmed_ratio,
+            invalid_samples: invalid,
             checked,
         });
     }
     let weighted_total = match weighted_total(&rubric.criteria, &scores) {
         Ok(total) => total,
-        // E2: единственным свидетельством оказалась строка-инъекция, и все
-        // критерии остались без подтверждённых цитат. Отчёт всё равно
-        // собирается: без него нечего аудировать, а число в нём — «что поставил
-        // судья», не подтверждение. Решение по такому входу механика не
-        // принимает: гейт видит пометки и уходит в INCOMPLETE
-        // (`semantic_input_injection`).
-        Err(_) if !input_injections.is_empty() => {
+        // E2/E3: единственным свидетельством оказалась строка-инъекция или
+        // все сэмплы пришли с баллом вне шкалы, и критерии остались без
+        // подтверждённых цитат. Отчёт всё равно собирается: без него нечего
+        // аудировать, а число в нём — «что поставил судья», не подтверждение.
+        // Решение по такому входу механика не принимает: гейт видит пометки и
+        // долю невалидных сэмплов и уходит в INCOMPLETE
+        // (`semantic_input_injection` / `rubric_invalid_samples`).
+        Err(_) if !input_injections.is_empty() || invalid_samples > 0 => {
             let as_judged: Vec<CriterionScore> = scores
                 .iter()
                 .map(|s| CriterionScore {
@@ -727,6 +796,11 @@ pub(crate) fn build_report(
             unconfirmed_samples as f64 / counted_samples as f64
         },
         input_injections,
+        invalid_samples_ratio: if counted_samples == 0 {
+            0.0
+        } else {
+            invalid_samples as f64 / counted_samples as f64
+        },
     })
 }
 
@@ -993,6 +1067,14 @@ fn clamp_score(raw: f64, scale_max: u8) -> u8 {
     let max = f64::from(scale_max.max(1));
     // После clamp+round значение гарантированно в 1..=scale_max, усечения не будет.
     raw.clamp(1.0, max).round() as u8
+}
+
+/// Балл судьи вне шкалы рубрики (E3.1): `0`, `9` при `scale_max: 5`, `NaN`,
+/// бесконечность. Такой сэмпл невалиден: обрезать его до `5` значило бы
+/// превратить «модель не поняла контракт» в «модель поставила пятёрку».
+#[must_use]
+pub(super) fn score_is_invalid(raw: f64, scale_max: u8) -> bool {
+    !raw.is_finite() || raw < 1.0 || raw > f64::from(scale_max.max(1))
 }
 
 /// Первые [`ERR_FRAGMENT_CHARS`] символов текста для сообщений об ошибках.
@@ -1387,12 +1469,14 @@ mod tests {
                 stdev: 0.0,
                 flags: Vec::new(),
                 evidence_unconfirmed_ratio: 0.0,
+                invalid_samples: 0,
                 checked: Vec::new(),
             }],
             weighted_total: 4.0,
             verdict: "годно".into(),
             evidence_unconfirmed_ratio: 0.0,
             input_injections: Vec::new(),
+            invalid_samples_ratio: 0.0,
         };
         let md = report.to_markdown();
         assert!(md.contains("# Оценка по рубрике «adr-quality»"));
@@ -1859,6 +1943,80 @@ mod tests {
             "{:?}",
             report.scores[0].flags
         );
+    }
+
+    // --- E3: строгая валидация ответа судьи --------------------------------
+
+    /// E3.1: балл вне шкалы — невалидный сэмпл, а не «пятёрка после обрезки».
+    /// Он не голосует за балл, метка `invalid_samples` называет его читателю, а
+    /// доля видна в отчёте; валидные сэмплы продолжают считаться.
+    #[test]
+    fn out_of_scale_score_is_invalid_not_clamped() {
+        let target = "контекст описан подробно";
+        let valid = |score: u8| judge_run(score, "Цитата: \"контекст описан подробно\" — да");
+        let runs = vec![
+            judge_run(9, "Цитата: \"контекст описан подробно\" — отлично"),
+            valid(4),
+            valid(4),
+        ];
+        let report = build_report(
+            &sample_rubric(),
+            "judge-x",
+            &runs,
+            &EvidenceScope::Target(target),
+            &three_samples(),
+        )
+        .expect("отчёт");
+        let context = &report.scores[0];
+        assert!(
+            context.has_flag(CriterionFlag::InvalidSamples),
+            "{:?}",
+            context.flags
+        );
+        assert_eq!(context.invalid_samples, 1, "невалидный сэмпл посчитан");
+        assert_eq!(context.score, 4, "балл — медиана валидных сэмплов, не 5");
+        assert!(
+            (report.invalid_samples_ratio - 1.0 / 6.0).abs() < 1e-9,
+            "доля по всем критериям: {}",
+            report.invalid_samples_ratio
+        );
+        let md = report.to_markdown();
+        assert!(md.contains("invalid_samples"), "{md}");
+        assert!(md.contains("вне шкалы"), "{md}");
+        // Отчёт без поля (до E3) читается: доля аддитивная.
+        let json = serde_json::to_string(&report).expect("json");
+        let without = json.replace(
+            &format!(
+                ",\"invalid_samples_ratio\":{}",
+                report.invalid_samples_ratio
+            ),
+            "",
+        );
+        let legacy: RubricReport = serde_json::from_str(&without).expect("старый отчёт");
+        assert_eq!(legacy.invalid_samples_ratio, 0.0, "отсутствие = ноль");
+    }
+
+    /// E3 (находка живого прогона 2026-09-25): когда не засчитан ни один
+    /// критерий, шапка отчёта не имеет права печатать «голый» итог — читатель
+    /// увидит максимум там, где все сэмплы были вне шкалы. Итог называется
+    /// неподтверждённым, и сказано, почему.
+    #[test]
+    fn markdown_marks_unconfirmed_total_when_nothing_counted() {
+        let bad = "{\"scores\": [{\"criterion_id\": \"context\", \"score\": 9, \
+                   \"rationale\": \"цитата: 'контекст описан'\"}], \"verdict\": \"ok\"}";
+        let runs = vec![parse_judge_response(bad).expect("ответ")];
+        let report = build_report(
+            &rubric_of(vec![criterion("context", 1.0, EvidenceOn::High, &[])]),
+            "judge-x",
+            &runs,
+            &EvidenceScope::Target("контекст описан"),
+            &one_sample(),
+        )
+        .expect("отчёт с невалидным сэмплом");
+        let md = report.to_markdown();
+        assert!(md.contains("не подтверждён"), "{md}");
+        assert!(md.contains("невалидные сэмплы"), "{md}");
+        assert!(md.contains("решение принимает человек"), "{md}");
     }
 
     /// Чистый вход: поля инъекций нет ни в отчёте, ни в JSON, а отчёт, снятый

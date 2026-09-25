@@ -191,6 +191,10 @@ pub enum CriterionFlag {
     /// решения, а тот, кто хотел управлять судьёй. Критерий, оставшийся без
     /// подтверждённых свидетельств, исключается из итога как обычно.
     InjectionQuote,
+    /// Балл сэмпла вне шкалы рубрики (E3.1): `9` при `scale_max: 5` — не
+    /// «пятёрка после обрезки», а невалидный сэмпл. Он не голосует за балл,
+    /// а его доля (`invalid_samples_ratio`) видна в отчёте и в гейте.
+    InvalidSamples,
 }
 
 impl CriterionFlag {
@@ -204,6 +208,7 @@ impl CriterionFlag {
             Self::AccusationUnconfirmed => "accusation_unconfirmed",
             Self::CoverageIncomplete => "coverage_incomplete",
             Self::InjectionQuote => "injection_quote",
+            Self::InvalidSamples => "invalid_samples",
         }
     }
 
@@ -236,7 +241,8 @@ pub struct CriterionScore {
     #[serde(default)]
     pub stdev: f64,
     /// Метки достоверности: `unstable`, `evidence_not_found`,
-    /// `evidence_partial`, `accusation_unconfirmed`, `coverage_incomplete`.
+    /// `evidence_partial`, `accusation_unconfirmed`, `coverage_incomplete`,
+    /// `injection_quote`, `invalid_samples`.
     #[serde(default)]
     pub flags: Vec<CriterionFlag>,
     /// Доля сэмплов судьи с неподтверждённой цитатой (Д10; ADR-051, S2).
@@ -245,6 +251,11 @@ pub struct CriterionScore {
     /// читаются (отсутствие = ноль).
     #[serde(default)]
     pub evidence_unconfirmed_ratio: f64,
+    /// Сколько сэмплов критерия пришло с баллом вне шкалы (E3.1). Такой сэмпл
+    /// не голосует за балл, а в `samples` виден приведённым к шкале — счётчик
+    /// рядом объясняет, почему. Поле аддитивное (отсутствие = ноль).
+    #[serde(default)]
+    pub invalid_samples: usize,
     /// Что судья назвал проверенным (ADR-051, S3) — объединение перечней
     /// `checked` по сэмплам; пусто у критериев без `coverage`.
     #[serde(default)]

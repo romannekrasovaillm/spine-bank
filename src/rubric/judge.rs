@@ -10,7 +10,7 @@ use crate::llm::{ChatMessage, ChatRequest, LlmProvider};
 
 use super::report::{
     COVERAGE_MIN_SCORE, EvidenceScope, JudgeResponse, RubricReport, build_report, fragment,
-    parse_judge_response,
+    parse_judge_response, score_is_invalid,
 };
 use super::types::{EvidenceOn, MAX_TARGET_CHARS, Rubric};
 
@@ -21,10 +21,11 @@ const TARGET_BEGIN: &str = "=== НАЧАЛО ОЦЕНИВАЕМОГО ТЕКСТ
 const TARGET_END: &str = "=== КОНЕЦ ОЦЕНИВАЕМОГО ТЕКСТА ===";
 
 /// Подсказка судье при повторном запросе: только JSON.
-const RETRY_JSON_HINT: &str = "Ответ не разобран как JSON. Верни ТОЛЬКО JSON-объект \
-     формата {\"scores\": [{\"criterion_id\": \"...\", \"score\": 1, \"rationale\": \
-     \"Цитата: \\\"...\\\". ...\"}], \"verdict\": \"...\"} — без markdown-обёрток и любого \
-     текста до и после. Требование цитаты в rationale сохраняется.";
+const RETRY_JSON_HINT: &str = "Ответ не разобран как JSON или содержит балл вне шкалы рубрики. \
+     Верни ТОЛЬКО JSON-объект формата {\"scores\": [{\"criterion_id\": \"...\", \"score\": 1, \
+     \"rationale\": \"Цитата: \\\"...\\\". ...\"}], \"verdict\": \"...\"} — без markdown-обёрток \
+     и любого текста до и после. Балл — целое число в шкале рубрики, не выше её максимума. \
+     Требование цитаты в rationale сохраняется.";
 
 /// Подсказка генератору при повторном запросе: только YAML.
 const RETRY_YAML_HINT: &str = "Ответ не разобран как YAML. Верни ТОЛЬКО YAML рубрики той же схемы — без markdown-обёрток и пояснений.";
@@ -192,6 +193,18 @@ pub fn check_target_len(target: &str) -> Result<()> {
 /// `thinking` — из `JudgeConfig`: None трактуется как `Some(false)` —
 /// судья без ризонинга, чтобы thinking-токены не съедали бюджет
 /// `max_tokens` провайдера (обрыв JSON, кейс 2026-09-01).
+/// Есть ли в ответе судьи балл вне шкалы рубрики (E3.1): такой ответ
+/// перезапрашивается один раз, а если и повтор не помог — уходит в отчёт с
+/// меткой `invalid_samples`, а не превращается в обрезанную оценку.
+fn has_invalid_scores(response: &JudgeResponse, rubric: &Rubric) -> bool {
+    response.scores.iter().any(|s| {
+        rubric
+            .criteria
+            .iter()
+            .any(|c| c.id == s.criterion_id && score_is_invalid(s.score, rubric.scale_max))
+    })
+}
+
 async fn judge_once(
     rubric: &Rubric,
     target: &str,
@@ -206,7 +219,12 @@ async fn judge_once(
     let mut request = ChatRequest::chat(messages.clone());
     request.thinking = thinking;
     let first = complete_idempotent(llm, request).await?;
-    if let Ok(parsed) = parse_judge_response(&first.content) {
+    // E3.1: повтор нужен и когда JSON разобран, но балл вне шкалы: «9» при
+    // scale_max: 5 — невалидный сэмпл, а не пятёрка после обрезки.
+    let first_ok = parse_judge_response(&first.content)
+        .ok()
+        .filter(|parsed| !has_invalid_scores(parsed, rubric));
+    if let Some(parsed) = first_ok {
         Ok((parsed, first.content))
     } else {
         // Один retry с явной инструкцией «только JSON».
@@ -592,13 +610,19 @@ mod tests {
         );
     }
 
+    /// E3.1 изменил контракт: балл вне шкалы больше не клэмпится, а
+    /// перезапрашивается. Ответ с 99 отвергнут, повтор даёт валидный балл;
+    /// неизвестный критерий по-прежнему игнорируется, пропущенный — «судья не
+    /// оценил» с баллом 1.
     #[tokio::test]
-    async fn evaluate_clamps_scores_and_marks_missing() {
-        let judge = "```json\n{\"scores\": [\n\
+    async fn evaluate_retries_out_of_scale_and_marks_missing() {
+        let bad = "```json\n{\"scores\": [\n\
              {\"criterion_id\": \"context\", \"score\": 99, \"rationale\": \"цитата: 'контекст описан'\"},\n\
              {\"criterion_id\": \"unknown\", \"score\": 3, \"rationale\": \"лишний критерий\"}\n\
              ], \"verdict\": \"годно с оговорками\"}\n```";
-        let llm = FakeLlm::new(&[judge]);
+        let good = "{\"scores\": [{\"criterion_id\": \"context\", \"score\": 4, \
+             \"rationale\": \"цитата: 'контекст описан'\"}], \"verdict\": \"годно с оговорками\"}";
+        let llm = FakeLlm::new(&[bad, good]);
         let report = evaluate_with_options(
             &sample_rubric(),
             "Текст ADR: контекст описан.",
@@ -610,17 +634,22 @@ mod tests {
         assert_eq!(report.scores.len(), 2, "в отчёте только критерии рубрики");
         assert_eq!(report.judge_samples, 1);
         assert_eq!(report.scores[0].criterion_id, "context");
-        assert_eq!(report.scores[0].score, 5, "99 клэмпится в scale_max");
+        assert_eq!(report.scores[0].score, 4, "после повтора — валидный балл");
+        assert_eq!(
+            report.invalid_samples_ratio, 0.0,
+            "невалидный ответ в отчёт не попал"
+        );
         assert!(
-            report.scores[0].flags.is_empty(),
-            "цитата подтверждена текстом"
+            !report.scores[0].has_flag(CriterionFlag::InvalidSamples),
+            "{:?}",
+            report.scores[0].flags
         );
         assert_eq!(report.scores[1].score, 1, "пропущенный судьёй критерий → 1");
         assert_eq!(report.scores[1].rationale, "судья не оценил");
         assert_eq!(report.judge_model, "fake-judge-1");
         assert_eq!(report.verdict, "годно с оговорками");
-        // (5*1 + 1*3) / 4 = 2.0
-        assert!((report.weighted_total - 2.0).abs() < 1e-9);
+        // (4*1 + 1*3) / 4 = 1.75 — после повтора балл валидный, не обрезанный.
+        assert!((report.weighted_total - 1.75).abs() < 1e-9);
     }
 
     #[tokio::test]
@@ -637,6 +666,53 @@ mod tests {
             report.scores[0].flags.is_empty(),
             "цитата из текста подтверждена"
         );
+    }
+
+    /// E3.1: балл вне шкалы — повод для повтора, а не молчаливая обрезка.
+    /// Первый ответ «9» при шкале 5 отвергается, повтор даёт валидный балл, и в
+    /// отчёте нет ни одного невалидного сэмпла.
+    #[tokio::test]
+    async fn evaluate_retries_on_out_of_scale_score() {
+        let llm = FakeLlm::new(&[
+            "{\"scores\": [{\"criterion_id\": \"context\", \"score\": 9, \"rationale\": \"Цитата: \\\"текст проекта\\\" — ok\"}], \"verdict\": \"ok\"}",
+            "{\"scores\": [{\"criterion_id\": \"context\", \"score\": 4, \"rationale\": \"Цитата: \\\"текст проекта\\\" — ok\"}], \"verdict\": \"ok\"}",
+        ]);
+        let report = evaluate_with_options(&sample_rubric(), "текст проекта", &llm, &one_sample())
+            .await
+            .expect("оценка после повтора");
+        assert_eq!(report.scores[0].score, 4, "повтор дал валидный балл");
+        assert_eq!(report.invalid_samples_ratio, 0.0, "невалидных сэмплов нет");
+        assert!(
+            !report.scores[0].has_flag(CriterionFlag::InvalidSamples),
+            "{:?}",
+            report.scores[0].flags
+        );
+    }
+
+    /// E3.1: если и повтор вернул балл вне шкалы, сэмпл остаётся в отчёте с
+    /// меткой `invalid_samples` и долей — «невалидно» видно, а не спрятано за
+    /// обрезкой. Отчёт при этом собирается: без него нечего аудировать.
+    #[tokio::test]
+    async fn out_of_scale_survives_retry_and_is_flagged() {
+        let bad = "{\"scores\": [{\"criterion_id\": \"context\", \"score\": 9, \
+             \"rationale\": \"Цитата: \\\"Текст ADR: контекст описан\\\" — да\"}], \"verdict\": \"ok\"}";
+        let llm = FakeLlm::new(&[bad, bad]);
+        let report = evaluate_with_options(
+            &sample_rubric(),
+            "Текст ADR: контекст описан.",
+            &llm,
+            &one_sample(),
+        )
+        .await
+        .expect("отчёт собирается даже с невалидным сэмплом");
+        // Невалиден один критерий из двух (у второго судья балла не дал вовсе).
+        assert_eq!(report.invalid_samples_ratio, 0.5, "доля невалидных сэмплов");
+        assert!(
+            report.scores[0].has_flag(CriterionFlag::InvalidSamples),
+            "{:?}",
+            report.scores[0].flags
+        );
+        assert_eq!(report.scores[0].invalid_samples, 1);
     }
 
     #[tokio::test]

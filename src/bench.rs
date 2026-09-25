@@ -588,6 +588,7 @@ pub async fn run_golden_filtered(
                 samples: Vec::new(),
                 stdev: 0.0,
                 evidence_unconfirmed_ratio: 0.0,
+                invalid_samples: 0,
                 checked: Vec::new(),
                 flags: Vec::new(),
             });

@@ -7,6 +7,7 @@ use std::path::Path;
 use super::components::adr_is_accepted;
 use super::git::GitProbe;
 use super::types::{GateComponent, GateFinding};
+use crate::control::Route;
 use crate::delta;
 
 /// Субъект смысловой проверки: рубрика и её субъект досье (ADR-052).
@@ -44,6 +45,7 @@ pub(super) fn component_semantic_quality(
     base: Option<&str>,
     git: &GitProbe,
     enabled: bool,
+    route: Option<Route>,
 ) -> GateComponent {
     if !enabled {
         return GateComponent::skip(
@@ -67,6 +69,9 @@ pub(super) fn component_semantic_quality(
     // Субъекты, чей вход помечен детектором инъекций (E2): их суждение
     // подтвердить нельзя, и составляющая уходит в SKIP — вердикт INCOMPLETE.
     let mut injection_suspected = 0usize;
+    // E3.2/E3.3: субъекты, чьё суждение механика не подтверждает по качеству
+    // ответа судьи (невалидные сэмплы сверх порога, evidence_partial на Critical).
+    let mut unconfirmed = 0usize;
     for name in &cfg.rubrics {
         let path = rubrics_dir.join(format!("{name}.yaml"));
         let rubric = match crate::rubric::load(&path) {
@@ -100,10 +105,15 @@ pub(super) fn component_semantic_quality(
             truncated = true;
         }
         for subject in subjects.into_iter().take(MAX_SEMANTIC_SUBJECTS) {
-            let state = semantic_subject_state(repo, &rubric, kind, &subject, &artifacts, cfg);
+            let state =
+                semantic_subject_state(repo, &rubric, kind, &subject, &artifacts, cfg, route);
             checked += usize::from(!matches!(state, SemanticState::Skipped));
-            if matches!(state, SemanticState::InjectionSuspected(_)) {
-                injection_suspected += 1;
+            match &state {
+                SemanticState::InjectionSuspected(_) => injection_suspected += 1,
+                SemanticState::InvalidSamples(_) | SemanticState::PartialOnCritical(_) => {
+                    unconfirmed += 1;
+                }
+                _ => {}
             }
             findings.extend(state.into_findings(name, &subject));
         }
@@ -141,15 +151,17 @@ pub(super) fn component_semantic_quality(
          порог и подтверждённость цитат, но не качество суждения"
             .to_string(),
     ];
-    if injection_suspected > 0 {
-        // E2: «проверить нельзя», а не «нечего проверять» и не «нарушено».
+    if injection_suspected + unconfirmed > 0 {
+        // E2/E3: «проверить нельзя», а не «нечего проверять» и не «нарушено».
         // SKIP обязательной составляющей делает вердикт INCOMPLETE (exit 3) —
         // ровно то, что ревью называет решением `human`.
         return GateComponent::skip_with_findings(
             "semantic_quality",
             format!(
-                "{detail}; у {injection_suspected} субъектов вход помечен prompt-инъекцией — \
-                 суждение по ним не подтверждено, решение за человеком"
+                "{detail}; суждений, которые механика не подтверждает: {} \
+                 (вход с инъекцией: {injection_suspected}, качество ответа судьи: {unconfirmed}) — \
+                 решение за человеком",
+                injection_suspected + unconfirmed
             ),
             findings,
         )
@@ -213,6 +225,14 @@ enum SemanticState {
     /// свидетельства оттуда не засчитаны, и суждение по такому входу механика
     /// подтвердить не может — решение за человеком.
     InjectionSuspected(Vec<usize>),
+    /// Доля сэмплов судьи с баллом вне шкалы выше порога (E3.2): суждению
+    /// верить нельзя — решение за человеком.
+    InvalidSamples(f64),
+    /// То же, но доля ниже порога: предупреждение, а не эскалация (E3.2).
+    InvalidSamplesWarn(f64),
+    /// Часть свидетельств судьи не подтвердилась, а маршрут — Critical (E3.3):
+    /// оговорку принимает человек.
+    PartialOnCritical(String),
     /// Всё в порядке.
     Ok,
 }
@@ -284,6 +304,31 @@ impl SemanticState {
                 "judge_is_author".to_string(),
                 format!("{who}: судья и автор — одна модель ({judge}) — оценка не независима"),
             )],
+            Self::InvalidSamples(ratio) => vec![GateFinding::ruled(
+                "error".to_string(),
+                "semantic_invalid_samples".to_string(),
+                format!(
+                    "{who}: доля сэмплов судьи с баллом вне шкалы {:.0}% выше порога — суждению \
+                     верить нельзя, решение за человеком",
+                    ratio * 100.0
+                ),
+            )],
+            Self::InvalidSamplesWarn(ratio) => vec![GateFinding::ruled(
+                "warn".to_string(),
+                "semantic_invalid_samples".to_string(),
+                format!(
+                    "{who}: {:.0}% сэмплов судьи пришли с баллом вне шкалы — в расчёт не вошли",
+                    ratio * 100.0
+                ),
+            )],
+            Self::PartialOnCritical(criteria) => vec![GateFinding::ruled(
+                "error".to_string(),
+                "semantic_evidence_partial".to_string(),
+                format!(
+                    "{who}: часть свидетельств судьи не подтвердилась ({criteria}), а маршрут \
+                     Critical — решение за человеком"
+                ),
+            )],
             Self::InjectionSuspected(lines) => vec![GateFinding::ruled(
                 // error: это не «нарушение субъекта», а недействительность
                 // суждения о нём. Составляющая при этой находке — SKIP, и
@@ -309,6 +354,7 @@ fn semantic_subject_state(
     subject: &SemanticSubject,
     artifacts: &[crate::rubric::RubricArtifact],
     cfg: &crate::config::SemanticQualityConfig,
+    route: Option<Route>,
 ) -> SemanticState {
     let Ok(packs) = crate::rubric_pack::build(repo, kind, &subject.subject) else {
         // Досье не собирается (секрет, лимит, битый маркер) — это не «нет
@@ -330,6 +376,26 @@ fn semantic_subject_state(
         .filter(|l| !l.is_empty())
     {
         return SemanticState::InjectionSuspected(lines.clone());
+    }
+    // E3.2: качество ответа судьи — невалидные сэмплы. Выше порога решение
+    // механике не подтвердить, ниже — предупреждение.
+    if artifact.invalid_samples_ratio > cfg.max_invalid_samples_ratio {
+        return SemanticState::InvalidSamples(artifact.invalid_samples_ratio);
+    }
+    if artifact.invalid_samples_ratio > 0.0 {
+        return SemanticState::InvalidSamplesWarn(artifact.invalid_samples_ratio);
+    }
+    // E3.3: оговорка судьи (`evidence_partial`) на Critical — человеку.
+    if route == Some(Route::Critical) {
+        let partial: Vec<String> = artifact
+            .scores
+            .iter()
+            .filter(|s| s.has_flag(crate::rubric::CriterionFlag::EvidencePartial))
+            .map(|s| s.criterion_id.clone())
+            .collect();
+        if !partial.is_empty() {
+            return SemanticState::PartialOnCritical(partial.join(", "));
+        }
     }
     // Отчёт привязан ко ВСЕМ источникам досье (ADR-051, П3): правка спайна
     // обесценивает отчёт о решении, даже если сам ADR не менялся.
@@ -605,6 +671,7 @@ mod tests {
             scope,
             min_score: 3.5,
             require_distinct_judge: false,
+            max_invalid_samples_ratio: 0.5,
         }
     }
 

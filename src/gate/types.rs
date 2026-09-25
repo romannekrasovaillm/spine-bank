@@ -360,6 +360,11 @@ pub struct GateOptions {
     /// детерминированный legacy-режим (исполнять, allow-файл не
     /// консультируется): библиотека без края не зависит от машины (AD-7).
     pub exec: crate::cmd_trust::ExecPolicy,
+    /// Эффективный маршрут прогона — после храповика `ROUTE.lock` (E3.3):
+    /// от него зависит политика оговорок отчёта (`evidence_partial` на
+    /// Critical уходит человеку). `None` — библиотечный вызов без маршрута:
+    /// поведение как на Fast (warn).
+    pub route: Option<Route>,
 }
 
 impl GateOptions {
@@ -376,6 +381,7 @@ impl GateOptions {
             executable_required: cfg.trace.executable_required,
             semantic_quality: cfg.gate.semantic_quality.clone(),
             exec: crate::cmd_trust::ExecPolicy::default(),
+            route: None,
         }
     }
 }

@@ -173,9 +173,16 @@ pub(super) fn run_inner(
     // через `[gate.required]` (по умолчанию SKIP, чтобы не краснить чужие
     // пайплайны без предупреждения).
     let required_names = requirements.for_route(route);
+    // E3.3: составляющие видят ЭФФЕКТИВНЫЙ маршрут (после ROUTE.lock) — от него
+    // зависит политика оговорок отчёта: `evidence_partial` на Critical уходит
+    // человеку, на Fast/Standard остаётся предупреждением.
+    let options = GateOptions {
+        route: Some(route),
+        ..options.clone()
+    };
     components.push(component_decision_quality(
         repo,
-        options,
+        &options,
         required_names.iter().any(|r| r == "decision_quality"),
     ));
     // ADR-052: смысловые рубрики — та же дисциплина, что у `decision_quality`:
@@ -187,6 +194,7 @@ pub(super) fn run_inner(
         base,
         &git,
         required_names.iter().any(|r| r == "semantic_quality"),
+        options.route,
     ));
     let mut report = GateReport {
         repo: repo.to_path_buf(),

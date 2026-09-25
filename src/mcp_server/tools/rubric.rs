@@ -102,6 +102,7 @@ impl McpServe {
             "weighted_total": report.weighted_total,
             "verdict": report.verdict,
             "scores": report.scores,
+            "invalid_samples_ratio": report.invalid_samples_ratio,
             "report_markdown": report.to_markdown(),
             "summary": format!(
                 "Рубрика '{}': {:.2}/5 (судья {})",
@@ -484,6 +485,7 @@ impl McpServe {
             "weighted_total": report.weighted_total,
             "verdict": report.verdict,
             "scores": report.scores,
+            "invalid_samples_ratio": report.invalid_samples_ratio,
             "report_markdown": report.to_markdown(),
             "answers": {
                 "total": total,

@@ -935,6 +935,11 @@ pub(super) fn component_decision_quality(
     // Отчёты, чей вход помечен детектором инъекций (E2): суждение по ним
     // подтвердить нельзя — составляющая уходит в SKIP (вердикт INCOMPLETE).
     let mut injection_suspected = 0usize;
+    // E3.2: доля невалидных сэмплов судьи выше порога — тоже «не подтверждено».
+    let mut invalid_over_threshold = 0usize;
+    // E3.3: `evidence_partial` на Critical — оговорка, которую проект не
+    // принимает молча.
+    let mut partial_on_critical = 0usize;
     for adr in &adrs {
         let Ok(text) = std::fs::read_to_string(adr) else {
             continue;
@@ -987,6 +992,60 @@ pub(super) fn component_decision_quality(
                 ),
             ));
             continue;
+        }
+        // E3.2: невалидные сэмплы судьи. Выше порога — суждению верить нельзя,
+        // решение за человеком; ниже — предупреждение, но не молчание.
+        if artifact.invalid_samples_ratio > cfg.max_invalid_samples_ratio {
+            invalid_over_threshold += 1;
+            findings.push(GateFinding::ruled(
+                "error".to_string(),
+                "rubric_invalid_samples".to_string(),
+                format!(
+                    "{rel}: доля сэмплов судьи с баллом вне шкалы {:.0}% выше порога {:.0}% — \
+                     суждению верить нельзя, решение за человеком",
+                    artifact.invalid_samples_ratio * 100.0,
+                    cfg.max_invalid_samples_ratio * 100.0
+                ),
+            ));
+            continue;
+        }
+        if artifact.invalid_samples_ratio > 0.0 {
+            findings.push(GateFinding::ruled(
+                "warn".to_string(),
+                "rubric_invalid_samples".to_string(),
+                format!(
+                    "{rel}: {:.0}% сэмплов судьи пришли с баллом вне шкалы — в расчёт не вошли",
+                    artifact.invalid_samples_ratio * 100.0
+                ),
+            ));
+        }
+        // E3.3: часть свидетельств не подтвердилась. На Critical это решение
+        // человека, на остальных маршрутах — предупреждение.
+        let partial = artifact
+            .scores
+            .iter()
+            .any(|s| s.has_flag(crate::rubric::CriterionFlag::EvidencePartial));
+        if partial && options.route == Some(crate::control::Route::Critical) {
+            partial_on_critical += 1;
+            findings.push(GateFinding::ruled(
+                "error".to_string(),
+                "rubric_evidence_partial".to_string(),
+                format!(
+                    "{rel}: часть свидетельств судьи не подтвердилась (evidence_partial), \
+                     а маршрут Critical — решение за человеком"
+                ),
+            ));
+            continue;
+        }
+        if partial {
+            findings.push(GateFinding::ruled(
+                "warn".to_string(),
+                "rubric_evidence_partial".to_string(),
+                format!(
+                    "{rel}: часть свидетельств судьи не подтвердилась (evidence_partial) — \
+                     на Critical это было бы решением человека"
+                ),
+            ));
         }
         // Привязка к содержанию: отчёт обязан относиться к ЭТОЙ редакции.
         if let (Some(want), Some(got)) = (&sha, &artifact.target_sha256) {
@@ -1265,14 +1324,17 @@ pub(super) fn component_decision_quality(
              остаются одни хэши"
         ));
     }
-    if injection_suspected > 0 {
-        // E2: «проверить нельзя», а не «нарушено» и не «нечего проверять» —
+    let unconfirmed = injection_suspected + invalid_over_threshold + partial_on_critical;
+    if unconfirmed > 0 {
+        // E2/E3: «проверить нельзя», а не «нарушено» и не «нечего проверять» —
         // SKIP обязательной составляющей даёт вердикт INCOMPLETE (exit 3).
         return GateComponent::skip_with_findings(
             "decision_quality",
             format!(
-                "{detail}; у {injection_suspected} отчётов вход помечен prompt-инъекцией — \
-                 суждение по ним не подтверждено, решение за человеком"
+                "{detail}; решений, которые механика не подтверждает: {unconfirmed} \
+                 (вход с инъекцией: {injection_suspected}, невалидных сэмплов сверх порога: \
+                 {invalid_over_threshold}, evidence_partial на Critical: {partial_on_critical}) — \
+                 решение за человеком"
             ),
             findings,
         )
@@ -2447,11 +2509,174 @@ mod tests {
             "{:?}",
             comp.findings
         );
+
         assert_eq!(
             report.outcome,
             GateOutcome::Incomplete,
             "{}",
             render(&report)
         );
+    }
+
+    /// Патч отчёта `make_quality_repo` полями E3: доля невалидных сэмплов и
+    /// метки критериев. Возвращает путь отчёта.
+    fn patch_quality_report(dir: &Path, invalid_ratio: Option<f64>, flags: &[&str]) -> PathBuf {
+        let path = dir
+            .join(crate::rubric::RUBRIC_REPORTS_DIR)
+            .join("ADR-001-reshenie.json");
+        let mut artifact: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("отчёт")).expect("JSON");
+        if let Some(ratio) = invalid_ratio {
+            artifact["invalid_samples_ratio"] = serde_json::json!(ratio);
+        }
+        if !flags.is_empty() {
+            artifact["scores"] = serde_json::json!([{
+                "criterion_id": "context",
+                "weight": 1.0,
+                "score": 4,
+                "rationale": "цитата",
+                "samples": [4],
+                "stdev": 0.0,
+                "flags": flags,
+                "evidence_unconfirmed_ratio": 0.0,
+                "invalid_samples": 0,
+                "checked": [],
+            }]);
+        }
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&artifact).expect("json"),
+        )
+        .expect("write report");
+        path
+    }
+
+    /// E3.2: доля сэмплов судьи с баллом вне шкалы выше порога — суждению
+    /// верить нельзя: SKIP с находкой `rubric_invalid_samples`, вердикт
+    /// INCOMPLETE (exit 3), решение за человеком.
+    #[test]
+    fn decision_quality_invalid_samples_above_threshold_escalates() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        make_quality_repo(dir, Some(4.5), Some("judge-x"));
+        patch_quality_report(dir, Some(0.8), &[]);
+        let report = run_with(
+            dir,
+            Some(Route::Fast),
+            None,
+            None,
+            (1, 4),
+            &with_quality(Route::Fast),
+        )
+        .expect("gate");
+        let comp = report
+            .components
+            .iter()
+            .find(|c| c.name == "decision_quality")
+            .expect("comp");
+        assert_eq!(comp.status, GateStatus::Skip, "{}", render(&report));
+        assert!(
+            comp.findings
+                .iter()
+                .any(|f| f.rule.as_deref() == Some("rubric_invalid_samples")
+                    && f.severity == "error"),
+            "{:?}",
+            comp.findings
+        );
+        assert_eq!(
+            report.outcome,
+            GateOutcome::Incomplete,
+            "{}",
+            render(&report)
+        );
+    }
+
+    /// E3.2, контрпроба: доля ниже порога — только предупреждение, вердикт
+    /// остаётся PASS: один сбойный сэмпл не повод блокировать решение.
+    #[test]
+    fn decision_quality_invalid_samples_below_threshold_is_warn() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        make_quality_repo(dir, Some(4.5), Some("judge-x"));
+        patch_quality_report(dir, Some(0.25), &[]);
+        let report = run_with(
+            dir,
+            Some(Route::Fast),
+            None,
+            None,
+            (1, 4),
+            &with_quality(Route::Fast),
+        )
+        .expect("gate");
+        let comp = report
+            .components
+            .iter()
+            .find(|c| c.name == "decision_quality")
+            .expect("comp");
+        assert_eq!(comp.status, GateStatus::Pass, "{}", render(&report));
+        assert!(
+            comp.findings.iter().any(
+                |f| f.rule.as_deref() == Some("rubric_invalid_samples") && f.severity == "warn"
+            ),
+            "{:?}",
+            comp.findings
+        );
+        assert_eq!(report.outcome, GateOutcome::Pass);
+    }
+
+    /// E3.3: `evidence_partial` на Critical — решение за человеком (SKIP →
+    /// INCOMPLETE), на Fast — предупреждение с вердиктом PASS.
+    #[test]
+    fn decision_quality_evidence_partial_follows_route() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        make_quality_repo(dir, Some(4.5), Some("judge-x"));
+        patch_quality_report(dir, None, &["evidence_partial"]);
+        // Critical: оговорку судьи принимает человек.
+        let critical = run_with(
+            dir,
+            Some(Route::Critical),
+            None,
+            None,
+            (1, 4),
+            &with_quality(Route::Critical),
+        )
+        .expect("gate critical");
+        let comp = critical
+            .components
+            .iter()
+            .find(|c| c.name == "decision_quality")
+            .expect("comp");
+        assert_eq!(comp.status, GateStatus::Skip, "{}", render(&critical));
+        assert!(
+            comp.findings
+                .iter()
+                .any(|f| f.rule.as_deref() == Some("rubric_evidence_partial")),
+            "{:?}",
+            comp.findings
+        );
+        assert_eq!(
+            critical.outcome,
+            GateOutcome::Incomplete,
+            "{}",
+            render(&critical)
+        );
+        // Fast: то же состояние — предупреждение, вердикт PASS.
+        let fast = run_with(
+            dir,
+            Some(Route::Fast),
+            None,
+            None,
+            (1, 4),
+            &with_quality(Route::Fast),
+        )
+        .expect("gate fast");
+        let comp = fast
+            .components
+            .iter()
+            .find(|c| c.name == "decision_quality")
+            .expect("comp");
+        assert_eq!(comp.status, GateStatus::Pass, "{}", render(&fast));
+        assert_eq!(fast.outcome, GateOutcome::Pass, "{}", render(&fast));
     }
 }

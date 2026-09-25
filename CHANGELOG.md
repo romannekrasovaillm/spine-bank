@@ -26,6 +26,18 @@
   отчёт по досье без сырых ответов — warn `rubric_report_unreproducible`
   (read-only контур MCP файлов не пишет, провалом это краснило бы настройку, а
   не решение). Составляющая по-прежнему включается только через `[gate.required]`.
+- **Балл судьи вне шкалы больше не обрезается.** `9` при `scale_max: 5` —
+  невалидный сэмпл: ответ перезапрашивается один раз, а если повтор не помог,
+  сэмпл не голосует за балл и попадает в отчёт меткой `invalid_samples` с долей
+  `invalid_samples_ratio`. Отчёт на таком входе собирается (число — «что поставил
+  судья»), но `decision_quality`/`semantic_quality` при доле выше порога
+  (`max_invalid_samples_ratio`, дефолт `0.5`) уходят в SKIP → вердикт
+  **INCOMPLETE** (exit 3). Пайплайн, где судья ставил `9`, раньше получал
+  обрезанную пятёрку и PASS.
+- **`evidence_partial` на маршруте Critical — решение человека.** Часть
+  свидетельств судьи не подтвердилась, и на Critical это SKIP с находкой
+  `rubric_evidence_partial` / `semantic_evidence_partial` → **INCOMPLETE**
+  (exit 3). На Fast/Standard — предупреждение, вердикт не меняется.
 - **Вход рубрики с prompt-инъекцией даёт INCOMPLETE (exit 3), а не PASS.**
   Если детектор пометил строки входа (документ или досье), `semantic_quality` и
   `decision_quality` уходят в SKIP с находкой (`semantic_input_injection` /
@@ -80,6 +92,23 @@
 - **E2 — сверка отчёта.** Пометки инъекций участвуют в `rubric reverify`:
   правка поля `input_injection_lines` называется расхождением, отчёт без поля
   (до 0.3.9) не штрафуется.
+- **E3 — строгая валидация ответа судьи.**
+  - **E3.1 невалидный сэмпл вместо обрезки.** `report::score_is_invalid`
+  (балл вне `1..=scale_max`, `NaN`, бесконечность); `judge_once` перезапрашивает
+  ответ с баллом вне шкалы тем же повтором, что и неразобранный JSON;
+  `CriterionScore.invalid_samples` и метка `invalid_samples` называют счётчик,
+  `RubricReport.invalid_samples_ratio` — долю. Если невалидны все сэмплы,
+  отчёт всё равно собирается (иначе аудировать нечего) — решение по нему
+  принимает гейт, а не «обрезанная» пятёрка.
+  - **E3.2 порог и эскалация.** `[gate.decision_quality]` и
+  `[gate.semantic_quality]`: `max_invalid_samples_ratio` (дефолт `0.5`). Выше
+  порога — error-находка `rubric_invalid_samples` / `semantic_invalid_samples`
+  и SKIP → INCOMPLETE; ниже — warn-находка (невалидный сэмпл не бывает
+  невидимым).
+  - **E3.3 `evidence_partial` в политике маршрута.** Составляющие видят
+  ЭФФЕКТИВНЫЙ маршрут (после `ROUTE.lock`): на Critical оговорка судьи уходит
+  человеку (`rubric_evidence_partial` / `semantic_evidence_partial` → SKIP →
+  INCOMPLETE), на Fast/Standard остаётся предупреждением.
 
 ## [0.3.8] — 2026-09-24
 

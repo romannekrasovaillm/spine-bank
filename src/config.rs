@@ -940,6 +940,15 @@ pub struct SemanticQualityConfig {
     /// `judge_is_author` становится error, `false` — warn.
     #[serde(default)]
     pub require_distinct_judge: bool,
+    /// Порог доли невалидных сэмплов (балл вне шкалы) для смысловых рубрик
+    /// (E3.2): выше порога составляющая уходит в SKIP — вердикт INCOMPLETE.
+    #[serde(default = "default_max_invalid_ratio")]
+    pub max_invalid_samples_ratio: f64,
+}
+
+/// Дефолт порога доли невалидных сэмплов (E3.2): половина и больше.
+fn default_max_invalid_ratio() -> f64 {
+    0.5
 }
 
 /// Порог взвешенного итога смысловой рубрики по умолчанию.
@@ -964,6 +973,7 @@ impl Default for SemanticQualityConfig {
             scope: SemanticScope::Changed,
             min_score: default_semantic_min_score(),
             require_distinct_judge: false,
+            max_invalid_samples_ratio: default_max_invalid_ratio(),
         }
     }
 }
@@ -993,6 +1003,12 @@ pub struct DecisionQualityConfig {
     /// `none` < `declared` < `declared_cross_family` < `launched` <
     /// `launched_cross_family`.
     pub min_independence: String,
+    /// Порог доли сэмплов судьи с баллом вне шкалы (E3.2). Выше порога
+    /// суждению верить нельзя: составляющая уходит в SKIP — вердикт
+    /// INCOMPLETE, решение за человеком. Дефолт `0.5`: половина сэмплов и
+    /// больше — не «шум одного ответа». Любая ненулевая доля ниже порога
+    /// оставляет warn-находку, поэтому невалидный сэмпл не бывает невидимым.
+    pub max_invalid_samples_ratio: f64,
 }
 
 impl Default for DecisionQualityConfig {
@@ -1002,6 +1018,7 @@ impl Default for DecisionQualityConfig {
             require_distinct_judge: false,
             require_distinct_family: false,
             min_independence: crate::judge::INDEPENDENCE_NONE.to_string(),
+            max_invalid_samples_ratio: 0.5,
         }
     }
 }
