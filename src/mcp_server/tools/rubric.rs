@@ -413,6 +413,7 @@ impl McpServe {
                         samples: self.cfg.judge.samples.max(1),
                         unstable_stdev: self.cfg.judge.unstable_stdev,
                         evidence_min_similarity: self.cfg.judge.evidence_min_similarity,
+                        adaptive_samples: self.cfg.judge.adaptive_samples,
                     }),
                     raw_answers: raw_inputs.clone(),
                 };

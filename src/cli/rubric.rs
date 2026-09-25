@@ -347,6 +347,7 @@ pub(crate) async fn cmd_rubric(cfg: &Arc<Config>, cmd: RubricCmd) -> Result<()> 
                             samples: judge_cfg.samples.max(1),
                             unstable_stdev: judge_cfg.unstable_stdev,
                             evidence_min_similarity: judge_cfg.evidence_min_similarity,
+                            adaptive_samples: judge_cfg.adaptive_samples,
                         }),
                         raw_answers: second_raw
                             .into_iter()
@@ -408,6 +409,7 @@ pub(crate) async fn cmd_rubric(cfg: &Arc<Config>, cmd: RubricCmd) -> Result<()> 
                         samples: judge_cfg.samples.max(1),
                         unstable_stdev: judge_cfg.unstable_stdev,
                         evidence_min_similarity: judge_cfg.evidence_min_similarity,
+                        adaptive_samples: judge_cfg.adaptive_samples,
                     }),
                     // Сырые ответы судьи — рядом с отчётом: отчёт обязан
                     // пересобираться из них (J2, ADR-048).
@@ -546,6 +548,7 @@ pub(crate) async fn cmd_rubric(cfg: &Arc<Config>, cmd: RubricCmd) -> Result<()> 
                             samples: judge_cfg.samples.max(1),
                             unstable_stdev: judge_cfg.unstable_stdev,
                             evidence_min_similarity: judge_cfg.evidence_min_similarity,
+                            adaptive_samples: judge_cfg.adaptive_samples,
                         }),
                         // Сырые ответы судьи — рядом с отчётом: отчёт обязан
                         // пересобираться из них (J2, ADR-048).

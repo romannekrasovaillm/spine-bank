@@ -157,10 +157,18 @@ async fn evaluate_scope_collecting(
     let samples = cfg.samples.max(1);
     let mut runs = Vec::with_capacity(samples);
     let mut raw = Vec::with_capacity(samples);
-    for _ in 0..samples {
+    for index in 0..samples {
         let (parsed, text) = judge_once(rubric, target, llm, cfg.thinking).await?;
         runs.push(parsed);
         raw.push(text);
+        // E8.1: первый ответ на краях шкалы однозначен — платить за остальные
+        // сэмплы нечем. Сомнение (балл 2..scale_max-1, неразобранный или
+        // недостающий критерий) добирает выборку до `samples`, и расхождение
+        // сэмплов тоже видно только на полной выборке.
+        if cfg.adaptive_samples && index == 0 && samples > 1 && decisive_response(&runs[0], rubric)
+        {
+            break;
+        }
     }
     let report = build_report(rubric, llm.model(), &runs, scope, cfg)?;
     Ok((report, raw))
@@ -181,6 +189,31 @@ pub fn check_target_len(target: &str) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+/// E8.1: однозначен ли первый ответ судьи. Однозначен — каждый критерий
+/// получил балл на краю шкалы (`1` или `scale_max`): направление вердикта
+/// (нарушение / чисто) такое решение фиксирует, и платить за остальные сэмплы
+/// нечем. Балл в зоне сомнения (`2..scale_max-1`), балл вне шкалы или
+/// пропущенный критерий — ответ неоднозначен, и выборка добирается до
+/// `samples`.
+///
+/// Чего адаптивный режим НЕ гарантирует: расхождения сэмплов. Если судья
+/// колеблется между краями, одиночный ответ — это один голос из трёх, и
+/// ошибка направления возможна. Поэтому режим включается флагом
+/// `[judge] adaptive_samples = true` и проверяется квалификацией на эталонном
+/// наборе (E6): экономия вызовов не должна покупаться падением полноты и
+/// точности.
+fn decisive_response(run: &JudgeResponse, rubric: &Rubric) -> bool {
+    rubric.criteria.iter().all(|criterion| {
+        run.scores
+            .iter()
+            .find(|s| s.criterion_id == criterion.id)
+            .is_some_and(|s| {
+                !score_is_invalid(s.score, rubric.scale_max)
+                    && (s.score == 1.0 || s.score == f64::from(rubric.scale_max))
+            })
+    })
 }
 
 /// Один прогон судьи: запрос + один retry при неразобранном JSON.
@@ -526,6 +559,134 @@ mod tests {
     use super::*;
     use crate::rubric::testkit::*;
     use crate::rubric::types::{Criterion, CriterionFlag};
+    /// LLM с неизменным ответом и счётчиком вызовов: адаптивный режим (E8.1)
+    /// проверяется числом запросов к судье, а не временем.
+    #[derive(Debug)]
+    struct CountLlm {
+        calls: std::sync::atomic::AtomicUsize,
+        reply: String,
+    }
+
+    impl CountLlm {
+        fn new(reply: &str) -> Self {
+            Self {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                reply: reply.to_string(),
+            }
+        }
+        fn calls(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for CountLlm {
+        fn name(&self) -> &'static str {
+            "count"
+        }
+        fn model(&self) -> &'static str {
+            "count-1"
+        }
+        async fn complete(&self, _req: ChatRequest) -> Result<ChatMessage> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(ChatMessage::assistant(self.reply.clone(), Vec::new()))
+        }
+    }
+
+    /// Цель оценки: цитаты в обоснованиях подтверждаются её текстом, иначе
+    /// критерии с `evidence_on: high` исключаются и отчёт не собирается.
+    const ADR_TARGET: &str = "ADR-1: контекст раскрыт, альтернативы рассмотрены";
+
+    /// Ответ судьи с заданными баллами по критериям `context`/`alternatives`.
+    fn scores_reply(context: f64, alternatives: f64) -> String {
+        serde_json::json!({
+            "scores": [
+                {"criterion_id": "context", "score": context,
+                 "rationale": "Цитата: \"контекст раскрыт\". Оценка контекста."},
+                {"criterion_id": "alternatives", "score": alternatives,
+                 "rationale": "Цитата: \"альтернативы рассмотрены\". Оценка альтернатив."},
+            ],
+            "verdict": "тест",
+        })
+        .to_string()
+    }
+
+    fn adaptive(samples: usize) -> JudgeConfig {
+        JudgeConfig {
+            samples,
+            adaptive_samples: true,
+            ..JudgeConfig::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn adaptive_sampling_asks_once_when_first_answer_is_decisive() {
+        // Все баллы на краях шкалы: направление вердикта зафиксировано — второго
+        // вызова нет, хотя в конфиге три сэмпла.
+        let llm = CountLlm::new(&scores_reply(5.0, 1.0));
+        let (report, raw) = evaluate_collecting(&sample_rubric(), ADR_TARGET, &llm, &adaptive(3))
+            .await
+            .expect("отчёт");
+        assert_eq!(llm.calls(), 1, "однозначный первый ответ — один вызов");
+        assert_eq!(raw.len(), 1, "сырых ответов столько же, сколько вызовов");
+        assert_eq!(report.judge_samples, 1);
+    }
+
+    #[tokio::test]
+    async fn adaptive_sampling_collects_full_set_on_doubt() {
+        // Балл 3 — зона сомнения: выборка добирается до `samples`.
+        let llm = CountLlm::new(&scores_reply(5.0, 3.0));
+        let (report, _) = evaluate_collecting(&sample_rubric(), ADR_TARGET, &llm, &adaptive(3))
+            .await
+            .expect("отчёт");
+        assert_eq!(llm.calls(), 3, "сомнение — полная выборка");
+        assert_eq!(report.judge_samples, 3);
+    }
+
+    #[tokio::test]
+    async fn adaptive_sampling_collects_full_set_on_missing_criterion() {
+        // Ответ не покрыл критерий — одного сэмпла мало.
+        let reply = serde_json::json!({
+            "scores": [{"criterion_id": "context", "score": 5,
+                        "rationale": "Цитата: \"контекст раскрыт\". Только контекст."}],
+            "verdict": "тест",
+        })
+        .to_string();
+        let llm = CountLlm::new(&reply);
+        let (_, _) = evaluate_collecting(&sample_rubric(), ADR_TARGET, &llm, &adaptive(3))
+            .await
+            .expect("отчёт");
+        assert_eq!(llm.calls(), 3, "неполный ответ — полная выборка");
+    }
+
+    #[tokio::test]
+    async fn adaptive_sampling_collects_full_set_on_out_of_scale_score() {
+        // Балл вне шкалы не однозначен: ответ перезапрашивается (E3.1), и
+        // адаптивный режим не считает его решающим.
+        let llm = CountLlm::new(&scores_reply(9.0, 5.0));
+        let (_, _) = evaluate_collecting(&sample_rubric(), ADR_TARGET, &llm, &adaptive(3))
+            .await
+            .expect("отчёт");
+        // Каждый сэмпл перезапрашивается один раз (E3.1) — два вызова на сэмпл.
+        assert_eq!(llm.calls(), 6, "балл вне шкалы — полная выборка с retry");
+    }
+
+    #[tokio::test]
+    async fn adaptive_sampling_off_by_default_keeps_all_samples() {
+        // Дефолт — прежнее поведение: `samples` вызовов даже при краях шкалы.
+        let llm = CountLlm::new(&scores_reply(5.0, 1.0));
+        let cfg = JudgeConfig {
+            samples: 3,
+            ..JudgeConfig::default()
+        };
+        assert!(!cfg.adaptive_samples, "флаг выключен по умолчанию");
+        let (report, _) = evaluate_collecting(&sample_rubric(), ADR_TARGET, &llm, &cfg)
+            .await
+            .expect("отчёт");
+        assert_eq!(llm.calls(), 3, "без флага — все сэмплы");
+        assert_eq!(report.judge_samples, 3);
+    }
+
     #[tokio::test]
     async fn judge_requests_run_without_thinking_by_default() {
         // Кейс 2026-09-01: thinking-токены съедали бюджет max_tokens и

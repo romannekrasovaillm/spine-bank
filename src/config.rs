@@ -747,10 +747,16 @@ pub struct JudgeConfig {
     pub clean_session_max_calls: usize,
     /// Писать в отчёт рубрики, кто организовал судейство: git `user.name` и
     /// `user.email` репозитория (поле `provenance.operator`, ADR-048).
-    /// Это запись из git-конфига, а не подпись: личность механикой не
+    /// Это запись из git-конфига, а не подпись: личность механики не
     /// удостоверяется, а имя с адресом попадают в коммитимый JSON отчёта —
     /// поэтому ключ существует (`false` выключает запись).
     pub record_operator: bool,
+    /// E8.1: адаптивное число сэмплов — `true` спрашивает судью один раз, когда
+    /// первый ответ однозначен (все баллы на краях шкалы), и добирает сэмплы до
+    /// `samples`, когда балл в зоне сомнения (`2..scale_max-1`) или ответ
+    /// неразбираем. `false` (дефолт) — прежнее поведение: всегда `samples`.
+    /// Число сэмплов видно в отчёте, поэтому экономия не прячется от аудита.
+    pub adaptive_samples: bool,
 }
 
 impl Default for JudgeConfig {
@@ -764,6 +770,7 @@ impl Default for JudgeConfig {
             families: BTreeMap::new(),
             clean_session_max_calls: crate::judge::DEFAULT_CLEAN_SESSION_MAX_CALLS,
             record_operator: true,
+            adaptive_samples: false,
         }
     }
 }
@@ -1839,6 +1846,10 @@ mod tests {
         assert!((cfg.judge.unstable_stdev - 1.0).abs() < 1e-9);
         assert!((cfg.judge.evidence_min_similarity - 0.8).abs() < 1e-9);
         assert!((cfg.judge.golden_max_mae - 1.0).abs() < 1e-9);
+        assert!(
+            !cfg.judge.adaptive_samples,
+            "E8.1 адаптивные сэмплы — opt-in: дефолт спрашивает судью `samples` раз"
+        );
         // Пустая секция [judge] в toml даёт те же дефолты (serde default).
         let back: Config = toml::from_str("[judge]\n").expect("deserialize");
         assert_eq!(back.judge.samples, 3);
