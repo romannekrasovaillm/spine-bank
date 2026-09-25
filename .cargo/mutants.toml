@@ -32,4 +32,5 @@ exclude_re = [
   "replace && with \\|\\| in parse_column_def",
   "replace \\|\\| with && in component_route_lock",
   "replace \\|\\| with && in effective_parameters",
+  "src/gate/components/mod.rs:1176:\\d+: replace && with \\|\\|",
 ]

@@ -96,3 +96,29 @@ let (Some(name), Some(in_)) = (...) else { continue };
 эквивалентен. Граница удержана тестом `ineffective_parameters_are_skipped`
 (нераскрытый `$ref` и не-объект в карту не попадают) и тестами CD-003/CD-008,
 которые читают параметры и схемы тела.
+
+### `src/gate/components/mod.rs`: `replace && with || in component_decision_quality` (строка 1176)
+
+```rust
+let author_for_family = artifact.author_model.as_deref().unwrap_or_default();
+if !author_for_family.trim().is_empty()
+    && !crate::judge::same_label(author_for_family, &artifact.judge_model)
+{
+    ...
+    if same { /* единственная ветка, которая что-то печатает */ }
+}
+```
+
+Мутация `&&` → `||` различается только когда автора нет (или он пустой):
+тогда оригинал блок пропускает, а мутант входит в него. Но войти мало — печать
+идёт только внутри `if same`, где `same` сравнивает ключи семейств, а ключ
+пустой метки — `unknown:` (см. [`family_key`]) и совпасть с ключом нормальной
+метки судьи не может. Значит, на корректном отчёте (у судьи метка есть) обе
+ветки не печатают ничего и вердикт совпадает.
+
+Исключение закреплено за позицией `1176` — при сдвиге строки оно перестанет
+совпадать, и мутант вернётся в отчёт: это намеренно, чтобы исключение не
+«размазалось» на соседние `&&` той же функции (они убиты тестами
+`decision_quality_missing_author_adds_no_family_finding`,
+`decision_quality_qualification_not_checked_on_warn_policy` и
+`decision_quality_session_note_needs_declared_mode_above_limit`).

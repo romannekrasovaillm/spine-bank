@@ -1081,12 +1081,85 @@ fn decision_quality_flags_unreproducible_code_report() {
         "{:?}",
         comp.findings
     );
+    assert!(
+        comp.not_verified
+            .iter()
+            .any(|n| n.contains("невоспроизводима") && n.contains("(1)")),
+        "отчёт по досье назван в примечании с числом: {:?}",
+        comp.not_verified
+    );
     assert_eq!(
         status_of(&report, "decision_quality"),
         GateStatus::Pass,
         "warn не краснит составляющую: {}",
         render(&report)
     );
+}
+
+/// Вердикт «судья = автор» подтверждается примечанием паспорта: находка без
+/// примечания читалась бы как «всё в порядке».
+#[test]
+fn decision_quality_notes_name_judge_is_author() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let dir = tmp.path();
+    make_quality_repo(dir, Some(4.5), Some("judge-x"));
+    let note_present = |author: &str| {
+        patch_report(dir, "ADR-001-reshenie.json", |v| {
+            v["author_model"] = serde_json::json!(author);
+        });
+        let report = run_quality_on(dir, Route::Fast, false);
+        report
+            .components
+            .iter()
+            .find(|c| c.name == "decision_quality")
+            .expect("comp")
+            .not_verified
+            .iter()
+            .any(|n| n.contains("независимость судьи не подтверждена"))
+    };
+    assert!(note_present("judge-x"), "судья = автор — примечание есть");
+    assert!(!note_present("agent-y"), "разные модели — примечания нет");
+}
+
+/// Второй судья разошёлся: находка, счётчик и режим «решение человека».
+#[test]
+fn decision_quality_second_judge_disagreement_is_reported() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let dir = tmp.path();
+    write_code_pack_report(dir, None);
+    let set_second = |agreement: bool, differences: Vec<String>| {
+        patch_report(dir, "control--code_vs_spine.json", |v| {
+            v["second_judge"] = serde_json::json!({
+                "model": "judge-y",
+                "report": "reports/rubric/control--code_vs_spine--second.json",
+                "weighted_total": 2.0,
+                "agreement": agreement,
+                "differences": differences,
+            });
+        });
+        let report = run_quality_on(dir, Route::Fast, false);
+        let comp = report
+            .components
+            .iter()
+            .find(|c| c.name == "decision_quality")
+            .expect("comp");
+        (
+            comp.findings
+                .iter()
+                .any(|f| f.rule.as_deref() == Some("judge_disagreement")),
+            comp.detail.clone(),
+            comp.status,
+        )
+    };
+    let (finding, detail, status) = set_second(false, vec!["критерий X: 3 против 5".to_string()]);
+    assert!(finding, "расхождение названо: {detail}");
+    assert_eq!(status, GateStatus::Skip, "решение человека: {detail}");
+    assert!(
+        detail.contains("механика не подтверждает: 1"),
+        "счётчик расхождений: {detail}"
+    );
+    let (finding, detail, _) = set_second(true, Vec::new());
+    assert!(!finding, "согласие судей — не расхождение: {detail}");
 }
 
 /// E1.4: подмена сохранённого ответа судьи по рубрике кода — находка
@@ -2083,6 +2156,439 @@ fn decision_quality_does_not_use_report_of_another_adr() {
             .iter()
             .any(|f| f.rule.as_deref() == Some("rubric_report_missing")),
         "чужой отчёт не закрывает наше решение: {:?}",
+        comp.findings
+    );
+}
+
+/// Патч JSON отчёта качества: тесты задают происхождение, независимость,
+/// второго судью и решения точечно, не пересобирая фикстуру.
+fn patch_report<F: FnOnce(&mut serde_json::Value)>(dir: &Path, name: &str, f: F) {
+    let path = dir.join(crate::rubric::RUBRIC_REPORTS_DIR).join(name);
+    let mut value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).expect("отчёт")).expect("JSON");
+    f(&mut value);
+    std::fs::write(&path, serde_json::to_string_pretty(&value).expect("json"))
+        .expect("write report");
+}
+
+/// Нулевая доля невалидных сэмплов — не повод для предупреждения: порог
+/// строгий, иначе каждый отчёт получал бы находку «вне шкалы».
+#[test]
+fn decision_quality_zero_invalid_ratio_adds_no_finding() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let dir = tmp.path();
+    make_quality_repo(dir, Some(4.5), Some("judge-x"));
+    let report = run_quality_on(dir, Route::Fast, false);
+    let comp = report
+        .components
+        .iter()
+        .find(|c| c.name == "decision_quality")
+        .expect("comp");
+    assert!(
+        !comp
+            .findings
+            .iter()
+            .any(|f| f.rule.as_deref() == Some("rubric_invalid_samples")),
+        "нулевая доля — тишина: {:?}",
+        comp.findings
+    );
+}
+
+/// Отчёт без автора не даёт находки о семействе: сравнивать не с чем.
+#[test]
+fn decision_quality_missing_author_adds_no_family_finding() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let dir = tmp.path();
+    make_quality_repo(dir, Some(4.5), None);
+    let report = run_quality_on(dir, Route::Fast, false);
+    let comp = report
+        .components
+        .iter()
+        .find(|c| c.name == "decision_quality")
+        .expect("comp");
+    assert!(
+        !comp.findings.iter().any(|f| f.message.contains("семейств")),
+        "автора нет — о семействе не говорим: {:?}",
+        comp.findings
+    );
+    // «Автор не указан» при этом назван отдельной находкой.
+    assert!(
+        comp.findings
+            .iter()
+            .any(|f| f.rule.as_deref() == Some("judge_is_author")),
+        "{:?}",
+        comp.findings
+    );
+}
+
+/// «Судья = автор» по умолчанию — предупреждение; ошибкой это становится
+/// только когда проект потребовал разделения (`require_distinct_judge`).
+#[test]
+fn decision_quality_judge_is_author_severity_follows_project_demand() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let dir = tmp.path();
+    make_quality_repo(dir, Some(4.5), Some("judge-x"));
+    let severity_in = |require_distinct: bool| {
+        let mut options = GateOptions::default();
+        options.decision_quality.require_distinct_judge = require_distinct;
+        options.route = Some(Route::Fast);
+        let report = crate::gate::verdict::run_inner(
+            dir,
+            Some(Route::Fast),
+            None,
+            None,
+            (1, 4),
+            &with_quality(Route::Fast),
+            &options,
+        )
+        .expect("гейт");
+        report
+            .components
+            .iter()
+            .find(|c| c.name == "decision_quality")
+            .expect("comp")
+            .findings
+            .iter()
+            .find(|f| f.rule.as_deref() == Some("judge_is_author"))
+            .map(|f| f.severity.clone())
+            .expect("находка judge_is_author")
+    };
+    assert_eq!(severity_in(false), "warn", "по умолчанию — предупреждение");
+    assert_eq!(severity_in(true), "error", "проект потребовал — ошибка");
+}
+
+/// На неблокирующем маршруте квалификация судьи не спрашивается, даже если
+/// проект включил флаг: останавливать нечего. Проверка идёт по отчёту ПО ДОСЬЕ
+/// — именно там эталонный набор и стоит проверка квалификации.
+#[test]
+fn decision_quality_qualification_not_checked_on_warn_policy() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let dir = tmp.path();
+    write_code_pack_report(dir, None);
+    let report = run_quality_on(dir, Route::Fast, true);
+    let comp = report
+        .components
+        .iter()
+        .find(|c| c.name == "decision_quality")
+        .expect("comp");
+    assert!(
+        !comp
+            .findings
+            .iter()
+            .any(|f| f.rule.as_deref() == Some("judge_unqualified")),
+        "на Fast человека нет — квалификация не требуется: {:?}",
+        comp.findings
+    );
+}
+
+/// Счётчики примечаний: невоспроизводимость названа с числом (отчёт без
+/// сырых ответов), а рабочая сессия — нет (происхождение не задано).
+#[test]
+fn decision_quality_counter_notes_follow_their_counters() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let dir = tmp.path();
+    make_quality_repo(dir, Some(4.5), Some("judge-x"));
+    let report = run_quality_on(dir, Route::Fast, false);
+    let comp = report
+        .components
+        .iter()
+        .find(|c| c.name == "decision_quality")
+        .expect("comp");
+    assert!(
+        !comp
+            .not_verified
+            .iter()
+            .any(|n| n.contains("рабочей сессии")),
+        "нулевой счётчик сессии не даёт примечания: {:?}",
+        comp.not_verified
+    );
+    assert!(
+        comp.not_verified
+            .iter()
+            .any(|n| n.contains("невоспроизводима") && n.contains("(1)")),
+        "отчёт без сырых ответов назван с числом: {:?}",
+        comp.not_verified
+    );
+}
+
+/// Отчёт по досье с сохранёнными ответами не попадает в «невоспроизводимые» и
+/// не объявляется расходящимся с собственными ответами.
+#[test]
+fn decision_quality_reproducible_dossier_report_has_no_unreproducible_note() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let dir = tmp.path();
+    let answer = "{\"scores\": []}";
+    let recorded = crate::hash::sha256_hex(answer.as_bytes());
+    write_code_pack_report(dir, Some((answer, &recorded)));
+    let report = run_quality_on(dir, Route::Fast, false);
+    let comp = report
+        .components
+        .iter()
+        .find(|c| c.name == "decision_quality")
+        .expect("comp");
+    assert!(
+        !comp
+            .not_verified
+            .iter()
+            .any(|n| n.contains("невоспроизводима")),
+        "сырые ответы сохранены: {:?}",
+        comp.not_verified
+    );
+    assert!(
+        !comp
+            .findings
+            .iter()
+            .any(|f| f.rule.as_deref() == Some("rubric_report_unreproducible")),
+        "{:?}",
+        comp.findings
+    );
+    assert!(
+        !comp
+            .findings
+            .iter()
+            .any(|f| f.rule.as_deref() == Some("rubric_report_inconsistent")),
+        "без расхождений отчёт не «несоответствует»: {:?}",
+        comp.findings
+    );
+}
+
+/// Примечание о рабочей сессии: только режим «заявлена» И число вызовов
+/// выше потолка; на самом потолке и в режиме запуска Spine — тишина.
+#[test]
+fn decision_quality_session_note_needs_declared_mode_above_limit() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let dir = tmp.path();
+    make_quality_repo(dir, Some(4.5), Some("judge-x"));
+    let note_present = |mode: &str, calls: usize| {
+        patch_report(dir, "ADR-001-reshenie.json", |v| {
+            v["provenance"] = serde_json::json!({
+                "mode": mode,
+                "session_calls_before": calls,
+            });
+        });
+        let report = run_quality_on(dir, Route::Fast, false);
+        let comp = report
+            .components
+            .iter()
+            .find(|c| c.name == "decision_quality")
+            .expect("comp");
+        comp.not_verified
+            .iter()
+            .any(|n| n.contains("рабочей сессии"))
+    };
+    assert!(
+        note_present(crate::judge::MODE_DECLARED, 4),
+        "заявленная сессия сверх потолка — примечание"
+    );
+    assert!(
+        !note_present(crate::judge::MODE_DECLARED, 3),
+        "ровно потолок — ещё чисто"
+    );
+    assert!(
+        !note_present(crate::judge::MODE_LAUNCHED, 9),
+        "судью запускал Spine — признак не тот"
+    );
+}
+
+/// Независимость ровно на пороге проекта — не «ниже порога».
+#[test]
+fn decision_quality_independence_at_threshold_is_not_low() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let dir = tmp.path();
+    make_quality_repo(dir, Some(4.5), Some("judge-x"));
+    patch_report(dir, "ADR-001-reshenie.json", |v| {
+        v["independence"] = serde_json::json!(crate::judge::INDEPENDENCE_DECLARED);
+    });
+    let mut options = GateOptions::default();
+    options.decision_quality.min_independence = crate::judge::INDEPENDENCE_DECLARED.to_string();
+    options.route = Some(Route::Fast);
+    let report = crate::gate::verdict::run_inner(
+        dir,
+        Some(Route::Fast),
+        None,
+        None,
+        (1, 4),
+        &with_quality(Route::Fast),
+        &options,
+    )
+    .expect("гейт");
+    let comp = report
+        .components
+        .iter()
+        .find(|c| c.name == "decision_quality")
+        .expect("comp");
+    assert!(
+        !comp
+            .findings
+            .iter()
+            .any(|f| f.rule.as_deref() == Some("judge_independence_low")),
+        "на пороге — не ниже порога: {:?}",
+        comp.findings
+    );
+}
+
+/// Запись решения архитектора по отчёту качества (в том же виде, что пишет
+/// `rubric decide`).
+fn write_quality_decision(dir: &Path, verdict: crate::rubric::HumanVerdict) {
+    let path = dir
+        .join(crate::rubric::RUBRIC_REPORTS_DIR)
+        .join("ADR-001-reshenie.json");
+    let text = std::fs::read_to_string(&path).expect("отчёт");
+    let artifact: crate::rubric::RubricArtifact = serde_json::from_str(&text).expect("JSON");
+    let slug = crate::judge::artifact_slug_of(&artifact);
+    let record = crate::rubric::HumanDecision::new(
+        &artifact,
+        "reports/rubric/ADR-001-reshenie.json",
+        &crate::hash::sha256_hex(text.as_bytes()),
+        verdict,
+        "Архитектор <arch@bank>",
+        "разобрано человеком",
+    );
+    crate::rubric::write_decision(dir, &slug, &record).expect("решение");
+}
+
+/// Оговорка `evidence_partial` на блокирующем маршруте снимается только
+/// решением «принято»: «отклонено» эскалацию сохраняет, а решение не
+/// подменяется чужое.
+#[test]
+fn decision_quality_evidence_partial_needs_accept_decision() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let dir = tmp.path();
+    make_quality_repo(dir, Some(4.5), Some("judge-x"));
+    patch_quality_report(dir, None, &["evidence_partial"]);
+    // (статус, есть ли предупреждение «принято»)
+    let state = || {
+        let report = run_quality_on(dir, Route::Critical, false);
+        let comp = report
+            .components
+            .iter()
+            .find(|c| c.name == "decision_quality")
+            .expect("comp");
+        let accepted = comp.findings.iter().any(|f| {
+            f.rule.as_deref() == Some("rubric_evidence_partial")
+                && f.severity == "warn"
+                && f.message.contains("решение архитектора принято")
+        });
+        (comp.status, accepted)
+    };
+    // Без решения — эскалация: человека зовут.
+    let (status, _) = state();
+    assert_eq!(status, GateStatus::Skip);
+    // «Принято» — оговорка разобрана, находка остаётся предупреждением.
+    write_quality_decision(dir, crate::rubric::HumanVerdict::Accept);
+    let (status, accepted) = state();
+    assert_eq!(
+        status,
+        GateStatus::Pass,
+        "принятое решение снимает эскалацию"
+    );
+    assert!(accepted, "находка названа принятой архитектором");
+    // «Отклонено» — эскалация остаётся.
+    write_quality_decision(dir, crate::rubric::HumanVerdict::Reject);
+    let report = run_quality_on(dir, Route::Critical, false);
+    assert_eq!(
+        status_of(&report, "decision_quality"),
+        GateStatus::Skip,
+        "отклонённое суждение не принимается: {}",
+        render(&report)
+    );
+}
+
+/// Сумма категорий «механика не подтверждает»: инъекция и невалидные сэмплы
+/// складываются, а не вычитаются — иначе вердикт молчал бы там, где человек
+/// нужен двум разным причинам.
+#[test]
+fn decision_quality_unconfirmed_categories_add_up() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let dir = tmp.path();
+    make_quality_repo(dir, Some(4.5), Some("judge-x"));
+    // Первый отчёт — вход с инъекцией.
+    patch_report(dir, "ADR-001-reshenie.json", |v| {
+        v["input_injection_lines"] = serde_json::json!([2]);
+    });
+    // Второй документ — доля невалидных сэмплов выше порога.
+    let adr2 = dir.join("docs/adr/ADR-002-vtoroe.md");
+    std::fs::write(&adr2, "# ADR-002\n\n- Status: Accepted\n\nРешение.\n").expect("adr2");
+    let sha2 = crate::hash::sha256_file(&adr2).expect("sha");
+    let reports = dir.join(crate::rubric::RUBRIC_REPORTS_DIR);
+    let second_adr_report = serde_json::json!({
+        "schema": crate::rubric::RUBRIC_REPORT_SCHEMA,
+        "rubric": "adr_quality",
+        "target": "docs/adr/ADR-002-vtoroe.md",
+        "target_sha256": sha2,
+        "judge_model": "judge-x",
+        "author_model": "agent-y",
+        "weighted_total": 4.5,
+        "verdict": "OK",
+        "unstable": false,
+        "evidence_not_found": 0,
+        "invalid_samples_ratio": 0.9,
+        "judged_at": "2026-09-25T10:00:00+00:00",
+    });
+    std::fs::write(
+        reports.join("ADR-002-vtoroe.json"),
+        serde_json::to_string_pretty(&second_adr_report).expect("json"),
+    )
+    .expect("write report2");
+    let report = run_quality_on(dir, Route::Fast, false);
+    let comp = report
+        .components
+        .iter()
+        .find(|c| c.name == "decision_quality")
+        .expect("comp");
+    assert_eq!(comp.status, GateStatus::Skip, "{}", comp.detail);
+    assert!(
+        comp.detail.contains("механика не подтверждает: 2"),
+        "две категории складываются: {}",
+        comp.detail
+    );
+    assert!(
+        comp.detail.contains("вход с инъекцией: 1")
+            && comp.detail.contains("невалидных сэмплов сверх порога: 1"),
+        "{}",
+        comp.detail
+    );
+}
+
+/// Судья и автор — разные метки одного семейства: «другая модель» не значит
+/// «другой взгляд», и это названо (семейство опознано по метке).
+#[test]
+fn decision_quality_names_same_family_different_models() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let dir = tmp.path();
+    make_quality_repo(dir, Some(4.5), Some("claude-opus-4"));
+    patch_report(dir, "ADR-001-reshenie.json", |v| {
+        v["judge_model"] = serde_json::json!("claude-sonnet-4");
+    });
+    let report = run_quality_on(dir, Route::Fast, false);
+    let comp = report
+        .components
+        .iter()
+        .find(|c| c.name == "decision_quality")
+        .expect("comp");
+    assert!(
+        comp.findings
+            .iter()
+            .any(|f| f.message.contains("одного семейства")),
+        "разные модели одного семейства названы: {:?}",
+        comp.findings
+    );
+    // А разные семейства — не повод для находки о семействе.
+    patch_report(dir, "ADR-001-reshenie.json", |v| {
+        v["judge_model"] = serde_json::json!("qwen-max");
+    });
+    let report = run_quality_on(dir, Route::Fast, false);
+    let comp = report
+        .components
+        .iter()
+        .find(|c| c.name == "decision_quality")
+        .expect("comp");
+    assert!(
+        !comp
+            .findings
+            .iter()
+            .any(|f| f.message.contains("одного семейства")),
+        "разные семейства — тишина: {:?}",
         comp.findings
     );
 }
