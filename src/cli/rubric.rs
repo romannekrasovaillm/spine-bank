@@ -128,6 +128,11 @@ pub(crate) enum RubricCmd {
         /// Куда положить отчёт квалификации (по умолчанию — текущий каталог).
         #[arg(long)]
         repo: Option<PathBuf>,
+        /// Не прогонять судью, а проверить записанный отчёт квалификации:
+        /// сходится ли он с текущим набором и пройдены ли пороги (E6.5 —
+        /// повторная квалификация после смены модели или правки набора).
+        #[arg(long)]
+        check: bool,
     },
     /// Собрать досье судьи (вход смысловой рубрики) и напечатать его с хэшем.
     Pack {
@@ -749,12 +754,52 @@ pub(crate) async fn cmd_rubric(cfg: &Arc<Config>, cmd: RubricCmd) -> Result<()> 
             set,
             model,
             repo,
+            check,
         } => {
             let registry = Arc::new(LlmRegistry::from_config(cfg)?);
             let judge = match &model {
                 Some(name) => registry.get(name)?,
                 None => registry.default(),
             };
+            let repo = repo.unwrap_or_else(|| PathBuf::from("."));
+            if check {
+                // E6.5: регрессия — смена модели или правка набора. Ничего не
+                // прогоняем: сверяем записанный отчёт с текущим набором и
+                // говорим, что делать.
+                let set_now = arch_harness::rubric::load_set(&set)?;
+                match arch_harness::rubric::stored_qualification(&repo, &rubric, judge.model()) {
+                    None => {
+                        anyhow::bail!(
+                            "отчёта квалификации модели '{}' на рубрике '{}' нет — \
+                             прогоните `arch-be rubric qualify {} --set {}`",
+                            judge.model(),
+                            rubric,
+                            rubric,
+                            set.display()
+                        );
+                    }
+                    Some(report) => {
+                        if report.set_sha256 != set_now.sha256 {
+                            anyhow::bail!(
+                                "набор изменился после квалификации (в отчёте {}, сейчас {}) — \
+                                 прогоните `arch-be rubric qualify` заново",
+                                &report.set_sha256[..12.min(report.set_sha256.len())],
+                                &set_now.sha256[..12.min(set_now.sha256.len())]
+                            );
+                        }
+                        print!("{}", report.summary());
+                        if !report.passed {
+                            anyhow::bail!("квалификация модели '{}' не пройдена", report.model);
+                        }
+                        println!(
+                            "Проверка квалификации: пройдена (модель {}, набор {})",
+                            report.model,
+                            &report.set_sha256[..12.min(report.set_sha256.len())]
+                        );
+                        return Ok(());
+                    }
+                }
+            }
             let path = resolve_asset(&cfg.paths.rubrics_dir(), &rubric, "yaml");
             let rub = arch_harness::rubric::load(&path)?;
             let report = arch_harness::rubric::run_qualification(
@@ -766,7 +811,6 @@ pub(crate) async fn cmd_rubric(cfg: &Arc<Config>, cmd: RubricCmd) -> Result<()> 
             )
             .await?;
             print!("{}", report.summary());
-            let repo = repo.unwrap_or_else(|| PathBuf::from("."));
             let written = arch_harness::rubric::write_qualification(&repo, &report)?;
             println!("Отчёт квалификации: {}", written.display());
             if !report.passed {

@@ -339,11 +339,16 @@ fn anchor_rules(repo: &Path) -> Anchor {
 fn anchor_redteam(repo: &Path) -> Anchor {
     let path = repo.join(REDTEAM_RESULT_REL);
     let Some(summary) = crate::redteam::load_summary(&path) else {
+        // E6.4: смысловая карта называется и здесь — иначе «результата нет»
+        // читалось бы как «судья не проверен», хотя квалификация может быть.
         return Anchor {
             n: 4,
             title: "Пакет защищён измеренно",
             met: false,
-            evidence: format!("{REDTEAM_RESULT_REL}: результата нет"),
+            evidence: format!(
+                "{REDTEAM_RESULT_REL}: результата нет; {}",
+                semantic_detection_map(repo)
+            ),
             why_not: Some(
                 "измерьте: `arch-be redteam . --save` — доля обнаружения без \
                  измерения не аргумент"
@@ -352,13 +357,18 @@ fn anchor_redteam(repo: &Path) -> Anchor {
         };
     };
     let met = summary.passed();
+    // E6.4: карта обнаружения смыслового судьи по классам дефектов — из отчёта
+    // квалификации. Она не двигает ступень (допуск судьи — политика проекта,
+    // E6.3), но шкала доверия обязана её называть: «доля обнаружения» без неё
+    // описывает только механику.
+    let semantic = semantic_detection_map(repo);
     Anchor {
         n: 4,
         title: "Пакет защищён измеренно",
         met,
         evidence: format!(
             "{REDTEAM_RESULT_REL}: доля обнаружения {}/{} = {:.0} % (порог {:.0} %), \
-             контроль аттестации: {}",
+             контроль аттестации: {}; {semantic}",
             summary.caught,
             summary.total,
             summary.ratio * 100.0,
@@ -384,6 +394,61 @@ fn anchor_redteam(repo: &Path) -> Anchor {
             }
         }),
     }
+}
+
+/// Карта обнаружения смыслового судьи по классам дефектов (E6.4): читает
+/// отчёты квалификации (`reports/qualification/*.json`) и называет долю
+/// обнаружения по классам с моделью и вердиктом допуска.
+///
+/// Отчёта нет — так и говорится: «не измерена». Молчаливое умолчание читалось
+/// бы как «судья проверен».
+fn semantic_detection_map(repo: &Path) -> String {
+    let dir = repo.join(crate::rubric::QUALIFICATION_DIR);
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return "смысловая доля обнаружения не измерена (`arch-be rubric qualify`)".to_string();
+    };
+    let mut best: Option<(std::time::SystemTime, crate::rubric::QualificationReport)> = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("json"))
+        {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(report) = serde_json::from_str::<crate::rubric::QualificationReport>(&text) else {
+            continue;
+        };
+        let time = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        if best.as_ref().is_none_or(|(t, _)| time > *t) {
+            best = Some((time, report));
+        }
+    }
+    let Some((_, report)) = best else {
+        return "смысловая доля обнаружения не измерена (`arch-be rubric qualify`)".to_string();
+    };
+    let classes: Vec<String> = report
+        .by_class
+        .iter()
+        .filter(|c| c.defective > 0)
+        .map(|c| format!("{}: {:.0} %", c.class, c.detection_share() * 100.0))
+        .collect();
+    format!(
+        "смысловая доля обнаружения судьи {}: {} (допуск: {})",
+        report.model,
+        classes.join(", "),
+        if report.passed {
+            "пройден"
+        } else {
+            "не пройден"
+        }
+    )
 }
 
 /// Якорь 5: вердикт полон и подписан — обязательные составляющие имеют вход,
@@ -701,6 +766,57 @@ mod tests {
             why.contains("ниже порога проекта"),
             "причина называет порог: {why}"
         );
+    }
+
+    /// E6.4: карта обнаружения смыслового судьи по классам читается из отчёта
+    /// квалификации и попадает в доказательство якоря 4; без отчёта шкала
+    /// честно говорит «не измерена», а не молчит.
+    #[test]
+    fn semantic_detection_map_is_read_from_qualification() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        assert!(
+            semantic_detection_map(dir).contains("не измерена"),
+            "без отчёта шкала говорит прямо"
+        );
+        let qdir = dir.join(crate::rubric::QUALIFICATION_DIR);
+        std::fs::create_dir_all(&qdir).expect("mkdir");
+        let class = |name: &str, caught: usize, missed: usize| {
+            serde_json::json!({
+                "class": name, "total": 6, "defective": 3, "clean": 3,
+                "caught": caught, "missed": missed, "cleared": 3,
+                "false_accusations": 0, "human": 0
+            })
+        };
+        let report = serde_json::json!({
+            "schema": crate::rubric::QUALIFICATION_SCHEMA,
+            "rubric": "code_invariant_conformance",
+            "model": "deepseek-flash",
+            "set": "/набор",
+            "set_sha256": "a".repeat(64),
+            "judged_at": "2026-09-25T00:00:00+00:00",
+            "samples": 1,
+            "by_class": [class("ignored_key", 3, 0), class("no_return", 1, 2)],
+            "totals": {"class": "итого", "total": 12, "defective": 6, "clean": 6,
+                       "caught": 4, "missed": 2, "cleared": 6, "false_accusations": 0,
+                       "human": 0},
+            "human_share": 0.0,
+            "thresholds": {"min_completeness": 0.8, "min_accuracy": 0.8,
+                           "max_human_share": 0.5},
+            "passed": false,
+            "failures": ["полнота 0.67 ниже порога 0.80"],
+            "cases": []
+        });
+        std::fs::write(
+            qdir.join("code_invariant_conformance--deepseek-flash.json"),
+            serde_json::to_string_pretty(&report).expect("json"),
+        )
+        .expect("write");
+        let map = semantic_detection_map(dir);
+        assert!(map.contains("deepseek-flash"), "{map}");
+        assert!(map.contains("ignored_key: 100 %"), "{map}");
+        assert!(map.contains("no_return: 33 %"), "{map}");
+        assert!(map.contains("не пройден"), "{map}");
     }
 
     /// Запись журнала MCP-вызовов.

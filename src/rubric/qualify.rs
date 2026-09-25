@@ -159,6 +159,17 @@ pub struct ClassStats {
 }
 
 impl ClassStats {
+    /// Доля обнаружения: найденные дефекты этого класса к дефектным случаям
+    /// класса (E6.4). Ноль дефектных случаев — ноль: «чистые» классы ничего не
+    /// доказывают о способности судьи видеть дефект.
+    #[must_use]
+    pub fn detection_share(&self) -> f64 {
+        if self.defective == 0 {
+            return 0.0;
+        }
+        self.caught as f64 / self.defective as f64
+    }
+
     /// Полнота: доля найденных дефектов среди случаев с вердиктом.
     #[must_use]
     pub fn completeness(&self) -> f64 {

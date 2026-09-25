@@ -2995,6 +2995,68 @@ fn rubric_qualify_records_unqualified_judge() {
         report["set_sha256"].as_str().is_some_and(|s| s.len() == 64),
         "хэш набора записан: {report}"
     );
+
+    // (E6.5) Повторная квалификация: `--check` сверяет записанный отчёт с
+    // текущим набором и порогами, не прогоняя судью.
+    let check = |home: &std::path::Path, repo: &std::path::Path| {
+        arch_cmd(home)
+            .args(["rubric", "qualify", "code_invariant_conformance"])
+            .arg("--set")
+            .arg(set.as_os_str())
+            .arg("--repo")
+            .arg(repo.as_os_str())
+            .arg("--check")
+            .output()
+            .expect("rubric qualify --check")
+    };
+    let out = check(home, &repo);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "пороги не пройдены: {stdout}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("не пройдена"),
+        "{stdout}"
+    );
+    // Тот же отчёт, но с пройденными порогами — проверка проходит.
+    let mut passed = report.clone();
+    passed["passed"] = serde_json::json!(true);
+    passed["failures"] = serde_json::json!([]);
+    std::fs::write(
+        &report_path,
+        serde_json::to_string_pretty(&passed).expect("json"),
+    )
+    .expect("write passed");
+    let out = check(home, &repo);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("Проверка квалификации: пройдена"),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    // Набор изменился после квалификации — регрессия названа.
+    let mut stale = passed.clone();
+    stale["set_sha256"] = serde_json::json!("0".repeat(64));
+    std::fs::write(
+        &report_path,
+        serde_json::to_string_pretty(&stale).expect("json"),
+    )
+    .expect("write stale");
+    let out = check(home, &repo);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("набор изменился"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 /// F1 (ADR-051/048): прогон смысловой рубрики по досье (`rubric run --pack`)
