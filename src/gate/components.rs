@@ -999,23 +999,6 @@ pub(super) fn component_decision_quality(
             ));
             continue;
         }
-        // E6.3: там, где решение блокируется, судья обязан быть квалифицирован
-        // на эталонном наборе: иначе «промах» неотличим от «не умеет».
-        if human_policy == crate::config::HumanPolicy::Human && cfg.require_qualified_judge {
-            let state = crate::rubric::qualification(repo, &artifact.rubric, &artifact.judge_model);
-            if !matches!(state, crate::rubric::Qualification::Qualified(_)) {
-                judge_unqualified += 1;
-                findings.push(GateFinding::ruled(
-                    "error".to_string(),
-                    "judge_unqualified".to_string(),
-                    format!(
-                        "{rel}: {} — `arch-be rubric qualify`",
-                        crate::rubric::refusal_reason(&state, &artifact.judge_model)
-                    ),
-                ));
-                continue;
-            }
-        }
         // E3.2: невалидные сэмплы судьи. Выше порога — суждению верить нельзя,
         // решение за человеком; ниже — предупреждение, но не молчание.
         if artifact.invalid_samples_ratio > cfg.max_invalid_samples_ratio {
@@ -2648,14 +2631,15 @@ mod tests {
         path
     }
 
-    /// Пройденная квалификация судьи `judge-x` на рубрике `adr_quality`: на
-    /// Critical её требует E6.3 — тесты прочих находок задают условие явно.
+    /// Пройденная квалификация судьи `judge-x` на рубрике
+    /// `code_invariant_conformance` (рубрика по досье): на блокирующем маршруте
+    /// её требует E6.3, когда проект включил `require_qualified_judge`.
     fn write_passing_qualification(dir: &Path) {
         let rubric = crate::rubric::load(
             &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("assets/rubrics/adr_quality.yaml"),
+                .join("assets/rubrics/code_invariant_conformance.yaml"),
         )
-        .expect("рубрика adr_quality");
+        .expect("рубрика code_invariant_conformance");
         let set = crate::rubric::QualificationSet {
             dir: std::path::PathBuf::from("/набор"),
             cases: Vec::new(),
@@ -2711,7 +2695,8 @@ mod tests {
     fn decision_quality_requires_qualification_when_enabled() {
         let tmp = tempfile::tempdir().expect("tmp");
         let dir = tmp.path();
-        make_quality_repo(dir, Some(4.5), Some("judge-x"));
+        // Отчёт по досье рубрики кода: эталонный набор существует именно для неё.
+        write_code_pack_report(dir, None);
         let before = run_quality_on(dir, Route::Critical, true);
         assert_eq!(
             status_of(&before, "decision_quality"),
