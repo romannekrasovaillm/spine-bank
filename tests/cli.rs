@@ -2904,3 +2904,168 @@ fn rubric_pack_prints_dossier_sources_and_hash() {
     let err = String::from_utf8_lossy(&out.stderr).to_string();
     assert!(err.contains("pack_subject_not_found"), "{err}");
 }
+
+/// F1 (ADR-051/048): прогон смысловой рубрики по досье (`rubric run --pack`)
+/// пишет сырые ответы судьи и происхождение так же, как прогон по документу
+/// (J1/J2), и `rubric reverify` воспроизводит такой отчёт из его ответов, а
+/// не называет его невоспроизводимым. Судья — CLI-фейк (`kind = "cli"`),
+/// поэтому тест детерминирован и офлайн.
+#[test]
+fn rubric_run_pack_saves_raw_answers_provenance_and_reverifies() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let home = tmp.path();
+    // Кейс с досье: спайн с инвариантом AD-2 и ADR-субъект.
+    let repo = home.join("case");
+    std::fs::create_dir_all(repo.join("docs/adr")).expect("mkdir adr");
+    std::fs::write(
+        repo.join("ARCHITECTURE-SPINE.md"),
+        "# Spine\n\n## AD-2: Детерминированный слой контроля\n\n- **Rule**: механика контроля без LLM.\n",
+    )
+    .expect("spine");
+    std::fs::write(
+        repo.join("docs/adr/ADR-001-x.md"),
+        "# ADR-001\n\nРешение: контроль без LLM в гейте.\n",
+    )
+    .expect("adr");
+    // git с локальной идентичностью: оттуда читается оператор происхождения
+    // (record_operator), а reverify находит корень репозитория по .git.
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["config", "user.name", "Тест Архитектор"]);
+    git(&repo, &["config", "user.email", "arch@example.invalid"]);
+
+    // Судья — CLI-фейк: печатает валидный JSON судьи с ролевыми цитатами из
+    // досье (промпт приходит в stdin, скрипт его прочитывает и глушит).
+    let script = home.join("fake-judge.sh");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\n\
+         if [ \"${1:-}\" = \"--version\" ]; then echo 'fake-judge 1.0'; exit 0; fi\n\
+         cat >/dev/null\n\
+         printf '%s' '{\"scores\":[{\"criterion_id\":\"no_contradiction\",\"score\":2,\"rationale\":\"Цитата subject: \\\"Решение: контроль без LLM в гейте.\\\". Цитата reference: \\\"Rule: механика контроля без LLM.\\\". противоречие\"}],\"verdict\":\"есть риск\"}'\n",
+    )
+    .expect("fake judge");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mut perms = std::fs::metadata(&script).expect("stat").permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).expect("chmod +x");
+    }
+
+    // Смысловая рубрика по досье adr_vs_spine (ролевые цитаты) — в каталоге
+    // рубрик ассетов: reverify разрешает её там по имени из отчёта.
+    let rubrics = home.join("assets/rubrics");
+    std::fs::create_dir_all(&rubrics).expect("mkdir rubrics");
+    let rubric = rubrics.join("t-semantic.yaml");
+    std::fs::write(
+        &rubric,
+        "name: t-semantic\n\
+         description: тестовая смысловая\n\
+         scale_max: 5\n\
+         origin: anchor\n\
+         pack: adr_vs_spine\n\
+         criteria:\n  \
+         - id: no_contradiction\n    \
+         name: Нет противоречия\n    \
+         description: Решение не противоречит инварианту\n    \
+         weight: 1.0\n    \
+         evidence_on: low\n    \
+         evidence_roles: [subject, reference]\n",
+    )
+    .expect("рубрика");
+
+    // Конфиг: судья — CLI-фейк, два сэмпла на критерий.
+    std::fs::write(
+        home.join("arch-harness.toml"),
+        format!(
+            "default_model = \"fakejudge\"\n\n\
+             [paths]\n\
+             assets_dir = \"{}\"\n\n\
+             [models.fakejudge]\n\
+             kind = \"cli\"\n\
+             command = \"{}\"\n\
+             model = \"fake-judge-1\"\n\n\
+             [judge]\n\
+             samples = 2\n",
+            home.join("assets").display(),
+            script.display()
+        ),
+    )
+    .expect("конфиг");
+
+    let out = arch_cmd(home)
+        .args(["rubric", "run", "t-semantic"])
+        .args([
+            "--pack",
+            "adr_vs_spine",
+            "--subject",
+            "docs/adr/ADR-001-x.md",
+            "--author-model",
+            "claude-opus-4",
+        ])
+        .arg("--root")
+        .arg(repo.as_os_str())
+        .output()
+        .expect("rubric run --pack");
+    assert!(
+        out.status.success(),
+        "прогон по досье: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let artifact_path = repo.join("reports/rubric/ADR-001-x--adr_vs_spine.json");
+    let artifact: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&artifact_path).expect("машиночитаемый отчёт досье"),
+    )
+    .expect("JSON отчёта");
+    assert_eq!(artifact["pack_kind"], "adr_vs_spine", "{artifact}");
+    assert_eq!(artifact["subject"], "docs/adr/ADR-001-x.md", "{artifact}");
+    assert!(
+        artifact["pack_sha256"]
+            .as_str()
+            .is_some_and(|s| s.len() == 64),
+        "{artifact}"
+    );
+    assert!(
+        artifact["inputs"].as_array().is_some_and(|i| i.len() == 2),
+        "источники досье с хэшами на месте: {artifact}"
+    );
+    assert_eq!(artifact["author_model"], "claude-opus-4", "{artifact}");
+    assert_eq!(artifact["author_source"], "argument", "{artifact}");
+    assert_eq!(artifact["judge_config"]["samples"], 2, "{artifact}");
+    // Происхождение: судью запустил Spine, оператор — из git-конфига, хэши
+    // сырых ответов — в samples.
+    let prov = &artifact["provenance"];
+    assert_eq!(prov["mode"], "launched", "{prov}");
+    assert_eq!(prov["launcher"]["provider"], "fakejudge", "{prov}");
+    assert!(
+        prov["operator"]
+            .as_str()
+            .is_some_and(|s| s.contains("Тест Архитектор")),
+        "оператор из git-конфига репозитория: {prov}"
+    );
+    let samples = prov["samples"].as_array().expect("хэши сэмплов");
+    assert_eq!(samples.len(), 2, "два сэмпла судьи: {prov}");
+    assert!(
+        samples
+            .iter()
+            .all(|s| s["sha256"].as_str().is_some_and(|h| h.len() == 64)),
+        "у каждого сэмпла свой хэш: {samples:?}"
+    );
+    // Сырые ответы лежат рядом с отчётом, под slug'ом досье.
+    for n in 1..=2 {
+        let raw = repo.join(format!(
+            "reports/rubric/raw/ADR-001-x--adr_vs_spine/sample-{n}.json"
+        ));
+        assert!(raw.is_file(), "сырой ответ на месте: {}", raw.display());
+    }
+
+    // (б) Отчёт по досье воспроизводится из своих сырых ответов.
+    let out = arch_cmd(home)
+        .args(["rubric", "reverify"])
+        .arg(artifact_path.as_os_str())
+        .output()
+        .expect("rubric reverify");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "reverify: {stdout}");
+    assert!(stdout.contains("воспроизводится"), "{stdout}");
+}

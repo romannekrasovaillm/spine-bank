@@ -84,8 +84,26 @@ pub async fn evaluate_pack(
     llm: &dyn LlmProvider,
     cfg: &JudgeConfig,
 ) -> Result<RubricReport> {
+    evaluate_pack_collecting(rubric, pack, llm, cfg)
+        .await
+        .map(|(report, _)| report)
+}
+
+/// Оценка досье с сохранением сырых ответов судьи: тот же расчёт, что у
+/// [`evaluate_pack`], плюс тексты ответов, на которых он построен (F1,
+/// ADR-051: отчёт по досье обязан быть воспроизводим из своих ответов так же,
+/// как отчёт по документу — J2, ADR-048).
+///
+/// # Errors
+/// Как у [`evaluate_pack`].
+pub async fn evaluate_pack_collecting(
+    rubric: &Rubric,
+    pack: &crate::rubric_pack::ContextPack,
+    llm: &dyn LlmProvider,
+    cfg: &JudgeConfig,
+) -> Result<(RubricReport, Vec<String>)> {
     let scope = EvidenceScope::Pack(pack);
-    evaluate_scope(rubric, &scope, llm, cfg).await
+    evaluate_scope_collecting(rubric, &scope, llm, cfg).await
 }
 
 /// Оценка с сохранением сырых ответов судьи: тот же расчёт, что у

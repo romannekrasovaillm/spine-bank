@@ -219,10 +219,13 @@ pub fn write_artifact_with(
     author_model: Option<&str>,
     extras: &ArtifactExtras,
 ) -> Result<PathBuf> {
-    let subject = ArtifactSubject::Target(target);
-    let (path, artifact) = build_artifact(repo, report, &subject, author_model, extras, true)?;
-    write_artifact_file(repo, &path, &artifact)?;
-    Ok(path)
+    write_artifact_for_subject_with(
+        repo,
+        report,
+        &ArtifactSubject::Target(target),
+        author_model,
+        extras,
+    )
 }
 
 /// Содержимое отчёта, которое записал бы [`write_artifact_with`], — БЕЗ записи
@@ -242,11 +245,13 @@ pub fn artifact_json(
     author_model: Option<&str>,
     extras: &ArtifactExtras,
 ) -> Result<(PathBuf, String)> {
-    let subject = ArtifactSubject::Target(target);
-    let (path, artifact) = build_artifact(repo, report, &subject, author_model, extras, false)?;
-    let text = serde_json::to_string_pretty(&artifact)
-        .map_err(|e| HarnessError::Config(format!("сериализация отчёта рубрики: {e}")))?;
-    Ok((path, text))
+    artifact_json_for_subject(
+        repo,
+        report,
+        &ArtifactSubject::Target(target),
+        author_model,
+        extras,
+    )
 }
 
 /// Уровень независимости оценки — один расчёт на все входы (J5, ADR-048):
@@ -285,7 +290,9 @@ pub enum ArtifactSubject<'a> {
     Pack(&'a crate::rubric_pack::ContextPack),
 }
 
-/// Записывает отчёт с указанием субъекта — общий путь для документа и досье.
+/// Записывает отчёт с указанием субъекта — общий путь для документа и досье
+/// без происхождения (поведение до ADR-048; тонкая обёртка над
+/// [`write_artifact_for_subject_with`]).
 ///
 /// # Errors
 /// Каталог отчётов не создаётся или файл не пишется.
@@ -295,16 +302,53 @@ pub fn write_artifact_for_subject(
     subject: &ArtifactSubject<'_>,
     author_model: Option<&str>,
 ) -> Result<PathBuf> {
-    let (path, artifact) = build_artifact(
+    write_artifact_for_subject_with(
         repo,
         report,
         subject,
         author_model,
         &ArtifactExtras::default(),
-        true,
-    )?;
+    )
+}
+
+/// Записывает отчёт с указанием субъекта и происхождением оценки — общий путь
+/// для документа и досье (F1, ADR-051: досье пишет сырые ответы и происхождение
+/// так же, как документ, иначе `rubric reverify` называет его невоспроизводимым).
+///
+/// # Errors
+/// Каталог отчётов не создаётся или файл не пишется.
+pub fn write_artifact_for_subject_with(
+    repo: &Path,
+    report: &RubricReport,
+    subject: &ArtifactSubject<'_>,
+    author_model: Option<&str>,
+    extras: &ArtifactExtras,
+) -> Result<PathBuf> {
+    let (path, artifact) = build_artifact(repo, report, subject, author_model, extras, true)?;
     write_artifact_file(repo, &path, &artifact)?;
     Ok(path)
+}
+
+/// Содержимое отчёта по указанному субъекту БЕЗ записи (J7) — read-only
+/// вариант [`write_artifact_for_subject_with`] для документа и досье: контур
+/// не оставляет следов в рабочем каталоге, но возвращает хосту готовый файл.
+///
+/// Сырые ответы судьи не сохраняются (контур не пишет ничего), а их хэши
+/// остаются в отчёте (`provenance.samples`) — по ним видно, из чего он собран.
+///
+/// # Errors
+/// Отчёт не сериализуется.
+pub fn artifact_json_for_subject(
+    repo: &Path,
+    report: &RubricReport,
+    subject: &ArtifactSubject<'_>,
+    author_model: Option<&str>,
+    extras: &ArtifactExtras,
+) -> Result<(PathBuf, String)> {
+    let (path, artifact) = build_artifact(repo, report, subject, author_model, extras, false)?;
+    let text = serde_json::to_string_pretty(&artifact)
+        .map_err(|e| HarnessError::Config(format!("сериализация отчёта рубрики: {e}")))?;
+    Ok((path, text))
 }
 
 /// Кладёт собранный отчёт в `reports/rubric/` — один способ записи на все
@@ -350,19 +394,32 @@ fn build_artifact(
     };
     // Сырые ответы судьи — рядом с отчётом: отчёт обязан быть воспроизводим из
     // ответов, на которых он объявлен собранным (J2, ADR-048). Их хэши попадают
-    // в происхождение, поэтому пишутся ДО артефакта. У досье роль «документа»
-    // играет субъект досье с его хэшем — сверка та же.
+    // в происхождение независимо от записи файлов: в read-only контуре
+    // (save_raw == false, J7) файлов нет, но отчёт, который хост сохранит
+    // своими средствами, обязан нести связь с ответами (F1). У досье роль
+    // «документа» играет субъект досье с его хэшем — сверка та же.
     let mut provenance = extras.provenance.clone();
-    if save_raw && !extras.raw_answers.is_empty() {
-        let stamps = crate::judge::write_raw_answers(
-            repo,
-            &file_stem,
-            &report.rubric_name,
-            pack_subject.as_deref().or(target.as_deref()),
-            pack_sha256.as_deref().or(sha.as_deref()),
-            &report.judge_model,
-            &extras.raw_answers,
-        )?;
+    if !extras.raw_answers.is_empty() {
+        let stamps = if save_raw {
+            crate::judge::write_raw_answers(
+                repo,
+                &file_stem,
+                &report.rubric_name,
+                pack_subject.as_deref().or(target.as_deref()),
+                pack_sha256.as_deref().or(sha.as_deref()),
+                &report.judge_model,
+                &extras.raw_answers,
+            )?
+        } else {
+            extras
+                .raw_answers
+                .iter()
+                .map(|answer| crate::judge::SampleStamp {
+                    sha256: crate::hash::sha256_hex(answer.text.as_bytes()),
+                    dropped: answer.dropped,
+                })
+                .collect()
+        };
         let prov =
             provenance.get_or_insert_with(|| crate::judge::RubricProvenance::declared(None, None));
         prov.samples = stamps;

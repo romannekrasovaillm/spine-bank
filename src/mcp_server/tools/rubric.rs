@@ -405,21 +405,48 @@ impl McpServe {
                     }),
                     raw_answers: raw_inputs.clone(),
                 };
-                if let (crate::rubric::ArtifactSubject::Target(t), false) =
-                    (&subject, self.mode.allows_write())
-                {
-                    // Read-only (J7): отчёт не записан, но он готов — хост
-                    // сохранит его своими файловыми инструментами, иначе гейт
-                    // скажет `rubric_report_missing`, а агент не поймёт почему.
+                if self.mode.allows_write() {
+                    // Оба субъекта пишутся с происхождением и сырыми ответами
+                    // (F1, ADR-051): иначе отчёт по досье `rubric reverify`
+                    // называл бы невоспроизводимым.
+                    let written = match &subject {
+                        crate::rubric::ArtifactSubject::Target(t) => {
+                            crate::rubric::write_artifact_with(
+                                &repo,
+                                &report,
+                                *t,
+                                choice.author.as_deref(),
+                                &extras,
+                            )
+                        }
+                        crate::rubric::ArtifactSubject::Pack(_) => {
+                            crate::rubric::write_artifact_for_subject_with(
+                                &repo,
+                                &report,
+                                &subject,
+                                choice.author.as_deref(),
+                                &extras,
+                            )
+                        }
+                    };
+                    match written {
+                        Ok(p) => artifact_note = Some(p.display().to_string()),
+                        Err(e) => {
+                            artifact_note = Some(format!("не записан: {e}"));
+                        }
+                    }
+                } else {
+                    // Read-only (J7): отчёт не записан, но он готов — и для
+                    // документа, и для досье — хост сохранит его своими
+                    // файловыми инструментами, иначе гейт скажет
+                    // `rubric_report_missing`, а агент не поймёт почему.
                     // Сырых ответов это не касается: их хэши уже в отчёте.
-                    let mut ro = extras.clone();
-                    ro.raw_answers = Vec::new();
-                    match crate::rubric::artifact_json(
+                    match crate::rubric::artifact_json_for_subject(
                         &repo,
                         &report,
-                        *t,
+                        &subject,
                         choice.author.as_deref(),
-                        &ro,
+                        &extras,
                     ) {
                         Ok((path, text)) => {
                             artifact_note = Some(format!(
@@ -434,35 +461,6 @@ impl McpServe {
                             artifact_note = Some(format!("не записан: {e}"));
                         }
                     }
-                } else if self.mode.allows_write() {
-                    let written = match &subject {
-                        crate::rubric::ArtifactSubject::Target(t) => {
-                            crate::rubric::write_artifact_with(
-                                &repo,
-                                &report,
-                                *t,
-                                choice.author.as_deref(),
-                                &extras,
-                            )
-                        }
-                        crate::rubric::ArtifactSubject::Pack(_) => {
-                            crate::rubric::write_artifact_for_subject(
-                                &repo,
-                                &report,
-                                &subject,
-                                choice.author.as_deref(),
-                            )
-                        }
-                    };
-                    match written {
-                        Ok(p) => artifact_note = Some(p.display().to_string()),
-                        Err(e) => {
-                            artifact_note = Some(format!("не записан: {e}"));
-                        }
-                    }
-                } else {
-                    artifact_note =
-                        Some("не записан: контур MCP только для чтения (нужен `--rw`)".to_string());
                 }
             }
         }
@@ -1281,6 +1279,106 @@ mod tests {
         assert_eq!(
             response["result"]["isError"], true,
             "исполнение без настроенного cli-провайдера — доменная ошибка: {response}"
+        );
+    }
+
+    /// F1/J7 (ADR-051): в read-only контуре отчёт по досье больше не теряется
+    /// молча: хост получает готовый `artifact_json` — с хэшами сэмплов в
+    /// `provenance.samples`, как у отчёта по документу, — и сохраняет его
+    /// своими средствами. В рабочем каталоге следов нет.
+    #[tokio::test]
+    async fn rubric_verify_pack_readonly_returns_artifact_json_with_samples() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = pack_repo(tmp.path());
+        let rub = rubric_fixture(tmp.path());
+        let answers = [
+            r#"{"scores":[{"criterion_id":"context","score":4,"rationale":"Цитата: \"Решение: контроль без LLM в гейте.\" — есть"}],"verdict":"v"}"#,
+        ];
+        let answers_json = serde_json::to_string(&answers).expect("json");
+        let verify = format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"rubric_verify","arguments":{{"rubric":"{}","pack":"adr_vs_spine","subject":"docs/adr/ADR-001-x.md","root":"{}","answers":{answers_json},"model":"host-x"}}}}}}"#,
+            rub.display(),
+            repo.display()
+        );
+        let responses = run_lines(&[&verify]).await;
+        let result = &responses[0]["result"];
+        assert_eq!(result["isError"], false, "{result}");
+        let sc = &result["structuredContent"];
+        assert_eq!(sc["artifact_saved"], false, "{sc}");
+        let path = sc["artifact_path"].as_str().expect("путь отчёта");
+        assert!(
+            path.ends_with("reports/rubric/ADR-001-x--adr_vs_spine.json"),
+            "slug отчёта досье: {path}"
+        );
+        let artifact: Value =
+            serde_json::from_str(sc["artifact_json"].as_str().expect("artifact_json"))
+                .expect("JSON отчёта");
+        assert_eq!(artifact["pack_kind"], "adr_vs_spine", "{artifact}");
+        assert_eq!(artifact["subject"], "docs/adr/ADR-001-x.md", "{artifact}");
+        assert_eq!(artifact["provenance"]["mode"], "declared", "{artifact}");
+        let samples = artifact["provenance"]["samples"]
+            .as_array()
+            .expect("хэши сэмплов в отчёте");
+        assert_eq!(samples.len(), 1, "{artifact}");
+        assert_eq!(
+            samples[0]["sha256"].as_str().map(str::len),
+            Some(64),
+            "{artifact}"
+        );
+        // Read-only: в рабочем каталоге следов нет.
+        assert!(
+            !repo.join("reports/rubric").exists(),
+            "read-only контур не пишет отчёты"
+        );
+    }
+
+    /// F1 (ADR-051/048): в rw-контуре отчёт по досье пишется с происхождением
+    /// и сырыми ответами — и валидными, и отброшенными (J2), как отчёт по
+    /// документу; иначе `rubric reverify` называл такой отчёт невоспроизводимым.
+    #[tokio::test]
+    async fn rubric_verify_pack_rw_writes_artifact_with_provenance_and_raws() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = pack_repo(tmp.path());
+        let rub = rubric_fixture(tmp.path());
+        let answers = [
+            r#"{"scores":[{"criterion_id":"context","score":4,"rationale":"Цитата: \"Решение: контроль без LLM в гейте.\" — есть"}],"verdict":"v"}"#,
+            "это не json судьи",
+        ];
+        let answers_json = serde_json::to_string(&answers).expect("json");
+        let verify = format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"rubric_verify","arguments":{{"rubric":"{}","pack":"adr_vs_spine","subject":"docs/adr/ADR-001-x.md","root":"{}","answers":{answers_json},"model":"host-x"}}}}}}"#,
+            rub.display(),
+            repo.display()
+        );
+        let responses = run_lines_on(rw_server(), &[&verify]).await;
+        let result = &responses[0]["result"];
+        assert_eq!(result["isError"], false, "{result}");
+        let sc = &result["structuredContent"];
+        assert_eq!(sc["artifact_saved"], true, "{sc}");
+        let artifact_path = repo.join("reports/rubric/ADR-001-x--adr_vs_spine.json");
+        let artifact: Value = serde_json::from_str(
+            &std::fs::read_to_string(&artifact_path).expect("отчёт досье записан"),
+        )
+        .expect("JSON отчёта");
+        assert_eq!(artifact["pack_kind"], "adr_vs_spine", "{artifact}");
+        assert_eq!(artifact["provenance"]["mode"], "declared", "{artifact}");
+        let samples = artifact["provenance"]["samples"]
+            .as_array()
+            .expect("samples");
+        assert_eq!(
+            samples.len(),
+            2,
+            "и валидный, и отброшенный ответы: {artifact}"
+        );
+        assert_eq!(samples[1]["dropped"], true, "{artifact}");
+        let raw = repo.join("reports/rubric/raw/ADR-001-x--adr_vs_spine/sample-2.json");
+        let record: Value =
+            serde_json::from_str(&std::fs::read_to_string(&raw).expect("сырой ответ"))
+                .expect("JSON сырого ответа");
+        assert_eq!(record["dropped"], true, "{record}");
+        assert_eq!(
+            record["text"], "это не json судьи",
+            "текст как есть: {record}"
         );
     }
 }

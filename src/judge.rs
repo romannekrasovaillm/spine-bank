@@ -510,9 +510,15 @@ pub fn load_raw_answers(repo: &Path, slug: &str) -> Vec<RawAnswer> {
 }
 
 /// Slug отчёта: имя файла отчёта, посчитанное от цели так же, как при записи.
+/// У отчёта по досье цель — вид досье и субъект (F1, ADR-051): сырые ответы
+/// лежат под slug'ом досье, иначе сверка не нашла бы их и честно, но ложно
+/// называла отчёт невоспроизводимым.
 #[must_use]
 pub fn artifact_slug_of(artifact: &crate::rubric::RubricArtifact) -> String {
-    crate::rubric::artifact_slug(artifact.target.as_deref().map(Path::new))
+    match (&artifact.pack_kind, &artifact.subject) {
+        (Some(kind), Some(subject)) => crate::rubric::pack_artifact_slug(kind, subject),
+        _ => crate::rubric::artifact_slug(artifact.target.as_deref().map(Path::new)),
+    }
 }
 
 /// Итог пересборки отчёта из сырых ответов (`arch-be rubric reverify` и
@@ -548,6 +554,9 @@ impl Reverify {
 
 /// Пересобирает отчёт из сохранённых сырых ответов тем же [`crate::rubric::build_report`]
 /// и сверяет с записанным: баллы по критериям, метки, взвешенный итог, вердикт.
+/// Для отчёта по досье (ADR-051) текст сверки цитат пересобирается из
+/// репозитория (`rubric_pack::build` по записанным виду и субъекту), а сырые
+/// ответы ищутся под slug'ом досье (F1).
 ///
 /// Дёшево по устройству (разбор JSON и медианы, без LLM) — поэтому это может
 /// делать и гейт. Сверка не «удостоверяет качество суждения»: она отвечает
@@ -604,13 +613,6 @@ fn rebuild(
     })?;
     let rubric =
         crate::rubric::load(&rubric_path).map_err(|e| format!("рубрика не читается: {e}"))?;
-    let target_rel = artifact
-        .target
-        .as_deref()
-        .ok_or_else(|| "в отчёте нет пути документа — текст не восстановить".to_string())?;
-    let path = repo.join(target_rel);
-    let text = std::fs::read_to_string(&path)
-        .map_err(|e| format!("документ {} не читается: {e}", path.display()))?;
     let runs: Vec<_> = raw
         .iter()
         .filter(|a| !a.dropped)
@@ -619,6 +621,35 @@ fn rebuild(
     if runs.is_empty() {
         return Err("ни один сырой ответ не разобран — пересобрать отчёт не из чего".to_string());
     }
+    // Досье (ADR-051) пересобирается из репозитория тем же детерминированным
+    // кодом, что собрал вход судьи: цитаты сверяются по ролям источников.
+    // Репозиторий изменился так, что досье не собирается прежним субъектом —
+    // это «сверка невозможна», а не расхождение (как у недоступного документа).
+    if let (Some(kind), Some(subject)) = (&artifact.pack_kind, &artifact.subject) {
+        let kind = crate::rubric_pack::PackKind::parse(kind)
+            .map_err(|e| format!("вид досье '{kind}' из отчёта не разбирается: {e}"))?;
+        let packs = crate::rubric_pack::build(repo, kind, subject)
+            .map_err(|e| format!("досье '{subject}' не пересобирается: {e}"))?;
+        let pack = packs
+            .iter()
+            .find(|p| &p.subject == subject)
+            .ok_or_else(|| {
+                format!(
+                    "досье '{subject}' больше не собирается одним фрагментом — \
+                 оцените его заново по фрагментам"
+                )
+            })?;
+        let scope = crate::rubric::EvidenceScope::Pack(pack);
+        return crate::rubric::build_report(&rubric, &artifact.judge_model, &runs, &scope, cfg)
+            .map_err(|e| format!("пересборка отчёта: {e}"));
+    }
+    let target_rel = artifact
+        .target
+        .as_deref()
+        .ok_or_else(|| "в отчёте нет пути документа — текст не восстановить".to_string())?;
+    let path = repo.join(target_rel);
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| format!("документ {} не читается: {e}", path.display()))?;
     let scope = crate::rubric::EvidenceScope::Target(&text);
     crate::rubric::build_report(&rubric, &artifact.judge_model, &runs, &scope, cfg)
         .map_err(|e| format!("пересборка отчёта: {e}"))
@@ -1793,6 +1824,91 @@ mod tests {
         assert!(
             !first.contains("контекст"),
             "текст не попадает в ключ: {first}"
+        );
+    }
+
+    /// F1 (ADR-051/048): отчёт по досье с сохранёнными сырыми ответами
+    /// воспроизводится — slug ответов считается от вида досье и субъекта (а не
+    /// пустого `target`), а текст для сверки цитат пересобирается из
+    /// репозитория (`EvidenceScope::Pack`).
+    #[test]
+    fn reverify_pack_artifact_reproduces_report() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let repo = dir.path().join("case");
+        std::fs::create_dir_all(repo.join("docs/adr")).expect("adr dir");
+        std::fs::write(
+            repo.join("ARCHITECTURE-SPINE.md"),
+            "# Spine\n\n## AD-2: Детерминированный слой контроля\n\n- **Rule**: механика контроля без LLM.\n",
+        )
+        .expect("spine");
+        std::fs::write(
+            repo.join("docs/adr/ADR-001-x.md"),
+            "# ADR-001\n\nРешение: контроль без LLM в гейте.\n",
+        )
+        .expect("adr");
+        // Рубрика на диске: reverify разрешает её по имени из каталога рубрик.
+        let rubrics = dir.path().join("rubrics");
+        std::fs::create_dir_all(&rubrics).expect("rubrics dir");
+        std::fs::write(
+            rubrics.join("t-semantic.yaml"),
+            "name: t-semantic\n\
+             description: тестовая смысловая\n\
+             scale_max: 5\n\
+             origin: anchor\n\
+             pack: adr_vs_spine\n\
+             criteria:\n  \
+             - id: no_contradiction\n    \
+             name: Нет противоречия\n    \
+             description: Решение не противоречит инварианту\n    \
+             weight: 1.0\n    \
+             evidence_on: low\n    \
+             evidence_roles: [subject, reference]\n",
+        )
+        .expect("рубрика");
+        let kind = crate::rubric_pack::PackKind::AdrVsSpine;
+        let pack = crate::rubric_pack::build(&repo, kind, "docs/adr/ADR-001-x.md")
+            .expect("досье")
+            .into_iter()
+            .next()
+            .expect("одно досье");
+        let rubric = crate::rubric::load(&rubrics.join("t-semantic.yaml")).expect("рубрика");
+        let answer = "{\"scores\":[{\"criterion_id\":\"no_contradiction\",\"score\":2,\
+                      \"rationale\":\"Цитата subject: \\\"Решение: контроль без LLM в гейте.\\\". \
+                      Цитата reference: \\\"Rule: механика контроля без LLM.\\\". противоречие\"}],\
+                      \"verdict\":\"есть риск\"}";
+        let runs = vec![crate::rubric::parse_judge_response(answer).expect("ответ судьи")];
+        let scope = crate::rubric::EvidenceScope::Pack(&pack);
+        let cfg = crate::config::JudgeConfig::default();
+        let report = crate::rubric::build_report(&rubric, "fake-judge-1", &runs, &scope, &cfg)
+            .expect("отчёт");
+        // Отчёт записан как у досье; сырые ответы — рядом, под slug'ом досье.
+        let subject = crate::rubric::ArtifactSubject::Pack(&pack);
+        let path = crate::rubric::write_artifact_for_subject(&repo, &report, &subject, None)
+            .expect("запись отчёта");
+        let slug = crate::rubric::pack_artifact_slug(kind.as_str(), &pack.subject);
+        write_raw_answers(
+            &repo,
+            &slug,
+            &report.rubric_name,
+            Some(&pack.subject),
+            Some(&pack.sha256),
+            &report.judge_model,
+            &[RawAnswerInput {
+                text: answer.to_string(),
+                dropped: false,
+            }],
+        )
+        .expect("сырые ответы");
+        let artifact: crate::rubric::RubricArtifact =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("отчёт")).expect("JSON");
+        let check = reverify(&repo, &artifact, &rubrics, &cfg);
+        assert!(
+            check.raw_saved,
+            "сырые ответы досье находятся по его slug'у: {check:?}"
+        );
+        assert!(
+            check.reproduced(),
+            "отчёт по досье воспроизводится из своих ответов: {check:?}"
         );
     }
 }

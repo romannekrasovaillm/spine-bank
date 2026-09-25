@@ -40,12 +40,14 @@ mod types;
 
 pub use artifact::{
     ArtifactExtras, ArtifactSubject, RUBRIC_REPORT_SCHEMA, RUBRIC_REPORTS_DIR, RubricArtifact,
-    artifact_json, artifact_slug, independence_for, load_artifacts, pack_artifact_slug,
-    repo_root_of, write_artifact, write_artifact_for_subject, write_artifact_with,
+    artifact_json, artifact_json_for_subject, artifact_slug, independence_for, load_artifacts,
+    pack_artifact_slug, repo_root_of, write_artifact, write_artifact_for_subject,
+    write_artifact_for_subject_with, write_artifact_with,
 };
 pub use catalog::{list, load};
 pub use judge::{
-    check_target_len, evaluate_collecting, evaluate_pack, evaluate_with_options, generate_dynamic,
+    check_target_len, evaluate_collecting, evaluate_pack, evaluate_pack_collecting,
+    evaluate_with_options, generate_dynamic,
 };
 pub(crate) use judge::{judge_system_prompt, judge_user_prompt};
 pub(crate) use report::{EvidenceScope, build_report, parse_judge_response};

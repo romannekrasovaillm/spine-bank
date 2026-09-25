@@ -178,9 +178,13 @@ pub(crate) async fn cmd_rubric(cfg: &Arc<Config>, cmd: RubricCmd) -> Result<()> 
                 judge_cfg.samples = samples;
             }
             if let Some(pack) = &dossier {
-                let report =
-                    arch_harness::rubric::evaluate_pack(&rub, pack, judge.as_ref(), &judge_cfg)
-                        .await?;
+                let (report, raw) = arch_harness::rubric::evaluate_pack_collecting(
+                    &rub,
+                    pack,
+                    judge.as_ref(),
+                    &judge_cfg,
+                )
+                .await?;
                 println!("{}", report.to_markdown());
                 let out =
                     cfg.paths
@@ -199,11 +203,45 @@ pub(crate) async fn cmd_rubric(cfg: &Arc<Config>, cmd: RubricCmd) -> Result<()> 
                     .unwrap_or_else(|| PathBuf::from("."))
                     .canonicalize()
                     .unwrap_or_else(|_| PathBuf::from("."));
-                match arch_harness::rubric::write_artifact_for_subject(
+                // Происхождение и сырые ответы — по тому же канону, что у
+                // документа (F1): иначе `rubric reverify` называет отчёт по
+                // досье невоспроизводимым (J1/J2, ADR-048). Автора досье
+                // решает аргумент: шапки у собранного досье нет (как в MCP
+                // `rubric_verify`).
+                let choice = arch_harness::judge::choose_author(None, author_model.clone());
+                let model_name = model.clone().unwrap_or_else(|| cfg.default_model.clone());
+                let mut provenance = arch_harness::judge::RubricProvenance::launched(
+                    arch_harness::judge::launcher_for(cfg, &model_name),
+                );
+                if cfg.judge.record_operator {
+                    provenance.operator = arch_harness::judge::operator(&repo);
+                }
+                let extras = arch_harness::rubric::ArtifactExtras {
+                    provenance: Some(provenance),
+                    author_source: Some(choice.source.clone()),
+                    author_model_declared: choice.declared.clone(),
+                    families: cfg.judge.families.clone(),
+                    judge_config: Some(arch_harness::rubric::JudgeConfigSnapshot {
+                        samples: judge_cfg.samples.max(1),
+                        unstable_stdev: judge_cfg.unstable_stdev,
+                        evidence_min_similarity: judge_cfg.evidence_min_similarity,
+                    }),
+                    // Сырые ответы судьи — рядом с отчётом: отчёт обязан
+                    // пересобираться из них (J2, ADR-048).
+                    raw_answers: raw
+                        .into_iter()
+                        .map(|text| arch_harness::judge::RawAnswerInput {
+                            text,
+                            dropped: false,
+                        })
+                        .collect(),
+                };
+                match arch_harness::rubric::write_artifact_for_subject_with(
                     &repo,
                     &report,
                     &arch_harness::rubric::ArtifactSubject::Pack(pack),
-                    author_model.as_deref(),
+                    choice.author.as_deref(),
+                    &extras,
                 ) {
                     Ok(path) => eprintln!("Отчёт для гейта: {}", path.display()),
                     Err(e) => eprintln!("⚠ машиночитаемый отчёт не записан: {e}"),
