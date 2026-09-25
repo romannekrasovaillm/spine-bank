@@ -130,6 +130,11 @@ pub struct RubricArtifact {
     /// пусто, сверка тогда идёт по итогу и меткам).
     #[serde(default)]
     pub scores: Vec<CriterionScore>,
+    /// Строки входа с паттернами prompt-инъекций (E2). `None` — отчёт записан
+    /// до появления детектора (сверка его не штрафует), `Some([])` — вход
+    /// сканировали и он чист, `Some([n, …])` — помеченные строки.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_injection_lines: Option<Vec<usize>>,
     /// Метка времени оценки (RFC 3339).
     pub judged_at: String,
 }
@@ -461,6 +466,16 @@ fn build_artifact(
         pack_sha256,
         inputs,
         scores: report.scores.clone(),
+        // E2: пометки инъекций входа переезжают в отчёт для гейта. `None` —
+        // отчёт записан до появления детектора: отсутствие поля означает «не
+        // сканировали», и сверка его не штрафует (как provenance и scores).
+        input_injection_lines: (!report.input_injections.is_empty()).then(|| {
+            report
+                .input_injections
+                .iter()
+                .map(|i| i.line)
+                .collect::<Vec<_>>()
+        }),
         judged_at: chrono::Local::now().to_rfc3339(),
     };
     let dir = repo.join(RUBRIC_REPORTS_DIR);

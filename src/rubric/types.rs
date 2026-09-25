@@ -185,6 +185,12 @@ pub enum CriterionFlag {
     /// источников (ADR-051, S3): критерий исключён из взвешенного итога —
     /// «5 не глядя» не должно читаться как проверка.
     CoverageIncomplete,
+    /// Свидетельство критерия опирается на строку входа с паттерном
+    /// prompt-инъекции (E2, ADR-038): такая цитата не засчитывается
+    /// доказательством — она честно есть в тексте, но её подсунул не автор
+    /// решения, а тот, кто хотел управлять судьёй. Критерий, оставшийся без
+    /// подтверждённых свидетельств, исключается из итога как обычно.
+    InjectionQuote,
 }
 
 impl CriterionFlag {
@@ -197,6 +203,7 @@ impl CriterionFlag {
             Self::EvidencePartial => "evidence_partial",
             Self::AccusationUnconfirmed => "accusation_unconfirmed",
             Self::CoverageIncomplete => "coverage_incomplete",
+            Self::InjectionQuote => "injection_quote",
         }
     }
 

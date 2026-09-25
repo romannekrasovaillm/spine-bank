@@ -64,6 +64,9 @@ pub(super) fn component_semantic_quality(
     let mut findings = Vec::new();
     let mut checked = 0usize;
     let mut truncated = false;
+    // Субъекты, чей вход помечен детектором инъекций (E2): их суждение
+    // подтвердить нельзя, и составляющая уходит в SKIP — вердикт INCOMPLETE.
+    let mut injection_suspected = 0usize;
     for name in &cfg.rubrics {
         let path = rubrics_dir.join(format!("{name}.yaml"));
         let rubric = match crate::rubric::load(&path) {
@@ -99,6 +102,9 @@ pub(super) fn component_semantic_quality(
         for subject in subjects.into_iter().take(MAX_SEMANTIC_SUBJECTS) {
             let state = semantic_subject_state(repo, &rubric, kind, &subject, &artifacts, cfg);
             checked += usize::from(!matches!(state, SemanticState::Skipped));
+            if matches!(state, SemanticState::InjectionSuspected(_)) {
+                injection_suspected += 1;
+            }
             findings.extend(state.into_findings(name, &subject));
         }
     }
@@ -135,6 +141,20 @@ pub(super) fn component_semantic_quality(
          порог и подтверждённость цитат, но не качество суждения"
             .to_string(),
     ];
+    if injection_suspected > 0 {
+        // E2: «проверить нельзя», а не «нечего проверять» и не «нарушено».
+        // SKIP обязательной составляющей делает вердикт INCOMPLETE (exit 3) —
+        // ровно то, что ревью называет решением `human`.
+        return GateComponent::skip_with_findings(
+            "semantic_quality",
+            format!(
+                "{detail}; у {injection_suspected} субъектов вход помечен prompt-инъекцией — \
+                 суждение по ним не подтверждено, решение за человеком"
+            ),
+            findings,
+        )
+        .noting(notes);
+    }
     if errors == 0 {
         GateComponent::pass_with_findings("semantic_quality", detail, findings).noting(notes)
     } else {
@@ -189,6 +209,10 @@ enum SemanticState {
     Low(f64, String),
     /// Судья и автор — одна модель.
     JudgeIsAuthor(String),
+    /// Во входе субъекта есть строки с паттернами prompt-инъекций (E2):
+    /// свидетельства оттуда не засчитаны, и суждение по такому входу механика
+    /// подтвердить не может — решение за человеком.
+    InjectionSuspected(Vec<usize>),
     /// Всё в порядке.
     Ok,
 }
@@ -260,6 +284,19 @@ impl SemanticState {
                 "judge_is_author".to_string(),
                 format!("{who}: судья и автор — одна модель ({judge}) — оценка не независима"),
             )],
+            Self::InjectionSuspected(lines) => vec![GateFinding::ruled(
+                // error: это не «нарушение субъекта», а недействительность
+                // суждения о нём. Составляющая при этой находке — SKIP, и
+                // вердикт гейта становится INCOMPLETE (exit 3): молча зелёным
+                // такой вход не проходит, а решение принимает человек.
+                "error".to_string(),
+                "semantic_input_injection".to_string(),
+                format!(
+                    "{who}: во входе досье есть строки с паттернами prompt-инъекций ({lines:?}) — \
+                     цитаты оттуда свидетельствами не засчитаны, суждение по этому входу \
+                     механика подтвердить не может"
+                ),
+            )],
         }
     }
 }
@@ -284,6 +321,16 @@ fn semantic_subject_state(
     let Some(artifact) = artifact else {
         return SemanticState::Missing;
     };
+    // E2: вход с инъекцией обесценивает суждение целиком — проверяется раньше
+    // свежести: судья мог подчиниться строке из досье, и «свежий» отчёт об
+    // этом ничего не говорит. Решение по такому субъекту — за человеком.
+    if let Some(lines) = artifact
+        .input_injection_lines
+        .as_ref()
+        .filter(|l| !l.is_empty())
+    {
+        return SemanticState::InjectionSuspected(lines.clone());
+    }
     // Отчёт привязан ко ВСЕМ источникам досье (ADR-051, П3): правка спайна
     // обесценивает отчёт о решении, даже если сам ADR не менялся.
     if let Some(want) = artifact.pack_sha256.as_deref() {
@@ -971,6 +1018,54 @@ mod tests {
             semantic_rules(&report).contains(&"semantic_rubric_unknown".to_string()),
             "{:?}",
             semantic_rules(&report)
+        );
+    }
+
+    /// E2: вход с prompt-инъекцией — «проверить нельзя, нужен человек».
+    /// Составляющая уходит в SKIP с находкой `semantic_input_injection`, и
+    /// вердикт гейта становится INCOMPLETE (exit 3): молчаливым PASS такой
+    /// вход не проходит, а FAIL не объявляется — субъект ничего не нарушил.
+    #[test]
+    fn semantic_input_injection_makes_gate_incomplete() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        make_semantic_repo(dir);
+        let rubrics = semantic_rubrics_dir(dir);
+        write_semantic_report(dir, "docs/adr/ADR-001-reshenie.md", 5, &[], 4.6, None);
+        // Пометка входа (E2.1) — поле новой схемы отчёта.
+        let path = dir
+            .join(crate::rubric::RUBRIC_REPORTS_DIR)
+            .join("semantic.json");
+        let mut artifact: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("отчёт")).expect("JSON");
+        artifact["input_injection_lines"] = serde_json::json!([2]);
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&artifact).expect("json"),
+        )
+        .expect("write report");
+        let report = run_semantic(
+            dir,
+            None,
+            semantic_cfg(crate::config::SemanticScope::All),
+            &rubrics,
+        );
+        assert_eq!(
+            status_of(&report, "semantic_quality"),
+            GateStatus::Skip,
+            "суждение по такому входу не подтверждается: {}",
+            crate::gate::render(&report)
+        );
+        assert!(
+            semantic_rules(&report).contains(&"semantic_input_injection".to_string()),
+            "{:?}",
+            semantic_rules(&report)
+        );
+        assert_eq!(
+            report.outcome,
+            GateOutcome::Incomplete,
+            "{}",
+            crate::gate::render(&report)
         );
     }
 }

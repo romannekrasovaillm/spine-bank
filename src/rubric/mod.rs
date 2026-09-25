@@ -51,7 +51,7 @@ pub use judge::{
 };
 pub(crate) use judge::{judge_system_prompt, judge_user_prompt};
 pub(crate) use report::{EvidenceScope, build_report, parse_judge_response};
-pub use report::{RubricReport, weighted_total};
+pub use report::{InputInjection, RubricReport, scan_injections, weighted_total};
 pub use tools::tools;
 pub use types::{
     Coverage, Criterion, CriterionFlag, CriterionScore, CriterionSnapshot, EvidenceOn,

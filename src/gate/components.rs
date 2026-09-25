@@ -932,6 +932,9 @@ pub(super) fn component_decision_quality(
     let mut not_reproducible = 0usize;
     // Отчёты, собранные в рабочей сессии (косвенный признак, ADR-048).
     let mut session_dirty = 0usize;
+    // Отчёты, чей вход помечен детектором инъекций (E2): суждение по ним
+    // подтвердить нельзя — составляющая уходит в SKIP (вердикт INCOMPLETE).
+    let mut injection_suspected = 0usize;
     for adr in &adrs {
         let Ok(text) = std::fs::read_to_string(adr) else {
             continue;
@@ -965,6 +968,26 @@ pub(super) fn component_decision_quality(
             ));
             continue;
         };
+        // E2: вход с инъекцией обесценивает суждение о документе так же, как о
+        // досье: судья мог подчиниться строке из самого документа. Составляющая
+        // уйдёт в SKIP — вердикт INCOMPLETE, решение за человеком.
+        if let Some(lines) = artifact
+            .input_injection_lines
+            .as_ref()
+            .filter(|l| !l.is_empty())
+        {
+            injection_suspected += 1;
+            findings.push(GateFinding::ruled(
+                "error".to_string(),
+                "rubric_input_injection".to_string(),
+                format!(
+                    "{rel}: во входе есть строки с паттернами prompt-инъекций ({lines:?}) — \
+                     цитаты оттуда свидетельствами не засчитаны, суждение по этому входу \
+                     механика подтвердить не может"
+                ),
+            ));
+            continue;
+        }
         // Привязка к содержанию: отчёт обязан относиться к ЭТОЙ редакции.
         if let (Some(want), Some(got)) = (&sha, &artifact.target_sha256) {
             if want != got && same_target(artifact) {
@@ -1241,6 +1264,19 @@ pub(super) fn component_decision_quality(
              ({pack_unreproducible}) — read-only контур MCP файлов не пишет, и в отчёте \
              остаются одни хэши"
         ));
+    }
+    if injection_suspected > 0 {
+        // E2: «проверить нельзя», а не «нарушено» и не «нечего проверять» —
+        // SKIP обязательной составляющей даёт вердикт INCOMPLETE (exit 3).
+        return GateComponent::skip_with_findings(
+            "decision_quality",
+            format!(
+                "{detail}; у {injection_suspected} отчётов вход помечен prompt-инъекцией — \
+                 суждение по ним не подтверждено, решение за человеком"
+            ),
+            findings,
+        )
+        .noting(notes);
     }
     if errors == 0 {
         GateComponent::pass_with_findings("decision_quality", detail, findings).noting(notes)
@@ -2367,5 +2403,55 @@ mod tests {
             comp.findings
         );
         assert_eq!(status_of(&report, "decision_quality"), GateStatus::Fail);
+    }
+
+    /// E2: вход документа помечен prompt-инъекцией — «проверить нельзя, нужен
+    /// человек». Составляющая уходит в SKIP с находкой `rubric_input_injection`,
+    /// вердикт гейта — INCOMPLETE (exit 3): ни PASS (судья мог подчиниться
+    /// строке), ни FAIL (документ ничего не нарушил).
+    #[test]
+    fn decision_quality_input_injection_makes_gate_incomplete() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        make_quality_repo(dir, Some(4.5), Some("judge-x"));
+        let path = dir
+            .join(crate::rubric::RUBRIC_REPORTS_DIR)
+            .join("ADR-001-reshenie.json");
+        let mut artifact: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("отчёт")).expect("JSON");
+        artifact["input_injection_lines"] = serde_json::json!([2]);
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&artifact).expect("json"),
+        )
+        .expect("write report");
+        let report = run_with(
+            dir,
+            Some(Route::Fast),
+            None,
+            None,
+            (1, 4),
+            &with_quality(Route::Fast),
+        )
+        .expect("gate");
+        let comp = report
+            .components
+            .iter()
+            .find(|c| c.name == "decision_quality")
+            .expect("comp");
+        assert_eq!(comp.status, GateStatus::Skip, "{}", render(&report));
+        assert!(
+            comp.findings
+                .iter()
+                .any(|f| f.rule.as_deref() == Some("rubric_input_injection")),
+            "{:?}",
+            comp.findings
+        );
+        assert_eq!(
+            report.outcome,
+            GateOutcome::Incomplete,
+            "{}",
+            render(&report)
+        );
     }
 }

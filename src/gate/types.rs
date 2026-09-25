@@ -199,6 +199,24 @@ impl GateComponent {
         }
     }
 
+    /// Составляющая пропущена, но не «нечего проверять», а «проверить нельзя»:
+    /// вход требует человека (E2 — prompt-инъекция в досье). Находка остаётся
+    /// в отчёте, статус SKIP делает вердикт INCOMPLETE: пропуск обязательной
+    /// составляющей не зеленеет (П1), и релиз не выдаётся молча.
+    pub(super) fn skip_with_findings(
+        name: &'static str,
+        detail: String,
+        findings: Vec<GateFinding>,
+    ) -> Self {
+        Self {
+            name,
+            status: GateStatus::Skip,
+            detail,
+            findings,
+            not_verified: Vec::new(),
+        }
+    }
+
     /// Дополняет составляющую границей её вердикта (W1, блок 2 паспорта).
     pub(super) fn noting(mut self, notes: Vec<String>) -> Self {
         self.not_verified = notes;
