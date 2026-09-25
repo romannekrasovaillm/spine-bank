@@ -3216,4 +3216,69 @@ mod tests {
             render(&report)
         );
     }
+
+    /// Счётчики составляющей `nfr`: число прогнанных проверок и разбивка
+    /// находок по критичности — это то, по чему читатель вердикта понимает,
+    /// что именно посчитано.
+    #[test]
+    fn nfr_counts_checks_and_findings_by_severity() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(repo.join("model")).expect("mkdir model");
+        // Перерасход бюджета (error) и непокрытый hop (warn).
+        for (name, fm) in [
+            (
+                "INT-001.md",
+                "id: INT-001\ntype: int\ntitle: Hop 1\nstatus: accepted\nlatency_budget_ms: 1500\n",
+            ),
+            (
+                "INT-002.md",
+                "id: INT-002\ntype: int\ntitle: Hop 2\nstatus: accepted\nlatency_budget_ms: 800\n",
+            ),
+            (
+                "INT-003.md",
+                "id: INT-003\ntype: int\ntitle: Hop 3\nstatus: accepted\nlatency_budget_ms: 300\n",
+            ),
+            (
+                "NFR-001.md",
+                "id: NFR-001\ntype: nfr\ntitle: Бюджет\nstatus: accepted\nverification: v\np99_target_ms: 2000\naffects: [INT-001, INT-002]\n",
+            ),
+        ] {
+            std::fs::write(
+                repo.join("model").join(name),
+                format!("---\n{fm}---\n\nТело.\n"),
+            )
+            .expect("entity");
+        }
+        let component = component_nfr(&repo);
+        assert_eq!(component.status, GateStatus::Fail, "{}", component.detail);
+        assert!(
+            component.detail.contains("проверок: 4"),
+            "прогнаны все четыре проверки: {}",
+            component.detail
+        );
+        let errors = component
+            .findings
+            .iter()
+            .filter(|f| f.severity == "error")
+            .count();
+        let warns = component
+            .findings
+            .iter()
+            .filter(|f| f.severity == "warn")
+            .count();
+        assert!(errors > 0 && warns > 0, "{:?}", component.findings);
+        assert!(
+            component.detail.contains(&format!("error: {errors}")),
+            "{}",
+            component.detail
+        );
+        assert!(
+            component
+                .detail
+                .contains(&format!("находок: {}", errors + warns)),
+            "{}",
+            component.detail
+        );
+    }
 }
