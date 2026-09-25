@@ -293,6 +293,134 @@ fn judge_history_record(subject: &str, score: u8, rationale: &str) -> serde_json
 /// E8.2: кэш вердикта. Повторное ревью неизменённого досье не вызывает модель
 /// (счётчик вызовов CLI-судья не растёт), отчёт несёт отметку `provenance.cache`,
 /// `--no-cache` обходит кэш, а правка субъекта промахивается мимо записи.
+/// E10.3/E10.4: смысловой срез по продуктам и пакет комитета. В пакет
+/// попадают только решения `fail` и `human`, каждое — с доказательствами
+/// (цитата с указателем на источник и причина решения); `pass` не попадает.
+#[test]
+fn rubric_committee_package_holds_only_contested_decisions() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let home = tmp.path();
+    let artifact = |rubric: &str, subject: &str, decision: &str, rationale: &str| {
+        serde_json::json!({
+            "schema": "arch-rubric-artifact/1",
+            "rubric": rubric,
+            "subject": subject,
+            "judge_model": "judge-1",
+            "weighted_total": 2.0,
+            "verdict": "тест",
+            "decision": decision,
+            "decision_reasons": ["подтверждённое нарушение"],
+            "scores": [{
+                "criterion_id": "no_violation",
+                "weight": 3.0,
+                "score": 1,
+                "rationale": rationale,
+                "samples": [1],
+                "stdev": 0.0,
+                // При `human` критерий несёт метку: обвинение без подтверждения.
+                "flags": if decision == "human" { vec!["accusation_unconfirmed"] } else { vec![] },
+                "evidence_unconfirmed_ratio": 0.0,
+                "invalid_samples": 0,
+                "checked": [],
+                "citations": [{
+                    "role": "subject",
+                    "source": "src/pay.py",
+                    "quote": "self.charged.append(amount_minor)",
+                    "confirmed": true,
+                }],
+            }],
+            "inputs": [
+                {"path": "src/pay.py", "sha256": "aa", "role": "subject"},
+                {"path": "reports/detectors/fitness.json", "sha256": "bb",
+                 "role": "detector", "status": "fail"},
+            ],
+            "judged_at": "2026-09-25T12:00:00Z",
+        })
+    };
+    let product = |name: &str, rows: &[(&str, &str)]| {
+        let dir = home.join(name).join("reports/rubric");
+        std::fs::create_dir_all(&dir).expect("каталог отчётов");
+        for (subject, decision) in rows {
+            let file = subject.replace('/', "-");
+            std::fs::write(
+                dir.join(format!("{file}--code_vs_spine.json")),
+                serde_json::to_vec(&artifact(
+                    "code_invariant_conformance",
+                    subject,
+                    decision,
+                    "Цитата subject: \"self.charged.append(amount_minor)\". Нарушение.",
+                ))
+                .expect("json"),
+            )
+            .expect("отчёт");
+        }
+    };
+    product("product-a", &[("src/a", "fail"), ("src/b", "pass")]);
+    product("product-b", &[("src/c", "human"), ("src/d", "pass")]);
+
+    let mut cmd = arch_cmd(home);
+    cmd.args(["rubric", "committee", "--root"])
+        .arg(home.join("product-a"))
+        .arg("--root")
+        .arg(home.join("product-b"));
+    cmd.assert()
+        .success()
+        .stdout(contains("Пакет для архитектурного комитета (E10.4)"))
+        .stdout(contains("только решения `fail` и `human`"))
+        .stdout(contains("src/a"))
+        .stdout(contains("src/c"))
+        .stdout(contains("self.charged.append(amount_minor)"))
+        .stdout(contains(
+            "Красные детекторы: reports/detectors/fitness.json",
+        ))
+        .stdout(contains("подтверждённое нарушение"))
+        .stdout(contains(
+            "Возможные нарушения (механика не подтвердила): no_violation",
+        ))
+        .stdout(predicates::str::contains("src/b").not())
+        .stdout(predicates::str::contains("src/d").not());
+
+    // Машиночитаемый срез (E10.3): решения по типам, доля human, расхождения.
+    let json_out = arch_cmd(home)
+        .args(["rubric", "committee", "--root"])
+        .arg(home.join("product-a"))
+        .arg("--root")
+        .arg(home.join("product-b"))
+        .arg("--json")
+        .output()
+        .expect("срез");
+    assert!(
+        json_out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&json_out.stderr)
+    );
+    let slice: serde_json::Value = serde_json::from_slice(&json_out.stdout).expect("JSON среза");
+    assert_eq!(slice["reports"], 4, "{slice}");
+    assert_eq!(slice["fail"], 1, "{slice}");
+    assert_eq!(slice["human"], 1, "{slice}");
+    assert_eq!(slice["pass"], 2, "{slice}");
+    assert_eq!(slice["human_share"], 0.25, "{slice}");
+    assert_eq!(
+        slice["contested"].as_array().map(Vec::len),
+        Some(2),
+        "{slice}"
+    );
+    assert_eq!(slice["violated_invariants"]["no_violation"], 2, "{slice}");
+
+    // Запись пакета в файл.
+    let out = home.join("committee.md");
+    arch_cmd(home)
+        .args(["rubric", "committee", "--root"])
+        .arg(home.join("product-a"))
+        .arg("--out")
+        .arg(&out)
+        .assert()
+        .success()
+        .stderr(contains("Пакет комитета:"));
+    let written = std::fs::read_to_string(&out).expect("пакет записан");
+    assert!(written.contains("src/a"), "{written}");
+}
+
 #[test]
 fn rubric_run_cache_avoids_second_model_call() {
     let tmp = tempfile::tempdir().expect("tempdir");

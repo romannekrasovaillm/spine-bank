@@ -192,6 +192,7 @@ arch-be redteam semantic-score /tmp/semantic              # «смысловой
 | `arch-be control rules-report` | инвентарь правил: владельцы, expiry, исключения |
 | `arch-be rules template list / show / apply / verify` | шаблоны исполняемых правил: библиотека, применение в кейс, проверка зубов (ADR-050) |
 | `arch-be rules suggest <кейс>` | кандидаты по каждому инварианту без проверки поведения (то же, что `control rules-suggest`) |
+| `arch-be rubric committee --root <продукт>` | E10.4: пакет для архкомитета — только `fail` и `human` с доказательствами; `--json`, `--out` |
 | `arch-be rules suggest --from-judge` | E7.3: кандидаты в детерминированные правила из истории отчётов судьи (`$ARCH_HOME/reports`); `--history <каталог>`, `--min-runs N` |
 | `arch-be control score [--from-diff]` | маршрут значимости + anti-bypass |
 | `arch-be model validate / graph / export / import / drift / landscape` | модель: проверки, диаграммы, обмен (вкл. импорт реестров csv/xlsx/backstage), дрейф «модель ↔ код», ландшафт |

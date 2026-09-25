@@ -67,6 +67,20 @@ pub(crate) enum RubricCmd {
         #[arg(long)]
         no_cache: bool,
     },
+    /// E10.4: пакет для архитектурного комитета — только решения `fail`
+    /// и `human` с доказательствами (цитаты, указатели на источники, причины).
+    /// `pass` в пакет не попадает: комитет разбирает спорное.
+    Committee {
+        /// Корни продуктов (по умолчанию — текущий каталог); повторяемый.
+        #[arg(long = "root", default_value = ".")]
+        roots: Vec<PathBuf>,
+        /// Записать пакет в файл (по умолчанию — напечатать).
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Машиночитаемый срез вместо markdown (E10.3).
+        #[arg(long)]
+        json: bool,
+    },
     /// Что осталось оценить и чем: перечень принятых ADR без свежего отчёта
     /// плюс два готовых текста передачи судейства. Ничего не пишет (ADR-048).
     Handover {
@@ -200,6 +214,30 @@ pub(crate) async fn cmd_rubric(cfg: &Arc<Config>, cmd: RubricCmd) -> Result<()> 
                     "  {:<32} {} ({} критериев)",
                     r.name, r.description, r.criteria_count
                 );
+            }
+        }
+        RubricCmd::Committee { roots, out, json } => {
+            let products = arch_harness::rubric::products_from_roots(&roots);
+            let report = arch_harness::rubric::collect_portfolio(&products);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+                return Ok(());
+            }
+            let text = report.committee_markdown();
+            match out {
+                Some(path) => {
+                    if let Some(parent) = path.parent() {
+                        std::fs::create_dir_all(parent).ok();
+                    }
+                    std::fs::write(&path, &text)?;
+                    eprintln!(
+                        "Пакет комитета: {} (спорных отчётов {}, доля human {:.0}%)",
+                        path.display(),
+                        report.contested.len(),
+                        report.human_pct()
+                    );
+                }
+                None => print!("{text}"),
             }
         }
         RubricCmd::Run {

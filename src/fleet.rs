@@ -116,6 +116,12 @@ pub struct FleetReport {
     pub per_worktree: Vec<WorktreeSummary>,
     /// Обнаружен дрейф (гейт CI: exit 1).
     pub has_drift: bool,
+    /// E10.3: смысловой срез по продуктам флота — решения рубрик, доля
+    /// `human`, расхождения судей, нарушенные инварианты. Считается по
+    /// машиночитаемым отчётам (`reports/rubric/*.json`) каждого корня; нет
+    /// отчётов — срез пуст, а не «всё чисто».
+    #[serde(default)]
+    pub semantics: crate::rubric::PortfolioReport,
 }
 
 /// Метка worktree: имя каталога, при коллизии/отсутствии — полный путь.
@@ -420,6 +426,7 @@ pub fn audit(roots: &[PathBuf], include: &[String]) -> Result<FleetReport> {
         drift,
         per_worktree,
         has_drift,
+        semantics: crate::rubric::collect_portfolio(&crate::rubric::products_from_roots(roots)),
     })
 }
 
@@ -455,6 +462,9 @@ pub fn render_text(report: &FleetReport) -> String {
             w.last_commit_age.as_deref().unwrap_or("—"),
         );
     }
+    // E10.3: смысловой срез — часть отчёта по флоту, а не отдельная команда.
+    out.push('\n');
+    out.push_str(&report.semantics.render_markdown());
     // Рекомендация prune: worktree с известным возрастом старше PRUNE_AGE_DAYS.
     let stale: Vec<&WorktreeSummary> = report
         .per_worktree

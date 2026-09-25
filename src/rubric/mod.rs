@@ -34,6 +34,7 @@ mod catalog;
 mod decision;
 mod human_decision;
 mod judge;
+mod portfolio;
 mod qualify;
 mod report;
 #[cfg(test)]
@@ -61,6 +62,9 @@ pub use judge::{
     evaluate_with_options, generate_dynamic,
 };
 pub(crate) use judge::{judge_system_prompt, judge_user_prompt};
+pub use portfolio::{
+    PortfolioReport, ReviewSummary, collect as collect_portfolio, products_from_roots,
+};
 pub use qualify::{
     CaseOutcome, MAX_HUMAN_SHARE, MIN_ACCURACY, MIN_COMPLETENESS, QUALIFICATION_DIR,
     QUALIFICATION_SCHEMA, Qualification, QualificationReport, QualificationSet, Thresholds, Truth,
