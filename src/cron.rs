@@ -252,18 +252,22 @@ async fn agent_loop(
     )))
 }
 
-/// Извлекает headless-статус из последней непустой строки ответа.
-/// Возвращает `(status, summary)`; если строка — не JSON с полем `status`,
-/// то `("unknown", "")`.
+/// Извлекает headless-статус из ответа: последняя строка, которая парсится как
+/// JSON-объект с полем `status`. Ограждения markdown (```` ``` ````/```` ```json ````)
+/// и пустые строки пропускаются — модели штатно оборачивают контракт в блок
+/// кода, и раньше такой отчёт получал `Статус: unknown` при валидном JSON
+/// внутри блока (живой прогон cron 0.3.9). Возвращает `(status, summary)`;
+/// JSON не найден — `("unknown", "")`.
 fn extract_status(answer: &str) -> (String, String) {
     let unknown = || ("unknown".to_string(), String::new());
-    let Some(line) = answer.lines().rev().find(|l| !l.trim().is_empty()) else {
+    let candidate = answer
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| line.starts_with('{') && line.ends_with('}'));
+    let Some(line) = candidate else {
         return unknown();
     };
-    let line = line.trim();
-    if !line.starts_with('{') {
-        return unknown();
-    }
     let Ok(json) = serde_json::from_str::<serde_json::Value>(line) else {
         return unknown();
     };
@@ -497,6 +501,25 @@ out = "out/quarter"
             extract_status("текст отчёта\n{\"status\":\"partial\",\"summary\":\"половина\"}\n");
         assert_eq!(status, "partial");
         assert_eq!(summary, "половина");
+    }
+
+    /// JSON-контракт статуса может быть обёрнут в markdown-блок: отчёт обязан
+    /// получить `complete`, а не `unknown` (живой прогон cron 0.3.9 — штатный
+    /// дайджест завершался валидным JSON внутри блока кода, статус терялся).
+    #[test]
+    fn extract_status_tolerates_markdown_fence() {
+        let answer =
+            "Готово.\n\n```json\n{\"status\": \"complete\", \"summary\": \"10 материалов\"}\n```\n";
+        assert_eq!(
+            extract_status(answer),
+            ("complete".to_string(), "10 материалов".to_string())
+        );
+        let bare = "{\"status\": \"blocked\"}";
+        assert_eq!(extract_status(bare), ("blocked".to_string(), String::new()));
+        assert_eq!(
+            extract_status("просто текст"),
+            ("unknown".to_string(), String::new())
+        );
     }
 
     #[test]
