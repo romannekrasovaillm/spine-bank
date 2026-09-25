@@ -583,6 +583,7 @@ pub async fn run_golden_filtered(
             expected_scores.push(crate::rubric::CriterionScore {
                 citations: Vec::new(),
                 evidence_channel: None,
+                scenario_verdicts: Vec::new(),
                 criterion_id: criterion_id.clone(),
                 weight: 0.0,
                 score: expected.midpoint().round() as u8,

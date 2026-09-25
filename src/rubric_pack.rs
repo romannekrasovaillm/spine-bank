@@ -83,16 +83,21 @@ pub enum PackKind {
     /// «решение слоя расходится со стандартом ДКА»): субъект — документ
     /// решения, ссылки — стандарты `docs/standards/**`.
     SolutionVsStandards,
+    /// Файл кода против сценариев проверки из `OpenSpec` (E11.1): субъект —
+    /// код, ссылки — сценарии WHEN/THEN (`openspec/specs/**`), каждый со своим
+    /// идентификатором `…/S<n>`. Судья оценивает сценарии поимённо.
+    CodeVsScenarios,
 }
 
 impl PackKind {
     /// Все виды досье в порядке объявления (реестр CLI/MCP).
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::AdrVsSpine,
         Self::EntityLinks,
         Self::NfrMechanism,
         Self::CodeVsSpine,
         Self::SolutionVsStandards,
+        Self::CodeVsScenarios,
     ];
 
     /// Строковое имя вида — как в YAML рубрик, CLI и отчётах.
@@ -104,6 +109,7 @@ impl PackKind {
             Self::NfrMechanism => "nfr_mechanism",
             Self::CodeVsSpine => "code_vs_spine",
             Self::SolutionVsStandards => "solution_vs_standards",
+            Self::CodeVsScenarios => "code_vs_scenarios",
         }
     }
 
@@ -141,6 +147,9 @@ impl PackKind {
             Self::CodeVsSpine => "путь к файлу кода относительно корня (`src/control.rs`)",
             Self::SolutionVsStandards => {
                 "путь к солюшен-документу (`docs/solution/SOL-1.md`); стандарты — из `docs/standards/`"
+            }
+            Self::CodeVsScenarios => {
+                "путь к файлу кода (`src/pay.py`); сценарии — из `openspec/specs/**`"
             }
         }
     }
@@ -532,6 +541,7 @@ fn collector(kind: PackKind, repo: &Path, subject: &str) -> Result<Vec<Source>> 
         PackKind::NfrMechanism => nfr_mechanism(repo, subject),
         PackKind::CodeVsSpine => code_vs_spine(repo, subject),
         PackKind::SolutionVsStandards => solution_vs_standards(repo, subject),
+        PackKind::CodeVsScenarios => code_vs_scenarios(repo, subject),
     }
 }
 
@@ -853,6 +863,63 @@ fn adr_vs_spine(repo: &Path, subject: &str) -> Result<Vec<Source>> {
     let text = std::fs::read_to_string(&path).map_err(|e| HarnessError::io(&path, e))?;
     let mut out = vec![Source::subject(relative(repo, &path), text)];
     out.extend(spine_sources(repo)?);
+    Ok(out)
+}
+
+/// Досье `code_vs_scenarios` (E11.1): файл кода + сценарии проверки из
+/// `OpenSpec`. Каждый сценарий — отдельный ссылочный источник со своим
+/// идентификатором (`openspec:<capability>#<hash>/S<n>`), а его текст несёт
+/// требование (строки SHALL/MUST) и шаги WHEN/THEN: судья оценивает сценарий
+/// поимённо, а покрытие (`coverage: reference_ids`) требует перечислить все.
+/// Нет сценариев — явная ошибка: сверять код не с чем.
+fn code_vs_scenarios(repo: &Path, subject: &str) -> Result<Vec<Source>> {
+    let path = resolve_subject_path(repo, subject, PackKind::CodeVsScenarios)?;
+    let text = std::fs::read_to_string(&path).map_err(|e| HarnessError::io(&path, e))?;
+    let mut out = vec![Source::subject(relative(repo, &path), text)];
+    let requirements = crate::openspec::scan_requirements(repo).unwrap_or_default();
+    let scenarios = crate::openspec::scan_scenarios(repo).map_err(|_| {
+        pack_error(
+            "pack_no_scenarios",
+            format!(
+                "в {} нет сценариев OpenSpec (`openspec/specs/**`): сверять код не с чем",
+                repo.display()
+            ),
+        )
+    })?;
+    if scenarios.is_empty() {
+        return Err(pack_error(
+            "pack_no_scenarios",
+            "в OpenSpec нет ни одного сценария проверки (`#### Scenario:` под требованием              с SHALL/MUST) — сверять код не с чем"
+                .to_string(),
+        ));
+    }
+    for scenario in scenarios {
+        let requirement = requirements
+            .iter()
+            .find(|r| r.id == scenario.requirement_id);
+        let mut body = String::new();
+        if let Some(requirement) = requirement {
+            let _ = writeln!(body, "## Требование: {}", requirement.title);
+            for statement in &requirement.statements {
+                let _ = writeln!(body, "{statement}");
+            }
+            body.push('\n');
+        }
+        let _ = writeln!(body, "## Сценарий: {}", scenario.title);
+        for step in &scenario.steps {
+            let _ = writeln!(body, "- {step}");
+        }
+        out.push(Source {
+            path: format!("{}#{}", scenario.file.display(), scenario.id),
+            text: body,
+            role: InputRole::Reference,
+            id: Some(scenario.id),
+            status: None,
+        });
+    }
+    out.sort_by(|a, b| a.path.cmp(&b.path));
+    // Субъект — первым: порядок досье «субъект, затем ссылки».
+    out.sort_by_key(|s| s.role != InputRole::Subject);
     Ok(out)
 }
 
@@ -1480,6 +1547,127 @@ mod tests {
         assert_eq!(sources[1].role, InputRole::Reference);
         assert_eq!(sources[1].id.as_deref(), Some("AD-2"));
         assert!(sources[1].text.contains("Rule: механика контроля без LLM"));
+    }
+
+    // --- E11.1/E11.2: досье «код против сценариев OpenSpec» ------------------
+
+    /// Сценарии `OpenSpec` становятся ссылочными источниками с поимёнными
+    /// идентификаторами; текст несёт и требование, и шаги WHEN/THEN.
+    #[test]
+    fn code_vs_scenarios_pairs_code_with_named_scenarios() {
+        let tmp = repo_with_spine();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("src")).expect("mkdir src");
+        std::fs::create_dir_all(root.join("openspec/specs/payments")).expect("mkdir openspec");
+        std::fs::write(
+            root.join("src/pay.py"),
+            "def charge(key):\n    return key\n",
+        )
+        .expect("код");
+        std::fs::write(
+            root.join("openspec/specs/payments/spec.md"),
+            "# payments Specification\n\n### Requirement: Идемпотентность\n\
+             Система SHALL требовать ключ идемпотентности.\n\n\
+             #### Scenario: Повторный вызов\n- **WHEN** ключ повторён\n- **THEN** второго эффекта нет\n",
+        )
+        .expect("спека");
+        let packs = build(root, PackKind::CodeVsScenarios, "src/pay.py").expect("досье");
+        assert_eq!(packs.len(), 1);
+        let pack = &packs[0];
+        assert_eq!(pack.inputs.len(), 2, "код + один сценарий");
+        assert_eq!(pack.inputs[0].role, InputRole::Subject);
+        assert_eq!(pack.inputs[1].role, InputRole::Reference);
+        let id = pack.inputs[1]
+            .id
+            .as_deref()
+            .expect("идентификатор сценария");
+        assert!(id.ends_with("/S1"), "{id}");
+        assert!(id.starts_with("openspec:payments#"), "{id}");
+        assert!(
+            pack.inputs[1]
+                .path
+                .contains("openspec/specs/payments/spec.md"),
+            "{}",
+            pack.inputs[1].path
+        );
+        assert!(
+            pack.text
+                .contains("Система SHALL требовать ключ идемпотентности."),
+            "текст требования в досье"
+        );
+        assert!(pack.text.contains("WHEN"), "шаги сценария в досье");
+        // Покрытие сверяет идентификаторы сценариев (coverage: reference_ids).
+        assert_eq!(
+            pack.references()
+                .iter()
+                .map(|r| r.key())
+                .collect::<Vec<_>>(),
+            vec![id.to_string()]
+        );
+    }
+
+    /// Нет сценариев — явная ошибка: код без сценариев сверять не с чем.
+    #[test]
+    fn code_vs_scenarios_without_scenarios_is_an_explicit_error() {
+        let tmp = repo_with_spine();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("src")).expect("mkdir src");
+        std::fs::write(root.join("src/pay.py"), "x = 1\n").expect("код");
+        let err = build(root, PackKind::CodeVsScenarios, "src/pay.py")
+            .expect_err("без сценариев досье не собирается");
+        assert!(err.to_string().contains("pack_no_scenarios"), "{err}");
+    }
+
+    /// Правка `OpenSpec` меняет досье без ручной работы (E11.2): хэш досье и
+    /// текст источника меняются вместе со спекой.
+    #[test]
+    fn openspec_change_moves_the_dossier_hash() {
+        let tmp = repo_with_spine();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("src")).expect("mkdir src");
+        std::fs::create_dir_all(root.join("openspec/specs/payments")).expect("mkdir openspec");
+        std::fs::write(
+            root.join("src/pay.py"),
+            "def charge(key):\n    return key\n",
+        )
+        .expect("код");
+        let spec = root.join("openspec/specs/payments/spec.md");
+        let text = "# payments Specification\n\n### Requirement: Идемпотентность\n\
+                    Система SHALL требовать ключ идемпотентности.\n\n\
+                    #### Scenario: Повторный вызов\n- **WHEN** ключ повторён\n- **THEN** второго эффекта нет\n";
+        std::fs::write(&spec, text).expect("спека");
+        let first = build(root, PackKind::CodeVsScenarios, "src/pay.py").expect("досье");
+        std::fs::write(
+            &spec,
+            text.replace("второго эффекта нет", "второго эффекта нет и быть не может"),
+        )
+        .expect("правка спеки");
+        let second = build(root, PackKind::CodeVsScenarios, "src/pay.py").expect("досье");
+        assert_ne!(
+            first[0].sha256, second[0].sha256,
+            "правка OpenSpec видна в досье без ручной работы"
+        );
+    }
+
+    /// Рубрика сценариев объявляет этот вид досье и требует покрытия
+    /// идентификаторов сценариев (E11.1).
+    #[test]
+    fn scenario_rubric_covers_every_scenario() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("assets/rubrics/code_scenario_conformance.yaml");
+        let rubric = crate::rubric::load(&path).expect("рубрика грузится");
+        assert_eq!(rubric.pack.map(PackKind::as_str), Some("code_vs_scenarios"));
+        let blocking = rubric
+            .criteria
+            .iter()
+            .find(|c| c.blocking)
+            .expect("блокирующий критерий");
+        assert!(blocking.coverage.is_some(), "сценарии покрываются поимённо");
+        assert_eq!(
+            blocking.evidence_role_list().expect("роли").len(),
+            2,
+            "цитата на код и на сценарий"
+        );
     }
 
     // --- E10.1: досье «солюшен против стандартов слоя ДКА» -------------------

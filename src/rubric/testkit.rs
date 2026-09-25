@@ -120,6 +120,7 @@ pub(super) fn plain_score(criterion_id: &str, weight: f64, score: u8) -> Criteri
         invalid_samples: 0,
         citations: Vec::new(),
         evidence_channel: None,
+        scenario_verdicts: Vec::new(),
     }
 }
 

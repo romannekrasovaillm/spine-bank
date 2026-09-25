@@ -649,6 +649,12 @@ fn semantic_subjects(
                 push(doc);
             }
         }
+        crate::rubric_pack::PackKind::CodeVsScenarios => {
+            // E11.1: сценарии OpenSpec проверяются по файлам кода модели.
+            for file in code_files(repo) {
+                push(file);
+            }
+        }
     }
     let Some(changed) = changed else {
         return out;

@@ -248,6 +248,7 @@ mod tests {
                 checked: Vec::new(),
                 citations: Vec::new(),
                 evidence_channel: None,
+                scenario_verdicts: Vec::new(),
             }],
             weighted_total: 5.0,
             verdict: "v".to_string(),

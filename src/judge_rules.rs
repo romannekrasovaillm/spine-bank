@@ -871,6 +871,7 @@ mod tests {
                 checked: Vec::new(),
                 citations: Vec::new(),
                 evidence_channel: None,
+                scenario_verdicts: Vec::new(),
             }
         };
         let report = RubricReport {

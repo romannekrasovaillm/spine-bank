@@ -332,6 +332,23 @@ pub struct CriterionScore {
     /// `None` — подтверждать было нечего (низкий балл без требования цитаты).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evidence_channel: Option<String>,
+    /// E11.1: поимённый вердикт по каждому сценарию проверки из досье
+    /// (`openspec:…#S1`). Пусто — критерий сценарии не оценивает.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scenario_verdicts: Vec<ScenarioVerdict>,
+}
+
+/// Вердикт судьи по одному сценарию проверки (E11.1): сценарий оценивается
+/// отдельно, а не «в целом по требованию».
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScenarioVerdict {
+    /// Идентификатор сценария (`openspec:payments#a1b2c3d4/S1`).
+    pub id: String,
+    /// Вердикт судьи: `pass` / `fail` / `unclear` (как назвал судья).
+    pub verdict: String,
+    /// Пояснение (цитаты — как в обосновании критерия).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub rationale: String,
 }
 
 /// Цитата с указателем на источник досье (E9.1), прошедшая механическую сверку.

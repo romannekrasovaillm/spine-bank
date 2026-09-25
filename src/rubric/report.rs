@@ -292,6 +292,35 @@ impl RubricReport {
                     let _ = writeln!(out, "\nКанал доказательств: {}.", channels.join(", "));
                 }
             }
+            // E11.1: сценарии проверки оцениваются поимённо — их вердикты видны
+            // отдельной таблицей, а не растворяются в общем балле критерия.
+            let scenarios: Vec<(&crate::rubric::ScenarioVerdict, &str)> = self
+                .scores
+                .iter()
+                .flat_map(|s| {
+                    s.scenario_verdicts
+                        .iter()
+                        .map(move |v| (v, s.criterion_id.as_str()))
+                })
+                .collect();
+            if !scenarios.is_empty() {
+                let _ = writeln!(out, "\n**Сценарии проверки (E11.1):**");
+                let _ = writeln!(out, "| Сценарий | Критерий | Вердикт | Пояснение |");
+                let _ = writeln!(out, "| --- | --- | --- | --- |");
+                for (v, criterion) in &scenarios {
+                    let verdict = if v.verdict.is_empty() {
+                        "—".to_string()
+                    } else {
+                        v.verdict.clone()
+                    };
+                    let rationale = v.rationale.replace('|', "\\|").replace(['\n', '\r'], " ");
+                    let _ = writeln!(
+                        out,
+                        "| `{}` | {} | {} | {} |",
+                        v.id, criterion, verdict, rationale
+                    );
+                }
+            }
             let _ = writeln!(out, "\n**Взвешенный итог:** {:.2}/5", self.weighted_total);
         }
         let excluded: Vec<&str> = self
@@ -455,6 +484,23 @@ pub(super) struct JudgeScore {
     /// доказательств. Пусто — доказательства берутся из rationale (страховка).
     #[serde(default)]
     citations: Vec<JudgeCitation>,
+    /// E11.1: поимённые вердикты по сценариям проверки из досье.
+    #[serde(default)]
+    scenarios: Vec<JudgeScenario>,
+}
+
+/// Вердикт судьи по одному сценарию (E11.1) в сыром ответе.
+#[derive(Debug, Clone, Deserialize)]
+pub(super) struct JudgeScenario {
+    /// Идентификатор сценария из досье.
+    #[serde(default)]
+    id: String,
+    /// `pass` / `fail` / `unclear`.
+    #[serde(default)]
+    verdict: String,
+    /// Пояснение.
+    #[serde(default)]
+    rationale: String,
 }
 
 /// Цитата от судьи с указателем на источник (E9.1): роль, путь источника и
@@ -599,6 +645,35 @@ fn coverage_incomplete(
 /// критерия с ролями — по цитате на роль, каждая только со своего источника.
 /// Метка роли разбирается терпимо (см. ниже), но сама проверка цитаты не
 /// смягчается ни в одном из путей.
+/// Собирает поимённые вердикты по сценариям проверки (E11.1): объединение по
+/// сэмплам, порядок — как в первом появлении.
+fn collect_scenario_verdicts(
+    runs: &[JudgeResponse],
+    criterion_id: &str,
+) -> Vec<crate::rubric::ScenarioVerdict> {
+    let mut out: Vec<crate::rubric::ScenarioVerdict> = Vec::new();
+    for run in runs {
+        let Some(sample) = run.scores.iter().find(|s| s.criterion_id == criterion_id) else {
+            continue;
+        };
+        for scenario in &sample.scenarios {
+            if scenario.id.trim().is_empty() {
+                continue;
+            }
+            let verdict = crate::rubric::ScenarioVerdict {
+                id: scenario.id.trim().to_string(),
+                verdict: scenario.verdict.trim().to_string(),
+                rationale: scenario.rationale.clone(),
+            };
+            match out.iter_mut().find(|seen| seen.id == verdict.id) {
+                Some(seen) => *seen = verdict,
+                None => out.push(verdict),
+            }
+        }
+    }
+    out
+}
+
 /// Собирает цитаты с указателем по всем сэмплам критерия (E9.1): одна и та же
 /// цитата из разных сэмплов не дублируется.
 fn collect_citations(runs: &[JudgeResponse], criterion_id: &str) -> Vec<JudgeCitation> {
@@ -995,6 +1070,9 @@ pub(crate) fn build_report(
         // подтверждаться его текстом. Прозаический канал (цитаты в rationale)
         // остаётся страховкой для моделей, которые структуру не отдают.
         let citations = collect_citations(runs, &c.id);
+        // E11.1: поимённые вердикты по сценариям — объединение по сэмплам;
+        // последний ответ по сценарию побеждает (как и в rationale).
+        let scenario_verdicts = collect_scenario_verdicts(runs, &c.id);
         let check = check_citations(&citations, scope, cfg.evidence_min_similarity);
         if check.unknown_source {
             flags.push(CriterionFlag::CitationSourceUnknown);
@@ -1086,6 +1164,7 @@ pub(crate) fn build_report(
             checked,
             citations: check.verified,
             evidence_channel,
+            scenario_verdicts,
         });
     }
     let weighted_total = match weighted_total(&rubric.criteria, &scores) {
@@ -1611,6 +1690,7 @@ mod tests {
             scores: vec![
                 JudgeScore {
                     citations: Vec::new(),
+                    scenarios: Vec::new(),
                     criterion_id: "context".into(),
                     score: f64::from(context),
                     rationale: rationale.into(),
@@ -1618,6 +1698,7 @@ mod tests {
                 },
                 JudgeScore {
                     citations: Vec::new(),
+                    scenarios: Vec::new(),
                     criterion_id: "alternatives".into(),
                     score: 3.0,
                     rationale: "Цитата: \"альтернативы перечислены\" — частично".into(),
@@ -1765,6 +1846,7 @@ mod tests {
                         .iter()
                         .map(|(id, score)| JudgeScore {
                             citations: Vec::new(),
+                            scenarios: Vec::new(),
                             criterion_id: id.clone(),
                             score: f64::from(*score),
                             rationale: format!("Цитата: \"{fragment}\" — по тексту"),
@@ -1813,6 +1895,7 @@ mod tests {
             scores: vec![CriterionScore {
                 citations: Vec::new(),
                 evidence_channel: None,
+                scenario_verdicts: Vec::new(),
                 criterion_id: "context".into(),
                 weight: 1.0,
                 score: 4,
@@ -2174,6 +2257,67 @@ mod tests {
     }
 
     // --- E9: цитаты с указателем на источник --------------------------------
+
+    // --- E11.1: сценарии проверки -------------------------------------------
+
+    /// Судья оценивает сценарии поимённо: вердикты попадают в отчёт отдельной
+    /// таблицей, а не растворяются в балле критерия.
+    #[test]
+    fn scenario_verdicts_are_recorded_per_scenario() {
+        let answer = parse_judge_response(
+            r#"{"scores": [{"criterion_id": "no_contradiction", "score": 1,
+                 "rationale": "Цитата subject: \"Решение: контроль слоя построен без LLM в гейте.\". Цитата reference: \"Rule: механика контроля без LLM.\". нарушено",
+                 "scenarios": [
+                   {"id": "openspec:payments#aa/S1", "verdict": "fail",
+                    "rationale": "WHEN повтор — второй эффект"},
+                   {"id": "openspec:payments#aa/S2", "verdict": "pass",
+                    "rationale": "WHEN отказ — эффекта нет"}
+                 ]}], "verdict": "v"}"#,
+        )
+        .expect("ответ судьи");
+        let report = build_report(
+            &two_role_rubric(),
+            "judge-x",
+            &[answer],
+            &EvidenceScope::Pack(&two_source_pack()),
+            &one_sample(),
+        )
+        .expect("отчёт");
+        let verdicts = &report.scores[0].scenario_verdicts;
+        assert_eq!(verdicts.len(), 2, "{verdicts:?}");
+        assert_eq!(verdicts[0].id, "openspec:payments#aa/S1");
+        assert_eq!(verdicts[0].verdict, "fail");
+        let md = report.to_markdown();
+        assert!(md.contains("Сценарии проверки (E11.1)"), "{md}");
+        assert!(md.contains("openspec:payments#aa/S1"), "{md}");
+        assert!(md.contains("WHEN повтор — второй эффект"), "{md}");
+    }
+
+    /// Один и тот же сценарий из разных сэмплов не дублируется: последний
+    /// ответ побеждает (как и у rationale).
+    #[test]
+    fn scenario_verdicts_are_deduplicated_across_samples() {
+        let reply = |verdict: &str| {
+            format!(
+                r#"{{"scores": [{{"criterion_id": "no_contradiction", "score": 1,
+                 "rationale": "Цитата subject: \"Решение: контроль слоя построен без LLM в гейте.\". Цитата reference: \"Rule: механика контроля без LLM.\". нарушено",
+                 "scenarios": [{{"id": "openspec:cap#aa/S1", "verdict": "{verdict}"}}]}}], "verdict": "v"}}"#
+            )
+        };
+        let first = parse_judge_response(&reply("pass")).expect("ответ");
+        let second = parse_judge_response(&reply("fail")).expect("ответ");
+        let report = build_report(
+            &two_role_rubric(),
+            "judge-x",
+            &[first, second],
+            &EvidenceScope::Pack(&two_source_pack()),
+            &three_samples(),
+        )
+        .expect("отчёт");
+        let verdicts = &report.scores[0].scenario_verdicts;
+        assert_eq!(verdicts.len(), 1, "сценарий один: {verdicts:?}");
+        assert_eq!(verdicts[0].verdict, "fail", "побеждает последний ответ");
+    }
 
     /// Рубрика с двумя ролями: обвинение (низкий балл) требует цитату на
     /// каждую роль, и каждая сверяется со своим источником.

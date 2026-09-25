@@ -185,6 +185,160 @@ fn parse_requirements(content: &str) -> Result<Vec<RawRequirement>> {
     Ok(out)
 }
 
+/// Сценарий проверки `#### Scenario: <title>` под требованием (E11.1): строки
+/// WHEN/THEN — то, что судья проверяет по коду ОТДЕЛЬНО от требования целиком.
+#[derive(Debug, Clone, Serialize)]
+pub struct Scenario {
+    /// Стабильный идентификатор `openspec:<capability>#<hash8>/S<n>`: хэш
+    /// требования плюс номер сценария внутри него.
+    pub id: String,
+    /// Идентификатор требования, к которому сценарий относится.
+    pub requirement_id: String,
+    /// Заголовок `#### Scenario:`.
+    pub title: String,
+    /// Тело сценария: строки WHEN/THEN/AND (обрезка, ведущие маркеры сняты).
+    pub steps: Vec<String>,
+    /// Файл-источник относительно корня репозитория.
+    pub file: PathBuf,
+    /// Строка заголовка сценария (1-based).
+    pub line: usize,
+}
+
+/// Требование файла спеки во время разбора сценариев: строки SHALL/MUST и
+/// найденные под ним сценарии `(заголовок, строка, шаги)`.
+struct Block {
+    statements: Vec<String>,
+    scenarios: Vec<(String, usize, Vec<String>)>,
+}
+
+/// Разбирает сценарии одного файла спеки: каждый привязан к требованию, под
+/// которым записан. Требование без строк SHALL/MUST отбрасывается вместе со
+/// сценариями — идентификатор требования строится из этих строк, и без них
+/// сценарий не к чему привязать.
+fn parse_scenarios(content: &str, capability: &str, file: &Path) -> Result<Vec<Scenario>> {
+    let re_req = os_regex(r"^###\s+Requirement:\s*(.+?)\s*$")?;
+    let re_scenario = os_regex(r"^####\s+Scenario:\s*(.+?)\s*$")?;
+    let re_heading = os_regex(r"^#{1,4}\s")?;
+    let re_shall = os_regex(r"\b(?:SHALL|MUST)\b")?;
+
+    let mut blocks: Vec<Block> = Vec::new();
+    let mut current: Option<Block> = None;
+    let mut open_scenario: Option<(String, usize, Vec<String>)> = None;
+
+    let close_scenario = |open: Option<(String, usize, Vec<String>)>,
+                          current: &mut Option<Block>| {
+        if let (Some(scenario), Some(block)) = (open, current.as_mut()) {
+            block.scenarios.push(scenario);
+        }
+    };
+
+    for (idx, line) in content.lines().enumerate() {
+        if re_req.is_match(line) {
+            close_scenario(open_scenario.take(), &mut current);
+            if let Some(done) = current.take() {
+                blocks.push(done);
+            }
+            current = Some(Block {
+                statements: Vec::new(),
+                scenarios: Vec::new(),
+            });
+            continue;
+        }
+        if let Some(caps) = re_scenario.captures(line) {
+            close_scenario(open_scenario.take(), &mut current);
+            open_scenario = Some((caps[1].to_string(), idx + 1, Vec::new()));
+            continue;
+        }
+        if re_heading.is_match(line) {
+            // Заголовок уровня ≤ 3 закрывает и сценарий, и требование.
+            close_scenario(open_scenario.take(), &mut current);
+            if let Some(done) = current.take() {
+                blocks.push(done);
+            }
+            continue;
+        }
+        if let Some((_, _, steps)) = open_scenario.as_mut() {
+            let trimmed = line.trim().trim_start_matches(['-', '*', ' ']).trim();
+            if !trimmed.is_empty() {
+                steps.push(trimmed.to_string());
+            }
+        } else if let Some(block) = current.as_mut() {
+            if re_shall.is_match(line) {
+                block.statements.push(line.trim().to_string());
+            }
+        }
+    }
+    close_scenario(open_scenario.take(), &mut current);
+    if let Some(done) = current.take() {
+        blocks.push(done);
+    }
+
+    let mut out = Vec::new();
+    for block in blocks {
+        if block.statements.is_empty() {
+            continue; // требование без SHALL/MUST — сценарии к нему не крепятся
+        }
+        let requirement = requirement_id(capability, &block.statements);
+        for (n, (title, line, steps)) in block.scenarios.into_iter().enumerate() {
+            out.push(Scenario {
+                id: format!("{requirement}/S{}", n + 1),
+                requirement_id: requirement.clone(),
+                title,
+                steps,
+                file: file.to_path_buf(),
+                line,
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// Сканирует сценарии проверки (E11.2): те же файлы `OpenSpec`, что у
+/// требований, — живые спеки и дельты активных changes. Порядок
+/// детерминирован (файл, строка).
+///
+/// # Errors
+/// `openspec/specs` отсутствует, файл спеки не читается.
+pub fn scan_scenarios(root: &Path) -> Result<Vec<Scenario>> {
+    let specs_dir = root.join("openspec/specs");
+    let mut files: Vec<PathBuf> = Vec::new();
+    if specs_dir.is_dir() {
+        files.extend(collect_md(&specs_dir));
+    }
+    let changes_dir = root.join("openspec/changes");
+    if changes_dir.is_dir() {
+        let mut change_dirs: Vec<PathBuf> = std::fs::read_dir(&changes_dir)
+            .map_err(|e| HarnessError::io(&changes_dir, e))?
+            .filter_map(std::result::Result::ok)
+            .map(|e| e.path())
+            .filter(|p| p.is_dir() && p.file_name().is_some_and(|n| n != "archive"))
+            .collect();
+        change_dirs.sort();
+        for change in change_dirs {
+            files.extend(collect_md(&change.join("specs")));
+        }
+    }
+    if files.is_empty() {
+        return Err(HarnessError::Control(format!(
+            "openspec/specs не найден в {} — адаптер читает репозиторий с разметкой OpenSpec",
+            root.display()
+        )));
+    }
+    let mut out = Vec::new();
+    for file in files {
+        let content = std::fs::read_to_string(&file).map_err(|e| HarnessError::io(&file, e))?;
+        let capability = file
+            .parent()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let rel = file.strip_prefix(root).unwrap_or(&file).to_path_buf();
+        out.extend(parse_scenarios(&content, &capability, &rel)?);
+    }
+    out.sort_by(|a, b| a.file.cmp(&b.file).then(a.line.cmp(&b.line)));
+    Ok(out)
+}
+
 /// Собирает markdown-файлы каталога (рекурсивно, детерминированный порядок).
 fn collect_md(dir: &Path) -> Vec<PathBuf> {
     let mut files: Vec<PathBuf> = WalkDir::new(dir)
@@ -1066,6 +1220,90 @@ mod tests {
         \n\
         ### Requirement: Идемпотентность\n\
         Система SHALL требовать ключ идемпотентности.\n";
+
+    // --- E11.1/E11.2: сценарии проверки --------------------------------------
+
+    /// Сценарии привязываются к требованию, получают стабильный идентификатор
+    /// `…/S<n>` и тело WHEN/THEN; требование без SHALL/MUST сценариев не даёт.
+    #[test]
+    fn scenarios_are_bound_to_requirements_with_stable_ids() {
+        let scenarios = parse_scenarios(
+            SPEC_MD,
+            "payments",
+            Path::new("openspec/specs/payments/spec.md"),
+        )
+        .expect("сценарии разбираются");
+        assert_eq!(scenarios.len(), 1, "{scenarios:?}");
+        let scenario = &scenarios[0];
+        assert_eq!(scenario.title, "Округление");
+        assert!(
+            scenario.id.ends_with("/S1"),
+            "номер сценария в идентификаторе: {}",
+            scenario.id
+        );
+        assert!(
+            scenario.id.starts_with(&scenario.requirement_id),
+            "идентификатор сценария строится от требования"
+        );
+        assert_eq!(scenario.steps.len(), 2, "{:?}", scenario.steps);
+        assert!(scenario.steps[0].contains("WHEN"), "{:?}", scenario.steps);
+        assert!(scenario.steps[1].contains("THEN"), "{:?}", scenario.steps);
+        assert_eq!(scenario.line, 13, "строка заголовка сценария");
+        assert_eq!(
+            scenario.file,
+            PathBuf::from("openspec/specs/payments/spec.md")
+        );
+    }
+
+    /// Требование без сценариев сценариев не даёт; несколько сценариев под
+    /// одним требованием нумеруются по порядку.
+    #[test]
+    fn scenarios_are_numbered_per_requirement() {
+        let content = "# Spec\n\n### Requirement: Одно\nСистема SHALL делать.\n\n\
+                       #### Scenario: Первый\n- **WHEN** раз\n- **THEN** два\n\n\
+                       #### Scenario: Второй\n- **WHEN** три\n- **THEN** четыре\n\n\
+                       ### Requirement: Без сценариев\nСистема SHALL молчать.\n";
+        let scenarios = parse_scenarios(content, "cap", Path::new("spec.md")).expect("разбор");
+        assert_eq!(scenarios.len(), 2);
+        assert!(scenarios[0].id.ends_with("/S1"), "{}", scenarios[0].id);
+        assert_eq!(scenarios[1].title, "Второй");
+        assert!(scenarios[1].id.ends_with("/S2"), "{}", scenarios[1].id);
+        assert_eq!(
+            scenarios[0].requirement_id, scenarios[1].requirement_id,
+            "оба сценария — одного требования"
+        );
+    }
+
+    /// Изменение текста сценария в `OpenSpec` меняет досье Spine без ручной
+    /// работы: сценарии читаются из спеки при каждой сборке (E11.2).
+    #[test]
+    fn scan_scenarios_reads_specs_and_tracks_changes() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let root = dir.path();
+        let spec = root.join("openspec/specs/payments/spec.md");
+        write(&spec, SPEC_MD);
+        let first = scan_scenarios(root).expect("сканирование");
+        assert_eq!(first.len(), 1);
+        // Правка сценария в спеке видна в следующем сканировании.
+        write(
+            &spec,
+            &SPEC_MD.replace("по правилу", "по правилу банка, с округлением вниз"),
+        );
+        let second = scan_scenarios(root).expect("сканирование");
+        assert_eq!(second.len(), 1);
+        assert_ne!(
+            first[0].steps, second[0].steps,
+            "правка OpenSpec видна без ручной работы"
+        );
+    }
+
+    /// Нет разметки `OpenSpec` — понятная ошибка, а не пустой список.
+    #[test]
+    fn scan_scenarios_without_openspec_is_an_explicit_error() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let err = scan_scenarios(dir.path()).expect_err("нет openspec/specs");
+        assert!(err.to_string().contains("openspec/specs"), "{err}");
+    }
 
     /// Дельта активного change.
     const DELTA_SPEC_MD: &str = "# Delta: payments\n\
