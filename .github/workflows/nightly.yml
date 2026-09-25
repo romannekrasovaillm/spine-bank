@@ -70,7 +70,10 @@ jobs:
     # Красная джоба = выжившие мутанты (cargo-mutants exit≠0) — это сигнал
     # добавить тесты, а не поломка сборки; mutants.out уезжает в артефакт
     # даже при таймауте (if: always()) с частичными результатами.
-    name: cargo-mutants (шард ${{ matrix.shard }}/12)
+    # Нумерация шардов у cargo-mutants 27 — С НУЛЯ: `--shard k/n` требует
+    # k < n, поэтому «12/12» было невалидным значением и джоба падала до
+    # прогона (exit 1 «shard k must be less than n»). Матрица — 0…11.
+    name: cargo-mutants (шард ${{ matrix.shard }} из 12, нумерация с 0)
     runs-on: ubuntu-latest
     # Лимит GitHub на джобу — 6 часов; если шард систематически не
     # укладывается, увеличивать число шардов в matrix.shard и --shard */N.
@@ -78,7 +81,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable

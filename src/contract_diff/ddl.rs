@@ -612,4 +612,34 @@ ALTER TABLE charges ADD COLUMN currency varchar(3);
             "numeric(5,2) → numeric(9,2) — расширение: {findings:?}"
         );
     }
+
+    /// Короткие формы действий `ALTER TABLE` без слова COLUMN: `ADD <col>`,
+    /// `DROP <col>`, `ALTER <col> …` — каждая распознаётся сама по себе.
+    #[test]
+    fn short_alter_actions_without_column_keyword_are_applied() {
+        // ADD <колонка> <тип> — колонка появляется.
+        let added = format!("{DDL_V1}\nALTER TABLE charges ADD currency_code varchar(3);\n");
+        let findings = diff_ddl(DDL_V1, &added);
+        assert!(
+            has_message(&findings, "currency_code"),
+            "короткий ADD применён: {findings:?}"
+        );
+        // DROP <колонка> — колонка исчезает (CD-S02).
+        let dropped = format!("{DDL_V1}\nALTER TABLE charges DROP note;\n");
+        let findings = diff_ddl(DDL_V1, &dropped);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule == "CD-S02" && f.message.contains("note")),
+            "короткий DROP применён: {findings:?}"
+        );
+        // ALTER <колонка> SET DATA TYPE — тип меняется.
+        let altered =
+            format!("{DDL_V1}\nALTER TABLE charges ALTER amount_minor SET DATA TYPE varchar(4);\n");
+        let findings = diff_ddl(DDL_V1, &altered);
+        assert!(
+            findings.iter().any(|f| f.rule == "CD-S03"),
+            "короткий ALTER применён: {findings:?}"
+        );
+    }
 }

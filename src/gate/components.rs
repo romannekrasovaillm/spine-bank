@@ -3114,4 +3114,106 @@ mod tests {
         assert!(found.contains(&repo), "{found:?}");
         assert!(found.contains(&repo.join("changes/one")), "{found:?}");
     }
+
+    /// Ровно пороговый балл — не «ниже порога»: сравнение строгое, иначе
+    /// решение на самой планке краснело бы как недотянувшее.
+    #[test]
+    fn decision_quality_score_exactly_at_threshold_is_not_low() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        make_quality_repo(dir, Some(3.5), Some("judge-x"));
+        let report = run_with(
+            dir,
+            Some(Route::Fast),
+            None,
+            None,
+            (1, 4),
+            &with_quality(Route::Fast),
+        )
+        .expect("gate");
+        let comp = report
+            .components
+            .iter()
+            .find(|c| c.name == "decision_quality")
+            .expect("comp");
+        assert!(
+            !comp
+                .findings
+                .iter()
+                .any(|f| f.rule.as_deref() == Some("decision_quality_low")),
+            "{:?}",
+            comp.findings
+        );
+        assert_eq!(comp.status, GateStatus::Pass, "{}", render(&report));
+    }
+
+    /// Доля невалидных сэмплов ровно на пороге — ещё не эскалация: строгое
+    /// «больше порога» отделяет шумную выборку от сломанной.
+    #[test]
+    fn decision_quality_invalid_ratio_at_threshold_does_not_escalate() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        make_quality_repo(dir, Some(4.5), Some("judge-x"));
+        patch_quality_report(dir, Some(0.5), &[]);
+        let report = run_with(
+            dir,
+            Some(Route::Fast),
+            None,
+            None,
+            (1, 4),
+            &with_quality(Route::Fast),
+        )
+        .expect("gate");
+        let comp = report
+            .components
+            .iter()
+            .find(|c| c.name == "decision_quality")
+            .expect("comp");
+        assert_ne!(
+            comp.status,
+            GateStatus::Skip,
+            "на пороге вердикт не выносится человеку: {}",
+            render(&report)
+        );
+        assert!(
+            !comp
+                .findings
+                .iter()
+                .any(|f| f.severity == "error"
+                    && f.rule.as_deref() == Some("rubric_invalid_samples")),
+            "{:?}",
+            comp.findings
+        );
+    }
+
+    /// Досье-отчёт без каталога `docs/adr` — повод работать, а не SKIP:
+    /// оценка кода не должна выпадать из составляющей только из-за
+    /// отсутствия ADR.
+    #[test]
+    fn decision_quality_runs_without_adr_dir_when_dossier_report_exists() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        write_code_pack_report(dir, None);
+        assert!(!dir.join("docs/adr").is_dir(), "каталога ADR нет");
+        let report = run_with(
+            dir,
+            Some(Route::Fast),
+            None,
+            None,
+            (1, 4),
+            &with_quality(Route::Fast),
+        )
+        .expect("gate");
+        let comp = report
+            .components
+            .iter()
+            .find(|c| c.name == "decision_quality")
+            .expect("comp");
+        assert_ne!(
+            comp.status,
+            GateStatus::Skip,
+            "досье есть — составляющая работает: {}",
+            render(&report)
+        );
+    }
 }

@@ -1750,4 +1750,91 @@ mod tests {
             crate::gate::render(&report)
         );
     }
+
+    /// Метка области субъектов — ровно `changed`/`all`: пустая строка или
+    /// заглушка в вердикте назвали бы область неверно.
+    #[test]
+    fn scope_label_names_both_scopes() {
+        assert_eq!(
+            scope_label(crate::config::SemanticScope::Changed),
+            "changed"
+        );
+        assert_eq!(scope_label(crate::config::SemanticScope::All), "all");
+    }
+
+    /// Принятые ADR — только `ADR-*.md` со статусом Accepted: прочий markdown
+    /// в каталоге ADR и непринятые решения в выборку не попадают.
+    #[test]
+    fn accepted_adr_paths_select_only_accepted_adr_markdown() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path();
+        let adr_dir = repo.join("docs/adr");
+        std::fs::create_dir_all(&adr_dir).expect("mkdir");
+        std::fs::write(
+            adr_dir.join("ADR-001-accepted.md"),
+            "# ADR-001\n\n- Status: Accepted\n\nРешение.\n",
+        )
+        .expect("accepted");
+        std::fs::write(
+            adr_dir.join("ADR-002-proposed.md"),
+            "# ADR-002\n\n- Status: Proposed\n\nЧерновик.\n",
+        )
+        .expect("proposed");
+        std::fs::write(
+            adr_dir.join("notes.md"),
+            "# Заметки\n\n- Status: Accepted\n\nНе ADR.\n",
+        )
+        .expect("notes");
+        std::fs::write(adr_dir.join("readme.txt"), "Status: Accepted\n").expect("txt");
+        let found = accepted_adr_paths(repo);
+        assert_eq!(
+            found,
+            vec!["docs/adr/ADR-001-accepted.md".to_string()],
+            "{found:?}"
+        );
+    }
+
+    /// Субъекты смысловой рубрики — только сущности со связями; для
+    /// `nfr_mechanism` дополнительно только сами NFR.
+    #[test]
+    fn linked_entities_require_links_and_filter_nfr_by_pack() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path();
+        let model = repo.join("model");
+        std::fs::create_dir_all(&model).expect("mkdir model");
+        // Связная CMP и связный NFR.
+        std::fs::write(
+            model.join("CMP-001.md"),
+            "---\nid: CMP-001\ntype: cmp\ntitle: \"Шлюз\"\nstatus: designed\ndepends_on: [INT-001]\n---\n\nТело.\n",
+        )
+        .expect("cmp");
+        std::fs::write(
+            model.join("NFR-001.md"),
+            "---\nid: NFR-001\ntype: nfr\ntitle: \"Доступность\"\nstatus: accepted\nverified_by: [C-001]\n---\n\nТело.\n",
+        )
+        .expect("nfr");
+        // Сущность без связей — субъектом не становится.
+        std::fs::write(
+            model.join("CMP-002.md"),
+            "---\nid: CMP-002\ntype: cmp\ntitle: \"Сид\"\nstatus: designed\n---\n\nТело.\n",
+        )
+        .expect("orphan");
+        let all = linked_entities(repo, crate::rubric_pack::PackKind::CodeVsSpine);
+        assert!(all.contains(&"CMP-001".to_string()), "{all:?}");
+        assert!(all.contains(&"NFR-001".to_string()), "{all:?}");
+        assert!(
+            !all.contains(&"CMP-002".to_string()),
+            "связная сущность без связей не субъект: {all:?}"
+        );
+        let nfr_only = linked_entities(repo, crate::rubric_pack::PackKind::NfrMechanism);
+        assert_eq!(nfr_only, vec!["NFR-001".to_string()], "{nfr_only:?}");
+        // Модели нет — пустой список, а не паника.
+        assert!(
+            linked_entities(
+                &repo.join("nope"),
+                crate::rubric_pack::PackKind::CodeVsSpine
+            )
+            .is_empty()
+        );
+    }
 }
