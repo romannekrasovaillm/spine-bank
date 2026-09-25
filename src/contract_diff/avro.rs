@@ -253,7 +253,21 @@ pub(crate) fn diff_avro(
 
 #[cfg(test)]
 mod tests {
+    use super::diff_avro;
     use crate::contract_diff::testkit::diff_text;
+
+    /// Дифф двух Avro-текстов напрямую (пути — только для сообщений).
+    fn diff(
+        old: &str,
+        new: &str,
+    ) -> crate::error::Result<Vec<crate::contract_diff::types::Finding>> {
+        diff_avro(
+            old,
+            new,
+            std::path::Path::new("old.avsc"),
+            std::path::Path::new("new.avsc"),
+        )
+    }
     use crate::tool::ToolOutput;
 
     const AVRO_V1: &str = r#"{
@@ -339,5 +353,139 @@ mod tests {
         assert!(out.content.contains("CD-A05"), "{}", out.content);
         assert!(!out.content.contains("CD-A03"), "{}", out.content);
         assert!(out.content.contains("Итог: PASS"), "{}", out.content);
+    }
+    /// Запись внутри `items` (тип-массив) собирается: правка её поля — находка
+    /// о ней. Именно этот путь идёт через обход значений объекта, а не через
+    /// «вложенный record в type поля».
+    #[test]
+    fn records_nested_under_items_are_collected() {
+        let schema = |inner_type: &str| {
+            format!(
+                r#"{{"type": "record", "name": "Wrapper", "fields": [
+  {{"name": "list", "type": {{"type": "array", "items": {{"type": "record", "name": "Item", "fields": [
+    {{"name": "amount", "type": "{inner_type}"}}
+  ]}}}}}}
+]}}"#
+            )
+        };
+        let findings = diff(&schema("int"), &schema("long")).expect("дифф");
+        assert!(
+            findings.iter().any(|f| f.location.contains("Item")),
+            "запись из items найдена: {findings:?}"
+        );
+        assert!(
+            findings.iter().any(|f| f.message.contains("расширен")),
+            "int → long — расширение: {findings:?}"
+        );
+    }
+
+    /// Записи внутри union-массивов собираются: `"type": ["null", {record}]`
+    /// — тоже схема, и её поля сравниваются.
+    #[test]
+    fn inline_records_inside_union_arrays_are_collected() {
+        let schema = |inner_type: &str| {
+            format!(
+                r#"{{"type": "record", "name": "Wrapper", "fields": [
+  {{"name": "payload", "type": ["null", {{"type": "record", "name": "Payload", "fields": [
+    {{"name": "id", "type": "{inner_type}"}}
+  ]}}]}}
+]}}"#
+            )
+        };
+        let findings = diff(&schema("int"), &schema("long")).expect("дифф");
+        assert!(
+            findings.iter().any(|f| f.location.contains("Payload")),
+            "запись из union-массива найдена: {findings:?}"
+        );
+    }
+
+    /// Добавленная запись названа именно записью (не полем): сообщение — про
+    /// `record`, а не про любой CD-A05.
+    #[test]
+    fn added_record_is_named_as_record() {
+        let wrapper = |extra: &str| {
+            format!(
+                r#"{{"type": "record", "name": "Wrapper", "fields": [
+  {{"name": "base", "type": {{"type": "record", "name": "Base", "fields": [{{"name": "id", "type": "string"}}]}}}}{extra}
+]}}"#
+            )
+        };
+        let extra = r#",
+  {"name": "added", "type": {"type": "record", "name": "Added", "fields": [{"name": "id", "type": "string"}]}}"#;
+        let old = wrapper("");
+        let new = wrapper(extra);
+        let findings = diff(&old, &new).expect("дифф");
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.message.contains("добавлена запись") && f.message.contains("Added")),
+            "{findings:?}"
+        );
+        // Идентичные схемы — ни одной находки (в т.ч. ни одной «добавленной»).
+        assert!(diff(&old, &old).expect("дифф").is_empty());
+    }
+
+    /// Промоушен типа (int → long) — предупреждение, а не ошибка: чтение
+    /// старых данных остаётся совместимым.
+    #[test]
+    fn type_promotion_is_warning_not_error() {
+        let schema = |t: &str| {
+            format!(
+                r#"{{"type": "record", "name": "A", "fields": [{{"name": "n", "type": "{t}"}}]}}"#
+            )
+        };
+        let findings = diff(&schema("int"), &schema("long")).expect("дифф");
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule == "CD-A05" && f.severity == "warn"),
+            "промоушен — warn: {findings:?}"
+        );
+        assert!(
+            !findings.iter().any(|f| f.rule == "CD-A03"),
+            "промоушен не ошибка: {findings:?}"
+        );
+    }
+
+    /// Если Avro-запись есть только с одной стороны — это ошибка формата, а не
+    /// «сравнили и всё чисто».
+    #[test]
+    fn side_without_records_is_an_error() {
+        let valid =
+            r#"{"type": "record", "name": "A", "fields": [{"name": "id", "type": "string"}]}"#;
+        assert!(diff(valid, "{\"hello\": 1}").is_err());
+        assert!(diff("{\"hello\": 1}", valid).is_err());
+        assert!(diff(valid, valid).is_ok());
+    }
+
+    /// Union-типы: расширение набора — предупреждение, замена состава —
+    /// ошибка; одного «тип составной» для предупреждения мало.
+    #[test]
+    fn union_extension_is_warning_but_replacement_is_error() {
+        let schema = |t: &str| {
+            format!(
+                r#"{{"type": "record", "name": "A", "fields": [{{"name": "v", "type": "{t}"}}]}}"#
+            )
+        };
+        // string → string|int: к одному типу добавили ветвь (расширение).
+        let findings = diff(&schema("string"), &schema("string|int")).expect("дифф");
+        assert!(
+            !findings.iter().any(|f| f.rule == "CD-A05"),
+            "добавление ветви к одиночному типу — не «расширение union»: {findings:?}"
+        );
+        // string|int → string|int|bool: составной стал шире — предупреждение.
+        let findings = diff(&schema("string|int"), &schema("string|int|bool")).expect("дифф");
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule == "CD-A05" && f.message.contains("расширен")),
+            "{findings:?}"
+        );
+        // string|int → string|bool: состав заменён, подмножества нет — ошибка.
+        let findings = diff(&schema("string|int"), &schema("string|bool")).expect("дифф");
+        assert!(
+            findings.iter().any(|f| f.rule == "CD-A03"),
+            "замена состава union — ошибка: {findings:?}"
+        );
     }
 }
