@@ -629,25 +629,20 @@ fn ad_number(raw: &str) -> Option<u32> {
     digits.parse().ok()
 }
 
-/// Номера инвариантов, объявленных в `ARCHITECTURE-SPINE.md` (`## AD-N. …`).
-/// Файла нет — пустой список.
+/// Номера инвариантов, объявленных в `ARCHITECTURE-SPINE.md` — заголовок
+/// `## AD-<n>: …` (как в спайнах проекта и каркасе `bootstrap`) или
+/// `## AD-<n>. …` (форма старых фикстур). Разбор — тот же, что у контура
+/// контроля (`control::report::spine_ad_ids`): один канон на весь крейт, иначе
+/// `rules template apply` молча не видит инварианты, которые видят гейт и
+/// трассировка. Файла нет — пустой список.
 fn spine_ad_numbers(case: &Path) -> Vec<u32> {
-    let Ok(text) = std::fs::read_to_string(case.join("ARCHITECTURE-SPINE.md")) else {
+    let path = case.join("ARCHITECTURE-SPINE.md");
+    let Ok(ids) = crate::control::report::spine_ad_ids(&path) else {
         return Vec::new();
     };
-    let mut out = Vec::new();
-    for line in text.lines() {
-        let Some(rest) = line.trim_start().strip_prefix("## ") else {
-            continue;
-        };
-        let Some((head, _)) = rest.split_once('.') else {
-            continue;
-        };
-        if let Some(n) = ad_number(head.trim()) {
-            out.push(n);
-        }
-    }
-    out
+    ids.into_iter()
+        .map(|n| u32::try_from(n).unwrap_or(u32::MAX))
+        .collect()
 }
 
 /// Текст инварианта в спайне: заголовок и строки `Binds`/`Prevents`/`Rule`
@@ -895,7 +890,7 @@ fn validate_ad(case: &Path, ad: &str) -> Result<()> {
     let declared = spine_ad_numbers(case);
     if declared.is_empty() {
         return Err(HarnessError::Control(format!(
-            "{}: нет объявленных инвариантов (`## AD-N. …`) — привязывать шаблон не к чему",
+            "{}: нет объявленных инвариантов (`## AD-N: …`) — привязывать шаблон не к чему",
             case.join("ARCHITECTURE-SPINE.md").display()
         )));
     }
@@ -2204,6 +2199,36 @@ mod tests {
         let err = apply(case.path(), "idempotency-key", "AD-1", Lang::Python, false)
             .expect_err("конфликт");
         assert!(err.to_string().contains("уже существуют"), "{err}");
+    }
+
+    /// Регрессия 0.3.9: спайн в канонической форме проекта (`## AD-N: …`)
+    /// обязан приниматься так же, как старая форма с точкой, — иначе
+    /// `rules template apply --ad AD-n` не видит инварианты, которые видят
+    /// гейт и трассировка (баг жил потому, что фикстуры тестов использовали
+    /// форму с точкой).
+    #[test]
+    fn apply_accepts_colon_spine_form() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let case = dir.path();
+        std::fs::write(
+            case.join("ARCHITECTURE-SPINE.md"),
+            "# Спайн\n\n## AD-2: Журнал append-only\n\n- **Binds**: Журнал\n- **Prevents**: подмену истории\n- **Rule**: только дозапись.\n",
+        )
+        .expect("спайн");
+        let report = apply(case, "append-only-journal", "AD-2", Lang::Python, true)
+            .expect("каноническая форма спайна принимается");
+        assert!(report.dry_run, "dry-run не пишет на диск");
+        assert_eq!(report.ad, "AD-2");
+        assert!(
+            !report.fragment.is_empty(),
+            "фрагмент правила сформирован: {:?}",
+            report.fragment
+        );
+        assert!(
+            report.verified_by.contains("AD-2") || report.verified_by.contains("C-"),
+            "связка verified_by заполнена: {}",
+            report.verified_by
+        );
     }
 
     #[test]

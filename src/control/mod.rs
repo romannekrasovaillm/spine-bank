@@ -57,7 +57,7 @@ pub mod baseline;
 mod diff_triggers;
 mod exec;
 mod registry;
-mod report;
+pub(crate) mod report;
 mod rules;
 mod templates;
 mod tools;
