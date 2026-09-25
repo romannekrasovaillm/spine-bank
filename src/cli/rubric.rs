@@ -62,6 +62,10 @@ pub(crate) enum RubricCmd {
         /// Кейс для `--all-accepted` (по умолчанию — рабочий каталог).
         #[arg(long)]
         dir: Option<PathBuf>,
+        /// E8.2: не брать вердикт из кэша и не класть туда новый (кэш включён
+        /// секцией `[judge] cache = true`).
+        #[arg(long)]
+        no_cache: bool,
     },
     /// Что осталось оценить и чем: перечень принятых ADR без свежего отчёта
     /// плюс два готовых текста передачи судейства. Ничего не пишет (ADR-048).
@@ -211,6 +215,7 @@ pub(crate) async fn cmd_rubric(cfg: &Arc<Config>, cmd: RubricCmd) -> Result<()> 
             all_accepted,
             dir,
             second_model,
+            no_cache,
         } => {
             let registry = Arc::new(LlmRegistry::from_config(cfg)?);
             let judge = match &model {
@@ -274,14 +279,68 @@ pub(crate) async fn cmd_rubric(cfg: &Arc<Config>, cmd: RubricCmd) -> Result<()> 
             if let Some(samples) = samples {
                 judge_cfg.samples = samples;
             }
+            // E8.2: снимок настроек — часть ключа кэша (и то, что видит
+            // аудитор в отчёте).
+            let judge_snapshot = arch_harness::rubric::JudgeConfigSnapshot {
+                samples: judge_cfg.samples.max(1),
+                unstable_stdev: judge_cfg.unstable_stdev,
+                evidence_min_similarity: judge_cfg.evidence_min_similarity,
+                adaptive_samples: judge_cfg.adaptive_samples,
+            };
+            let model_name = model.clone().unwrap_or_else(|| cfg.default_model.clone());
+            let cache_path = arch_harness::judge_cache::default_cache_path();
+            let use_cache = cfg.judge.cache && !no_cache;
+            let mut cache = if use_cache {
+                arch_harness::judge_cache::JudgeCache::load(&cache_path)
+            } else {
+                arch_harness::judge_cache::JudgeCache::default()
+            };
             if let Some(pack) = &dossier {
-                let (mut report, raw) = arch_harness::rubric::evaluate_pack_collecting(
+                let key = arch_harness::judge_cache::key_for(
                     &rub,
-                    pack,
-                    judge.as_ref(),
-                    &judge_cfg,
-                )
-                .await?;
+                    &model_name,
+                    &pack.sha256,
+                    &judge_snapshot,
+                );
+                let (mut report, raw, cached) = match cache
+                    .get(&key)
+                    .map(|entry| (entry.report.clone(), entry.raw.clone()))
+                {
+                    Some((report, raw)) if use_cache => {
+                        let hit = cache.touch(&key).expect("запись только что найдена");
+                        // Счётчик попаданий — часть записи: без записи файла он
+                        // обнулялся бы на каждом прогоне.
+                        cache.save(&cache_path).ok();
+                        eprintln!(
+                            "Вердикт из кэша: снят {}, предъявлен {} раз(а) — модель не спрашивали",
+                            hit.judged_at, hit.hits
+                        );
+                        (report, raw, Some(hit))
+                    }
+                    _ => {
+                        let (report, raw) = arch_harness::rubric::evaluate_pack_collecting(
+                            &rub,
+                            pack,
+                            judge.as_ref(),
+                            &judge_cfg,
+                        )
+                        .await?;
+                        if use_cache {
+                            cache.put(arch_harness::judge_cache::CacheEntry {
+                                version: arch_harness::judge_cache::CACHE_VERSION,
+                                key: key.clone(),
+                                rubric: rub.name.clone(),
+                                model: model_name.clone(),
+                                judged_at: timestamp(),
+                                hits: 0,
+                                report: report.clone(),
+                                raw: raw.clone(),
+                            });
+                            cache.save(&cache_path).ok();
+                        }
+                        (report, raw, None)
+                    }
+                };
                 println!("{}", report.to_markdown());
                 // E7.3: markdown — человеку, JSON-близнец — история для
                 // `rules suggest --from-judge` (цель и метки там данные, а не
@@ -343,12 +402,7 @@ pub(crate) async fn cmd_rubric(cfg: &Arc<Config>, cmd: RubricCmd) -> Result<()> 
                         author_source: Some(choice.source.clone()),
                         author_model_declared: choice.declared.clone(),
                         families: cfg.judge.families.clone(),
-                        judge_config: Some(arch_harness::rubric::JudgeConfigSnapshot {
-                            samples: judge_cfg.samples.max(1),
-                            unstable_stdev: judge_cfg.unstable_stdev,
-                            evidence_min_similarity: judge_cfg.evidence_min_similarity,
-                            adaptive_samples: judge_cfg.adaptive_samples,
-                        }),
+                        judge_config: Some(judge_snapshot.clone()),
                         raw_answers: second_raw
                             .into_iter()
                             .map(|text| arch_harness::judge::RawAnswerInput {
@@ -393,24 +447,21 @@ pub(crate) async fn cmd_rubric(cfg: &Arc<Config>, cmd: RubricCmd) -> Result<()> 
                 } else {
                     None
                 };
-                let model_name = model.clone().unwrap_or_else(|| cfg.default_model.clone());
                 let mut provenance = arch_harness::judge::RubricProvenance::launched(
                     arch_harness::judge::launcher_for(cfg, &model_name),
                 );
                 if cfg.judge.record_operator {
                     provenance.operator = arch_harness::judge::operator(&repo);
                 }
+                // E8.2: отчёт из кэша несёт отметку — «вердикт снят тогда-то,
+                // предъявлен столько-то раз, модель не спрашивали».
+                provenance.cache.clone_from(&cached);
                 let extras = arch_harness::rubric::ArtifactExtras {
                     provenance: Some(provenance),
                     author_source: Some(choice.source.clone()),
                     author_model_declared: choice.declared.clone(),
                     families: cfg.judge.families.clone(),
-                    judge_config: Some(arch_harness::rubric::JudgeConfigSnapshot {
-                        samples: judge_cfg.samples.max(1),
-                        unstable_stdev: judge_cfg.unstable_stdev,
-                        evidence_min_similarity: judge_cfg.evidence_min_similarity,
-                        adaptive_samples: judge_cfg.adaptive_samples,
-                    }),
+                    judge_config: Some(judge_snapshot.clone()),
                     // Сырые ответы судьи — рядом с отчётом: отчёт обязан
                     // пересобираться из них (J2, ADR-048).
                     raw_answers: raw
@@ -492,13 +543,53 @@ pub(crate) async fn cmd_rubric(cfg: &Arc<Config>, cmd: RubricCmd) -> Result<()> 
                 for target in targets {
                     let text = std::fs::read_to_string(&target)
                         .with_context(|| format!("чтение {}", target.display()))?;
-                    let (report, raw) = arch_harness::rubric::evaluate_collecting(
+                    // E8.2: тот же кэш, что у досье; ключ — хэш текста
+                    // документа, поэтому правка ADR промахивается мимо записи.
+                    let key = arch_harness::judge_cache::key_for(
                         &rub,
-                        &text,
-                        judge.as_ref(),
-                        &judge_cfg,
-                    )
-                    .await?;
+                        &model_name,
+                        &arch_harness::hash::sha256_hex(text.as_bytes()),
+                        &judge_snapshot,
+                    );
+                    let (report, raw, cached) = match cache
+                        .get(&key)
+                        .map(|entry| (entry.report.clone(), entry.raw.clone()))
+                    {
+                        Some((report, raw)) if use_cache => {
+                            let hit = cache.touch(&key).expect("запись только что найдена");
+                            // Счётчик попаданий — часть записи: без записи файла
+                            // он обнулялся бы на каждом прогоне.
+                            cache.save(&cache_path).ok();
+                            eprintln!(
+                                "Вердикт из кэша: снят {}, предъявлен {} раз(а) — модель не спрашивали",
+                                hit.judged_at, hit.hits
+                            );
+                            (report, raw, Some(hit))
+                        }
+                        _ => {
+                            let (report, raw) = arch_harness::rubric::evaluate_collecting(
+                                &rub,
+                                &text,
+                                judge.as_ref(),
+                                &judge_cfg,
+                            )
+                            .await?;
+                            if use_cache {
+                                cache.put(arch_harness::judge_cache::CacheEntry {
+                                    version: arch_harness::judge_cache::CACHE_VERSION,
+                                    key: key.clone(),
+                                    rubric: rub.name.clone(),
+                                    model: model_name.clone(),
+                                    judged_at: timestamp(),
+                                    hits: 0,
+                                    report: report.clone(),
+                                    raw: raw.clone(),
+                                });
+                                cache.save(&cache_path).ok();
+                            }
+                            (report, raw, None)
+                        }
+                    };
                     println!("{}", report.to_markdown());
                     let stamp = timestamp();
                     let out = cfg
@@ -532,24 +623,19 @@ pub(crate) async fn cmd_rubric(cfg: &Arc<Config>, cmd: RubricCmd) -> Result<()> 
                     // Происхождение `launched`: судью запустил Spine — известны
                     // команда и аргументы запуска (или имя API-модели), неизвестна
                     // отвечавшая модель (ADR-048).
-                    let model_name = model.clone().unwrap_or_else(|| cfg.default_model.clone());
                     let mut provenance = arch_harness::judge::RubricProvenance::launched(
                         arch_harness::judge::launcher_for(cfg, &model_name),
                     );
                     if cfg.judge.record_operator {
                         provenance.operator = arch_harness::judge::operator(&repo);
                     }
+                    provenance.cache.clone_from(&cached);
                     let extras = arch_harness::rubric::ArtifactExtras {
                         provenance: Some(provenance),
                         author_source: Some(choice.source.clone()),
                         author_model_declared: choice.declared.clone(),
                         families: cfg.judge.families.clone(),
-                        judge_config: Some(arch_harness::rubric::JudgeConfigSnapshot {
-                            samples: judge_cfg.samples.max(1),
-                            unstable_stdev: judge_cfg.unstable_stdev,
-                            evidence_min_similarity: judge_cfg.evidence_min_similarity,
-                            adaptive_samples: judge_cfg.adaptive_samples,
-                        }),
+                        judge_config: Some(judge_snapshot.clone()),
                         // Сырые ответы судьи — рядом с отчётом: отчёт обязан
                         // пересобираться из них (J2, ADR-048).
                         raw_answers: raw

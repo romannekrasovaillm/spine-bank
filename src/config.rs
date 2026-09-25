@@ -751,6 +751,11 @@ pub struct JudgeConfig {
     /// удостоверяется, а имя с адресом попадают в коммитимый JSON отчёта —
     /// поэтому ключ существует (`false` выключает запись).
     pub record_operator: bool,
+    /// E8.2: кэш вердикта судьи по хэшу досье, модели, рубрики и настроек.
+    /// `true` — повторное ревью неизменённого кода не вызывает модель; запись
+    /// кэша видна в отчёте (`provenance.cache`), обход — `rubric run --no-cache`.
+    /// `false` (дефолт) — каждый прогон спрашивает модель.
+    pub cache: bool,
     /// E8.1: адаптивное число сэмплов — `true` спрашивает судью один раз, когда
     /// первый ответ однозначен (все баллы на краях шкалы), и добирает сэмплы до
     /// `samples`, когда балл в зоне сомнения (`2..scale_max-1`) или ответ
@@ -770,6 +775,7 @@ impl Default for JudgeConfig {
             families: BTreeMap::new(),
             clean_session_max_calls: crate::judge::DEFAULT_CLEAN_SESSION_MAX_CALLS,
             record_operator: true,
+            cache: false,
             adaptive_samples: false,
         }
     }
@@ -1846,6 +1852,10 @@ mod tests {
         assert!((cfg.judge.unstable_stdev - 1.0).abs() < 1e-9);
         assert!((cfg.judge.evidence_min_similarity - 0.8).abs() < 1e-9);
         assert!((cfg.judge.golden_max_mae - 1.0).abs() < 1e-9);
+        assert!(
+            !cfg.judge.cache,
+            "E8.2 кэш вердикта — opt-in: дефолт каждый раз спрашивает модель"
+        );
         assert!(
             !cfg.judge.adaptive_samples,
             "E8.1 адаптивные сэмплы — opt-in: дефолт спрашивает судью `samples` раз"

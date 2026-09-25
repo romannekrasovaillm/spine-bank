@@ -63,6 +63,7 @@ pub mod hash;
 pub mod hooks;
 pub mod injection;
 pub mod judge;
+pub mod judge_cache;
 pub mod judge_rules;
 pub mod kb;
 pub mod landscape;

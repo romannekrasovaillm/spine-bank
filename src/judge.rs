@@ -114,6 +114,12 @@ pub struct RubricProvenance {
     /// архитектора механикой не удостоверяется.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operator: Option<String>,
+    /// E8.2: вердикт взят из кэша — модели в этом прогоне не спрашивали.
+    /// `judged_at` говорит, когда вердикт снят на самом деле, `key` — по какому
+    /// срезу досье и настроек. Отсутствие поля (у отчётов до 0.3.9) читается
+    /// как «судила модель в этом прогоне».
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache: Option<crate::judge_cache::CacheHit>,
 }
 
 impl RubricProvenance {

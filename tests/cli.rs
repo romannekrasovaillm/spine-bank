@@ -290,6 +290,188 @@ fn judge_history_record(subject: &str, score: u8, rationale: &str) -> serde_json
 /// харнесса (`$ARCH_HOME/reports`) и предлагает детерминированные правила по
 /// повторяющимся находкам: обвинение — YAML `must_not_contain`, метка механики —
 /// advisory. Порог `--min-runs` и явный `--history` управляют отбором.
+/// E8.2: кэш вердикта. Повторное ревью неизменённого досье не вызывает модель
+/// (счётчик вызовов CLI-судья не растёт), отчёт несёт отметку `provenance.cache`,
+/// `--no-cache` обходит кэш, а правка субъекта промахивается мимо записи.
+#[test]
+fn rubric_run_cache_avoids_second_model_call() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let home = tmp.path();
+    let repo = home.join("case");
+    std::fs::create_dir_all(repo.join("docs/adr")).expect("mkdir adr");
+    std::fs::write(
+        repo.join("ARCHITECTURE-SPINE.md"),
+        "# Spine\n\n## AD-2: Детерминированный слой контроля\n\n- **Rule**: механика контроля без LLM.\n",
+    )
+    .expect("spine");
+    let adr = repo.join("docs/adr/ADR-001-x.md");
+    std::fs::write(&adr, "# ADR-001\n\nРешение: контроль без LLM в гейте.\n").expect("adr");
+
+    // Судья — CLI-фейк со счётчиком вызовов: сколько раз модель спросили, видно
+    // по числу строк в calls.log.
+    let calls = home.join("calls.log");
+    let script = home.join("fake-judge.sh");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\n\
+             if [ \"${{1:-}}\" = \"--version\" ]; then echo 'fake-judge 1.0'; exit 0; fi\n\
+             echo call >> {}\n\
+             cat >/dev/null\n\
+             printf '%s' '{{\"scores\":[{{\"criterion_id\":\"no_contradiction\",\"score\":2,\"rationale\":\"Цитата subject: \\\"Решение: контроль без LLM в гейте.\\\". Цитата reference: \\\"Rule: механика контроля без LLM.\\\". противоречие\"}}],\"verdict\":\"есть риск\"}}'\n",
+            calls.display()
+        ),
+    )
+    .expect("fake judge");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mut perms = std::fs::metadata(&script).expect("stat").permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).expect("chmod +x");
+    }
+
+    let rubrics = home.join("assets/rubrics");
+    std::fs::create_dir_all(&rubrics).expect("mkdir rubrics");
+    std::fs::write(
+        rubrics.join("t-semantic.yaml"),
+        "name: t-semantic\n\
+         description: тестовая смысловая\n\
+         scale_max: 5\n\
+         origin: anchor\n\
+         pack: adr_vs_spine\n\
+         criteria:\n  \
+         - id: no_contradiction\n    \
+         name: Нет противоречия\n    \
+         description: Решение не противоречит инварианту\n    \
+         weight: 1.0\n    \
+         evidence_on: low\n    \
+         evidence_roles: [subject, reference]\n",
+    )
+    .expect("рубрика");
+
+    std::fs::write(
+        home.join("arch-harness.toml"),
+        format!(
+            "default_model = \"fakejudge\"\n\n\
+             [paths]\n\
+             assets_dir = \"{}\"\n\n\
+             [models.fakejudge]\n\
+             kind = \"cli\"\n\
+             command = \"{}\"\n\
+             model = \"fake-judge-1\"\n\n\
+             [judge]\n\
+             samples = 1\n\
+             cache = true\n",
+            home.join("assets").display(),
+            script.display()
+        ),
+    )
+    .expect("конфиг");
+
+    let run = |extra: &[&str]| {
+        let mut cmd = arch_cmd(home);
+        cmd.args(["rubric", "run", "t-semantic"]).args([
+            "--pack",
+            "adr_vs_spine",
+            "--subject",
+            "docs/adr/ADR-001-x.md",
+        ]);
+        cmd.arg("--root").arg(repo.as_os_str());
+        cmd.args(extra);
+        cmd.output().expect("rubric run")
+    };
+    let calls_count = || std::fs::read_to_string(&calls).map_or(0, |t| t.lines().count());
+    let artifact = || -> serde_json::Value {
+        serde_json::from_str(
+            &std::fs::read_to_string(repo.join("reports/rubric/ADR-001-x--adr_vs_spine.json"))
+                .expect("отчёт"),
+        )
+        .expect("JSON отчёта")
+    };
+
+    // Первый прогон: модель спросили, кэш пуст.
+    let first = run(&[]);
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert_eq!(calls_count(), 1, "первый прогон вызывает судью");
+    assert!(
+        !String::from_utf8_lossy(&first.stderr).contains("из кэша"),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(
+        artifact()["provenance"]["cache"].is_null(),
+        "живой вердикт без отметки кэша: {}",
+        artifact()["provenance"]
+    );
+
+    // Второй прогон того же досье: модель не спрашивают, отметка кэша в отчёте.
+    let second = run(&[]);
+    assert!(
+        second.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert_eq!(
+        calls_count(),
+        1,
+        "повторное ревью неизменённого досье — без вызова"
+    );
+    assert!(
+        String::from_utf8_lossy(&second.stderr).contains("Вердикт из кэша"),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let cached = &artifact()["provenance"]["cache"];
+    assert_eq!(cached["hits"], 1, "{cached}");
+    assert!(
+        cached["judged_at"].as_str().is_some_and(|s| !s.is_empty()),
+        "время снятия вердикта записано: {cached}"
+    );
+
+    // Третий прогон: счётчик попаданий растёт и сохраняется между прогонами.
+    let third = run(&[]);
+    assert!(
+        third.status.success(),
+        "{}",
+        String::from_utf8_lossy(&third.stderr)
+    );
+    assert_eq!(calls_count(), 1, "третий прогон тоже без вызова модели");
+    assert_eq!(
+        artifact()["provenance"]["cache"]["hits"],
+        2,
+        "счётчик попаданий переживает прогон: {}",
+        artifact()["provenance"]["cache"]
+    );
+
+    // `--no-cache` — снова спрашиваем модель.
+    let forced = run(&["--no-cache"]);
+    assert!(
+        forced.status.success(),
+        "{}",
+        String::from_utf8_lossy(&forced.stderr)
+    );
+    assert_eq!(calls_count(), 2, "--no-cache обходит кэш");
+
+    // Правка субъекта меняет хэш досье — запись кэша не подходит.
+    std::fs::write(
+        &adr,
+        "# ADR-001\n\nРешение: контроль без LLM в гейте.\n\nДополнено.\n",
+    )
+    .expect("правка ADR");
+    let edited = run(&[]);
+    assert!(
+        edited.status.success(),
+        "{}",
+        String::from_utf8_lossy(&edited.stderr)
+    );
+    assert_eq!(calls_count(), 3, "правка досье промахивается мимо кэша");
+}
+
 #[test]
 fn rules_suggest_from_judge_history_proposes_deterministic_rule() {
     let tmp = tempfile::tempdir().expect("tempdir");
