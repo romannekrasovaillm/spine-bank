@@ -1088,6 +1088,52 @@ mod tests {
         );
     }
 
+    /// E3.2 (смысловая составляющая, путь досье): доля сэмплов судьи с баллом
+    /// вне шкалы выше порога — SKIP с находкой `semantic_invalid_samples` и
+    /// вердикт INCOMPLETE. Тот же контур, что у `decision_quality`, но по досье.
+    #[test]
+    fn semantic_invalid_samples_above_threshold_escalates() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        make_semantic_repo(dir);
+        let rubrics = semantic_rubrics_dir(dir);
+        write_semantic_report(dir, "docs/adr/ADR-001-reshenie.md", 5, &[], 4.6, None);
+        let path = dir
+            .join(crate::rubric::RUBRIC_REPORTS_DIR)
+            .join("semantic.json");
+        let mut artifact: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("отчёт")).expect("JSON");
+        artifact["invalid_samples_ratio"] = serde_json::json!(0.75);
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&artifact).expect("json"),
+        )
+        .expect("write report");
+        let report = run_semantic(
+            dir,
+            None,
+            semantic_cfg(crate::config::SemanticScope::All),
+            &rubrics,
+        );
+        assert_eq!(
+            status_of(&report, "semantic_quality"),
+            GateStatus::Skip,
+            "суждению верить нельзя: {}",
+            crate::gate::render(&report)
+        );
+        assert!(
+            semantic_rules(&report).contains(&"semantic_invalid_samples".to_string()),
+            "{:?}",
+            semantic_rules(&report)
+        );
+        assert_eq!(
+            report.outcome,
+            GateOutcome::Incomplete,
+            "{}",
+            crate::gate::render(&report)
+        );
+    }
+
     /// E2: вход с prompt-инъекцией — «проверить нельзя, нужен человек».
     /// Составляющая уходит в SKIP с находкой `semantic_input_injection`, и
     /// вердикт гейта становится INCOMPLETE (exit 3): молчаливым PASS такой
