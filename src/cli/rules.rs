@@ -16,6 +16,19 @@ pub(crate) enum RulesCmd {
         /// Корень кейса (каталог с `docs/`, `model/`, `.arch-handoff/`).
         #[arg(default_value = ".")]
         path: PathBuf,
+        /// E7.3: читать историю отчётов судьи вместо пробелов кейса.
+        /// Повторяющееся обвинение становится кандидатом `must_not_contain`,
+        /// повторяющаяся метка механики — advisory без механики.
+        #[arg(long)]
+        from_judge: bool,
+        /// Каталог истории отчётов (по умолчанию — архив харнесса,
+        /// `$ARCH_HOME/reports`); действует вместе с `--from-judge`.
+        #[arg(long)]
+        history: Option<PathBuf>,
+        /// Сколько прогонов делают находку повторяющейся (по умолчанию
+        /// `judge_rules::MIN_RUNS` = 3); действует вместе с `--from-judge`.
+        #[arg(long, default_value_t = arch_harness::judge_rules::MIN_RUNS)]
+        min_runs: usize,
     },
     /// Шаблоны исполняемых правил: библиотека, применение, проверка зубов.
     Template {
@@ -91,10 +104,30 @@ pub(crate) enum RulesTemplateCmd {
 /// Обрабатывает `arch-be rules …`: кандидаты и шаблоны исполняемых правил.
 pub(crate) fn cmd_rules(cmd: RulesCmd) -> Result<()> {
     match cmd {
-        RulesCmd::Suggest { path } => {
-            let report = arch_harness::rules_suggest::suggest(&path)?;
-            print!("{}", arch_harness::rules_suggest::render_markdown(&report));
-            Ok(())
+        RulesCmd::Suggest {
+            path,
+            from_judge,
+            history,
+            min_runs,
+        } => {
+            if from_judge {
+                // E7.3: источник — история отчётов судьи, а не пробелы кейса.
+                let dir = history.unwrap_or_else(arch_harness::judge_rules::default_history_dir);
+                let runs = arch_harness::judge_rules::read_history(&dir);
+                let report = arch_harness::judge_rules::suggest(&runs, min_runs);
+                if runs.is_empty() {
+                    eprintln!(
+                        "История отчётов судьи пуста: {} (каталог создаёт `rubric run`)",
+                        dir.display()
+                    );
+                }
+                print!("{}", arch_harness::rules_suggest::render_markdown(&report));
+                Ok(())
+            } else {
+                let report = arch_harness::rules_suggest::suggest(&path)?;
+                print!("{}", arch_harness::rules_suggest::render_markdown(&report));
+                Ok(())
+            }
         }
         RulesCmd::Template { cmd } => cmd_rules_template(cmd),
         RulesCmd::Allow { repo, constraints } => {

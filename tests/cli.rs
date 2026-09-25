@@ -269,6 +269,102 @@ fn control_check_no_exec_env_switch() {
 /// совпадение отпечатка — исполнение; изменение реестра — пропуск
 /// `command_untrusted` (команда не запускалась); повторное `rules allow` —
 /// снова исполнение.
+fn judge_history_record(subject: &str, score: u8, rationale: &str) -> serde_json::Value {
+    serde_json::json!({
+        "schema": "judge-history/1",
+        "rubric": "code_invariant_conformance",
+        "judge_model": "test-judge",
+        "judged_at": "20260925-120000",
+        "decision": "fail",
+        "subject": subject,
+        "scores": [{
+            "criterion_id": "no_violation",
+            "score": score,
+            "flags": [],
+            "rationale": rationale,
+        }],
+    })
+}
+
+/// E7.3: `rules suggest --from-judge` читает историю отчётов судьи из архива
+/// харнесса (`$ARCH_HOME/reports`) и предлагает детерминированные правила по
+/// повторяющимся находкам: обвинение — YAML `must_not_contain`, метка механики —
+/// advisory. Порог `--min-runs` и явный `--history` управляют отбором.
+#[test]
+fn rules_suggest_from_judge_history_proposes_deterministic_rule() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let reports = tmp.path().join(".arch-harness/reports");
+    std::fs::create_dir_all(&reports).expect("каталог истории");
+    let accusation = "Цитата subject: \"self.charged.append(amount_minor)\". Нарушение.";
+    for (i, subject) in ["src/pay.py", "src/ledger.py", "src/order.py"]
+        .iter()
+        .enumerate()
+    {
+        std::fs::write(
+            reports.join(format!(
+                "rubric-code_invariant_conformance-2026092{i}-120000.json"
+            )),
+            serde_json::to_vec(&judge_history_record(subject, 1, accusation)).expect("json"),
+        )
+        .expect("запись истории");
+    }
+    // Повторяющаяся метка механики — advisory без механики.
+    let flagged = "Нарушений не вижу.";
+    std::fs::write(
+        reports.join("rubric-adr_quality-20260925-130000.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "schema": "judge-history/1",
+            "rubric": "adr_quality",
+            "judge_model": "test-judge",
+            "subject": "docs/adr/001.md",
+            "scores": [{
+                "criterion_id": "reversibility",
+                "score": 3,
+                "flags": ["evidence_not_found"],
+                "rationale": flagged,
+            }],
+        }))
+        .expect("json"),
+    )
+    .expect("запись истории");
+
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.args(["rules", "suggest", "--from-judge"]);
+    cmd.assert()
+        .success()
+        .stdout(contains("Из истории отчётов судьи (4 прогонов"))
+        .stdout(contains("judge-accusation-no-violation-1"))
+        .stdout(contains("type: must_not_contain"))
+        .stdout(contains("self\\.charged\\.append\\(amount_minor\\)"))
+        .stdout(contains("glob: '**/*.py'"))
+        // Одна метка на одном критерии не достигает порога повторяемости (3).
+        .stdout(predicates::str::contains("judge-flag-evidence_not_found-reversibility").not());
+
+    // Порог выше числа прогонов — кандидатов нет, и причина названа.
+    let mut strict = arch_cmd(tmp.path());
+    strict.args(["rules", "suggest", "--from-judge", "--min-runs", "5"]);
+    strict
+        .assert()
+        .success()
+        .stdout(contains("не даёт кандидатов"));
+
+    // Явный каталог истории без отчётов рубрик — пустая история, не ошибка.
+    let empty = tmp.path().join("no-history");
+    std::fs::create_dir_all(&empty).expect("каталог");
+    let mut explicit = arch_cmd(tmp.path());
+    explicit.args([
+        "rules",
+        "suggest",
+        "--from-judge",
+        "--history",
+        empty.to_str().expect("путь"),
+    ]);
+    explicit
+        .assert()
+        .success()
+        .stdout(contains("не даёт кандидатов"));
+}
+
 #[test]
 fn rules_allow_lifecycle() {
     let tmp = tempfile::tempdir().expect("tempdir");

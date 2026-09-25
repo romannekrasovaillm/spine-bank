@@ -94,6 +94,18 @@ impl Candidate {
             templates: Vec::new(),
         }
     }
+
+    /// Кандидат от стороннего детектора (E7.3: повторяющиеся находки судьи).
+    /// `yaml` — готовый фрагмент реестра, когда класс механизируем; `None` —
+    /// честный advisory (механики нет).
+    pub(crate) fn from_history(
+        id: &str,
+        rationale: String,
+        source_skill: &str,
+        yaml: Option<String>,
+    ) -> Self {
+        Self::new(id, rationale, source_skill, yaml)
+    }
 }
 
 /// Отчёт детекторов: кандидаты + однострочная сводка.
@@ -103,6 +115,11 @@ pub struct SuggestReport {
     pub candidates: Vec<Candidate>,
     /// Однострочная сводка для CLI/MCP.
     pub summary: String,
+    /// Чем объяснить пустой список кандидатов (E7.3): источник истории и порог
+    /// повторяемости описываются иначе, чем пробелы кейса. `None` — общий текст
+    /// детекторов кейса.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub empty_note: Option<String>,
 }
 
 /// Собирает текстовые файлы каталога (рекурсивно, без следования симлинкам)
@@ -179,6 +196,34 @@ fn yaml_must_contain(
     format!(
         "  - name: {name}\n    \
          type: must_contain\n    \
+         glob: {glob}\n    \
+         pattern: {pattern}\n    \
+         severity: warn\n    \
+         rationale: {rationale}\n    \
+         fix_hint: {fix_hint}\n    \
+         skill: {skill}",
+        glob = yaml_sq(glob),
+        pattern = yaml_sq(pattern),
+        rationale = yaml_sq(rationale),
+        fix_hint = yaml_sq(fix_hint),
+    )
+}
+
+/// YAML-фрагмент кандидатного правила `must_not_contain` (E7.3): цитата-нарушение
+/// из истории судьи становится запрещённым паттерном. Скаляры экранируются так
+/// же, как у [`yaml_must_contain`], — фрагмент обязан грузиться боевой схемой
+/// `control::load_fitness_rules`.
+pub(crate) fn yaml_must_not_contain(
+    name: &str,
+    glob: &str,
+    pattern: &str,
+    rationale: &str,
+    fix_hint: &str,
+    skill: &str,
+) -> String {
+    format!(
+        "  - name: {name}\n    \
+         type: must_not_contain\n    \
          glob: {glob}\n    \
          pattern: {pattern}\n    \
          severity: warn\n    \
@@ -572,6 +617,7 @@ pub fn suggest(case_dir: &Path) -> Result<SuggestReport> {
     Ok(SuggestReport {
         candidates,
         summary,
+        empty_note: None,
     })
 }
 
@@ -584,12 +630,19 @@ pub fn render_markdown(report: &SuggestReport) -> String {
     let _ = writeln!(out, "# Кандидатные fitness-правила (rules-suggest)\n");
     let _ = writeln!(out, "{}\n", report.summary);
     if report.candidates.is_empty() {
-        let _ = writeln!(
-            out,
-            "Пробелов по детекторам (EARS, таймауты контрактов, REQ→TASK, \
-             RTO/RPO→ADR, аудит операторских действий, исполняемые правила, \
-             инвариант→исполняемое правило) не найдено."
-        );
+        match &report.empty_note {
+            Some(note) => {
+                let _ = writeln!(out, "{note}");
+            }
+            None => {
+                let _ = writeln!(
+                    out,
+                    "Пробелов по детекторам (EARS, таймауты контрактов, REQ→TASK, \
+                     RTO/RPO→ADR, аудит операторских действий, исполняемые правила, \
+                     инвариант→исполняемое правило) не найдено."
+                );
+            }
+        }
         return out;
     }
     for c in &report.candidates {

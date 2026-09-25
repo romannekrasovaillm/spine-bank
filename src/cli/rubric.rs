@@ -283,14 +283,25 @@ pub(crate) async fn cmd_rubric(cfg: &Arc<Config>, cmd: RubricCmd) -> Result<()> 
                 )
                 .await?;
                 println!("{}", report.to_markdown());
-                let out =
-                    cfg.paths
-                        .reports_dir
-                        .join(format!("rubric-{}-{}.md", rub.name, timestamp()));
+                // E7.3: markdown — человеку, JSON-близнец — история для
+                // `rules suggest --from-judge` (цель и метки там данные, а не
+                // текст таблицы). Одна метка времени на оба файла.
+                let stamp = timestamp();
+                let out = cfg
+                    .paths
+                    .reports_dir
+                    .join(format!("rubric-{}-{stamp}.md", rub.name));
                 if let Some(parent) = out.parent() {
                     std::fs::create_dir_all(parent).ok();
                 }
                 std::fs::write(&out, report.to_markdown())?;
+                arch_harness::judge_rules::write_history_twin(
+                    &cfg.paths.reports_dir,
+                    &rub.name,
+                    &stamp,
+                    &report,
+                    Some(pack.subject.clone()),
+                )?;
                 eprintln!("Отчёт: {}", out.display());
                 // Машиночитаемый отчёт о досье (ADR-051): его читает
                 // составляющая `semantic_quality`. Репозиторий — тот, из
@@ -487,15 +498,23 @@ pub(crate) async fn cmd_rubric(cfg: &Arc<Config>, cmd: RubricCmd) -> Result<()> 
                     )
                     .await?;
                     println!("{}", report.to_markdown());
-                    let out = cfg.paths.reports_dir.join(format!(
-                        "rubric-{}-{}.md",
-                        rub.name,
-                        timestamp()
-                    ));
+                    let stamp = timestamp();
+                    let out = cfg
+                        .paths
+                        .reports_dir
+                        .join(format!("rubric-{}-{stamp}.md", rub.name));
                     if let Some(parent) = out.parent() {
                         std::fs::create_dir_all(parent).ok();
                     }
                     std::fs::write(&out, report.to_markdown())?;
+                    // E7.3: та же история, что у досье, — цель это документ.
+                    arch_harness::judge_rules::write_history_twin(
+                        &cfg.paths.reports_dir,
+                        &rub.name,
+                        &stamp,
+                        &report,
+                        Some(target.display().to_string()),
+                    )?;
                     eprintln!("Отчёт: {}", out.display());
                     // Машиночитаемый отчёт (Н7, ADR-042): его читает составляющая
                     // гейта `decision_quality`. Пишем в репозиторий, к которому
