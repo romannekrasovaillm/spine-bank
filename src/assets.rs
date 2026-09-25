@@ -60,6 +60,18 @@ pub const RUBRIC_NFR_MECHANISM_FIT: &str = include_str!("../assets/rubrics/nfr_m
 /// (класс `D11`). Досье — `code_vs_spine`.
 pub const RUBRIC_CODE_INVARIANT_CONFORMANCE: &str =
     include_str!("../assets/rubrics/code_invariant_conformance.yaml");
+/// Смысловая рубрика (E10.1): солюшен-документ против стандартов слоя ДКА.
+/// Досье — `solution_vs_standards`.
+pub const RUBRIC_SOLUTION_STANDARDS: &str =
+    include_str!("../assets/rubrics/solution_standards.yaml");
+/// Смысловая рубрика (E10.2): обоснованность исключения из инварианта.
+/// Досье — `adr_vs_spine`.
+pub const RUBRIC_ADR_EXCEPTION_JUSTIFICATION: &str =
+    include_str!("../assets/rubrics/adr_exception_justification.yaml");
+/// Смысловая рубрика (E11.1): код против сценариев проверки `OpenSpec`.
+/// Досье — `code_vs_scenarios`.
+pub const RUBRIC_CODE_SCENARIO_CONFORMANCE: &str =
+    include_str!("../assets/rubrics/code_scenario_conformance.yaml");
 
 /// Пара файлов golden-набора смысловых рубрик (ADR-051, S4).
 macro_rules! semantic_golden_files {
@@ -703,6 +715,59 @@ const PLUGIN_FILES: &[(&str, &str)] = &[
     ("plugins/spine-workflows/skills/spine-archify-viz/SKILL.md", PLUGIN_SPINE_WORKFLOWS_SKILLS_SPINE_ARCHIFY_VIZ_SKILL_MD),
 ];
 
+/// Пара файлов набора квалификации судьи (E6.1): каталог-репозиторий
+/// (`ARCHITECTURE-SPINE.md`, `cases.yaml`, `code/`), по которому считается
+/// полнота и точность судьи. Отдельным списком, как `SEMANTIC_GOLDEN`: набор
+/// растёт вместе с числом классов дефектов.
+macro_rules! qualification_files {
+    ($($path:literal),* $(,)?) => {
+        &[$((
+            concat!("assets/qualification/", $path),
+            include_str!(concat!("../assets/qualification/", $path)),
+        )),*]
+    };
+}
+
+/// Встроенный набор квалификации `code_vs_spine` (E6.1): 33 файлов —
+/// эталон, `cases.yaml` с истиной и 30 случаев (15 дефektных / 15 чистых).
+/// `arch-be rubric qualify <рубрика> --set <каталог>` читает его из дома
+/// после `arch-be init`.
+pub const QUALIFICATION: &[(&str, &str)] = qualification_files![
+    "code_vs_spine/ARCHITECTURE-SPINE.md",
+    "code_vs_spine/README.md",
+    "code_vs_spine/cases.yaml",
+    "code_vs_spine/code/comment-only-bad-01.py",
+    "code_vs_spine/code/comment-only-bad-02.py",
+    "code_vs_spine/code/comment-only-bad-03.py",
+    "code_vs_spine/code/comment-only-ok-01.py",
+    "code_vs_spine/code/comment-only-ok-02.py",
+    "code_vs_spine/code/comment-only-ok-03.py",
+    "code_vs_spine/code/flag-bypass-bad-01.py",
+    "code_vs_spine/code/flag-bypass-bad-02.py",
+    "code_vs_spine/code/flag-bypass-bad-03.py",
+    "code_vs_spine/code/flag-bypass-ok-01.py",
+    "code_vs_spine/code/flag-bypass-ok-02.py",
+    "code_vs_spine/code/flag-bypass-ok-03.py",
+    "code_vs_spine/code/float-money-bad-01.py",
+    "code_vs_spine/code/float-money-bad-02.py",
+    "code_vs_spine/code/float-money-bad-03.py",
+    "code_vs_spine/code/float-money-ok-01.py",
+    "code_vs_spine/code/float-money-ok-02.py",
+    "code_vs_spine/code/float-money-ok-03.py",
+    "code_vs_spine/code/ignored-key-bad-01.py",
+    "code_vs_spine/code/ignored-key-bad-02.py",
+    "code_vs_spine/code/ignored-key-bad-03.py",
+    "code_vs_spine/code/ignored-key-ok-01.py",
+    "code_vs_spine/code/ignored-key-ok-02.py",
+    "code_vs_spine/code/ignored-key-ok-03.py",
+    "code_vs_spine/code/no-return-bad-01.py",
+    "code_vs_spine/code/no-return-bad-02.py",
+    "code_vs_spine/code/no-return-bad-03.py",
+    "code_vs_spine/code/no-return-ok-01.py",
+    "code_vs_spine/code/no-return-ok-02.py",
+    "code_vs_spine/code/no-return-ok-03.py",
+];
+
 /// Карта «относительный путь в домашнем каталоге → содержимое».
 /// Порядок не важен; существующие файлы пропускаются.
 const DEFAULT_FILES: &[(&str, &str)] = &[
@@ -754,6 +819,18 @@ const DEFAULT_FILES: &[(&str, &str)] = &[
     (
         "assets/rubrics/code_invariant_conformance.yaml",
         RUBRIC_CODE_INVARIANT_CONFORMANCE,
+    ),
+    (
+        "assets/rubrics/solution_standards.yaml",
+        RUBRIC_SOLUTION_STANDARDS,
+    ),
+    (
+        "assets/rubrics/adr_exception_justification.yaml",
+        RUBRIC_ADR_EXCEPTION_JUSTIFICATION,
+    ),
+    (
+        "assets/rubrics/code_scenario_conformance.yaml",
+        RUBRIC_CODE_SCENARIO_CONFORMANCE,
     ),
     (
         "assets/benchmarks/payment_integration.yaml",
@@ -1363,6 +1440,7 @@ pub fn write_defaults(home: &Path) -> Result<Vec<PathBuf>> {
         .chain(PLUGIN_FILES.iter())
         .chain(RULE_TEMPLATE_FILES.iter())
         .chain(SEMANTIC_GOLDEN.iter())
+        .chain(QUALIFICATION.iter())
     {
         let path = home.join(rel);
         if path.exists() {
@@ -1382,6 +1460,57 @@ mod tests {
     use super::*;
     use unicode_width::UnicodeWidthStr;
 
+    /// Охранный тест: каждый файл рубрик и набора квалификации репозитория
+    /// встроен и устанавливается `write_defaults` (то есть `arch-be init`).
+    /// Иначе новая рубрика живёт в репозитории, но не доезжает до дома, и
+    /// `rubric run <имя>` падает на «файл не найден» (так и случилось с
+    /// рубриками E10.1/E10.2/E11.1 до этого теста).
+    #[test]
+    fn every_rubric_and_qualification_file_is_installed() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_defaults(tmp.path()).expect("write_defaults");
+        for dir in ["assets/rubrics", "assets/qualification"] {
+            let mut checked = 0_usize;
+            for entry in walkdir::WalkDir::new(root.join(dir))
+                .into_iter()
+                .filter_map(std::result::Result::ok)
+                .filter(|e| e.file_type().is_file())
+            {
+                let rel = entry
+                    .path()
+                    .strip_prefix(root)
+                    .expect("путь внутри репозитория");
+                assert!(
+                    tmp.path().join(rel).is_file(),
+                    "ассет не встроен в бинарь: {}",
+                    rel.display()
+                );
+                checked += 1;
+            }
+            assert!(checked > 0, "в {dir} не найдено файлов для проверки");
+        }
+        // Новые рубрики волны 0.3.9 — поимённо: их отсутствие ломало `rubric run`.
+        for name in [
+            "solution_standards.yaml",
+            "adr_exception_justification.yaml",
+            "code_scenario_conformance.yaml",
+        ] {
+            let rel = format!("assets/rubrics/{name}");
+            assert!(
+                tmp.path().join(&rel).is_file(),
+                "рубрика не устанавливается: {rel}"
+            );
+        }
+        // Набор квалификации E6 — каталог-репозиторий целиком.
+        assert!(
+            tmp.path()
+                .join("assets/qualification/code_vs_spine/cases.yaml")
+                .is_file(),
+            "набор квалификации не устанавливается"
+        );
+    }
+
     #[test]
     fn write_defaults_creates_full_tree() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -1389,7 +1518,8 @@ mod tests {
         let total = DEFAULT_FILES.len()
             + PLUGIN_FILES.len()
             + RULE_TEMPLATE_FILES.len()
-            + SEMANTIC_GOLDEN.len();
+            + SEMANTIC_GOLDEN.len()
+            + QUALIFICATION.len();
         assert_eq!(written.len(), total, "записаны не все файлы");
         for (rel, content) in DEFAULT_FILES
             .iter()

@@ -138,6 +138,13 @@ clippy зелёные в обоих профилях (`harness` и `core`).
 
 ### Added
 
+- **Новые рубрики и набор квалификации доезжают до дома через `arch-be init`.**
+  Три рубрики волны (`solution_standards`, `adr_exception_justification`,
+  `code_scenario_conformance`) и набор квалификации `assets/qualification/`
+  встроены в бинарь и устанавливаются в `~/.arch-harness/assets/`; до этого
+  `rubric run <новая рубрика>` из дома падал на «файл не найден», хотя рубрика
+  лежала в репозитории. Охранный тест сверяет дерево
+  `assets/rubrics`+`assets/qualification` с тем, что пишет `write_defaults`.
 - **E1.3 — устаревшее досье называется находкой, а не «сверкой невозможной».**
   `judge::reverify` сверяет записанные `pack_sha256` и поимённые хэши `inputs`
   с досье, пересобранным из репозитория (`rubric_pack::changed_after_judging`),
