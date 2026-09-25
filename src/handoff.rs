@@ -323,6 +323,28 @@ struct Manifest<'a> {
     rollback_plan: &'a str,
 }
 
+/// Модель-автор кода из контракта передачи (E5.3): `MANIFEST.json` пакета
+/// называет модель, назначенную для реализации задачи. Это единственное
+/// машинное свидетельство авторства кода до того, как кто-то назовёт его
+/// аргументом; по нему считается независимость судьи (E5.2) и ловится
+/// «судья судил свой же код».
+///
+/// Пустое значение и отсутствие пакета — `None`: догадки вместо свидетельства
+/// не подставляются, и в отчёте честно остаётся «автор не указан».
+#[must_use]
+pub fn author_model_from_contract(repo: &Path) -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct ManifestAuthor {
+        #[serde(default)]
+        model: Option<String>,
+    }
+    let text = std::fs::read_to_string(repo.join(HANDOFF_DIR).join("MANIFEST.json")).ok()?;
+    serde_json::from_str::<ManifestAuthor>(&text)
+        .ok()?
+        .model
+        .filter(|m| !m.trim().is_empty())
+}
+
 /// Генерирует handoff-пакет в репозиторий.
 ///
 /// Создаёт `<repo>/.arch-handoff/` с TASK.md, ARCHITECTURE.md, MANIFEST.json,
@@ -1804,6 +1826,37 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(&spec_path).expect("SPEC.md after"),
             "# SPEC\n\nУточнено архитектором.\n"
+        );
+    }
+
+    /// E5.3: модель-автор кода берётся из контракта передачи; пустое значение
+    /// и отсутствие пакета — не автор, а не догадка.
+    #[test]
+    fn contract_author_model_is_read_from_manifest() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path();
+        assert!(
+            author_model_from_contract(repo).is_none(),
+            "без пакета автора нет"
+        );
+        std::fs::create_dir_all(repo.join(HANDOFF_DIR)).expect("mkdir");
+        std::fs::write(
+            repo.join(HANDOFF_DIR).join("MANIFEST.json"),
+            "{\"created_at\":\"2026-09-25T00:00:00+00:00\",\"task\":\"t\",\"model\":\"code-agent-x\"}",
+        )
+        .expect("manifest");
+        assert_eq!(
+            author_model_from_contract(repo).as_deref(),
+            Some("code-agent-x")
+        );
+        std::fs::write(
+            repo.join(HANDOFF_DIR).join("MANIFEST.json"),
+            "{\"created_at\":\"2026-09-25T00:00:00+00:00\",\"task\":\"t\",\"model\":\"  \"}",
+        )
+        .expect("manifest 2");
+        assert!(
+            author_model_from_contract(repo).is_none(),
+            "пробелы — не автор"
         );
     }
 

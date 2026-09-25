@@ -3165,4 +3165,63 @@ fn rubric_run_pack_saves_raw_answers_provenance_and_reverifies() {
             .is_some_and(|s| s.len() == 64),
         "{record}"
     );
+
+    // (е) E5.2/E5.3: автор кода — из контракта передачи. Без `--author-model`
+    // MANIFEST.json handoff-пакета называет модель-исполнителя, отчёт получает
+    // её как автора, и независимость судьи вычисляется, а не остаётся `none`.
+    std::fs::create_dir_all(repo.join(".arch-handoff")).expect("mkdir handoff");
+    std::fs::write(
+        repo.join(".arch-handoff/MANIFEST.json"),
+        "{\"created_at\":\"2026-09-25T00:00:00+00:00\",\"task\":\"t\",\"model\":\"code-agent-x\"}",
+    )
+    .expect("MANIFEST");
+    let rerun = |home: &std::path::Path, repo: &std::path::Path| {
+        arch_cmd(home)
+            .args(["rubric", "run", "t-semantic"])
+            .args([
+                "--pack",
+                "adr_vs_spine",
+                "--subject",
+                "docs/adr/ADR-001-x.md",
+            ])
+            .arg("--root")
+            .arg(repo.as_os_str())
+            .output()
+            .expect("rubric run с контрактом")
+    };
+    let out = rerun(home, &repo);
+    // 0 или 2: во входе этого кейса уже есть строка-инъекция из фазы (г),
+    // поэтому решение — `human`, а не «годно». Для E5 важно не оно, а автор.
+    assert!(
+        matches!(out.status.code(), Some(0 | 2)),
+        "прогон с контрактом: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let artifact: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&artifact_path).expect("отчёт после прогона с контрактом"),
+    )
+    .expect("JSON");
+    assert_eq!(artifact["author_model"], "code-agent-x", "{artifact}");
+    assert_eq!(artifact["author_source"], "contract", "{artifact}");
+    let independence = artifact["independence"]
+        .as_str()
+        .expect("уровень независимости");
+    assert!(
+        independence.starts_with("launched"),
+        "независимость вычислена, а не none: {independence} в {artifact}"
+    );
+    // Судья совпал с моделью из контракта — независимости нет, и это видно.
+    std::fs::write(
+        repo.join(".arch-handoff/MANIFEST.json"),
+        "{\"created_at\":\"2026-09-25T00:00:00+00:00\",\"task\":\"t\",\"model\":\"fake-judge-1\"}",
+    )
+    .expect("MANIFEST 2");
+    let out = rerun(home, &repo);
+    assert!(matches!(out.status.code(), Some(0 | 2)));
+    let artifact: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&artifact_path).expect("отчёт после второго прогона"),
+    )
+    .expect("JSON");
+    assert_eq!(artifact["author_model"], "fake-judge-1", "{artifact}");
+    assert_eq!(artifact["independence"], "none", "{artifact}");
 }

@@ -884,6 +884,10 @@ pub const AUTHOR_SOURCE_ARGUMENT: &str = "argument";
 /// Источник метки автора: автора нет ни в документе, ни в вызове.
 pub const AUTHOR_SOURCE_NONE: &str = "none";
 
+/// Метка автора взята из контракта передачи (E5.3): `MANIFEST.json`
+/// handoff-пакета называет модель, назначенную для реализации задачи.
+pub const AUTHOR_SOURCE_CONTRACT: &str = "contract";
+
 /// Кем выбран автор документа и откуда взята метка (J3, ADR-048).
 #[derive(Debug, Clone, Default)]
 pub struct AuthorChoice {
@@ -902,6 +906,25 @@ impl AuthorChoice {
     pub fn from_header(&self) -> bool {
         self.source == AUTHOR_SOURCE_HEADER
     }
+}
+
+/// Автор с учётом контракта передачи (E5.3): шапка документа сильнее
+/// аргумента, аргумент — сильнее контракта; контракт — последнее машинное
+/// свидетельство авторства перед «неизвестен».
+#[must_use]
+pub fn choose_author_from(
+    header: Option<String>,
+    declared: Option<String>,
+    contract: Option<String>,
+) -> AuthorChoice {
+    let mut choice = choose_author(header, declared);
+    if choice.author.is_none() {
+        if let Some(model) = contract.filter(|m| !m.trim().is_empty()) {
+            choice.author = Some(model);
+            choice.source = AUTHOR_SOURCE_CONTRACT.to_string();
+        }
+    }
+    choice
 }
 
 /// Выбирает автора документа: **значение из шапки документа сильнее**
@@ -1695,6 +1718,31 @@ mod tests {
 
     /// Оператор — запись из git-конфига РЕПОЗИТОРИЯ: имя и адрес как есть,
     /// без попытки что-то о них утверждать (это не подпись).
+    /// E5.3: контракт передачи — последний источник авторства: шапка и
+    /// аргумент сильнее, пустой контракт ничего не подставляет.
+    #[test]
+    fn author_source_precedence_includes_contract() {
+        let choice = choose_author_from(
+            Some("header-model".into()),
+            Some("arg".into()),
+            Some("code-agent".into()),
+        );
+        assert_eq!(choice.author.as_deref(), Some("header-model"));
+        assert_eq!(choice.source, AUTHOR_SOURCE_HEADER);
+        let choice = choose_author_from(None, Some("arg".into()), Some("code-agent".into()));
+        assert_eq!(choice.author.as_deref(), Some("arg"));
+        assert_eq!(choice.source, AUTHOR_SOURCE_ARGUMENT);
+        let choice = choose_author_from(None, None, Some("code-agent".into()));
+        assert_eq!(choice.author.as_deref(), Some("code-agent"));
+        assert_eq!(choice.source, AUTHOR_SOURCE_CONTRACT);
+        let choice = choose_author_from(None, None, None);
+        assert!(choice.author.is_none());
+        assert_eq!(choice.source, AUTHOR_SOURCE_NONE);
+        // Пустая строка контракта — не автор.
+        let choice = choose_author_from(None, None, Some("   ".into()));
+        assert!(choice.author.is_none(), "{choice:?}");
+    }
+
     #[test]
     fn operator_reads_repository_git_config() {
         let dir = tempfile::tempdir().expect("tmp");

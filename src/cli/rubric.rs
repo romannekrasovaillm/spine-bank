@@ -268,9 +268,14 @@ pub(crate) async fn cmd_rubric(cfg: &Arc<Config>, cmd: RubricCmd) -> Result<()> 
                 // Происхождение и сырые ответы — по тому же канону, что у
                 // документа (F1): иначе `rubric reverify` называет отчёт по
                 // досье невоспроизводимым (J1/J2, ADR-048). Автора досье
-                // решает аргумент: шапки у собранного досье нет (как в MCP
-                // `rubric_verify`).
-                let choice = arch_harness::judge::choose_author(None, author_model.clone());
+                // решает аргумент, а если его нет — контракт передачи
+                // (`.arch-handoff/MANIFEST.json`, E5.3): шапки у собранного
+                // досье нет (как в MCP `rubric_verify`).
+                let choice = arch_harness::judge::choose_author_from(
+                    None,
+                    author_model.clone(),
+                    arch_harness::handoff::author_model_from_contract(&repo),
+                );
                 let model_name = model.clone().unwrap_or_else(|| cfg.default_model.clone());
                 let mut provenance = arch_harness::judge::RubricProvenance::launched(
                     arch_harness::judge::launcher_for(cfg, &model_name),

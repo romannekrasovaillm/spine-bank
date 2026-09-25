@@ -359,12 +359,16 @@ impl McpServe {
         // Автор — из шапки документа, если он там записан: значение из
         // документа сильнее аргумента вызова (J3, ADR-048). Для inline-текста
         // шапки нет, поэтому решает аргумент.
-        let choice = crate::judge::choose_author(
+        let contract_author = subject_for_write
+            .as_ref()
+            .and_then(|(repo, _, _)| crate::handoff::author_model_from_contract(repo));
+        let choice = crate::judge::choose_author_from(
             abs_target
                 .as_deref()
                 .filter(|p| p.is_file())
                 .and_then(crate::adr_registry::author_model_of),
             args.author_model.clone(),
+            contract_author,
         );
         if let Some((repo, subject, addressable)) = subject_for_write {
             // Текста без файла гейт не найдёт: писать нечего — адресуемость
