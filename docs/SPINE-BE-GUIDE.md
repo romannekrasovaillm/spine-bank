@@ -133,11 +133,15 @@ ADR не «написан и забыт»: у него статусная маш
 хоста (в ядре LLM нет, AD-2).
 
 ```bash
-arch-be rubric pack adr_vs_spine docs/adr/ADR-042-x.md   # вход судьи: ADR + инварианты спайна
-arch-be rubric list                                       # видно и четыре смысловые рубрики
-arch-be bench run --golden --rubric adr_spine_consistency # калибровка по golden-набору
+arch-be rubric pack adr_vs_spine docs/adr/ADR-042-x.md      # вход судьи: ADR + инварианты спайна
+arch-be rubric pack code_vs_scenarios src/pay.py             # код + сценарии OpenSpec (E11)
+arch-be rubric pack solution_vs_standards docs/solution/SOL-1.md  # документ + стандарты слоя (E10.1)
+arch-be rubric list                                          # видно и семь смысловых рубрик
+arch-be bench run --golden --rubric adr_spine_consistency    # калибровка по golden-набору
+arch-be rubric qualify code_invariant_conformance --set assets/qualification/code_vs_spine  # допуск модели (E6)
+arch-be rubric committee --root .                            # пакет архкомитету: только fail и human (E10.4)
 arch-be redteam кейсы/salary-payments --keep-semantic /tmp/semantic
-arch-be redteam semantic-score /tmp/semantic              # «смысловой слой: поймано k из n»
+arch-be redteam semantic-score /tmp/semantic                 # «смысловой слой: поймано k из n»
 ```
 
 Что важно знать, читая любой зелёный вердикт:
@@ -193,6 +197,10 @@ arch-be redteam semantic-score /tmp/semantic              # «смысловой
 | `arch-be rules template list / show / apply / verify` | шаблоны исполняемых правил: библиотека, применение в кейс, проверка зубов (ADR-050) |
 | `arch-be rules suggest <кейс>` | кандидаты по каждому инварианту без проверки поведения (то же, что `control rules-suggest`) |
 | `arch-be rubric committee --root <продукт>` | E10.4: пакет для архкомитета — только `fail` и `human` с доказательствами; `--json`, `--out` |
+| `arch-be rubric qualify <рубрика> --set <каталог> [--model <модель>] [--check]` | E6: квалификация судьи на эталонном наборе (полнота/точность по классам, доля `human`); `--check` — проверить записанный отчёт против текущего набора |
+| `arch-be rubric decide <отчёт> --accept/--reject --by <кто> [--reason <почему>]` | E4.5: решение архитектора снимает или оставляет эскалацию `human`, привязка к ревизии отчёта |
+| `arch-be fleet audit <worktree…> [--format json]` | SSOT-аудит флота + **смысловой срез** (E10.3): решения рубрик, доля `human`, расхождения судей, нарушенные инварианты |
+| `arch-be metrics [--cost-report]` | операционные метрики; строка «Смысловые ревью (E8.3)»: время судьи и токены на решение |
 | `arch-be rules suggest --from-judge` | E7.3: кандидаты в детерминированные правила из истории отчётов судьи (`$ARCH_HOME/reports`); `--history <каталог>`, `--min-runs N` |
 | `arch-be control score [--from-diff]` | маршрут значимости + anti-bypass |
 | `arch-be model validate / graph / export / import / drift / landscape` | модель: проверки, диаграммы, обмен (вкл. импорт реестров csv/xlsx/backstage), дрейф «модель ↔ код», ландшафт |
