@@ -194,7 +194,7 @@ pub(super) fn run_inner(
         base,
         &git,
         required_names.iter().any(|r| r == "semantic_quality"),
-        options.route,
+        options.decision_policy.for_route(options.route),
     ));
     let mut report = GateReport {
         repo: repo.to_path_buf(),

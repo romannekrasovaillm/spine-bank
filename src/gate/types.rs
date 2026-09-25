@@ -360,6 +360,9 @@ pub struct GateOptions {
     /// детерминированный legacy-режим (исполнять, allow-файл не
     /// консультируется): библиотека без края не зависит от машины (AD-7).
     pub exec: crate::cmd_trust::ExecPolicy,
+    /// Политика решения `human` по маршрутам (E4.2): от неё зависит, блокирует
+    /// ли гейт оговорку судьи или предупреждает.
+    pub decision_policy: crate::config::DecisionPolicyConfig,
     /// Эффективный маршрут прогона — после храповика `ROUTE.lock` (E3.3):
     /// от него зависит политика оговорок отчёта (`evidence_partial` на
     /// Critical уходит человеку). `None` — библиотечный вызов без маршрута:
@@ -380,6 +383,7 @@ impl GateOptions {
             rubrics_dir: cfg.paths.rubrics_dir(),
             executable_required: cfg.trace.executable_required,
             semantic_quality: cfg.gate.semantic_quality.clone(),
+            decision_policy: cfg.gate.decision_policy.clone(),
             exec: crate::cmd_trust::ExecPolicy::default(),
             route: None,
         }

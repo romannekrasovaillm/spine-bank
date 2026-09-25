@@ -7,7 +7,6 @@ use std::path::Path;
 use super::components::adr_is_accepted;
 use super::git::GitProbe;
 use super::types::{GateComponent, GateFinding};
-use crate::control::Route;
 use crate::delta;
 
 /// Субъект смысловой проверки: рубрика и её субъект досье (ADR-052).
@@ -45,7 +44,7 @@ pub(super) fn component_semantic_quality(
     base: Option<&str>,
     git: &GitProbe,
     enabled: bool,
-    route: Option<Route>,
+    human_policy: crate::config::HumanPolicy,
 ) -> GateComponent {
     if !enabled {
         return GateComponent::skip(
@@ -105,17 +104,14 @@ pub(super) fn component_semantic_quality(
             truncated = true;
         }
         for subject in subjects.into_iter().take(MAX_SEMANTIC_SUBJECTS) {
-            let state =
-                semantic_subject_state(repo, &rubric, kind, &subject, &artifacts, cfg, route);
+            let state = semantic_subject_state(repo, &rubric, kind, &subject, &artifacts, cfg);
             checked += usize::from(!matches!(state, SemanticState::Skipped));
             match &state {
                 SemanticState::InjectionSuspected(_) => injection_suspected += 1,
-                SemanticState::InvalidSamples(_) | SemanticState::PartialOnCritical(_) => {
-                    unconfirmed += 1;
-                }
+                s if s.escalates(human_policy) => unconfirmed += 1,
                 _ => {}
             }
-            findings.extend(state.into_findings(name, &subject));
+            findings.extend(state.into_findings(name, &subject, human_policy));
         }
     }
     let errors = findings.iter().filter(|f| f.severity == "error").count();
@@ -230,16 +226,35 @@ enum SemanticState {
     InvalidSamples(f64),
     /// То же, но доля ниже порога: предупреждение, а не эскалация (E3.2).
     InvalidSamplesWarn(f64),
-    /// Часть свидетельств судьи не подтвердилась, а маршрут — Critical (E3.3):
-    /// оговорку принимает человек.
-    PartialOnCritical(String),
+    /// Часть свидетельств судьи не подтвердилась (E3.3): политика маршрута
+    /// (E4.2) решает, блокировать ли из-за этого вердикт.
+    PartialEvidence(String),
     /// Всё в порядке.
     Ok,
 }
 
 impl SemanticState {
+    /// Блокирует ли состояние вердикт при такой политике маршрута (E4.2).
+    /// Инъекция во входе и невалидные сэмплы не понижаются: это не настройка,
+    /// а отказ доверия к суждению (E2/E3.2).
+    fn escalates(&self, policy: crate::config::HumanPolicy) -> bool {
+        match self {
+            Self::InjectionSuspected(_) | Self::InvalidSamples(_) => true,
+            Self::PartialEvidence(_) | Self::Unconfirmed(_) | Self::CoverageIncomplete(_) => {
+                policy == crate::config::HumanPolicy::Human
+            }
+            _ => false,
+        }
+    }
+
     /// Находки состояния; пусто — состояние не оставляет следа в отчёте.
-    fn into_findings(self, rubric: &str, subject: &SemanticSubject) -> Vec<GateFinding> {
+    fn into_findings(
+        self,
+        rubric: &str,
+        subject: &SemanticSubject,
+        policy: crate::config::HumanPolicy,
+    ) -> Vec<GateFinding> {
+        let escalated = self.escalates(policy);
         let who = format!("{} '{}' (рубрика {rubric})", "субъект", subject.subject);
         match self {
             Self::Skipped | Self::Ok => Vec::new(),
@@ -272,20 +287,30 @@ impl SemanticState {
                 ),
             )],
             Self::Unconfirmed(detail) => vec![GateFinding::ruled(
-                "warn".to_string(),
+                if escalated { "error" } else { "warn" }.to_string(),
                 "semantic_accusation_unconfirmed".to_string(),
                 format!(
                     "{who}: главный критерий низкий, но цитаты не подтверждены ({detail}) — \
-                     критерий исключён из итога, гейт этим не краснеет"
+                     критерий исключён из итога{}",
+                    if escalated {
+                        "; на этом маршруте решение за человеком"
+                    } else {
+                        ", гейт этим не краснеет"
+                    }
                 ),
             )],
             Self::CoverageIncomplete(criteria) => vec![GateFinding::ruled(
-                "warn".to_string(),
+                if escalated { "error" } else { "warn" }.to_string(),
                 "semantic_coverage_incomplete".to_string(),
                 format!(
                     "{who}: высокий балл без полного перечня проверенных источников ({}) — \
-                     критерии исключены из итога",
-                    criteria.join(", ")
+                     критерии исключены из итога{}",
+                    criteria.join(", "),
+                    if escalated {
+                        "; на этом маршруте решение за человеком"
+                    } else {
+                        ""
+                    }
                 ),
             )],
             Self::Low(total, judge) => vec![GateFinding::ruled(
@@ -321,12 +346,16 @@ impl SemanticState {
                     ratio * 100.0
                 ),
             )],
-            Self::PartialOnCritical(criteria) => vec![GateFinding::ruled(
-                "error".to_string(),
+            Self::PartialEvidence(criteria) => vec![GateFinding::ruled(
+                if escalated { "error" } else { "warn" }.to_string(),
                 "semantic_evidence_partial".to_string(),
                 format!(
-                    "{who}: часть свидетельств судьи не подтвердилась ({criteria}), а маршрут \
-                     Critical — решение за человеком"
+                    "{who}: часть свидетельств судьи не подтвердилась ({criteria}){}",
+                    if escalated {
+                        " — на этом маршруте решение за человеком"
+                    } else {
+                        ""
+                    }
                 ),
             )],
             Self::InjectionSuspected(lines) => vec![GateFinding::ruled(
@@ -354,7 +383,6 @@ fn semantic_subject_state(
     subject: &SemanticSubject,
     artifacts: &[crate::rubric::RubricArtifact],
     cfg: &crate::config::SemanticQualityConfig,
-    route: Option<Route>,
 ) -> SemanticState {
     let Ok(packs) = crate::rubric_pack::build(repo, kind, &subject.subject) else {
         // Досье не собирается (секрет, лимит, битый маркер) — это не «нет
@@ -385,17 +413,16 @@ fn semantic_subject_state(
     if artifact.invalid_samples_ratio > 0.0 {
         return SemanticState::InvalidSamplesWarn(artifact.invalid_samples_ratio);
     }
-    // E3.3: оговорка судьи (`evidence_partial`) на Critical — человеку.
-    if route == Some(Route::Critical) {
-        let partial: Vec<String> = artifact
-            .scores
-            .iter()
-            .filter(|s| s.has_flag(crate::rubric::CriterionFlag::EvidencePartial))
-            .map(|s| s.criterion_id.clone())
-            .collect();
-        if !partial.is_empty() {
-            return SemanticState::PartialOnCritical(partial.join(", "));
-        }
+    // E3.3/E4.2: оговорка судьи (`evidence_partial`) — состояние, а блокирует
+    // ли она вердикт, решает политика маршрута.
+    let partial: Vec<String> = artifact
+        .scores
+        .iter()
+        .filter(|s| s.has_flag(crate::rubric::CriterionFlag::EvidencePartial))
+        .map(|s| s.criterion_id.clone())
+        .collect();
+    if !partial.is_empty() {
+        return SemanticState::PartialEvidence(partial.join(", "));
     }
     // Отчёт привязан ко ВСЕМ источникам досье (ADR-051, П3): правка спайна
     // обесценивает отчёт о решении, даже если сам ADR не менялся.
@@ -1085,6 +1112,164 @@ mod tests {
             semantic_rules(&report).contains(&"semantic_rubric_unknown".to_string()),
             "{:?}",
             semantic_rules(&report)
+        );
+    }
+
+    /// Прогон гейта на заданном маршруте и с заданной политикой решения (E4.2).
+    fn run_semantic_on(
+        dir: &Path,
+        route: Route,
+        policy: crate::config::DecisionPolicyConfig,
+        cfg: crate::config::SemanticQualityConfig,
+        rubrics_dir: &Path,
+    ) -> GateReport {
+        let options = GateOptions {
+            semantic_quality: cfg,
+            rubrics_dir: rubrics_dir.to_path_buf(),
+            decision_policy: policy,
+            ..GateOptions::default()
+        };
+        run_inner(
+            dir,
+            Some(route),
+            None,
+            None,
+            (1, 4),
+            &with_semantic(route),
+            &options,
+        )
+        .expect("гейт")
+    }
+
+    /// E4.3: находки судьи доезжают до SARIF — с идентификатором правила и
+    /// цитатами, которыми подтверждено обвинение. Интерфейс ревью кода читает
+    /// машинный формат, а не markdown отчёта, и без этого «находки судьи в
+    /// ревью» остались бы только словами.
+    #[test]
+    fn semantic_findings_reach_sarif_with_quotes() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        make_semantic_repo(dir);
+        let rubrics = semantic_rubrics_dir(dir);
+        write_semantic_report(dir, "docs/adr/ADR-001-reshenie.md", 1, &[], 2.0, None);
+        let report = run_semantic(
+            dir,
+            None,
+            semantic_cfg(crate::config::SemanticScope::All),
+            &rubrics,
+        );
+        let fmt = crate::report_fmt::FmtReport::from_gate(&report);
+        let sarif = crate::report_fmt::render(crate::report_fmt::ReportFormat::Sarif, &fmt);
+        assert!(
+            sarif.contains("semantic_contradiction"),
+            "правило в SARIF: {sarif}"
+        );
+        assert!(
+            sarif.contains("Цитата subject") && sarif.contains("Цитата reference"),
+            "цитаты обеих ролей в SARIF: {sarif}"
+        );
+        assert!(
+            sarif.contains("docs/adr/ADR-001-reshenie.md"),
+            "файл-субъект в SARIF: {sarif}"
+        );
+    }
+
+    /// E4.2: «главный критерий низкий, но цитаты не подтверждены» на Critical —
+    /// решение человека (SKIP → INCOMPLETE), а на Fast — предупреждение с
+    /// вердиктом PASS. Та же механика, разная политика маршрута.
+    #[test]
+    fn human_policy_follows_route_for_unconfirmed_accusation() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        make_semantic_repo(dir);
+        let rubrics = semantic_rubrics_dir(dir);
+        write_semantic_report(
+            dir,
+            "docs/adr/ADR-001-reshenie.md",
+            1,
+            &["accusation_unconfirmed"],
+            4.0,
+            None,
+        );
+        let policy = crate::config::DecisionPolicyConfig::default();
+        // Critical: блок до решения архитектора.
+        let critical = run_semantic_on(
+            dir,
+            Route::Critical,
+            policy.clone(),
+            semantic_cfg(crate::config::SemanticScope::All),
+            &rubrics,
+        );
+        assert_eq!(
+            status_of(&critical, "semantic_quality"),
+            GateStatus::Skip,
+            "{}",
+            crate::gate::render(&critical)
+        );
+        assert_eq!(
+            critical.outcome,
+            GateOutcome::Incomplete,
+            "{}",
+            crate::gate::render(&critical)
+        );
+        // Fast: предупреждение, вердикт не меняется.
+        let fast = run_semantic_on(
+            dir,
+            Route::Fast,
+            policy,
+            semantic_cfg(crate::config::SemanticScope::All),
+            &rubrics,
+        );
+        assert_eq!(status_of(&fast, "semantic_quality"), GateStatus::Pass);
+        assert_eq!(fast.outcome, GateOutcome::Pass);
+    }
+
+    /// E4.2: политику можно переопределить в конфиге — `critical = "warn"`
+    /// снимает блокировку, и то же состояние даёт PASS с предупреждением.
+    #[test]
+    fn human_policy_is_configurable_in_config() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        make_semantic_repo(dir);
+        let rubrics = semantic_rubrics_dir(dir);
+        write_semantic_report(
+            dir,
+            "docs/adr/ADR-001-reshenie.md",
+            1,
+            &["accusation_unconfirmed"],
+            4.0,
+            None,
+        );
+        let policy = crate::config::DecisionPolicyConfig {
+            critical: crate::config::HumanPolicy::Warn,
+            ..crate::config::DecisionPolicyConfig::default()
+        };
+        let report = run_semantic_on(
+            dir,
+            Route::Critical,
+            policy,
+            semantic_cfg(crate::config::SemanticScope::All),
+            &rubrics,
+        );
+        assert_eq!(
+            status_of(&report, "semantic_quality"),
+            GateStatus::Pass,
+            "политика проекта сильнее дефолта: {}",
+            crate::gate::render(&report)
+        );
+        // Находка остаётся видимой, но предупреждением, а не блоком: итог
+        // гейта здесь определяют другие обязательные составляющие Critical.
+        let comp = report
+            .components
+            .iter()
+            .find(|c| c.name == "semantic_quality")
+            .expect("comp");
+        assert!(
+            comp.findings.iter().any(|f| f.rule.as_deref()
+                == Some("semantic_accusation_unconfirmed")
+                && f.severity == "warn"),
+            "{:?}",
+            comp.findings
         );
     }
 

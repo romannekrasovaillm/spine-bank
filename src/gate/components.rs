@@ -1025,7 +1025,10 @@ pub(super) fn component_decision_quality(
             .scores
             .iter()
             .any(|s| s.has_flag(crate::rubric::CriterionFlag::EvidencePartial));
-        if partial && options.route == Some(crate::control::Route::Critical) {
+        // E4.2: политика маршрута решает, блокирует ли оговорка судьи
+        // (по умолчанию — только на Critical).
+        let human_policy = options.decision_policy.for_route(options.route);
+        if partial && human_policy == crate::config::HumanPolicy::Human {
             partial_on_critical += 1;
             findings.push(GateFinding::ruled(
                 "error".to_string(),
@@ -1043,7 +1046,7 @@ pub(super) fn component_decision_quality(
                 "rubric_evidence_partial".to_string(),
                 format!(
                     "{rel}: часть свидетельств судьи не подтвердилась (evidence_partial) — \
-                     на Critical это было бы решением человека"
+                     на этом маршруте это предупреждение"
                 ),
             ));
         }

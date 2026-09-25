@@ -903,6 +903,61 @@ pub struct GateConfig {
     /// решение против инварианта, ссылка не на ту сущность, обещание без
     /// механизма, код против инварианта — по отчётам судьи.
     pub semantic_quality: SemanticQualityConfig,
+    /// Что делать с решением рубрики `human` на каждом маршруте (E4.2).
+    pub decision_policy: DecisionPolicyConfig,
+}
+
+/// Что делает гейт с решением рубрики `human` (E4.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HumanPolicy {
+    /// Предупреждение: находка видна, вердикт не меняется.
+    #[default]
+    Warn,
+    /// Блок: составляющая уходит в SKIP, вердикт INCOMPLETE — решение за
+    /// человеком (очередь `reports/human/`, E4.4).
+    Human,
+}
+
+/// Политика решения `human` по маршрутам значимости (E4.2; раздел 5.2 ревью).
+///
+/// По умолчанию блокирует только Critical: на Fast/Standard решение модели —
+/// повод для предупреждения и задачи архитектору, а не остановка потока.
+/// Инъекция во входе и невалидные сэмплы этой политике **не подчиняются** —
+/// они эскалируются всегда (E2/E3.2): доверие к суждению подорвано, и
+/// «понизить до warn» это не настройка, а отключение страховки.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DecisionPolicyConfig {
+    /// Маршрут Fast: по умолчанию предупреждение.
+    pub fast: HumanPolicy,
+    /// Маршрут Standard: по умолчанию предупреждение и задача архитектору.
+    pub standard: HumanPolicy,
+    /// Маршрут Critical: по умолчанию блок до решения архитектора.
+    pub critical: HumanPolicy,
+}
+
+impl Default for DecisionPolicyConfig {
+    fn default() -> Self {
+        Self {
+            fast: HumanPolicy::Warn,
+            standard: HumanPolicy::Warn,
+            critical: HumanPolicy::Human,
+        }
+    }
+}
+
+impl DecisionPolicyConfig {
+    /// Политика маршрута; библиотечный вызов без маршрута — как на Fast
+    /// (мягко): эскалация требует явного решения проекта.
+    #[must_use]
+    pub fn for_route(&self, route: Option<crate::control::Route>) -> HumanPolicy {
+        match route {
+            Some(crate::control::Route::Critical) => self.critical,
+            Some(crate::control::Route::Standard) => self.standard,
+            Some(crate::control::Route::Fast) | None => self.fast,
+        }
+    }
 }
 
 /// На что смотрит составляющая `semantic_quality` (ADR-052).
