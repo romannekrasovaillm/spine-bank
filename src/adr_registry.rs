@@ -798,12 +798,127 @@ pub fn build_registry(root: &Path) -> Result<RegistryReport> {
     entries.sort_by(|a, b| {
         (&a.project, a.number, &a.source, &a.file).cmp(&(&b.project, b.number, &b.source, &b.file))
     });
-    let findings = find_issues(&entries);
+    let mut findings = find_issues(&entries);
+    // E10.2: исключение без обоснования не входит в реестр молча. Проверяются
+    // и корень (он сам — проект), и его непосредственные подкаталоги: тот же
+    // состав, что у `collect_project` выше.
+    let mut scanned: Vec<(String, PathBuf)> = vec![(root_name.clone(), root.to_path_buf())];
+    for p in &projects {
+        let name = p
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        scanned.push((name, p.clone()));
+    }
+    for (name, dir) in &scanned {
+        findings.extend(exception_findings(name, dir));
+    }
     Ok(RegistryReport {
         root: root.to_path_buf(),
         entries,
         findings,
     })
+}
+
+/// Маркеры отступления от инварианта в тексте решения (E10.2): решение
+/// объявляет исключение — значит, обоснование обязано быть проверено.
+const EXCEPTION_MARKERS: [&str; 6] = [
+    "отступлен",
+    "исключени",
+    "override",
+    "waiver",
+    "обход инвариант",
+    "не соблюда",
+];
+
+/// Находки «исключение без обоснования» (E10.2): ADR, объявивший отступление
+/// от инварианта, обязан иметь свежий отчёт рубрики `adr_exception_justification`
+/// с решением `pass`. Иначе исключение не входит в реестр молча: находка
+/// видна человеку, а `--strict` останавливает CI.
+fn exception_findings(project: &str, dir: &Path) -> Vec<RegistryFinding> {
+    let docs_dir = dir.join("docs/adr");
+    let Ok(rd) = std::fs::read_dir(&docs_dir) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut files: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
+    files.sort();
+    for file in files {
+        let Ok(text) = std::fs::read_to_string(&file) else {
+            continue;
+        };
+        let Some(adr) = parse_prose_adr(&text).ok().flatten() else {
+            continue;
+        };
+        if !declares_exception(&text) {
+            continue;
+        }
+        let rel = file
+            .strip_prefix(dir)
+            .map_or_else(|_| file.clone(), PathBuf::from)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if exception_justified(dir, &rel) {
+            continue;
+        }
+        out.push(RegistryFinding {
+            kind: "exception_unjustified".to_string(),
+            message: format!(
+                "{project}: ADR-{:03} ({rel}) объявляет исключение, но обоснования нет: \
+                 нужен свежий отчёт рубрики 'adr_exception_justification' с решением pass \
+                 — до внесения в реестр",
+                adr.number
+            ),
+        });
+    }
+    out
+}
+
+/// Объявлено ли в тексте отступление от инварианта (E10.2). Ищем маркеры в
+/// строках решения: слово в середине прозы — не объявление, а упоминание.
+fn declares_exception(text: &str) -> bool {
+    text.lines().any(|line| {
+        let low = line.to_lowercase();
+        EXCEPTION_MARKERS.iter().any(|m| low.contains(m))
+    })
+}
+
+/// Есть ли у проекта свежий отчёт `adr_exception_justification` с решением
+/// `pass`, относящийся к этому ADR (E10.2).
+fn exception_justified(dir: &Path, rel: &str) -> bool {
+    let reports = dir.join("reports/rubric");
+    let Ok(rd) = std::fs::read_dir(&reports) else {
+        return false;
+    };
+    for path in rd.flatten().map(|e| e.path()) {
+        if !path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("json"))
+        {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(artifact) = serde_json::from_str::<crate::rubric::RubricArtifact>(&text) else {
+            continue;
+        };
+        if artifact.rubric != "adr_exception_justification" {
+            continue;
+        }
+        let target = artifact
+            .target
+            .as_deref()
+            .or(artifact.subject.as_deref())
+            .unwrap_or_default();
+        if target != rel {
+            continue;
+        }
+        if artifact.decision == Some(crate::rubric::RubricDecision::Pass) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Рендер реестра в markdown: таблица индекса + секция находок.
@@ -1394,6 +1509,135 @@ mod tests {
         assert_eq!(report.entries.len(), 2, "{:?}", report.entries);
         assert!(report.findings.is_empty(), "{:?}", report.findings);
         assert_eq!(exit_code(&report, true), 0);
+    }
+
+    // --- E10.2: исключение без обоснования не входит в реестр ----------------
+
+    /// ADR, объявивший отступление от инварианта, без отчёта
+    /// `adr_exception_justification` даёт находку `exception_unjustified` и
+    /// останавливает строгий реестр (до внесения исключения в реестр).
+    #[test]
+    fn registry_flags_exception_without_justification() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        write_file(
+            &root,
+            "docs/adr/ADR-001-exception.md",
+            "# ADR-001. Отступление от AD-2\n\n- Date: 2026-09-19\n- Status: Accepted\n\n             Решение: допускаем отступление от инварианта AD-2 для скорости.\n",
+        );
+        let report = build_registry(&root).unwrap();
+        assert_eq!(report.entries.len(), 1);
+        assert_eq!(
+            report
+                .findings
+                .iter()
+                .filter(|f| f.kind == "exception_unjustified")
+                .count(),
+            1,
+            "{:?}",
+            report.findings
+        );
+        let message = &report.findings[0].message;
+        assert!(message.contains("ADR-001"), "{message}");
+        assert!(message.contains("adr_exception_justification"), "{message}");
+        assert_eq!(exit_code(&report, true), 1, "строгий реестр краснеет");
+        assert!(
+            render_markdown(&report).contains("exception_unjustified"),
+            "находка видна человеку"
+        );
+    }
+
+    /// Тот же ADR с отчётом рубрики, решение `pass`, находки не даёт; отчёт с
+    /// решением `human` исключение не закрывает.
+    #[test]
+    fn registry_accepts_exception_only_with_passing_report() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        let adr = "docs/adr/ADR-001-exception.md";
+        write_file(
+            &root,
+            adr,
+            "# ADR-001. Отступление от AD-2\n\n- Date: 2026-09-19\n- Status: Accepted\n\n             Решение: допускаем отступление от инварианта AD-2 для скорости.\n",
+        );
+        let artifact = |decision: &str| {
+            serde_json::json!({
+                "schema": "arch-rubric-artifact/1",
+                "rubric": "adr_exception_justification",
+                "target": adr,
+                "judge_model": "judge-1",
+                "weighted_total": 4.0,
+                "verdict": "v",
+                "decision": decision,
+                "scores": [],
+                "judged_at": "2026-09-25T12:00:00Z",
+            })
+        };
+        write_file(
+            &root,
+            "reports/rubric/ADR-001-exception--adr_vs_spine.json",
+            &serde_json::to_string(&artifact("human")).unwrap(),
+        );
+        let report = build_registry(&root).unwrap();
+        assert_eq!(
+            report
+                .findings
+                .iter()
+                .filter(|f| f.kind == "exception_unjustified")
+                .count(),
+            1,
+            "human не закрывает исключение: {:?}",
+            report.findings
+        );
+        write_file(
+            &root,
+            "reports/rubric/ADR-001-exception--adr_vs_spine.json",
+            &serde_json::to_string(&artifact("pass")).unwrap(),
+        );
+        let report = build_registry(&root).unwrap();
+        assert!(
+            report.findings.is_empty(),
+            "pass закрывает исключение: {:?}",
+            report.findings
+        );
+    }
+
+    /// ADR без отступления находки не даёт, даже если слова «инвариант» и
+    /// «решение» в тексте есть.
+    #[test]
+    fn registry_ignores_adr_without_exception() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        write_file(
+            &root,
+            "docs/adr/ADR-001-plain.md",
+            "# ADR-001. Обычное решение\n\n- Date: 2026-09-19\n- Status: Accepted\n\n             Решение соблюдает инвариант AD-2 без оговорок.\n",
+        );
+        let report = build_registry(&root).unwrap();
+        assert!(report.findings.is_empty(), "{:?}", report.findings);
+    }
+
+    /// Рубрика обоснованности исключения: блокирующий критерий требует цитаты
+    /// на обе роли — исключение доказывается решением И инвариантом (E10.2).
+    #[test]
+    fn exception_rubric_demands_both_citations() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("assets/rubrics/adr_exception_justification.yaml");
+        let rubric = crate::rubric::load(&path).expect("рубрика грузится");
+        assert_eq!(
+            rubric.pack.map(crate::rubric_pack::PackKind::as_str),
+            Some("adr_vs_spine")
+        );
+        let blocking = rubric
+            .criteria
+            .iter()
+            .find(|c| c.blocking)
+            .expect("блокирующий критерий");
+        assert_eq!(blocking.id, "exception_justified");
+        assert_eq!(
+            blocking.evidence_role_list().expect("роли").len(),
+            2,
+            "цитата на решение и на инвариант"
+        );
     }
 
     #[test]
