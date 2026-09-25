@@ -869,6 +869,8 @@ mod tests {
                 evidence_unconfirmed_ratio: 0.0,
                 invalid_samples: 0,
                 checked: Vec::new(),
+                citations: Vec::new(),
+                evidence_channel: None,
             }
         };
         let report = RubricReport {

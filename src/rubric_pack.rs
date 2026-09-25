@@ -294,6 +294,84 @@ impl ContextPack {
         }
         out
     }
+
+    /// Источники досье с указателями: путь, роль и текст каждого (E9.1).
+    /// Нужны механике цитат: цитата с указателем сверяется с НАЗВАННЫМ
+    /// источником, а не со всем досье, и роль берётся из состава досье, а не из
+    /// слов судьи. Источники, не найденные в тексте досье, в список не
+    /// попадают — цитата на них будет названа неизвестной.
+    #[must_use]
+    pub fn source_texts(&self) -> Vec<SourceText<'_>> {
+        let mut out = Vec::new();
+        let mut cursor = 0usize;
+        while let Some(rel) = self.text.get(cursor..).and_then(|t| t.find(SOURCE_BEGIN)) {
+            let open = cursor + rel;
+            let Some(head_rel) = self.text.get(open..).and_then(|t| t.find('\n')) else {
+                break;
+            };
+            let head = &self.text[open..open + head_rel];
+            let body_start = open + head_rel + 1;
+            let body_end = self
+                .text
+                .get(body_start..)
+                .and_then(|t| t.find(SOURCE_END))
+                .map_or(self.text.len(), |i| body_start + i);
+            let path = source_path_of(head);
+            out.push(SourceText {
+                id: self
+                    .inputs
+                    .iter()
+                    .find(|i| i.path == path)
+                    .and_then(|i| i.id.clone()),
+                path,
+                role: InputRole::parse(head_source_role(head).unwrap_or_default())
+                    .unwrap_or(InputRole::Subject),
+                text: self.text[body_start..body_end].trim_end_matches('\n'),
+            });
+            let next = body_end + SOURCE_END.len();
+            if next >= self.text.len() {
+                break;
+            }
+            cursor = next;
+        }
+        out
+    }
+}
+
+/// Источник досье, каким его видит механика цитат (E9.1): путь-указатель,
+/// роль из состава досье и текст источника.
+#[derive(Debug, Clone)]
+pub struct SourceText<'a> {
+    /// Путь источника как в маркере (`src/pay.py`, `ARCHITECTURE-SPINE.md#AD-1`).
+    pub path: String,
+    /// Идентификатор источника для покрытия (`AD-1`), если задан.
+    pub id: Option<String>,
+    /// Роль источника в досье.
+    pub role: InputRole,
+    /// Текст источника.
+    pub text: &'a str,
+}
+
+/// Роль из строки-маркера источника (`=== ИСТОЧНИК reference: … ===`).
+fn head_source_role(head: &str) -> Option<&str> {
+    let rest = head.strip_prefix(SOURCE_BEGIN)?.trim_start();
+    rest.split(':').next().map(str::trim)
+}
+
+/// Путь из строки-маркера источника: всё после `<роль>:` без закрывающего
+/// ` ===`.
+fn source_path_of(head: &str) -> String {
+    let rest = head.strip_prefix(SOURCE_BEGIN).unwrap_or(head).trim_start();
+    rest.split_once(':')
+        .map(|(_, tail)| {
+            tail.trim()
+                .trim_end_matches("===")
+                .trim()
+                .trim_end_matches('=')
+                .trim()
+                .to_string()
+        })
+        .unwrap_or_default()
 }
 
 impl ContextPack {
@@ -1278,6 +1356,30 @@ mod tests {
         let rel = format!("docs/adr/{name}");
         std::fs::write(root.join(&rel), format!("# {name}\n\n{body}\n")).expect("adr");
         rel
+    }
+
+    /// E9.1: источники досье отдаются с указателями — путь, роль, текст.
+    #[test]
+    fn source_texts_expose_path_role_and_text() {
+        let text = format!(
+            "{SOURCE_BEGIN} subject: docs/adr/ADR-001.md ===\n\
+             Решение: контроль слоя построен без LLM в гейте.\n\
+             {SOURCE_END}\n\
+             {SOURCE_BEGIN} reference: ARCHITECTURE-SPINE.md#AD-2 ===\n\
+             AD-2: Детерминированный слой контроля\nRule: механика контроля без LLM.\n\
+             {SOURCE_END}\n"
+        );
+        let pack = ContextPack::from_text(PackKind::AdrVsSpine, "docs/adr/ADR-001.md", &text)
+            .expect("досье из текста");
+        let sources = pack.source_texts();
+        assert_eq!(sources.len(), 2);
+        assert_eq!(sources[0].path, "docs/adr/ADR-001.md");
+        assert_eq!(sources[0].role, InputRole::Subject);
+        assert!(sources[0].text.contains("контроль слоя построен без LLM"));
+        assert_eq!(sources[1].path, "ARCHITECTURE-SPINE.md#AD-2");
+        assert_eq!(sources[1].role, InputRole::Reference);
+        assert_eq!(sources[1].id.as_deref(), Some("AD-2"));
+        assert!(sources[1].text.contains("Rule: механика контроля без LLM"));
     }
 
     #[test]

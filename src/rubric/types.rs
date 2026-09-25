@@ -199,6 +199,13 @@ pub enum CriterionFlag {
     /// вердикт судьи противоречит измерению, которое механика умеет читать.
     /// Чисел это не меняет — решение уходит человеку.
     DetectorContradiction,
+    /// Цитата с указателем на источник (E9.1) называет источник, которого в
+    /// досье нет: проверить её нечем, и «доказательство» указывает в пустоту.
+    CitationSourceUnknown,
+    /// Цитата с указателем (E9.2) названа ролью, которой у этого источника нет
+    /// (цитата из кода выдана за цитату из инварианта): роль берётся из состава
+    /// досье, а не из слов судьи.
+    CitationRoleMismatch,
 }
 
 impl CriterionFlag {
@@ -214,6 +221,8 @@ impl CriterionFlag {
             Self::InjectionQuote => "injection_quote",
             Self::InvalidSamples => "invalid_samples",
             Self::DetectorContradiction => "detector_contradiction",
+            Self::CitationSourceUnknown => "citation_source_unknown",
+            Self::CitationRoleMismatch => "citation_role_mismatch",
         }
     }
 
@@ -313,6 +322,38 @@ pub struct CriterionScore {
     /// `checked` по сэмплам; пусто у критериев без `coverage`.
     #[serde(default)]
     pub checked: Vec<String>,
+    /// E9.1: цитаты с указателем на источник досье — основной канал
+    /// доказательств, когда он есть. Пусто — доказательства пришли из
+    /// rationale (прозаический канал, страховка).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub citations: Vec<VerifiedCitation>,
+    /// E9.1: каким каналом критерий подтверждён — `citations` (структурные
+    /// цитаты с указателем на источник) или `prose` (цитаты в rationale).
+    /// `None` — подтверждать было нечего (низкий балл без требования цитаты).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_channel: Option<String>,
+}
+
+/// Цитата с указателем на источник досье (E9.1), прошедшая механическую сверку.
+///
+/// Судья (или провайдер) называет не только фрагмент, но и ИСТОЧНИК, из
+/// которого он взят; механика сверяет фрагмент с текстом названного источника
+/// и роль — с составом досье. Это снимает главную слабость прозаического
+/// канала: цитата из кода больше не может «закрыть» роль инварианта.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerifiedCitation {
+    /// Роль, которой судья пометил цитату (`subject`, `reference`, `detector`).
+    pub role: String,
+    /// Путь источника в досье (`src/pay.py`, `ARCHITECTURE-SPINE.md#AD-1`).
+    pub source: String,
+    /// Дословный фрагмент.
+    pub quote: String,
+    /// Подтверждена ли цитата текстом названного источника.
+    pub confirmed: bool,
+    /// Почему не подтверждена (`источник не найден в досье`, `роль источника
+    /// другая`, `фрагмента нет в источнике`); `None` — подтверждена.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 impl CriterionScore {

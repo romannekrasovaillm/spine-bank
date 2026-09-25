@@ -207,7 +207,9 @@ impl RubricReport {
                     | CriterionFlag::CoverageIncomplete
                     | CriterionFlag::InjectionQuote
                     | CriterionFlag::InvalidSamples
-                    | CriterionFlag::DetectorContradiction => f.as_str().to_string(),
+                    | CriterionFlag::DetectorContradiction
+                    | CriterionFlag::CitationSourceUnknown
+                    | CriterionFlag::CitationRoleMismatch => f.as_str().to_string(),
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
@@ -247,6 +249,49 @@ impl RubricReport {
                 }
             );
         } else {
+            // E9.1: цитаты с указателями — видно, ЧЕМ критерий подтверждён и из
+            // какого источника; неподтверждённая цитата называется причиной.
+            let citation_lines: Vec<String> = self
+                .scores
+                .iter()
+                .flat_map(|s| {
+                    s.citations.iter().map(move |c| {
+                        let mark = if c.confirmed { "✓" } else { "✗" };
+                        let note = c
+                            .note
+                            .as_deref()
+                            .map(|n| format!(" — {n}"))
+                            .unwrap_or_default();
+                        format!(
+                            "- {} · {} `{}` — «{}» {}{}",
+                            s.criterion_id,
+                            if c.role.is_empty() { "?" } else { &c.role },
+                            c.source,
+                            c.quote,
+                            mark,
+                            note
+                        )
+                    })
+                })
+                .collect();
+            if !citation_lines.is_empty() {
+                let _ = writeln!(out, "\n**Цитаты с указателями на источники (E9.1):**");
+                for line in &citation_lines {
+                    let _ = writeln!(out, "{line}");
+                }
+                let channels: Vec<String> = self
+                    .scores
+                    .iter()
+                    .filter_map(|s| {
+                        s.evidence_channel
+                            .as_deref()
+                            .map(|ch| format!("{} — {ch}", s.criterion_id))
+                    })
+                    .collect();
+                if !channels.is_empty() {
+                    let _ = writeln!(out, "\nКанал доказательств: {}.", channels.join(", "));
+                }
+            }
             let _ = writeln!(out, "\n**Взвешенный итог:** {:.2}/5", self.weighted_total);
         }
         let excluded: Vec<&str> = self
@@ -406,6 +451,25 @@ pub(super) struct JudgeScore {
     /// критериями с `coverage`; у остальных пусто.
     #[serde(default)]
     checked: Vec<String>,
+    /// E9.1: цитаты с указателем на источник досье — основной канал
+    /// доказательств. Пусто — доказательства берутся из rationale (страховка).
+    #[serde(default)]
+    citations: Vec<JudgeCitation>,
+}
+
+/// Цитата от судьи с указателем на источник (E9.1): роль, путь источника и
+/// дословный фрагмент.
+#[derive(Debug, Deserialize)]
+pub(super) struct JudgeCitation {
+    /// Роль, которой судья пометил цитату.
+    #[serde(default)]
+    role: String,
+    /// Путь источника в досье, как он записан в маркере.
+    #[serde(default)]
+    source: String,
+    /// Дословный фрагмент.
+    #[serde(default)]
+    quote: String,
 }
 
 /// Терпимый разбор балла: JSON-число или строка с числом.
@@ -478,6 +542,15 @@ impl EvidenceScope<'_> {
         }
     }
 
+    /// Источники досье с указателями (E9.1): путь, роль и текст. У оценки по
+    /// документу источников нет — цитаты с указателем там неоткуда взять.
+    fn sources(&self) -> Vec<crate::rubric_pack::SourceText<'_>> {
+        match self {
+            Self::Target(_) => Vec::new(),
+            Self::Pack(p) => p.source_texts(),
+        }
+    }
+
     /// Идентификаторы ссылочных источников досье (`AD-1`, `CMP-002`, …);
     /// `None` — оценка идёт по документу без досье, и сверять покрытие не с чем.
     fn reference_ids(&self) -> Option<Vec<String>> {
@@ -526,6 +599,149 @@ fn coverage_incomplete(
 /// критерия с ролями — по цитате на роль, каждая только со своего источника.
 /// Метка роли разбирается терпимо (см. ниже), но сама проверка цитаты не
 /// смягчается ни в одном из путей.
+/// Собирает цитаты с указателем по всем сэмплам критерия (E9.1): одна и та же
+/// цитата из разных сэмплов не дублируется.
+fn collect_citations(runs: &[JudgeResponse], criterion_id: &str) -> Vec<JudgeCitation> {
+    let mut out: Vec<JudgeCitation> = Vec::new();
+    for run in runs {
+        let Some(sample) = run.scores.iter().find(|s| s.criterion_id == criterion_id) else {
+            continue;
+        };
+        for c in &sample.citations {
+            if c.quote.trim().is_empty() {
+                continue;
+            }
+            if !out
+                .iter()
+                .any(|seen| seen.role == c.role && seen.source == c.source && seen.quote == c.quote)
+            {
+                out.push(JudgeCitation {
+                    role: c.role.clone(),
+                    source: c.source.clone(),
+                    quote: c.quote.clone(),
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Итог механической сверки цитат с указателями (E9.1).
+struct CitationCheck {
+    /// Проверенные цитаты — в отчёт, как есть (с пометкой подтверждения).
+    verified: Vec<crate::rubric::VerifiedCitation>,
+    /// Хотя бы одна цитата указала на источник, которого в досье нет.
+    unknown_source: bool,
+    /// Хотя бы одна цитата названа ролью, которой у источника нет (E9.2).
+    role_mismatch: bool,
+}
+
+impl CitationCheck {
+    /// Структурные цитаты закрывают все требуемые роли критерия: каждая роль
+    /// подтверждена цитатой ИЗ ИСТОЧНИКА ЭТОЙ РОЛИ. `None` в списке ролей —
+    /// «источник любой»: закрывает хотя бы одна подтверждённая цитата.
+    fn confirms(&self, roles: &[Option<crate::rubric_pack::InputRole>]) -> bool {
+        roles.iter().all(|role| match role {
+            Some(role) => self.verified.iter().any(|c| {
+                c.confirmed
+                    && crate::rubric_pack::InputRole::parse(&c.role)
+                        .is_ok_and(|parsed| parsed == *role)
+            }),
+            None => self.verified.iter().any(|c| c.confirmed),
+        })
+    }
+}
+
+/// Механическая сверка цитат с указателями (E9.1): указатель, роль, фрагмент.
+/// Сверка — страховка: она не доверяет ни роли, ни указателю, а берёт и то и
+/// другое из состава досье.
+fn check_citations(
+    citations: &[JudgeCitation],
+    scope: &EvidenceScope<'_>,
+    min_similarity: f64,
+) -> CitationCheck {
+    let sources = scope.sources();
+    let mut check = CitationCheck {
+        verified: Vec::new(),
+        unknown_source: false,
+        role_mismatch: false,
+    };
+    for citation in citations {
+        let declared = crate::rubric_pack::InputRole::parse(&citation.role).ok();
+        let found = sources
+            .iter()
+            .find(|source| source_matches(source, &citation.source));
+        let (confirmed, note) = match found {
+            None => {
+                check.unknown_source = true;
+                (false, Some("источник не найден в досье".to_string()))
+            }
+            Some(source) => {
+                // E9.2: цитата из кода не засчитывается за цитату из
+                // инварианта — роль берётся из состава досье, а не из слов
+                // судьи. Подменённая роль делает цитату негодной: она не
+                // закрывает НАЗВАННУЮ роль, даже если фрагмент в источнике есть.
+                if declared.is_some_and(|role| role != source.role) {
+                    check.role_mismatch = true;
+                    (
+                        false,
+                        Some(format!(
+                            "роль источника другая: назван «{}», у источника — «{}»",
+                            citation.role.trim(),
+                            source.role.as_str()
+                        )),
+                    )
+                } else if verify_quote(&citation.quote, source.text, min_similarity) {
+                    (true, None)
+                } else {
+                    (
+                        false,
+                        Some("фрагмента нет в названном источнике".to_string()),
+                    )
+                }
+            }
+        };
+        check.verified.push(crate::rubric::VerifiedCitation {
+            role: citation.role.clone(),
+            source: citation.source.clone(),
+            quote: citation.quote.clone(),
+            confirmed,
+            note,
+        });
+    }
+    check
+}
+
+/// Указатель цитаты попадает в источник досье: точный путь, идентификатор
+/// (`AD-1`) или путь с фрагментом (`ARCHITECTURE-SPINE.md#AD-1`).
+fn source_matches(source: &crate::rubric_pack::SourceText<'_>, raw: &str) -> bool {
+    let want = raw.trim();
+    if want.is_empty() {
+        return false;
+    }
+    let path = source.path.as_str();
+    path == want
+        || path.starts_with(&format!("{want}#"))
+        || want.starts_with(&format!("{path}#"))
+        || source.id.as_deref() == Some(want)
+}
+
+/// Сэмпл подтверждён: цитаты с указателем закрывают все требуемые роли
+/// критерия (основной канал, E9.1) ИЛИ цитаты rationale (страховка).
+fn sample_confirmed(
+    sample: &JudgeScore,
+    roles: &[Option<crate::rubric_pack::InputRole>],
+    scope: &EvidenceScope<'_>,
+    min_similarity: f64,
+) -> bool {
+    if !sample.citations.is_empty()
+        && check_citations(&sample.citations, scope, min_similarity).confirms(roles)
+    {
+        return true;
+    }
+    quotes_confirmed(&sample.rationale, roles, scope, min_similarity)
+}
+
 fn quotes_confirmed(
     rationale: &str,
     roles: &[Option<crate::rubric_pack::InputRole>],
@@ -679,6 +895,9 @@ pub(crate) fn build_report(
     // отправлять ли решение человеку.
     let mut invalid_samples = 0usize;
     for c in &rubric.criteria {
+        // Роли доказательства нужны и на уровне сэмпла (E9.1): цитата с
+        // указателем подтверждает сэмпл так же, как цитата в rationale.
+        let roles = c.evidence_role_list()?;
         let mut samples: Vec<u8> = Vec::with_capacity(runs.len());
         // Д10: цитата сверяется в КАЖДОМ сэмпле, а не только у обоснования,
         // выбранного под медиану. Сэмпл, чья цитата не подтвердилась, в медиану
@@ -700,18 +919,18 @@ pub(crate) fn build_report(
                 invalid += 1;
                 continue;
             }
+            // E9.1: свидетельством сэмпла служит либо цитата в rationale
+            // (страховка), либо цитаты с указателем на источник (основной
+            // канал). Роль закрывает только ЕЁ источник — это проверяет
+            // `sample_confirmed`.
             let confirmed = value < 2
                 || sample.is_some_and(|s| {
-                    evidence_confirmed(&s.rationale, scope.whole(), cfg.evidence_min_similarity)
+                    sample_confirmed(s, &roles, scope, cfg.evidence_min_similarity)
                 });
             let injection_only = confirmed
                 && clean_scope.as_ref().is_some_and(|clean| {
                     sample.is_some_and(|s| {
-                        !evidence_confirmed(
-                            &s.rationale,
-                            clean.whole(),
-                            cfg.evidence_min_similarity,
-                        )
+                        !sample_confirmed(s, &roles, clean, cfg.evidence_min_similarity)
                     })
                 });
             if injection_only {
@@ -749,7 +968,6 @@ pub(crate) fn build_report(
         if invalid > 0 {
             flags.push(CriterionFlag::InvalidSamples);
         }
-        let roles = c.evidence_role_list()?;
         let rationale = pick_rationale(
             runs,
             &c.id,
@@ -771,17 +989,37 @@ pub(crate) fn build_report(
         // отсутствует», цитировать нечего (контракт промпта). В смысловой
         // рубрике (ADR-051) обвинение — низкий балл, и цитата нужна там:
         // направление доказательства задаёт критерий (`evidence_on`).
+        // E9.1/E9.2: цитаты с указателем на источник — основной канал
+        // доказательств. Проверяются механически: указатель обязан быть
+        // источником досье, роль — совпадать с ролью этого источника, фрагмент —
+        // подтверждаться его текстом. Прозаический канал (цитаты в rationale)
+        // остаётся страховкой для моделей, которые структуру не отдают.
+        let citations = collect_citations(runs, &c.id);
+        let check = check_citations(&citations, scope, cfg.evidence_min_similarity);
+        if check.unknown_source {
+            flags.push(CriterionFlag::CitationSourceUnknown);
+        }
+        if check.role_mismatch {
+            flags.push(CriterionFlag::CitationRoleMismatch);
+        }
+        let citation_ok = check.confirms(&roles);
+        let prose_ok = quotes_confirmed(&rationale, &roles, scope, cfg.evidence_min_similarity);
+        let evidence_ok = citation_ok || prose_ok;
+        let evidence_channel = if citation_ok {
+            Some("citations".to_string())
+        } else if prose_ok {
+            Some("prose".to_string())
+        } else {
+            None
+        };
         if c.evidence_on.requires_high()
             && median_score >= 2
             && !flags.contains(&CriterionFlag::EvidenceNotFound)
-            && !quotes_confirmed(&rationale, &roles, scope, cfg.evidence_min_similarity)
+            && !evidence_ok
         {
             flags.push(CriterionFlag::EvidenceNotFound);
         }
-        if c.evidence_on.requires_low()
-            && median_score <= 2
-            && !quotes_confirmed(&rationale, &roles, scope, cfg.evidence_min_similarity)
-        {
+        if c.evidence_on.requires_low() && median_score <= 2 && !evidence_ok {
             flags.push(CriterionFlag::AccusationUnconfirmed);
         }
         // E7.2: «чисто» (высокий балл без исключающих меток) при красном
@@ -846,6 +1084,8 @@ pub(crate) fn build_report(
             evidence_unconfirmed_ratio,
             invalid_samples: invalid,
             checked,
+            citations: check.verified,
+            evidence_channel,
         });
     }
     let weighted_total = match weighted_total(&rubric.criteria, &scores) {
@@ -1370,12 +1610,14 @@ mod tests {
         JudgeResponse {
             scores: vec![
                 JudgeScore {
+                    citations: Vec::new(),
                     criterion_id: "context".into(),
                     score: f64::from(context),
                     rationale: rationale.into(),
                     checked: Vec::new(),
                 },
                 JudgeScore {
+                    citations: Vec::new(),
                     criterion_id: "alternatives".into(),
                     score: 3.0,
                     rationale: "Цитата: \"альтернативы перечислены\" — частично".into(),
@@ -1522,6 +1764,7 @@ mod tests {
                         .scores
                         .iter()
                         .map(|(id, score)| JudgeScore {
+                            citations: Vec::new(),
                             criterion_id: id.clone(),
                             score: f64::from(*score),
                             rationale: format!("Цитата: \"{fragment}\" — по тексту"),
@@ -1568,6 +1811,8 @@ mod tests {
             judge_model: "fake-judge-1".into(),
             judge_samples: 3,
             scores: vec![CriterionScore {
+                citations: Vec::new(),
+                evidence_channel: None,
                 criterion_id: "context".into(),
                 weight: 1.0,
                 score: 4,
@@ -1926,6 +2171,219 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("coverage_without_dossier"), "{msg}");
         assert!(msg.contains("pack/subject"), "подсказка что делать: {msg}");
+    }
+
+    // --- E9: цитаты с указателем на источник --------------------------------
+
+    /// Рубрика с двумя ролями: обвинение (низкий балл) требует цитату на
+    /// каждую роль, и каждая сверяется со своим источником.
+    fn two_role_rubric() -> Rubric {
+        // Второй критерий — «балласт»: он подтверждается легко и не даёт
+        // отчёту упасть на «нет засчитанных критериев», когда проверяемый
+        // критерий намеренно оставлен без свидетельств.
+        let mut rubric = rubric_of(vec![
+            criterion(
+                "no_contradiction",
+                1.0,
+                EvidenceOn::Low,
+                &["subject", "reference"],
+            ),
+            criterion("context", 1.0, EvidenceOn::High, &[]),
+        ]);
+        rubric.criteria[0].evidence_roles = vec!["subject".into(), "reference".into()];
+        rubric
+    }
+
+    /// E9.1: структурные цитаты с указателями — основной канал доказательств.
+    /// Цитат в rationale нет вовсе, но обвинение подтверждено: фрагменты
+    /// сверены с НАЗВАННЫМИ источниками, и канал записан в отчёт.
+    #[test]
+    fn citations_with_source_pointers_are_the_primary_channel() {
+        let answer = parse_judge_response(
+            r#"{"scores": [{"criterion_id": "no_contradiction", "score": 1,
+                 "rationale": "Противоречие подтверждено источниками.",
+                 "citations": [
+                   {"role": "subject", "source": "docs/adr/ADR-001.md",
+                    "quote": "Решение: контроль слоя построен без LLM в гейте."},
+                   {"role": "reference", "source": "ARCHITECTURE-SPINE.md#AD-2",
+                    "quote": "Rule: механика контроля без LLM."}
+                 ],
+                 "checked": ["AD-2"]},
+                {"criterion_id": "context", "score": 4,
+                 "rationale": "Цитата: \"Решение: контроль слоя построен без LLM в гейте.\". контекст есть"}],
+                "verdict": "v"}"#,
+        )
+        .expect("ответ судьи");
+        let report = build_report(
+            &two_role_rubric(),
+            "judge-x",
+            &[answer],
+            &EvidenceScope::Pack(&two_source_pack()),
+            &one_sample(),
+        )
+        .expect("отчёт");
+        let score = &report.scores[0];
+        assert!(
+            !score.has_flag(CriterionFlag::AccusationUnconfirmed),
+            "цитаты с указателями подтвердили обвинение: {:?}",
+            score.flags
+        );
+        assert_eq!(
+            score.evidence_channel.as_deref(),
+            Some("citations"),
+            "канал доказательств — структурные цитаты"
+        );
+        assert_eq!(score.citations.len(), 2);
+        assert!(
+            score.citations.iter().all(|c| c.confirmed),
+            "{:?}",
+            score.citations
+        );
+        let md = report.to_markdown();
+        assert!(
+            md.contains("Цитаты с указателями на источники (E9.1)"),
+            "{md}"
+        );
+        assert!(md.contains("ARCHITECTURE-SPINE.md#AD-2"), "{md}");
+    }
+
+    /// E9.2: цитата из кода не засчитывается за цитату из инварианта — роль
+    /// берётся из состава досье, а не из слов судьи.
+    #[test]
+    fn code_citation_cannot_cover_the_invariant_role() {
+        let answer = parse_judge_response(
+            r#"{"scores": [{"criterion_id": "no_contradiction", "score": 1,
+                 "rationale": "Противоречие.",
+                 "citations": [
+                   {"role": "reference", "source": "docs/adr/ADR-001.md",
+                    "quote": "Решение: контроль слоя построен без LLM в гейте."},
+                   {"role": "reference", "source": "ARCHITECTURE-SPINE.md#AD-2",
+                    "quote": "Rule: механика контроля без LLM."}
+                 ]}], "verdict": "v"}"#,
+        )
+        .expect("ответ судьи");
+        let report = build_report(
+            &two_role_rubric(),
+            "judge-x",
+            &[answer],
+            &EvidenceScope::Pack(&two_source_pack()),
+            &one_sample(),
+        )
+        .expect("отчёт");
+        let score = &report.scores[0];
+        assert!(
+            score.has_flag(CriterionFlag::CitationRoleMismatch),
+            "подмена роли видна меткой: {:?}",
+            score.flags
+        );
+        assert!(
+            score.has_flag(CriterionFlag::AccusationUnconfirmed),
+            "роль subject подменённой цитатой не закрыта, страховки нет: {:?}",
+            score.flags
+        );
+        assert_eq!(score.evidence_channel, None, "канала доказательств нет");
+        let substituted = score
+            .citations
+            .iter()
+            .find(|c| c.source == "docs/adr/ADR-001.md")
+            .expect("цитата в отчёте");
+        assert!(
+            !substituted.confirmed,
+            "подменённая роль не подтверждает цитату"
+        );
+        assert!(
+            substituted
+                .note
+                .as_deref()
+                .is_some_and(|n| n.contains("роль источника другая")),
+            "{:?}",
+            substituted.note
+        );
+    }
+
+    /// E9.1: указатель на источник, которого в досье нет, — находка: цитата
+    /// не сверена, и опираться на неё нельзя.
+    #[test]
+    fn citation_to_unknown_source_is_flagged() {
+        let answer = parse_judge_response(
+            r#"{"scores": [{"criterion_id": "no_contradiction", "score": 1,
+                 "rationale": "Противоречие.",
+                 "citations": [
+                   {"role": "subject", "source": "src/nowhere.py", "quote": "фрагмент"},
+                   {"role": "reference", "source": "ARCHITECTURE-SPINE.md#AD-2",
+                    "quote": "Rule: механика контроля без LLM."}
+                 ]}], "verdict": "v"}"#,
+        )
+        .expect("ответ судьи");
+        let report = build_report(
+            &two_role_rubric(),
+            "judge-x",
+            &[answer],
+            &EvidenceScope::Pack(&two_source_pack()),
+            &one_sample(),
+        )
+        .expect("отчёт");
+        let score = &report.scores[0];
+        assert!(
+            score.has_flag(CriterionFlag::CitationSourceUnknown),
+            "неизвестный источник назван меткой: {:?}",
+            score.flags
+        );
+        let unconfirmed = score
+            .citations
+            .iter()
+            .find(|c| c.source == "src/nowhere.py")
+            .expect("цитата записана в отчёт");
+        assert!(!unconfirmed.confirmed);
+        assert_eq!(
+            unconfirmed.note.as_deref(),
+            Some("источник не найден в досье")
+        );
+    }
+
+    /// Страховка: без структурных цитат цитаты в rationale работают как
+    /// прежде — канал называется `prose`.
+    #[test]
+    fn prose_quotes_remain_the_safety_net() {
+        let answer = parse_judge_response(
+            r#"{"scores": [{"criterion_id": "no_contradiction", "score": 1,
+                 "rationale": "Цитата subject: \"Решение: контроль слоя построен без LLM в гейте.\". Цитата reference: \"Rule: механика контроля без LLM.\". противоречие"}], "verdict": "v"}"#,
+        )
+        .expect("ответ судьи");
+        let report = build_report(
+            &two_role_rubric(),
+            "judge-x",
+            &[answer],
+            &EvidenceScope::Pack(&two_source_pack()),
+            &one_sample(),
+        )
+        .expect("отчёт");
+        let score = &report.scores[0];
+        assert!(!score.has_flag(CriterionFlag::AccusationUnconfirmed));
+        assert_eq!(score.evidence_channel.as_deref(), Some("prose"));
+        assert!(score.citations.is_empty(), "структурных цитат не было");
+    }
+
+    /// Промпт: рубрика с ролями обязана просить цитаты с указателями, рубрика
+    /// без ролей — нет (промпт остаётся прежним).
+    #[test]
+    fn prompt_asks_for_source_pointers_only_with_roles() {
+        let with_roles = crate::rubric::judge::judge_system_prompt(&two_role_rubric());
+        assert!(with_roles.contains("citations"), "{with_roles}");
+        assert!(
+            with_roles.contains("ОСНОВНОЙ канал доказательств"),
+            "{with_roles}"
+        );
+        let without_roles = crate::rubric::judge::judge_system_prompt(&rubric_of(vec![criterion(
+            "context",
+            1.0,
+            EvidenceOn::High,
+            &[],
+        )]));
+        assert!(
+            !without_roles.contains("citations"),
+            "рубрика без ролей не просит структуру: {without_roles}"
+        );
     }
 
     // --- E2: инъекции на входе рубрики -------------------------------------
