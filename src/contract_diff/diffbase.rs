@@ -416,11 +416,15 @@ mod tests {
             ),
             (
                 "INT-001.md",
-                "---\nid: INT-001\ntype: int\ntitle: Рельс процессинга\nstatus: accepted\ncontract: contracts/old.proto\n---\n\nТело.\n",
+                "---\nid: INT-001\ntype: int\ntitle: Рельс процессинга\nstatus: accepted\ncontract: contracts/old.proto\naffects: [OWNER-1]\n---\n\nТело.\n",
             ),
             (
                 "INT-002.md",
                 "---\nid: INT-002\ntype: int\ntitle: Другой рельс\nstatus: accepted\ncontract: contracts/other.proto\n---\n\nТело.\n",
+            ),
+            (
+                "OWNER-1.md",
+                "---\nid: OWNER-1\ntype: owner\ntitle: Команда процессинга\nstatus: active\n---\n\nТело.\n",
             ),
         ] {
             std::fs::write(model.join(name), fm).expect("сущность");
@@ -452,7 +456,7 @@ mod tests {
                 "CMP-001 · Платёжный шлюз".to_string(),
                 "SYS-001 · Процессинг".to_string(),
             ],
-            "в потребители входят только CMP/SYS, и сам INT-001 в них не дублируется"
+            "в потребители входят только CMP/SYS: ни сам INT-001, ни владелец OWNER-1 из радиуса"
         );
     }
 }

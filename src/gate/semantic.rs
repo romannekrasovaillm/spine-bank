@@ -1870,7 +1870,7 @@ mod tests {
             "на пороге решение механике ещё подтверждаемо: {}",
             crate::gate::render(&report)
         );
-        let warn_only = report
+        let invalid: Vec<&crate::gate::GateFinding> = report
             .components
             .iter()
             .find(|c| c.name == "semantic_quality")
@@ -1878,8 +1878,17 @@ mod tests {
             .findings
             .iter()
             .filter(|f| f.rule.as_deref() == Some("semantic_invalid_samples"))
-            .all(|f| f.severity == "warn");
-        assert!(warn_only, "{}", crate::gate::render(&report));
+            .collect();
+        assert!(
+            !invalid.is_empty(),
+            "предупреждение о невалидных сэмплах обязано быть: {}",
+            crate::gate::render(&report)
+        );
+        assert!(
+            invalid.iter().all(|f| f.severity == "warn"),
+            "{}",
+            crate::gate::render(&report)
+        );
     }
 
     /// Допуск судьи включается проектом: при `require_qualified_judge = false`
@@ -1928,5 +1937,131 @@ mod tests {
             "на Fast политика без человека: {:?}",
             semantic_rules(&report)
         );
+    }
+
+    /// Отчёт судьи ищется по паре «рубрика + субъект»: отчёт другой рубрики о
+    /// том же документе не подменяет суждение (иначе вердикт шёл бы по чужой
+    /// шкале критериев).
+    #[test]
+    fn semantic_artifact_lookup_requires_rubric_and_subject() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        make_semantic_repo(dir);
+        let rubrics = semantic_rubrics_dir(dir);
+        write_semantic_report(dir, "docs/adr/ADR-001-reshenie.md", 5, &[], 4.6, None);
+        let path = dir
+            .join(crate::rubric::RUBRIC_REPORTS_DIR)
+            .join("semantic.json");
+        let mut artifact: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("отчёт")).expect("JSON");
+        artifact["rubric"] = serde_json::json!("adr_quality");
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&artifact).expect("json"),
+        )
+        .expect("write report");
+        let report = run_semantic(
+            dir,
+            None,
+            semantic_cfg(crate::config::SemanticScope::All),
+            &rubrics,
+        );
+        assert!(
+            semantic_rules(&report).contains(&"semantic_report_missing".to_string()),
+            "отчёт чужой рубрики не считается отчётом по нашей: {:?}",
+            semantic_rules(&report)
+        );
+    }
+
+    /// Итог ровно на пороге — не «ниже порога»: сравнение строгое.
+    #[test]
+    fn semantic_total_exactly_at_threshold_is_not_low() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        make_semantic_repo(dir);
+        let rubrics = semantic_rubrics_dir(dir);
+        write_semantic_report(dir, "docs/adr/ADR-001-reshenie.md", 4, &[], 3.5, None);
+        let report = run_semantic(
+            dir,
+            None,
+            semantic_cfg(crate::config::SemanticScope::All),
+            &rubrics,
+        );
+        assert!(
+            !semantic_rules(&report).contains(&"semantic_quality_low".to_string()),
+            "на пороге итог не «низкий»: {:?}",
+            semantic_rules(&report)
+        );
+    }
+
+    /// Судья, совпавший с автором, назван: это отдельная находка, а не тишина.
+    #[test]
+    fn semantic_judge_is_author_is_reported_for_named_author() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        make_semantic_repo(dir);
+        let rubrics = semantic_rubrics_dir(dir);
+        write_semantic_report(dir, "docs/adr/ADR-001-reshenie.md", 5, &[], 4.6, None);
+        let path = dir
+            .join(crate::rubric::RUBRIC_REPORTS_DIR)
+            .join("semantic.json");
+        let mut artifact: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("отчёт")).expect("JSON");
+        artifact["author_model"] = artifact["judge_model"].clone();
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&artifact).expect("json"),
+        )
+        .expect("write report");
+        let report = run_semantic(
+            dir,
+            None,
+            semantic_cfg(crate::config::SemanticScope::All),
+            &rubrics,
+        );
+        assert!(
+            semantic_rules(&report).contains(&"judge_is_author".to_string()),
+            "автор = судья обязан быть назван: {:?}",
+            semantic_rules(&report)
+        );
+    }
+
+    /// Солюшен-документы собираются рекурсивно из `docs/solution`, и только
+    /// markdown: это субъекты рубрики «решение против стандартов».
+    #[test]
+    fn semantic_solution_docs_are_collected_recursively() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path();
+        std::fs::create_dir_all(repo.join("docs/solution/nested")).expect("mkdir");
+        std::fs::write(repo.join("docs/solution/top.md"), "# Решение\n").expect("md");
+        std::fs::write(repo.join("docs/solution/nested/deep.md"), "# Вложенное\n").expect("md");
+        std::fs::write(repo.join("docs/solution/notes.txt"), "не markdown\n").expect("txt");
+        let found = solution_docs(repo);
+        assert_eq!(
+            found,
+            vec![
+                "docs/solution/nested/deep.md".to_string(),
+                "docs/solution/top.md".to_string()
+            ],
+            "{found:?}"
+        );
+    }
+
+    /// Файлы кода — из корней `code_roots` модели, со пропуском служебных и
+    /// скрытых каталогов: `target/` и `.git/` не субъекты смыслового ревью.
+    #[test]
+    fn semantic_code_files_follow_roots_and_skip_service_dirs() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path();
+        write_model(repo, &[("CMP-001", "code_roots: [src]\ndepends_on: []")]);
+        std::fs::create_dir_all(repo.join("src/target")).expect("mkdir target");
+        std::fs::create_dir_all(repo.join("src/.hidden")).expect("mkdir hidden");
+        std::fs::create_dir_all(repo.join("src/node_modules")).expect("mkdir modules");
+        std::fs::write(repo.join("src/main.rs"), "fn main() {}\n").expect("main");
+        std::fs::write(repo.join("src/target/build.rs"), "// сборка\n").expect("target");
+        std::fs::write(repo.join("src/.hidden/secret.rs"), "// скрытое\n").expect("hidden");
+        std::fs::write(repo.join("src/node_modules/dep.rs"), "// зависимость\n").expect("dep");
+        let found = code_files(repo);
+        assert_eq!(found, vec!["src/main.rs".to_string()], "{found:?}");
     }
 }

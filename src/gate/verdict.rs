@@ -462,4 +462,22 @@ mod tests {
             Some("2")
         );
     }
+
+    /// Заявленный маршрут, равный вычисленному, — не «поднятие»: суффикс
+    /// «поднят ROUTE.lock» появляется только при строгом повышении.
+    #[test]
+    fn route_lock_equal_to_auto_route_is_not_a_raise() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("mkdir");
+        make_gate_repo(&repo);
+        std::fs::write(repo.join("ROUTE.lock"), "route: fast\n").expect("ROUTE.lock");
+        let report = run(&repo, None, None, None, (1, 4)).expect("гейт");
+        assert_eq!(report.route, Route::Fast, "{}", report.route_note);
+        assert!(
+            !report.route_note.contains("поднят ROUTE.lock"),
+            "равный маршрут не поднимается: {}",
+            report.route_note
+        );
+    }
 }

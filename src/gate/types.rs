@@ -534,3 +534,104 @@ impl GateReport {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::control::Route;
+
+    fn component(
+        name: &'static str,
+        status: GateStatus,
+        findings: Vec<GateFinding>,
+    ) -> GateComponent {
+        GateComponent {
+            name,
+            status,
+            detail: format!("детали {name}"),
+            findings,
+            not_verified: Vec::new(),
+        }
+    }
+
+    fn report(required: Vec<String>, inputs: Vec<(String, String)>) -> GateReport {
+        GateReport {
+            repo: std::path::PathBuf::from("."),
+            route: Route::Fast,
+            route_auto: false,
+            route_note: "auto".to_string(),
+            components: vec![
+                component("fitness", GateStatus::Pass, Vec::new()),
+                component("delta_guard", GateStatus::Pass, Vec::new()),
+            ],
+            outcome: GateOutcome::Pass,
+            required,
+            not_checked: Vec::new(),
+            inputs,
+            attestation: String::new(),
+            passed: true,
+        }
+    }
+
+    /// `inputs_map` отдаёт ровно те пары «вход → значение», что записаны в
+    /// вердикте: сверка конверта (`--verify-envelope`) сравнивает их поимённо.
+    #[test]
+    fn inputs_map_pairs_names_with_values() {
+        let map = report(
+            Vec::new(),
+            vec![
+                ("base".to_string(), "sha256:aaa".to_string()),
+                ("constraints".to_string(), "absent".to_string()),
+            ],
+        )
+        .inputs_map();
+        assert_eq!(map.len(), 2, "{map:?}");
+        assert_eq!(map.get("base").map(String::as_str), Some("sha256:aaa"));
+        assert_eq!(map.get("constraints").map(String::as_str), Some("absent"));
+    }
+
+    /// Вердикт с одной составляющей: нужен, чтобы флаг `required` был виден
+    /// и в вырожденном случае — «обязательна» против «не обязательна».
+    fn single_report(required: Vec<String>) -> GateReport {
+        let mut r = report(required, Vec::new());
+        r.components = vec![component("fitness", GateStatus::Pass, Vec::new())];
+        r
+    }
+
+    /// Аттестация различает состав обязательных составляющих: свёртка «ничего
+    /// не обязательно» и «обязательно всё» не имеет права совпасть, иначе
+    /// конверт с другим маршрутом выглядел бы тем же вердиктом.
+    #[test]
+    fn attestation_distinguishes_required_composition() {
+        // Вырожденный случай: одна составляющая, флаг «обязательна» меняется.
+        assert_ne!(
+            single_report(vec!["fitness".to_string()]).compute_attestation(),
+            single_report(Vec::new()).compute_attestation(),
+            "единственная обязательная составляющая меняет аттестацию"
+        );
+        let none_required = report(Vec::new(), Vec::new()).compute_attestation();
+        let all_required = report(
+            vec!["fitness".to_string(), "delta_guard".to_string()],
+            Vec::new(),
+        )
+        .compute_attestation();
+        assert_ne!(
+            none_required, all_required,
+            "разный состав обязательных — разная аттестация"
+        );
+        // Тот же вход и тот же состав — та же аттестация (идемпотентность).
+        assert_eq!(
+            none_required,
+            report(Vec::new(), Vec::new()).compute_attestation()
+        );
+        // Входы входят в свёртку: другой реестр — другая аттестация.
+        assert_ne!(
+            none_required,
+            report(
+                Vec::new(),
+                vec![("constraints".to_string(), "sha256:aaa".to_string())],
+            )
+            .compute_attestation()
+        );
+    }
+}

@@ -1853,3 +1853,236 @@ fn nfr_counts_checks_and_findings_by_severity() {
         component.detail
     );
 }
+
+/// Число error и warn в детали `trace_check` совпадает с фактическими
+/// находками: подмена счёта (не-ошибки как ошибки) видна, потому что
+/// числа в фикстуре разные.
+#[test]
+fn trace_detail_counts_match_findings() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("mkdir");
+    make_gate_repo(&repo);
+    // Корневой реестр — вход звена fitness: без него trace честно
+    // пропускается, и счётчиков не проверить.
+    std::fs::copy(
+        repo.join(".arch-handoff/CONSTRAINTS.yaml"),
+        repo.join("CONSTRAINTS.yaml"),
+    )
+    .expect("root registry");
+    std::fs::write(
+            repo.join("ARCHITECTURE-SPINE.md"),
+            "# Spine\n\n## AD-1: Идемпотентность\n\n- **Binds:** Processor.authorize\n- **Prevents:** двойное списание\n- **Rule:** ключ из команды\n",
+        )
+        .expect("spine");
+    write_model(
+        &repo,
+        &[
+            ("AD-001", ""),
+            ("REQ-001", "depends_on: []"),
+            ("NFR-001", "verification: \"\"\naffects: []"),
+        ],
+    );
+    let component = component_trace(&repo, &GateOptions::default());
+    assert_eq!(component.status, GateStatus::Fail, "{}", component.detail);
+    let errors = component
+        .findings
+        .iter()
+        .filter(|f| f.severity == "error")
+        .count();
+    let warns = component
+        .findings
+        .iter()
+        .filter(|f| f.severity == "warn")
+        .count();
+    assert!(
+        errors > 0 && warns > 0 && errors != warns,
+        "фикстура обязана дать разные числа: error {errors}, warn {warns}: {:?}",
+        component.findings
+    );
+    assert!(
+        component
+            .detail
+            .contains(&format!("error: {errors}, warn: {warns}")),
+        "{}",
+        component.detail
+    );
+}
+
+/// Ранг `nfr-without-verification` зависит от маршрута: на Standard это
+/// предупреждение, на Critical — ошибка. Проверяется и вердикт, и
+/// критичность самой находки, а не только счётчик.
+#[test]
+fn model_validate_promotes_nfr_without_verification_only_on_critical() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let dir = tmp.path();
+    make_gate_repo(dir);
+    write_model(
+        dir,
+        &[
+            ("CMP-001", "depends_on: [MISSING-1]"),
+            ("NFR-001", "verification: \"\"\naffects: [CMP-001]"),
+        ],
+    );
+    git(dir, &["add", "."]);
+    git(dir, &["commit", "-q", "-m", "model"]);
+    let severity_of = |route: Route| {
+        let report = run_with(
+            dir,
+            Some(route),
+            None,
+            None,
+            (1, 4),
+            &GateRequirements::default(),
+        )
+        .expect("gate");
+        let comp = report
+            .components
+            .iter()
+            .find(|c| c.name == "model_validate")
+            .expect("составляющая");
+        let finding = comp
+            .findings
+            .iter()
+            .find(|f| f.rule.as_deref() == Some("nfr-without-verification"))
+            .unwrap_or_else(|| panic!("нет находки: {:?}", comp.findings));
+        (comp.status, finding.severity.clone())
+    };
+    let (standard_status, standard_severity) = severity_of(Route::Standard);
+    assert_eq!(
+        standard_status,
+        GateStatus::Fail,
+        "сломанная ссылка валит модель"
+    );
+    assert_eq!(
+        standard_severity, "warn",
+        "на Standard оговорка остаётся предупреждением"
+    );
+    let (_, critical_severity) = severity_of(Route::Critical);
+    assert_eq!(
+        critical_severity, "error",
+        "на Critical та же оговорка — ошибка"
+    );
+}
+
+/// Не-ADR markdown в каталоге решений не считается решением: иначе
+/// составляющая требовала бы отчёт рубрики для заметок и черновиков.
+#[test]
+fn decision_quality_ignores_non_adr_markdown() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let dir = tmp.path();
+    make_quality_repo(dir, Some(4.5), Some("judge-x"));
+    std::fs::write(
+        dir.join("docs/adr/notes.md"),
+        "# Заметки\n\n- Status: Accepted\n\nНе решение.\n",
+    )
+    .expect("notes");
+    let report = run_with(
+        dir,
+        Some(Route::Fast),
+        None,
+        None,
+        (1, 4),
+        &with_quality(Route::Fast),
+    )
+    .expect("gate");
+    let comp = report
+        .components
+        .iter()
+        .find(|c| c.name == "decision_quality")
+        .expect("comp");
+    assert!(
+        !comp
+            .findings
+            .iter()
+            .any(|f| f.rule.as_deref() == Some("rubric_report_missing")),
+        "заметки не требуют отчёта: {:?}",
+        comp.findings
+    );
+}
+
+/// Отчёт находится по хвосту пути цели: судья мог записать длинный путь,
+/// и это тот же документ. Признак пути — не только точное равенство.
+#[test]
+fn decision_quality_matches_report_by_path_suffix() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let dir = tmp.path();
+    make_quality_repo(dir, Some(4.5), Some("judge-x"));
+    let path = dir
+        .join(crate::rubric::RUBRIC_REPORTS_DIR)
+        .join("ADR-001-reshenie.json");
+    let mut artifact: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).expect("отчёт")).expect("JSON");
+    // Отчёта по хэшу нет: сверка идёт по пути, и путь — длиннее нашего.
+    artifact["target_sha256"] = serde_json::Value::Null;
+    artifact["target"] = serde_json::json!("/абсолютный/путь/до/docs/adr/ADR-001-reshenie.md");
+    std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&artifact).expect("json"),
+    )
+    .expect("write");
+    let report = run_with(
+        dir,
+        Some(Route::Fast),
+        None,
+        None,
+        (1, 4),
+        &with_quality(Route::Fast),
+    )
+    .expect("gate");
+    let comp = report
+        .components
+        .iter()
+        .find(|c| c.name == "decision_quality")
+        .expect("comp");
+    assert!(
+        !comp
+            .findings
+            .iter()
+            .any(|f| f.rule.as_deref() == Some("rubric_report_missing")),
+        "хвост пути опознаёт тот же документ: {:?}",
+        comp.findings
+    );
+}
+
+/// Чужой путь не подменяет решение: отчёт по другому ADR не считается
+/// отчётом по этому — иначе оценка одного решения выдавалась бы за другое.
+#[test]
+fn decision_quality_does_not_use_report_of_another_adr() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let dir = tmp.path();
+    make_quality_repo(dir, Some(4.5), Some("judge-x"));
+    let path = dir
+        .join(crate::rubric::RUBRIC_REPORTS_DIR)
+        .join("ADR-001-reshenie.json");
+    let mut artifact: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).expect("отчёт")).expect("JSON");
+    artifact["target_sha256"] = serde_json::Value::Null;
+    artifact["target"] = serde_json::json!("docs/adr/ADR-002-drugoe-reshenie.md");
+    std::fs::write(
+        &path,
+        serde_json::to_string_pretty(&artifact).expect("json"),
+    )
+    .expect("write");
+    let report = run_with(
+        dir,
+        Some(Route::Fast),
+        None,
+        None,
+        (1, 4),
+        &with_quality(Route::Fast),
+    )
+    .expect("gate");
+    let comp = report
+        .components
+        .iter()
+        .find(|c| c.name == "decision_quality")
+        .expect("comp");
+    assert!(
+        comp.findings
+            .iter()
+            .any(|f| f.rule.as_deref() == Some("rubric_report_missing")),
+        "чужой отчёт не закрывает наше решение: {:?}",
+        comp.findings
+    );
+}
