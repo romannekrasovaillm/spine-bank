@@ -12,7 +12,7 @@
   <a href="https://github.com/romannekrasovaillm/spine-bank/actions/workflows/ci.yml"><img src="https://github.com/romannekrasovaillm/spine-bank/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <img src="https://img.shields.io/badge/rust-edition_2024-e43717?logo=rust&logoColor=white" alt="Rust edition 2024">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="License MIT">
-  <img src="https://img.shields.io/badge/harnesses-5 ✓-blueviolet" alt="5 harnesses verified">
+  <img src="https://img.shields.io/badge/harnesses-6 ✓-blueviolet" alt="6 harnesses verified (GigaCode CLI — форк Qwen Code)">
 </p>
 
 ---
@@ -656,9 +656,10 @@ Kimi Code, OpenClaw) — с матрицей, нюансами и всеми к�
 
 ### Скиллы видны агенту нативно
 
-62 архитектурных скилла (ADR, fitness-функции, saga/outbox/circuit-breaker,
-pptx/docx/xlsx-отчёты + плейбуки spine-*) раскладываются в проект и видны
-агенту (на кадрах с прогонов — 55, плейбуки добавлены позже):
+66 архитектурных скиллов в 9 встроенных плагинах (ADR, fitness-функции,
+saga/outbox/circuit-breaker, pptx/docx/xlsx-отчёты + плейбуки spine-*)
+раскладываются в проект и видны агенту (на кадрах с прогонов — 55: библиотека
+росла после съёмки):
 
 <p align="center">
   <img src="docs/screenshots/harnesses/claude-skills.png" alt="Claude Code видит 66 скиллов Spine" width="47%">
@@ -705,14 +706,14 @@ arch-be doctor                   # проверка окружения
 fitness-правил, **сам** чинил его и перепроверял. Полная матрица,
 ограничения и все скриншоты — **[docs/HARNESSES.md](docs/HARNESSES.md)**.
 
-| Харнесс | MCP | FAIL→PASS | Скиллы | Хуки |
+| Харнесс (шесть хостов; GigaCode CLI — форк Qwen Code) | MCP | FAIL→PASS | Скиллы | Хуки |
 |---|---|---|---|---|
 | **GigaCode CLI** (форк Qwen Code) | ✅ живые прогоны на qwen-code **0.0.5 и 0.24.0** | ✅ | ✅ через MCP; в 0.24 и `.qwen/skills` | ⚠️ `qwen hooks` в 0.24 (UI) |
-| Claude Code 2.1.274 | ✅ | ✅ | ✅ 55 | ✅ Stop-гейт |
+| Claude Code 2.1.274 | ✅ | ✅ | ✅ 66 | ✅ Stop-гейт |
 | Kimi Code 0.42.0 | ✅ | ✅ | ✅ Project scope | ✅ Stop (user-level) |
 | Qwen Code 0.0.5 → 0.24.0 | ✅ (+ `mcp approve` в 0.24) | ✅ на локальной qwen3.8 | ✅ через MCP / `.qwen/skills` | ⚠️ UI в 0.24, headless н/п |
 | omp (oh-my-pi) 15.10.3 | ✅ | ✅ | ✅ нативно | ✅ TS-хук block |
-| OpenClaw 2026.7.1 | ✅ | ✅ | ✅ 55/55 | ✅ плагин `before_agent_finalize` |
+| OpenClaw 2026.7.1 | ✅ | ✅ | ✅ 66/66 | ✅ плагин `before_agent_finalize` |
 
 ## Что внутри MCP-сервера
 
