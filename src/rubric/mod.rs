@@ -32,6 +32,7 @@
 mod artifact;
 mod catalog;
 mod decision;
+mod human_decision;
 mod judge;
 mod report;
 #[cfg(test)]
@@ -47,6 +48,10 @@ pub use artifact::{
 };
 pub use catalog::{list, load};
 pub use decision::{HUMAN_QUEUE_DIR, decide, human_package, write_human_package};
+pub use human_decision::{
+    HUMAN_DECISION_SCHEMA, HumanDecision, HumanVerdict, decision_for, decision_path, read_decision,
+    report_rel_path, write_decision,
+};
 pub use judge::{
     check_target_len, evaluate_collecting, evaluate_pack, evaluate_pack_collecting,
     evaluate_with_options, generate_dynamic,

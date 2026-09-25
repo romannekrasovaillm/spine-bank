@@ -3130,4 +3130,39 @@ fn rubric_run_pack_saves_raw_answers_provenance_and_reverifies() {
     assert!(body.contains("Решение человека"), "{body}");
     assert!(body.contains("prompt-инъекц"), "причина названа: {body}");
     assert!(body.contains("Что решает человек"), "{body}");
+
+    // (д) E4.5: решение архитектора записывается и привязывается к отчёту.
+    let out = arch_cmd(home)
+        .args(["rubric", "decide"])
+        .arg(artifact_path.as_os_str())
+        .args([
+            "--accept",
+            "--by",
+            "Иван Петров <ivan@bank>",
+            "--reason",
+            "риск принят осознанно",
+        ])
+        .output()
+        .expect("rubric decide");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{stdout}");
+    assert!(stdout.contains("accept"), "{stdout}");
+    assert!(
+        stdout.contains("git commit -S"),
+        "подсказка про подписанный коммит: {stdout}"
+    );
+    let decision = repo.join("reports/human/ADR-001-x--adr_vs_spine.decision.json");
+    assert!(decision.is_file(), "запись решения: {}", decision.display());
+    let record: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&decision).expect("решение"))
+            .expect("JSON решения");
+    assert_eq!(record["decision"], "accept", "{record}");
+    assert_eq!(record["rubric"], "t-semantic", "{record}");
+    assert_eq!(record["decided_by"], "Иван Петров <ivan@bank>", "{record}");
+    assert!(
+        record["report_sha256"]
+            .as_str()
+            .is_some_and(|s| s.len() == 64),
+        "{record}"
+    );
 }

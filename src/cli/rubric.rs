@@ -86,6 +86,26 @@ pub(crate) enum RubricCmd {
         /// Отчёт (`reports/rubric/<slug>.json`) или каталог с отчётами.
         path: PathBuf,
     },
+    /// Записать решение архитектора по решению `human` (E4.5): принято или
+    /// отклонено, кем и почему. Запись привязывается к хэшу файла отчёта и
+    /// кладётся рядом с пакетом человека; коммитится подписанным коммитом.
+    /// Гейт читает её и снимает эскалацию при `accept`.
+    Decide {
+        /// Отчёт (`reports/rubric/<slug>.json`).
+        report: PathBuf,
+        /// Принять суждение судьи (снять эскалацию `human`).
+        #[arg(long)]
+        accept: bool,
+        /// Отклонить суждение судьи (эскалация остаётся).
+        #[arg(long)]
+        reject: bool,
+        /// Кто решил: имя и, при желании, адрес (`Иван Петров <ivan@bank>`).
+        #[arg(long)]
+        by: String,
+        /// Обоснование решения.
+        #[arg(long, default_value = "")]
+        reason: String,
+    },
     /// Собрать досье судьи (вход смысловой рубрики) и напечатать его с хэшем.
     Pack {
         /// Вид досье: `adr_vs_spine` | `entity_links` | `nfr_mechanism` |
@@ -553,6 +573,61 @@ pub(crate) async fn cmd_rubric(cfg: &Arc<Config>, cmd: RubricCmd) -> Result<()> 
             if bad > 0 {
                 anyhow::bail!("отчётов с расхождением: {bad}");
             }
+        }
+        RubricCmd::Decide {
+            report,
+            accept,
+            reject,
+            by,
+            reason,
+        } => {
+            if accept == reject {
+                anyhow::bail!("укажите ровно одно: `--accept` или `--reject`");
+            }
+            let path = report.canonicalize().unwrap_or_else(|_| report.clone());
+            let text = std::fs::read_to_string(&path)
+                .with_context(|| format!("чтение отчёта {}", path.display()))?;
+            let artifact: arch_harness::rubric::RubricArtifact =
+                serde_json::from_str(&text).context("разбор отчёта рубрики")?;
+            let repo = arch_harness::rubric::repo_root_of(&path);
+            let slug = path
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .context("имя файла отчёта")?;
+            let verdict = if accept {
+                arch_harness::rubric::HumanVerdict::Accept
+            } else {
+                arch_harness::rubric::HumanVerdict::Reject
+            };
+            let record = arch_harness::rubric::HumanDecision::new(
+                &artifact,
+                &arch_harness::rubric::report_rel_path(&repo, &path),
+                &arch_harness::hash::sha256_hex(text.as_bytes()),
+                verdict,
+                &by,
+                &reason,
+            );
+            let written = arch_harness::rubric::write_decision(&repo, &slug, &record)?;
+            println!(
+                "Решение архитектора: {} · {} — {}",
+                artifact.rubric,
+                artifact
+                    .subject
+                    .as_deref()
+                    .or(artifact.target.as_deref())
+                    .unwrap_or("(без субъекта)"),
+                verdict.as_str()
+            );
+            println!("Запись решения: {}", written.display());
+            println!(
+                "Закоммитьте её подписанным коммитом, чтобы решение попало в аудиторский след:\n  \
+                 git add {rel}\n  git commit -S -m \"decision({rubric}): {verdict}\" --trailer \
+                 \"Signed-off-by: {by}\"",
+                rel = arch_harness::rubric::report_rel_path(&repo, &written),
+                rubric = artifact.rubric,
+                verdict = verdict.as_str(),
+                by = by,
+            );
         }
         RubricCmd::Pack {
             kind,

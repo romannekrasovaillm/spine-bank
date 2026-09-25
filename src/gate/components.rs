@@ -1029,15 +1029,45 @@ pub(super) fn component_decision_quality(
         // (по умолчанию — только на Critical).
         let human_policy = options.decision_policy.for_route(options.route);
         if partial && human_policy == crate::config::HumanPolicy::Human {
-            partial_on_critical += 1;
-            findings.push(GateFinding::ruled(
-                "error".to_string(),
-                "rubric_evidence_partial".to_string(),
-                format!(
-                    "{rel}: часть свидетельств судьи не подтвердилась (evidence_partial), \
-                     а маршрут Critical — решение за человеком"
-                ),
-            ));
+            // E4.5: решение архитектора по этому отчёту снимает эскалацию —
+            // спорное уже разобрано человеком, и повторно звать его незачем.
+            match crate::rubric::decision_for(repo, artifact) {
+                Some(record) if record.decision == crate::rubric::HumanVerdict::Accept => {
+                    findings.push(GateFinding::ruled(
+                        "warn".to_string(),
+                        "rubric_evidence_partial".to_string(),
+                        format!(
+                            "{rel}: часть свидетельств судьи не подтвердилась (evidence_partial), \
+                             но решение архитектора принято — {} ({}){}",
+                            record.decided_by,
+                            record.decided_at,
+                            if record.reason.is_empty() {
+                                String::new()
+                            } else {
+                                format!(": {}", record.reason)
+                            }
+                        ),
+                    ));
+                }
+                other => {
+                    partial_on_critical += 1;
+                    let why = match other {
+                        Some(record) => format!(
+                            "архитектор решение отклонил — {} ({})",
+                            record.decided_by, record.decided_at
+                        ),
+                        None => "решение за человеком".to_string(),
+                    };
+                    findings.push(GateFinding::ruled(
+                        "error".to_string(),
+                        "rubric_evidence_partial".to_string(),
+                        format!(
+                            "{rel}: часть свидетельств судьи не подтвердилась (evidence_partial) — \
+                             {why}"
+                        ),
+                    ));
+                }
+            }
             continue;
         }
         if partial {

@@ -229,6 +229,9 @@ enum SemanticState {
     /// Часть свидетельств судьи не подтвердилась (E3.3): политика маршрута
     /// (E4.2) решает, блокировать ли из-за этого вердикт.
     PartialEvidence(String),
+    /// Оговорку судьи разобрал архитектор: решение записано и принято (E4.5) —
+    /// эскалации нет, но находка остаётся видимой.
+    HumanAccepted(String),
     /// Всё в порядке.
     Ok,
 }
@@ -236,7 +239,8 @@ enum SemanticState {
 impl SemanticState {
     /// Блокирует ли состояние вердикт при такой политике маршрута (E4.2).
     /// Инъекция во входе и невалидные сэмплы не понижаются: это не настройка,
-    /// а отказ доверия к суждению (E2/E3.2).
+    /// а отказ доверия к суждению (E2/E3.2). `HumanAccepted` (решение
+    /// архитектора уже принято, E4.5) и остальные состояния не блокируют.
     fn escalates(&self, policy: crate::config::HumanPolicy) -> bool {
         match self {
             Self::InjectionSuspected(_) | Self::InvalidSamples(_) => true,
@@ -346,6 +350,14 @@ impl SemanticState {
                     ratio * 100.0
                 ),
             )],
+            Self::HumanAccepted(decision) => vec![GateFinding::ruled(
+                "warn".to_string(),
+                "human_decision_accepted".to_string(),
+                format!(
+                    "{who}: оговорку судьи разобрал архитектор — {decision}; эскалации нет, \
+                     находка остаётся видимой"
+                ),
+            )],
             Self::PartialEvidence(criteria) => vec![GateFinding::ruled(
                 if escalated { "error" } else { "warn" }.to_string(),
                 "semantic_evidence_partial".to_string(),
@@ -413,6 +425,25 @@ fn semantic_subject_state(
     if artifact.invalid_samples_ratio > 0.0 {
         return SemanticState::InvalidSamplesWarn(artifact.invalid_samples_ratio);
     }
+    // E4.5: решение архитектора по этому отчёту снимает эскалацию оговорок
+    // судьи (инъекции и невалидные сэмплы оно не снимает — они выше).
+    let decided = crate::rubric::decision_for(repo, artifact)
+        .filter(|record| record.decision == crate::rubric::HumanVerdict::Accept);
+    let resolved = |state: SemanticState| -> SemanticState {
+        match &decided {
+            Some(record) => SemanticState::HumanAccepted(format!(
+                "{} ({}){}",
+                record.decided_by,
+                record.decided_at,
+                if record.reason.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {}", record.reason)
+                }
+            )),
+            None => state,
+        }
+    };
     // E3.3/E4.2: оговорка судьи (`evidence_partial`) — состояние, а блокирует
     // ли она вердикт, решает политика маршрута.
     let partial: Vec<String> = artifact
@@ -422,7 +453,7 @@ fn semantic_subject_state(
         .map(|s| s.criterion_id.clone())
         .collect();
     if !partial.is_empty() {
-        return SemanticState::PartialEvidence(partial.join(", "));
+        return resolved(SemanticState::PartialEvidence(partial.join(", ")));
     }
     // Отчёт привязан ко ВСЕМ источникам досье (ADR-051, П3): правка спайна
     // обесценивает отчёт о решении, даже если сам ADR не менялся.
@@ -443,7 +474,10 @@ fn semantic_subject_state(
         if let Some(score) = artifact.scores.iter().find(|s| s.criterion_id == main.id) {
             if score.score <= 2 {
                 if score.flags.iter().any(|f| f.excludes_from_total()) {
-                    state = SemanticState::Unconfirmed(format!("метки: {:?}", score.flags));
+                    state = resolved(SemanticState::Unconfirmed(format!(
+                        "метки: {:?}",
+                        score.flags
+                    )));
                 } else {
                     state = SemanticState::Contradiction {
                         criterion: main.id.clone(),
@@ -479,7 +513,7 @@ fn semantic_subject_state(
             .map(|s| s.criterion_id.clone())
             .collect();
         if !uncovered.is_empty() {
-            state = SemanticState::CoverageIncomplete(uncovered);
+            state = resolved(SemanticState::CoverageIncomplete(uncovered));
         }
     }
     // «Автор = судья» — отдельная находка, но она не перекрывает суть
@@ -1139,6 +1173,74 @@ mod tests {
             &options,
         )
         .expect("гейт")
+    }
+
+    /// E4.5: записанное решение архитектора (`accept`) снимает эскалацию
+    /// оговорки судьи на Critical. Находка остаётся видимой, но вердикт
+    /// составляющей — PASS: спорное уже разобрано человеком.
+    #[test]
+    fn human_decision_accept_resolves_escalation() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        make_semantic_repo(dir);
+        let rubrics = semantic_rubrics_dir(dir);
+        write_semantic_report(
+            dir,
+            "docs/adr/ADR-001-reshenie.md",
+            1,
+            &["accusation_unconfirmed"],
+            4.0,
+            None,
+        );
+        let policy = crate::config::DecisionPolicyConfig::default();
+        let before = run_semantic_on(
+            dir,
+            Route::Critical,
+            policy.clone(),
+            semantic_cfg(crate::config::SemanticScope::All),
+            &rubrics,
+        );
+        assert_eq!(
+            status_of(&before, "semantic_quality"),
+            GateStatus::Skip,
+            "без решения архитектора оговорка блокирует: {}",
+            crate::gate::render(&before)
+        );
+        // Решение архитектора: принято.
+        let path = dir
+            .join(crate::rubric::RUBRIC_REPORTS_DIR)
+            .join("semantic.json");
+        let text = std::fs::read_to_string(&path).expect("отчёт");
+        let artifact: crate::rubric::RubricArtifact =
+            serde_json::from_str(&text).expect("JSON отчёта");
+        let slug = crate::judge::artifact_slug_of(&artifact);
+        let record = crate::rubric::HumanDecision::new(
+            &artifact,
+            "reports/rubric/semantic.json",
+            &crate::hash::sha256_hex(text.as_bytes()),
+            crate::rubric::HumanVerdict::Accept,
+            "Архитектор <arch@bank>",
+            "риск принят осознанно",
+        );
+        crate::rubric::write_decision(dir, &slug, &record).expect("решение");
+        let after = run_semantic_on(
+            dir,
+            Route::Critical,
+            policy,
+            semantic_cfg(crate::config::SemanticScope::All),
+            &rubrics,
+        );
+        assert_eq!(
+            status_of(&after, "semantic_quality"),
+            GateStatus::Pass,
+            "решение архитектора снимает блок: {}",
+            crate::gate::render(&after)
+        );
+        assert!(
+            semantic_rules(&after).contains(&"human_decision_accepted".to_string()),
+            "{:?}",
+            semantic_rules(&after)
+        );
     }
 
     /// E4.3: находки судьи доезжают до SARIF — с идентификатором правила и
