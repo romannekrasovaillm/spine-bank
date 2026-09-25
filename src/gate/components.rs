@@ -903,8 +903,14 @@ pub(super) fn component_decision_quality(
         );
     }
     let adr_dir = repo.join("docs/adr");
-    if !adr_dir.is_dir() {
-        return GateComponent::skip("decision_quality", "нет каталога docs/adr".to_string());
+    let artifacts = crate::rubric::load_artifacts(repo);
+    // E1.4: смысловые рубрики по досье судятся и без каталога ADR — иначе
+    // решение о коде выпадало бы из decision_quality целиком.
+    if !adr_dir.is_dir() && !artifacts.iter().any(|a| a.pack_kind.is_some()) {
+        return GateComponent::skip(
+            "decision_quality",
+            "нет каталога docs/adr и отчётов по досье".to_string(),
+        );
     }
     let mut adrs: Vec<PathBuf> = std::fs::read_dir(&adr_dir)
         .map(|rd| {
@@ -919,7 +925,6 @@ pub(super) fn component_decision_quality(
         })
         .unwrap_or_default();
     adrs.sort();
-    let artifacts = crate::rubric::load_artifacts(repo);
     let mut findings = Vec::new();
     let mut judged = 0usize;
     // Отчёты, у которых нет сырых ответов судьи: сверить балл с ответами
@@ -1123,15 +1128,76 @@ pub(super) fn component_decision_quality(
             ));
         }
     }
-    if judged == 0 {
+    // E1.4: отчёты смысловых рубрик по досье (`code_vs_spine` и другие) —
+    // такой же предмет аудита, как ADR: правка кода или инварианта после
+    // оценки (`rubric_report_stale`), подмена сохранённого ответа судьи
+    // (`rubric_raw_tampered`) и правка балла руками (`rubric_report_inconsistent`)
+    // обязаны быть видны гейту. Отчёт по досье без сырых ответов — warn-находка
+    // `rubric_report_unreproducible`: read-only контур MCP их не пишет, и делать
+    // это провалом значило бы краснить настройку, а не дефект решения.
+    let mut pack_judged = 0usize;
+    let mut pack_unreproducible = 0usize;
+    for artifact in artifacts.iter().filter(|a| a.pack_kind.is_some()) {
+        let Some(subject) = artifact.subject.as_deref() else {
+            continue;
+        };
+        pack_judged += 1;
+        let what = format!("{subject} [{}]", artifact.rubric);
+        let check = crate::judge::reverify(repo, artifact, &options.rubrics_dir, &options.judge);
+        if !check.raw_saved {
+            pack_unreproducible += 1;
+            findings.push(GateFinding::ruled(
+                "warn".to_string(),
+                "rubric_report_unreproducible".to_string(),
+                format!(
+                    "{what}: сырые ответы судьи не сохранены — сверить балл с ответами механика \
+                     не может; прогоните рубрику самим Spine (`arch-be rubric run --pack …`)"
+                ),
+            ));
+            continue;
+        }
+        // Порядок силы: подмена сохранённого ответа — прямое свидетельство
+        // правки следа, и она называется раньше устаревания досье: оба могут
+        // быть истинны одновременно (ответ правили, а источник уже изменился).
+        if !check.tampered.is_empty() {
+            findings.push(GateFinding::ruled(
+                "error".to_string(),
+                "rubric_raw_tampered".to_string(),
+                format!(
+                    "{what}: сохранённые ответы судьи правили после записи ({}) — отчёт собран \
+                     из подменённых ответов",
+                    check.tampered.join(", ")
+                ),
+            ));
+        } else if let Some(reason) = &check.stale {
+            findings.push(GateFinding::ruled(
+                "error".to_string(),
+                "rubric_report_stale".to_string(),
+                format!(
+                    "{what}: досье изменено после оценки — {reason}; оцените субъект заново \
+                     (`arch-be rubric run --pack …`)"
+                ),
+            ));
+        } else if !check.differences.is_empty() {
+            findings.push(GateFinding::ruled(
+                "error".to_string(),
+                "rubric_report_inconsistent".to_string(),
+                format!(
+                    "{what}: отчёт не соответствует ответам судьи — {}",
+                    check.differences.join("; ")
+                ),
+            ));
+        }
+    }
+    if judged == 0 && pack_judged == 0 {
         return GateComponent::skip(
             "decision_quality",
-            "принятых ADR (Status: Accepted) не найдено".to_string(),
+            "принятых ADR (Status: Accepted) и отчётов по досье не найдено".to_string(),
         );
     }
     let errors = findings.iter().filter(|f| f.severity == "error").count();
     let detail = format!(
-        "принятых ADR: {judged}, находок: {} (error: {errors}); порог {:.2}",
+        "принятых ADR: {judged}, отчётов по досье: {pack_judged}, находок: {} (error: {errors}); порог {:.2}",
         findings.len(),
         cfg.min_score
     );
@@ -1167,6 +1233,13 @@ pub(super) fn component_decision_quality(
         notes.push(format!(
             "часть отчётов невоспроизводима: сырые ответы судьи не сохранены ({not_reproducible}) \
              — сверить балл с ответами механика не может, она сверяет только число с порогом"
+        ));
+    }
+    if pack_unreproducible > 0 {
+        notes.push(format!(
+            "часть отчётов по досье невоспроизводима: сырые ответы судьи не сохранены \
+             ({pack_unreproducible}) — read-only контур MCP файлов не пишет, и в отчёте \
+             остаются одни хэши"
         ));
     }
     if errors == 0 {
@@ -2167,5 +2240,132 @@ mod tests {
             render(&report)
         );
         assert_eq!(report.outcome, GateOutcome::Fail, "{}", render(&report));
+    }
+
+    // --- E1.4: отчёты по досье в decision_quality --------------------------
+
+    /// Репозиторий с отчётом смысловой рубрики по досье (`code_vs_spine`) и,
+    /// опционально, сырым ответом судьи под slug'ом досье. Каталога `docs/adr`
+    /// здесь нет намеренно: составляющая обязана судить решение о коде и без
+    /// принятых ADR.
+    fn write_code_pack_report(dir: &Path, raw: Option<(&str, &str)>) {
+        make_gate_repo(dir);
+        let reports = dir.join(crate::rubric::RUBRIC_REPORTS_DIR);
+        std::fs::create_dir_all(&reports).expect("mkdir reports");
+        let artifact = serde_json::json!({
+            "schema": crate::rubric::RUBRIC_REPORT_SCHEMA,
+            "rubric": "code_invariant_conformance",
+            "judge_model": "judge-x",
+            "author_model": "agent-y",
+            "weighted_total": 4.5,
+            "verdict": "OK",
+            "unstable": false,
+            "evidence_not_found": 0,
+            "judged_at": "2026-09-25T10:00:00+00:00",
+            "pack_kind": "code_vs_spine",
+            "subject": "src/control.rs",
+            "pack_sha256": "a".repeat(64),
+            "inputs": [{"path": "src/control.rs", "sha256": "b".repeat(64), "role": "subject"}],
+        });
+        std::fs::write(
+            reports.join("control--code_vs_spine.json"),
+            serde_json::to_string_pretty(&artifact).expect("json"),
+        )
+        .expect("write pack report");
+        if let Some((text, recorded_sha)) = raw {
+            let raw_dir = dir
+                .join(crate::judge::RUBRIC_RAW_DIR)
+                .join("control--code_vs_spine");
+            std::fs::create_dir_all(&raw_dir).expect("mkdir raw");
+            let answer = serde_json::json!({
+                "schema": crate::judge::RUBRIC_RAW_SCHEMA,
+                "rubric": "code_invariant_conformance",
+                "sample": 1,
+                "judge_model": "judge-x",
+                "sha256": recorded_sha,
+                "dropped": false,
+                "text": text,
+                "saved_at": "2026-09-25T10:00:00+00:00",
+            });
+            std::fs::write(
+                raw_dir.join(crate::judge::raw_file_name(1)),
+                serde_json::to_string_pretty(&answer).expect("json"),
+            )
+            .expect("write raw");
+        }
+    }
+
+    /// E1.4: отчёт по досье без сырых ответов судьи — находка гейта
+    /// (`rubric_report_unreproducible`, warn: read-only контур MCP файлов не
+    /// пишет, и провалом это краснило бы настройку, а не решение).
+    #[test]
+    fn decision_quality_flags_unreproducible_code_report() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        write_code_pack_report(dir, None);
+        let report = run_with(
+            dir,
+            Some(Route::Fast),
+            None,
+            None,
+            (1, 4),
+            &with_quality(Route::Fast),
+        )
+        .expect("gate");
+        let comp = report
+            .components
+            .iter()
+            .find(|c| c.name == "decision_quality")
+            .expect("comp");
+        assert!(
+            comp.detail.contains("отчётов по досье: 1"),
+            "отчёт по досье посчитан: {}",
+            comp.detail
+        );
+        assert!(
+            comp.findings
+                .iter()
+                .any(|f| f.rule.as_deref() == Some("rubric_report_unreproducible")),
+            "{:?}",
+            comp.findings
+        );
+        assert_eq!(
+            status_of(&report, "decision_quality"),
+            GateStatus::Pass,
+            "warn не краснит составляющую: {}",
+            render(&report)
+        );
+    }
+
+    /// E1.4: подмена сохранённого ответа судьи по рубрике кода — находка
+    /// гейта с провалом составляющей, как и у отчёта по документу.
+    #[test]
+    fn decision_quality_flags_tampered_code_raw_answer() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        let text = "{\"scores\": [], \"verdict\": \"ok\"}";
+        write_code_pack_report(dir, Some((text, &"f".repeat(64))));
+        let report = run_with(
+            dir,
+            Some(Route::Fast),
+            None,
+            None,
+            (1, 4),
+            &with_quality(Route::Fast),
+        )
+        .expect("gate");
+        let comp = report
+            .components
+            .iter()
+            .find(|c| c.name == "decision_quality")
+            .expect("comp");
+        assert!(
+            comp.findings
+                .iter()
+                .any(|f| f.rule.as_deref() == Some("rubric_raw_tampered")),
+            "{:?}",
+            comp.findings
+        );
+        assert_eq!(status_of(&report, "decision_quality"), GateStatus::Fail);
     }
 }

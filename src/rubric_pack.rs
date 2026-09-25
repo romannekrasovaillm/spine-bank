@@ -189,6 +189,33 @@ impl PackInput {
     }
 }
 
+/// Что именно изменилось в досье после оценки: поимённая причина для человека
+/// (`src/control.rs — изменён после оценки`) либо `None`, если источники те же.
+///
+/// Сверяются путь и хэш каждого источника в обе стороны: правка источника,
+/// его исчезновение и появление нового обесценивают отчёт — судья видел другой
+/// вход, и записанный балл к нынешнему досье не относится (E1.3, ADR-051).
+/// Сравнение по множеству (порядок источников не важен) — перестановка
+/// источников без изменения содержимого не считается расхождением.
+#[must_use]
+pub fn changed_after_judging(recorded: &[PackInput], pack: &ContextPack) -> Option<String> {
+    for input in &pack.inputs {
+        match recorded.iter().find(|i| i.path == input.path) {
+            None => return Some(format!("{} — источник появился после оценки", input.path)),
+            Some(was) if was.sha256 != input.sha256 => {
+                return Some(format!("{} — изменён после оценки", input.path));
+            }
+            Some(_) => {}
+        }
+    }
+    for was in recorded {
+        if !pack.inputs.iter().any(|i| i.path == was.path) {
+            return Some(format!("{} — источник исчез после оценки", was.path));
+        }
+    }
+    None
+}
+
 /// Собранное досье — вход судьи смысловой рубрики.
 #[derive(Debug, Clone)]
 pub struct ContextPack {
@@ -1482,6 +1509,65 @@ mod tests {
         assert!(
             out.contains("без машиночитаемой шапки"),
             "обрезание названо честно: {out}"
+        );
+    }
+
+    /// E1.3: сверка досье после оценки называет изменившийся источник поимённо,
+    /// ловит и исчезновение, и появление источника, а перестановку источников
+    /// без правки содержимого расхождением не считает (порядок в тексте досье
+    /// стабилен, но сравнение идёт по составу, а не по номерам строк).
+    #[test]
+    fn changed_after_judging_names_the_changed_source() {
+        let input = |path: &str, sha: &str| PackInput {
+            path: path.to_string(),
+            sha256: sha.to_string(),
+            role: InputRole::Reference,
+            id: None,
+        };
+        let pack = ContextPack {
+            kind: PackKind::CodeVsSpine,
+            subject: "src/control.rs".to_string(),
+            text: "текст досье".to_string(),
+            sha256: "a".repeat(64),
+            inputs: vec![
+                input("src/control.rs", &"b".repeat(64)),
+                input("ARCHITECTURE-SPINE.md#AD-1", &"c".repeat(64)),
+            ],
+        };
+        assert_eq!(
+            changed_after_judging(&pack.inputs, &pack),
+            None,
+            "тот же состав источников — не расхождение"
+        );
+        let mut edited = pack.clone();
+        edited.inputs[0].sha256 = "d".repeat(64);
+        let reason = changed_after_judging(&pack.inputs, &edited).expect("правка названа");
+        assert!(
+            reason.contains("src/control.rs") && reason.contains("изменён"),
+            "{reason}"
+        );
+        let mut dropped = pack.clone();
+        dropped.inputs.remove(1);
+        let reason = changed_after_judging(&pack.inputs, &dropped).expect("исчезновение названо");
+        assert!(
+            reason.contains("ARCHITECTURE-SPINE.md#AD-1") && reason.contains("исчез"),
+            "{reason}"
+        );
+        let mut added = pack.clone();
+        added
+            .inputs
+            .push(input("model/REQ-002.md", &"e".repeat(64)));
+        let reason = changed_after_judging(&pack.inputs, &added).expect("появление названо");
+        assert!(
+            reason.contains("model/REQ-002.md") && reason.contains("появился"),
+            "{reason}"
+        );
+        let mut reordered = pack.clone();
+        reordered.inputs.reverse();
+        assert_eq!(
+            changed_after_judging(&pack.inputs, &reordered),
+            None,
+            "перестановка источников без правки содержимого — не расхождение"
         );
     }
 }

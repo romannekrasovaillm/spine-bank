@@ -2910,6 +2910,8 @@ fn rubric_pack_prints_dossier_sources_and_hash() {
 /// (J1/J2), и `rubric reverify` воспроизводит такой отчёт из его ответов, а
 /// не называет его невоспроизводимым. Судья — CLI-фейк (`kind = "cli"`),
 /// поэтому тест детерминирован и офлайн.
+/// E1.3: правка источника досье после оценки делает отчёт устаревшим —
+/// `reverify` возвращает ненулевой код и называет изменившийся источник.
 #[test]
 fn rubric_run_pack_saves_raw_answers_provenance_and_reverifies() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -3068,4 +3070,25 @@ fn rubric_run_pack_saves_raw_answers_provenance_and_reverifies() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "reverify: {stdout}");
     assert!(stdout.contains("воспроизводится"), "{stdout}");
+
+    // (в) E1.3: правка источника досье после оценки делает отчёт устаревшим.
+    // Это находка с ненулевым кодом, а не «сверка невозможна» (код 0): иначе
+    // подмена предмета оценки проходила бы как «отчёт в порядке».
+    std::fs::write(
+        repo.join("ARCHITECTURE-SPINE.md"),
+        "# Spine\n\n## AD-2: Детерминированный слой контроля\n\n- **Rule**: механика контроля без LLM в гейте. Уточнено после оценки.\n",
+    )
+    .expect("правка спайна после оценки");
+    let out = arch_cmd(home)
+        .args(["rubric", "reverify"])
+        .arg(artifact_path.as_os_str())
+        .output()
+        .expect("rubric reverify после правки");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !out.status.success(),
+        "устаревшее досье — ненулевой код: {stdout}"
+    );
+    assert!(stdout.contains("досье устарело"), "{stdout}");
+    assert!(stdout.contains("ARCHITECTURE-SPINE.md"), "{stdout}");
 }

@@ -446,8 +446,20 @@ pub(crate) async fn cmd_rubric(cfg: &Arc<Config>, cmd: RubricCmd) -> Result<()> 
                     println!("~ {name}: сырые ответы не сохранены — отчёт невоспроизводим");
                     continue;
                 }
-                for file in &check.tampered {
-                    println!("✗ {name}: {file} — текст ответа не сходится с записанным хэшем");
+                // Порядок силы: правка сохранённого ответа — прямое свидетельство
+                // подмены следа; устаревание досье называется, только если след цел.
+                if !check.tampered.is_empty() {
+                    for file in &check.tampered {
+                        println!("✗ {name}: {file} — текст ответа не сходится с записанным хэшем");
+                    }
+                    bad += 1;
+                    println!("✗ {name}: отчёт собран из подменённых ответов");
+                    continue;
+                }
+                if let Some(reason) = &check.stale {
+                    println!("✗ {name}: досье устарело — {reason}");
+                    bad += 1;
+                    continue;
                 }
                 if let Some(reason) = &check.unavailable {
                     println!("~ {name}: сверка невозможна — {reason}");
