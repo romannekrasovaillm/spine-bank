@@ -359,6 +359,9 @@ mod tests {
             invalid_samples_ratio: 0.0,
             decision: Some(decision),
             decision_reasons: Vec::new(),
+            judge_duration_ms: 0,
+            judge_prompt_tokens: 0,
+            judge_completion_tokens: 0,
         };
         let (agree, diffs) = judges_agree(
             &report(RubricDecision::Pass, 4.0),

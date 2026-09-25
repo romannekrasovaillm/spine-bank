@@ -6,7 +6,7 @@ use std::fmt::Write as _;
 
 use crate::config::JudgeConfig;
 use crate::error::{HarnessError, Result};
-use crate::llm::{ChatMessage, ChatRequest, LlmProvider};
+use crate::llm::{ChatMessage, ChatRequest, LlmProvider, Usage};
 
 use super::report::{
     COVERAGE_MIN_SCORE, EvidenceScope, JudgeResponse, RubricReport, build_report, fragment,
@@ -34,12 +34,15 @@ const RETRY_YAML_HINT: &str = "Ответ не разобран как YAML. В�
 /// генератор рубрик идемпотентны, а отказ сети не должен валить гейт
 /// (наблюдение симуляции: «судья дал ошибку декодирования ответа, повтор
 /// прошёл»). Повтор ручной был — теперь он встроен.
-async fn complete_idempotent(llm: &dyn LlmProvider, req: ChatRequest) -> Result<ChatMessage> {
-    match llm.complete(req.clone()).await {
-        Ok(msg) => Ok(msg),
+async fn complete_idempotent(
+    llm: &dyn LlmProvider,
+    req: ChatRequest,
+) -> Result<(ChatMessage, Usage)> {
+    match llm.complete_with_usage(req.clone()).await {
+        Ok(ok) => Ok(ok),
         Err(first_err) => {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            llm.complete(req).await.map_err(|_| first_err)
+            llm.complete_with_usage(req).await.map_err(|_| first_err)
         }
     }
 }
@@ -157,8 +160,16 @@ async fn evaluate_scope_collecting(
     let samples = cfg.samples.max(1);
     let mut runs = Vec::with_capacity(samples);
     let mut raw = Vec::with_capacity(samples);
+    // E8.3: время и токены судьи — стоимость ревью. Меряем вокруг вызова
+    // судьи (с ретраями), сборка отчёта в это время не входит.
+    let mut duration_ms: u64 = 0;
+    let mut usage = Usage::default();
     for index in 0..samples {
-        let (parsed, text) = judge_once(rubric, target, llm, cfg.thinking).await?;
+        let started = std::time::Instant::now();
+        let (parsed, text, spent) = judge_once(rubric, target, llm, cfg.thinking).await?;
+        duration_ms += started.elapsed().as_millis() as u64;
+        usage.prompt_tokens += spent.prompt_tokens;
+        usage.completion_tokens += spent.completion_tokens;
         runs.push(parsed);
         raw.push(text);
         // E8.1: первый ответ на краях шкалы однозначен — платить за остальные
@@ -170,7 +181,10 @@ async fn evaluate_scope_collecting(
             break;
         }
     }
-    let report = build_report(rubric, llm.model(), &runs, scope, cfg)?;
+    let mut report = build_report(rubric, llm.model(), &runs, scope, cfg)?;
+    report.judge_duration_ms = duration_ms;
+    report.judge_prompt_tokens = usage.prompt_tokens;
+    report.judge_completion_tokens = usage.completion_tokens;
     Ok((report, raw))
 }
 
@@ -243,7 +257,7 @@ async fn judge_once(
     target: &str,
     llm: &dyn LlmProvider,
     thinking: Option<bool>,
-) -> Result<(JudgeResponse, String)> {
+) -> Result<(JudgeResponse, String, Usage)> {
     let thinking = Some(thinking.unwrap_or(false));
     let mut messages = vec![
         ChatMessage::system(judge_system_prompt(rubric)),
@@ -251,23 +265,25 @@ async fn judge_once(
     ];
     let mut request = ChatRequest::chat(messages.clone());
     request.thinking = thinking;
-    let first = complete_idempotent(llm, request).await?;
+    let (first, mut usage) = complete_idempotent(llm, request).await?;
     // E3.1: повтор нужен и когда JSON разобран, но балл вне шкалы: «9» при
     // scale_max: 5 — невалидный сэмпл, а не пятёрка после обрезки.
     let first_ok = parse_judge_response(&first.content)
         .ok()
         .filter(|parsed| !has_invalid_scores(parsed, rubric));
     if let Some(parsed) = first_ok {
-        Ok((parsed, first.content))
+        Ok((parsed, first.content, usage))
     } else {
         // Один retry с явной инструкцией «только JSON».
         messages.push(ChatMessage::assistant(first.content.clone(), Vec::new()));
         messages.push(ChatMessage::user(RETRY_JSON_HINT));
         let mut retry = ChatRequest::chat(messages);
         retry.thinking = thinking;
-        let second = complete_idempotent(llm, retry).await?;
+        let (second, retry_usage) = complete_idempotent(llm, retry).await?;
+        usage.prompt_tokens += retry_usage.prompt_tokens;
+        usage.completion_tokens += retry_usage.completion_tokens;
         match parse_judge_response(&second.content) {
-            Ok(parsed) => Ok((parsed, second.content)),
+            Ok(parsed) => Ok((parsed, second.content, usage)),
             Err(_) => Err(HarnessError::Rubric(format!(
                 "судья не вернул валидный JSON даже после повторного запроса: {}",
                 fragment(&second.content)
@@ -332,7 +348,8 @@ pub async fn generate_dynamic(
     // чтобы thinking-токены не съедали бюджет вывода (см. judge_once).
     let mut request = ChatRequest::chat(messages.clone());
     request.thinking = Some(false);
-    let first = complete_idempotent(llm, request).await?;
+    // Генерации рубрики статистика токенов не нужна (в отчёт она не входит).
+    let (first, _) = complete_idempotent(llm, request).await?;
     let mut rubric = if let Ok(rubric) = parse_rubric_yaml(&first.content) {
         rubric
     } else {
@@ -341,7 +358,7 @@ pub async fn generate_dynamic(
         messages.push(ChatMessage::user(RETRY_YAML_HINT));
         let mut retry = ChatRequest::chat(messages);
         retry.thinking = Some(false);
-        let second = complete_idempotent(llm, retry).await?;
+        let (second, _) = complete_idempotent(llm, retry).await?;
         parse_rubric_yaml(&second.content).map_err(|_| {
             HarnessError::Rubric(format!(
                 "генератор не вернул валидный YAML рубрики даже после повторного запроса: {}",
@@ -617,6 +634,60 @@ mod tests {
             adaptive_samples: true,
             ..JudgeConfig::default()
         }
+    }
+
+    #[tokio::test]
+    async fn judge_reports_duration_and_tokens() {
+        // E8.3: стоимость ревью — время и токены судьи в отчёте. Провайдер,
+        // который отдаёт `usage`, попадает в отчёт; провайдер без usage даёт
+        // нули — «неизвестно», а не «бесплатно».
+        #[derive(Debug)]
+        struct CostLlm {
+            calls: std::sync::atomic::AtomicUsize,
+        }
+        #[async_trait]
+        impl LlmProvider for CostLlm {
+            fn name(&self) -> &'static str {
+                "cost"
+            }
+            fn model(&self) -> &'static str {
+                "cost-1"
+            }
+            async fn complete(&self, _req: ChatRequest) -> Result<ChatMessage> {
+                Ok(ChatMessage::assistant(scores_reply(5.0, 1.0), Vec::new()))
+            }
+            async fn complete_with_usage(
+                &self,
+                _req: ChatRequest,
+            ) -> Result<(ChatMessage, crate::llm::Usage)> {
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok((
+                    ChatMessage::assistant(scores_reply(5.0, 1.0), Vec::new()),
+                    crate::llm::Usage {
+                        prompt_tokens: 1200,
+                        completion_tokens: 300,
+                    },
+                ))
+            }
+        }
+        let llm = CostLlm {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        };
+        let (report, _) = evaluate_collecting(&sample_rubric(), ADR_TARGET, &llm, &one_sample())
+            .await
+            .expect("отчёт");
+        assert_eq!(llm.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(report.judge_prompt_tokens, 1200, "токены промпта в отчёте");
+        assert_eq!(
+            report.judge_completion_tokens, 300,
+            "токены ответа в отчёте"
+        );
+        // Время измерено (нулевым оно быть может только на машине без часов).
+        assert!(
+            report.judge_duration_ms < 60_000,
+            "время судьи правдоподобно: {}",
+            report.judge_duration_ms
+        );
     }
 
     #[tokio::test]

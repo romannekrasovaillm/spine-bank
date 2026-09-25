@@ -345,18 +345,22 @@ pub(crate) async fn cmd_rubric(cfg: &Arc<Config>, cmd: RubricCmd) -> Result<()> 
                 // E7.3: markdown — человеку, JSON-близнец — история для
                 // `rules suggest --from-judge` (цель и метки там данные, а не
                 // текст таблицы). Одна метка времени на оба файла.
+                // Метка времени секундная: два прогона в одну секунду получают
+                // разные основы имён, иначе второй затёр бы первый.
                 let stamp = timestamp();
-                let out = cfg
-                    .paths
-                    .reports_dir
-                    .join(format!("rubric-{}-{stamp}.md", rub.name));
+                let stem = arch_harness::judge_rules::unique_history_stem(
+                    &cfg.paths.reports_dir,
+                    &rub.name,
+                    &stamp,
+                );
+                let out = cfg.paths.reports_dir.join(format!("{stem}.md"));
                 if let Some(parent) = out.parent() {
                     std::fs::create_dir_all(parent).ok();
                 }
                 std::fs::write(&out, report.to_markdown())?;
                 arch_harness::judge_rules::write_history_twin(
                     &cfg.paths.reports_dir,
-                    &rub.name,
+                    &stem,
                     &stamp,
                     &report,
                     Some(pack.subject.clone()),
@@ -592,10 +596,12 @@ pub(crate) async fn cmd_rubric(cfg: &Arc<Config>, cmd: RubricCmd) -> Result<()> 
                     };
                     println!("{}", report.to_markdown());
                     let stamp = timestamp();
-                    let out = cfg
-                        .paths
-                        .reports_dir
-                        .join(format!("rubric-{}-{stamp}.md", rub.name));
+                    let stem = arch_harness::judge_rules::unique_history_stem(
+                        &cfg.paths.reports_dir,
+                        &rub.name,
+                        &stamp,
+                    );
+                    let out = cfg.paths.reports_dir.join(format!("{stem}.md"));
                     if let Some(parent) = out.parent() {
                         std::fs::create_dir_all(parent).ok();
                     }
@@ -603,7 +609,7 @@ pub(crate) async fn cmd_rubric(cfg: &Arc<Config>, cmd: RubricCmd) -> Result<()> 
                     // E7.3: та же история, что у досье, — цель это документ.
                     arch_harness::judge_rules::write_history_twin(
                         &cfg.paths.reports_dir,
-                        &rub.name,
+                        &stem,
                         &stamp,
                         &report,
                         Some(target.display().to_string()),

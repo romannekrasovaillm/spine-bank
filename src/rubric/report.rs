@@ -78,6 +78,18 @@ pub struct RubricReport {
     /// Почему решение такое (E4.4): причины идут в пакет для архитектора.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub decision_reasons: Vec<String>,
+    /// E8.3: сколько миллисекунд заняли вызовы судьи (с ретраями, без сборки
+    /// отчёта). Поле аддитивное: у отчётов до 0.3.9 его нет (читается как 0 —
+    /// «время не измерялось», а не «мгновенно»).
+    #[serde(default)]
+    pub judge_duration_ms: u64,
+    /// E8.3: токены промптов судьи за прогон. Ноль — провайдер не отдаёт
+    /// `usage`; стоимость такого ревью неизвестна, а не нулевая.
+    #[serde(default)]
+    pub judge_prompt_tokens: u64,
+    /// E8.3: токены ответов судьи за прогон.
+    #[serde(default)]
+    pub judge_completion_tokens: u64,
 }
 
 /// Строка входа с паттерном prompt-инъекции (E2.1): номер строки и сработавший
@@ -885,6 +897,9 @@ pub(crate) fn build_report(
         },
         decision: None,
         decision_reasons: Vec::new(),
+        judge_duration_ms: 0,
+        judge_prompt_tokens: 0,
+        judge_completion_tokens: 0,
     };
     // E4.1: решение считается из готового отчёта — один раз и в одном месте,
     // чтобы CLI, гейт и пакет человеку читали одно и то же.
@@ -1571,6 +1586,9 @@ mod tests {
             invalid_samples_ratio: 0.0,
             decision: None,
             decision_reasons: Vec::new(),
+            judge_duration_ms: 0,
+            judge_prompt_tokens: 0,
+            judge_completion_tokens: 0,
         };
         let md = report.to_markdown();
         assert!(md.contains("# Оценка по рубрике «adr-quality»"));

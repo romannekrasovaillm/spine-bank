@@ -254,6 +254,9 @@ mod tests {
             invalid_samples_ratio: 0.0,
             decision: Some(crate::rubric::RubricDecision::Pass),
             decision_reasons: Vec::new(),
+            judge_duration_ms: 0,
+            judge_prompt_tokens: 0,
+            judge_completion_tokens: 0,
         }
     }
 

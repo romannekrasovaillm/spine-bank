@@ -277,6 +277,14 @@ pub trait LlmProvider: Send + Sync + fmt::Debug {
     fn model(&self) -> &str;
     /// Нестриминговый запрос: полный ответ разом.
     async fn complete(&self, req: ChatRequest) -> Result<ChatMessage>;
+    /// То же, что [`LlmProvider::complete`], но со статистикой токенов (E8.3):
+    /// стоимость ревью видна только у провайдеров, которые её отдают
+    /// (`usage` в ответе API). Реализация по умолчанию возвращает нули — это
+    /// честное «провайдер не сказал», а не «токенов не было»; потребитель
+    /// (отчёт рубрики, метрики) обязан различать эти случаи.
+    async fn complete_with_usage(&self, req: ChatRequest) -> Result<(ChatMessage, Usage)> {
+        Ok((self.complete(req).await?, Usage::default()))
+    }
     /// Стриминговый запрос: дельты в `tx`, возвращает собранный ответ.
     ///
     /// Реализация по умолчанию — обёртка над [`LlmProvider::complete`]:

@@ -63,6 +63,15 @@ pub struct HistoryRecord {
     /// Цель прогона (путь субъекта), если известна: markdown-отчёты её не несут.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subject: Option<String>,
+    /// E8.3: сколько миллисекунд заняли вызовы судьи.
+    #[serde(default)]
+    pub duration_ms: u64,
+    /// E8.3: токены промптов судьи (0 — провайдер не отдаёт `usage`).
+    #[serde(default)]
+    pub prompt_tokens: u64,
+    /// E8.3: токены ответов судьи.
+    #[serde(default)]
+    pub completion_tokens: u64,
     /// Оценки критериев.
     #[serde(default)]
     pub scores: Vec<HistoryScore>,
@@ -101,6 +110,9 @@ impl HistoryRecord {
             judged_at,
             decision: report.decision.map(|d| d.as_str().to_string()),
             subject,
+            duration_ms: report.judge_duration_ms,
+            prompt_tokens: report.judge_prompt_tokens,
+            completion_tokens: report.judge_completion_tokens,
             scores: report
                 .scores
                 .iter()
@@ -132,6 +144,28 @@ struct Finding {
     quotes: Vec<String>,
 }
 
+/// Уникальная основа имени отчёта в архиве истории: `rubric-<рубрика>-<метка>`,
+/// а если такая пара уже есть (два прогона в одну секунду — метка времени
+/// секундная), к метке добавляется счётчик `-2`, `-3`, … Иначе второй прогон
+/// молча затирал бы первый, и история (E7.3) и стоимость (E8.3) теряли ревью.
+#[must_use]
+pub fn unique_history_stem(dir: &Path, rubric: &str, stamp: &str) -> String {
+    let base = format!("rubric-{rubric}-{stamp}");
+    let taken = |stem: &str| {
+        dir.join(format!("{stem}.md")).exists() || dir.join(format!("{stem}.json")).exists()
+    };
+    if !taken(&base) {
+        return base;
+    }
+    for n in 2..1000 {
+        let candidate = format!("{base}-{n}");
+        if !taken(&candidate) {
+            return candidate;
+        }
+    }
+    base
+}
+
 /// Пишет JSON-близнец отчёта в архив истории (`rubric-<рубрика>-<метка>.json`).
 /// Рядом с markdown-отчётом живёт машиночитаемая запись: у неё цель и метки —
 /// данные, а не текст таблицы, поэтому `rules suggest --from-judge` читает её
@@ -142,14 +176,14 @@ struct Finding {
 /// Ошибка создания каталога или записи файла.
 pub fn write_history_twin(
     dir: &Path,
-    rubric: &str,
-    stamp: &str,
+    stem: &str,
+    judged_at: &str,
     report: &crate::rubric::RubricReport,
     subject: Option<String>,
 ) -> std::io::Result<PathBuf> {
     std::fs::create_dir_all(dir)?;
-    let path = dir.join(format!("rubric-{rubric}-{stamp}.json"));
-    let record = HistoryRecord::from_report(report, subject, Some(stamp.to_string()));
+    let path = dir.join(format!("{stem}.json"));
+    let record = HistoryRecord::from_report(report, subject, Some(judged_at.to_string()));
     std::fs::write(&path, serde_json::to_vec_pretty(&record)?)?;
     Ok(path)
 }
@@ -283,6 +317,9 @@ pub fn parse_report(text: &str) -> Option<HistoryRecord> {
         judged_at: None,
         decision,
         subject: None,
+        duration_ms: 0,
+        prompt_tokens: 0,
+        completion_tokens: 0,
         scores,
     })
 }
@@ -578,6 +615,9 @@ mod tests {
             judged_at: Some("20260925-120000".to_string()),
             decision: Some("fail".to_string()),
             subject: Some(subject.to_string()),
+            duration_ms: 0,
+            prompt_tokens: 0,
+            completion_tokens: 0,
             scores: vec![HistoryScore {
                 criterion_id: "no_violation".to_string(),
                 score,
@@ -692,6 +732,25 @@ mod tests {
         let history = vec![accusation("src/pay.py")];
         // Один прогон с порогом 0 не становится правилом: повтор — минимум два.
         assert!(suggest(&history, 0).candidates.is_empty());
+    }
+
+    /// Два прогона в одну секунду не затирают друг друга (метка времени
+    /// секундная): основа имени получает счётчик.
+    #[test]
+    fn history_stem_survives_two_runs_in_one_second() {
+        let dir = std::env::temp_dir().join(format!("judge-stem-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("временный каталог");
+        let first = unique_history_stem(&dir, "code_vs_spine", "20260925-120000");
+        assert_eq!(first, "rubric-code_vs_spine-20260925-120000");
+        std::fs::write(dir.join(format!("{first}.md")), "x").expect("первый отчёт");
+        let second = unique_history_stem(&dir, "code_vs_spine", "20260925-120000");
+        assert_eq!(second, "rubric-code_vs_spine-20260925-120000-2");
+        std::fs::write(dir.join(format!("{second}.json")), "x").expect("близнец второго");
+        assert_eq!(
+            unique_history_stem(&dir, "code_vs_spine", "20260925-120000"),
+            "rubric-code_vs_spine-20260925-120000-3"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Пара «markdown + JSON-близнец» одного прогона считается одним прогоном:
@@ -837,6 +896,9 @@ mod tests {
             invalid_samples_ratio: 0.0,
             decision: Some(RubricDecision::Fail),
             decision_reasons: vec!["подтверждённое нарушение".to_string()],
+            judge_duration_ms: 0,
+            judge_prompt_tokens: 0,
+            judge_completion_tokens: 0,
         };
         let parsed = parse_report(&report.to_markdown()).expect("markdown разбирается");
         assert_eq!(parsed.rubric, report.rubric_name);

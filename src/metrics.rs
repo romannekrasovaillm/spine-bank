@@ -51,6 +51,18 @@ pub struct HarnessMetrics {
     pub rubric_reports: usize,
     /// Средний взвешенный балл рубрик.
     pub rubric_avg: Option<f64>,
+    /// E8.3: рубричных прогонов с известной стоимостью (JSON-близнецы отчётов
+    /// с временем или токенами судьи).
+    pub rubric_costed_reports: usize,
+    /// E8.3: суммарное время работы судьи по этим прогонам, мс.
+    pub rubric_judge_ms: u64,
+    /// E8.3: токены промптов судьи.
+    pub rubric_prompt_tokens: u64,
+    /// E8.3: токены ответов судьи.
+    pub rubric_completion_tokens: u64,
+    /// E8.3: решения рубрик по прогонам с известной стоимостью
+    /// (`pass` / `fail` / `human`; пусто — решения в отчёте не было).
+    pub rubric_decisions: BTreeMap<String, usize>,
     /// Бенч-отчётов (json), из них прошедших.
     pub bench_reports: usize,
     /// Прошедших бенчей.
@@ -188,6 +200,31 @@ impl HarnessMetrics {
             self.rubric_avg
                 .map_or_else(|| "—".into(), |a| format!("{a:.2}"))
         );
+        if self.rubric_costed_reports > 0 {
+            let decisions = if self.rubric_decisions.is_empty() {
+                "—".to_string()
+            } else {
+                self.rubric_decisions
+                    .iter()
+                    .map(|(k, v)| format!("{k}: {v}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let per_report = |tokens: u64| tokens as f64 / self.rubric_costed_reports as f64;
+            let _ = writeln!(
+                out,
+                "- Смысловые ревью (E8.3): прогонов со стоимостью **{}**, решений: {}; \
+                 время судьи **{:.1} с** (в среднем {:.0} мс), токены prompt **{}** + \
+                 completion **{}** — **{:.0}** на решение",
+                self.rubric_costed_reports,
+                decisions,
+                self.rubric_judge_ms as f64 / 1000.0,
+                self.rubric_judge_ms as f64 / self.rubric_costed_reports as f64,
+                self.rubric_prompt_tokens,
+                self.rubric_completion_tokens,
+                per_report(self.rubric_prompt_tokens) + per_report(self.rubric_completion_tokens),
+            );
+        }
         let _ = writeln!(
             out,
             "- Бенчей: {}, прошло: {} ({})",
@@ -653,6 +690,48 @@ fn collect_reports(dir: &Path, m: &mut HarnessMetrics) {
             }
         }
     }
+    // E8.3: стоимость смысловых ревью — из JSON-близнецов отчётов
+    // (`rubric-*.json`, пишет `rubric run`). Markdown-отчёты остаются счётчиком
+    // самих ревью: пара «markdown + JSON» — один прогон, поэтому стоимость
+    // собирается только с близнецов и `rubric_reports` не двоится.
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for entry in rd.flatten() {
+            let path = entry.path();
+            if !path
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+            {
+                continue;
+            }
+            let Some(name) = path.file_name().map(|n| n.to_string_lossy().to_string()) else {
+                continue;
+            };
+            if !name.starts_with("rubric-") {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(record) = serde_json::from_str::<crate::judge_rules::HistoryRecord>(&text)
+            else {
+                continue;
+            };
+            if record.schema != crate::judge_rules::HISTORY_SCHEMA {
+                continue;
+            }
+            let costed =
+                record.duration_ms > 0 || record.prompt_tokens > 0 || record.completion_tokens > 0;
+            if costed {
+                m.rubric_costed_reports += 1;
+                m.rubric_judge_ms += record.duration_ms;
+                m.rubric_prompt_tokens += record.prompt_tokens;
+                m.rubric_completion_tokens += record.completion_tokens;
+            }
+            if let Some(decision) = record.decision {
+                *m.rubric_decisions.entry(decision).or_insert(0) += 1;
+            }
+        }
+    }
     // Крон-отчёты в подкаталоге cron/.
     if let Ok(rd) = std::fs::read_dir(dir.join("cron")) {
         m.cron_reports = rd
@@ -668,6 +747,74 @@ fn collect_reports(dir: &Path, m: &mut HarnessMetrics) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rubric_review_cost_is_aggregated_from_json_twins() {
+        // E8.3: стоимость ревью на решение — из JSON-близнецов отчётов; пара
+        // «markdown + JSON» считается одним ревью, а не двумя.
+        let dir = tempfile::tempdir().expect("tmp");
+        let md = "# Оценка по рубрике «code_vs_spine»\n\n**Взвешенный итог:** 4.00/5\n";
+        std::fs::write(
+            dir.path().join("rubric-code_vs_spine-20260925-120000.md"),
+            md,
+        )
+        .expect("markdown");
+        let twin = serde_json::json!({
+            "schema": "judge-history/1",
+            "rubric": "code_vs_spine",
+            "judge_model": "judge-1",
+            "judged_at": "20260925-120000",
+            "decision": "pass",
+            "subject": "src/pay.py",
+            "duration_ms": 1500,
+            "prompt_tokens": 1000,
+            "completion_tokens": 200,
+            "scores": [],
+        });
+        std::fs::write(
+            dir.path().join("rubric-code_vs_spine-20260925-120000.json"),
+            serde_json::to_vec(&twin).expect("json"),
+        )
+        .expect("близнец");
+        let mut m = HarnessMetrics::default();
+        collect_reports(dir.path(), &mut m);
+        assert_eq!(m.rubric_reports, 1, "ревью посчитано один раз");
+        assert_eq!(m.rubric_costed_reports, 1);
+        assert_eq!(m.rubric_judge_ms, 1500);
+        assert_eq!(m.rubric_prompt_tokens, 1000);
+        assert_eq!(m.rubric_completion_tokens, 200);
+        assert_eq!(m.rubric_decisions.get("pass"), Some(&1));
+        let text = m.to_markdown();
+        assert!(text.contains("Смысловые ревью (E8.3)"), "{text}");
+        assert!(text.contains("время судьи **1.5 с**"), "{text}");
+        assert!(text.contains("**1200** на решение"), "{text}");
+    }
+
+    #[test]
+    fn report_without_cost_does_not_pretend_to_be_free() {
+        // Отчёт без времени и токенов (провайдер не отдал usage) не попадает в
+        // стоимость: «неизвестно» — не «ноль токенов».
+        let dir = tempfile::tempdir().expect("tmp");
+        let twin = serde_json::json!({
+            "schema": "judge-history/1",
+            "rubric": "adr_quality",
+            "decision": "human",
+            "duration_ms": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "scores": [],
+        });
+        std::fs::write(
+            dir.path().join("rubric-adr_quality-20260925-130000.json"),
+            serde_json::to_vec(&twin).expect("json"),
+        )
+        .expect("близнец");
+        let mut m = HarnessMetrics::default();
+        collect_reports(dir.path(), &mut m);
+        assert_eq!(m.rubric_costed_reports, 0);
+        assert_eq!(m.rubric_decisions.get("human"), Some(&1), "решение видно");
+        assert!(!m.to_markdown().contains("Смысловые ревью (E8.3)"));
+    }
 
     #[test]
     fn ask_events_feed_approval_theater_metric() {

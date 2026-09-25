@@ -111,6 +111,22 @@ pub(crate) trait AuthSource: Send + Sync + fmt::Debug {
 }
 
 impl OpenAiCompat {
+    /// Нестриминговый запрос с разбором ответа: сообщение + статистика
+    /// токенов (None у провайдера → нули, «неизвестно» помечает потребитель).
+    async fn complete_parsed(&self, req: ChatRequest) -> Result<(ChatMessage, Usage)> {
+        let body = self.build_body(&req, RequestMode::Complete);
+        let resp = self.send_with_retry(&body).await?;
+        let resp = self.ensure_success(resp).await?;
+        let parsed: CompletionResponse = resp.json().await?;
+        let usage = parsed.usage.as_ref().map(CompletionUsage::to_usage);
+        let choice = parsed.choices.into_iter().next().ok_or_else(|| {
+            HarnessError::Llm(format!("{}: пустой ответ API (нет choices)", self.name))
+        })?;
+        let mut msg = choice.message.into_chat_message();
+        msg.finish_reason = choice.finish_reason;
+        Ok((msg, usage.unwrap_or_default()))
+    }
+
     /// Создаёт клиента из конфигурации; `base_url` обязателен.
     /// API-ключ не проверяется — читается лениво на первом запросе.
     ///
@@ -638,16 +654,13 @@ impl LlmProvider for OpenAiCompat {
 
     /// Нестриминговый запрос: `POST /chat/completions`, ответ целиком.
     async fn complete(&self, req: ChatRequest) -> Result<ChatMessage> {
-        let body = self.build_body(&req, RequestMode::Complete);
-        let resp = self.send_with_retry(&body).await?;
-        let resp = self.ensure_success(resp).await?;
-        let parsed: CompletionResponse = resp.json().await?;
-        let choice = parsed.choices.into_iter().next().ok_or_else(|| {
-            HarnessError::Llm(format!("{}: пустой ответ API (нет choices)", self.name))
-        })?;
-        let mut msg = choice.message.into_chat_message();
-        msg.finish_reason = choice.finish_reason;
-        Ok(msg)
+        self.complete_parsed(req).await.map(|(msg, _)| msg)
+    }
+
+    /// Тот же запрос, но со статистикой токенов (E8.3): провайдер отдаёт
+    /// `usage` в нестриминговом ответе — берём её оттуда.
+    async fn complete_with_usage(&self, req: ChatRequest) -> Result<(ChatMessage, Usage)> {
+        self.complete_parsed(req).await
     }
 
     /// Стриминговый запрос: дельты в `tx`, собранный ответ — результатом.
@@ -874,6 +887,28 @@ struct OutToolSpec<'a> {
 struct CompletionResponse {
     #[serde(default)]
     choices: Vec<CompletionChoice>,
+    /// Статистика токенов (E8.3): часть провайдеров её не отдаёт — тогда
+    /// `None`, и стоимость ревью считается неизвестной, а не нулевой.
+    #[serde(default)]
+    usage: Option<CompletionUsage>,
+}
+
+/// `usage` ответа API: сколько токенов ушло на промпт и на ответ.
+#[derive(Debug, Deserialize)]
+struct CompletionUsage {
+    #[serde(default)]
+    prompt_tokens: u64,
+    #[serde(default)]
+    completion_tokens: u64,
+}
+
+impl CompletionUsage {
+    fn to_usage(&self) -> Usage {
+        Usage {
+            prompt_tokens: self.prompt_tokens,
+            completion_tokens: self.completion_tokens,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
