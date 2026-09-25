@@ -166,6 +166,39 @@ pub fn unique_history_stem(dir: &Path, rubric: &str, stamp: &str) -> String {
     base
 }
 
+/// Метка времени для имени архивной записи (`ГГГГММДД-ЧЧММСС`) — та же, что у
+/// CLI `rubric run`: имя файла и `judged_at` обязаны совпадать у обоих путей
+/// (CLI и MCP), иначе история одной и той же рубрики выглядит по-разному.
+#[must_use]
+pub fn now_stamp() -> String {
+    chrono::Local::now().format("%Y%m%d-%H%M%S").to_string()
+}
+
+/// Пишет архивную пару отчёта рубрики: markdown для человека и JSON-близнец
+/// для истории (E1). Один прогон — одна запись с уникальной основой имени,
+/// поэтому повторное судейство того же субъекта НЕ затирает предыдущий отчёт:
+/// история остаётся историей, а не только последним состоянием. Этим путём
+/// пользуются и CLI `rubric run`, и MCP `rubric_verify` — иначе split-judge
+/// терял бы прошлые прогоны (живой TUI-прогон 0.3.9 это и показал).
+///
+/// # Errors
+///
+/// Ошибка создания каталога или записи файлов.
+pub fn write_archive(
+    dir: &Path,
+    rubric: &str,
+    report: &crate::rubric::RubricReport,
+    subject: Option<String>,
+    stamp: &str,
+) -> std::io::Result<PathBuf> {
+    let stem = unique_history_stem(dir, rubric, stamp);
+    std::fs::create_dir_all(dir)?;
+    let md = dir.join(format!("{stem}.md"));
+    std::fs::write(&md, report.to_markdown())?;
+    write_history_twin(dir, &stem, stamp, report, subject)?;
+    Ok(md)
+}
+
 /// Пишет JSON-близнец отчёта в архив истории (`rubric-<рубрика>-<метка>.json`).
 /// Рядом с markdown-отчётом живёт машиночитаемая запись: у неё цель и метки —
 /// данные, а не текст таблицы, поэтому `rules suggest --from-judge` читает её
@@ -815,6 +848,56 @@ mod tests {
             "повтор неподтверждённых обвинений остаётся видимым advisory: {:?}",
             report.candidates
         );
+    }
+
+    /// Архив истории хранит КАЖДЫЙ прогон: повторная запись того же субъекта не
+    /// затирает предыдущую (E1) — на этом спотыкался MCP-путь split-judge.
+    #[test]
+    fn archive_keeps_every_run() {
+        let dir = std::env::temp_dir().join(format!("judge-archive-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("временный каталог");
+        let report = crate::rubric::RubricReport {
+            rubric_name: "adr_quality".to_string(),
+            judge_model: "judge-1".to_string(),
+            judge_samples: 1,
+            scores: Vec::new(),
+            weighted_total: 3.0,
+            verdict: "v".to_string(),
+            evidence_unconfirmed_ratio: 0.0,
+            input_injections: Vec::new(),
+            invalid_samples_ratio: 0.0,
+            decision: Some(crate::rubric::RubricDecision::Pass),
+            decision_reasons: Vec::new(),
+            judge_duration_ms: 0,
+            judge_prompt_tokens: 0,
+            judge_completion_tokens: 0,
+        };
+        // Две записи в одну и ту же секунду: вторая обязана получить свой stem.
+        let first = write_archive(
+            &dir,
+            "adr_quality",
+            &report,
+            Some("docs/adr/1.md".into()),
+            "20260925-120000",
+        )
+        .expect("первая запись");
+        let second = write_archive(
+            &dir,
+            "adr_quality",
+            &report,
+            Some("docs/adr/1.md".into()),
+            "20260925-120000",
+        )
+        .expect("вторая запись");
+        assert_ne!(first, second, "записи не затирают друг друга");
+        assert!(first.is_file() && second.is_file());
+        assert!(
+            first.with_extension("json").is_file() && second.with_extension("json").is_file(),
+            "у каждой записи есть JSON-близнец"
+        );
+        let history = read_history(&dir);
+        assert_eq!(history.len(), 2, "история видит оба прогона: {history:?}");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Охранный тест E7.3: каждый сгенерированный фрагмент `must_not_contain`

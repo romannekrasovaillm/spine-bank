@@ -386,22 +386,12 @@ pub(crate) async fn cmd_rubric(cfg: &Arc<Config>, cmd: RubricCmd) -> Result<()> 
                 // Метка времени секундная: два прогона в одну секунду получают
                 // разные основы имён, иначе второй затёр бы первый.
                 let stamp = timestamp();
-                let stem = arch_harness::judge_rules::unique_history_stem(
+                let out = arch_harness::judge_rules::write_archive(
                     &cfg.paths.reports_dir,
                     &rub.name,
-                    &stamp,
-                );
-                let out = cfg.paths.reports_dir.join(format!("{stem}.md"));
-                if let Some(parent) = out.parent() {
-                    std::fs::create_dir_all(parent).ok();
-                }
-                std::fs::write(&out, report.to_markdown())?;
-                arch_harness::judge_rules::write_history_twin(
-                    &cfg.paths.reports_dir,
-                    &stem,
-                    &stamp,
                     &report,
                     Some(pack.subject.clone()),
+                    &stamp,
                 )?;
                 eprintln!("Отчёт: {}", out.display());
                 // Машиночитаемый отчёт о досье (ADR-051): его читает
@@ -633,24 +623,15 @@ pub(crate) async fn cmd_rubric(cfg: &Arc<Config>, cmd: RubricCmd) -> Result<()> 
                         }
                     };
                     println!("{}", report.to_markdown());
-                    let stamp = timestamp();
-                    let stem = arch_harness::judge_rules::unique_history_stem(
+                    // E1/E7.3: архивная пара (markdown + JSON-близнец) — общий
+                    // путь с MCP `rubric_verify`: у досье и документа история
+                    // судейства одна и та же.
+                    let out = arch_harness::judge_rules::write_archive(
                         &cfg.paths.reports_dir,
                         &rub.name,
-                        &stamp,
-                    );
-                    let out = cfg.paths.reports_dir.join(format!("{stem}.md"));
-                    if let Some(parent) = out.parent() {
-                        std::fs::create_dir_all(parent).ok();
-                    }
-                    std::fs::write(&out, report.to_markdown())?;
-                    // E7.3: та же история, что у досье, — цель это документ.
-                    arch_harness::judge_rules::write_history_twin(
-                        &cfg.paths.reports_dir,
-                        &stem,
-                        &stamp,
                         &report,
                         Some(target.display().to_string()),
+                        &timestamp(),
                     )?;
                     eprintln!("Отчёт: {}", out.display());
                     // Машиночитаемый отчёт (Н7, ADR-042): его читает составляющая

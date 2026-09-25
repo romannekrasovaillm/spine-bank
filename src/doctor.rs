@@ -856,14 +856,72 @@ fn check_mcp(cfg: &Config) -> Check {
 fn check_cron(cfg: &Config) -> Check {
     let file = &cfg.cron.file;
     let ok = file.is_file() && std::fs::metadata(file).is_ok_and(|m| m.len() > 0);
-    Check {
-        name: "cron",
-        verdict: if ok { Verdict::Ok } else { Verdict::Warn },
-        text: if ok {
-            format!("{} на месте", file.display())
+    if !ok {
+        return Check {
+            name: "cron",
+            verdict: Verdict::Warn,
+            text: format!("{} отсутствует или пуст (крон опционален)", file.display()),
+        };
+    }
+    // Расписание читается и пути задач раскрываются: файл задачи, которого нет,
+    // выяснялся бы только падением `cron tick` (живой тест 0.3.9: тильду не
+    // раскрывали, задача не читалась). Проверяем ПУТИ, а не только наличие
+    // cron.toml. Сам планировщик — часть сборки `harness`; в core проверка
+    // ограничивается наличием файла.
+    #[cfg(feature = "harness")]
+    {
+        let mut missing: Vec<String> = Vec::new();
+        let jobs;
+        match crate::cron::load(file) {
+            Ok(tab) => {
+                jobs = tab.jobs.len();
+                for job in &tab.jobs {
+                    if !job.task_md.is_file() {
+                        missing.push(format!("{} → {}", job.name, job.task_md.display()));
+                    }
+                }
+            }
+            Err(e) => {
+                return Check {
+                    name: "cron",
+                    verdict: Verdict::Fail,
+                    text: format!("{}: расписание не читается: {e}", file.display()),
+                };
+            }
+        }
+        if missing.is_empty() {
+            Check {
+                name: "cron",
+                verdict: Verdict::Ok,
+                text: format!(
+                    "{} на месте, задач {jobs}, файлы задач найдены",
+                    file.display()
+                ),
+            }
         } else {
-            format!("{} отсутствует или пуст (крон опционален)", file.display())
-        },
+            Check {
+                name: "cron",
+                verdict: Verdict::Warn,
+                text: format!(
+                    "файлы задач не найдены ({}): {} — `cron tick` упадёт на чтении \
+                     (проверьте пути в {})",
+                    missing.len(),
+                    missing.join("; "),
+                    file.display()
+                ),
+            }
+        }
+    }
+    #[cfg(not(feature = "harness"))]
+    {
+        Check {
+            name: "cron",
+            verdict: Verdict::Ok,
+            text: format!(
+                "{} на месте (планировщик — только сборка `harness`)",
+                file.display()
+            ),
+        }
     }
 }
 
@@ -1069,6 +1127,47 @@ fn binary_in_path(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    #[cfg(feature = "harness")]
+    /// `doctor` видит задачу расписания, файла которой нет: иначе поломка
+    /// выясняется только падением `cron tick` (живой тест 0.3.9).
+    #[test]
+    fn cron_check_reports_missing_task_file() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let mut cfg = Config::default();
+        let cron = dir.path().join("cron.toml");
+        std::fs::write(
+            &cron,
+            format!(
+                "[[job]]\nname = \"digest\"\nschedule = \"30 9 * * *\"\n\
+                 task_md = \"{}\"\n",
+                dir.path().join("нет-такого.md").display()
+            ),
+        )
+        .expect("cron.toml");
+        cfg.cron.file = cron.clone();
+        let check = check_cron(&cfg);
+        assert_eq!(check.verdict, Verdict::Warn, "{}", check.text);
+        assert!(check.text.contains("digest"), "{}", check.text);
+        assert!(check.text.contains("не найдены"), "{}", check.text);
+
+        // Файл на месте — проверка зелёная и называет число задач.
+        let task = dir.path().join("task.md");
+        std::fs::write(&task, "задача").expect("task.md");
+        std::fs::write(
+            &cron,
+            format!(
+                "[[job]]\nname = \"digest\"\nschedule = \"30 9 * * *\"\n\
+                 task_md = \"{}\"\n",
+                task.display()
+            ),
+        )
+        .expect("cron.toml");
+        let check = check_cron(&cfg);
+        assert_eq!(check.verdict, Verdict::Ok, "{}", check.text);
+        assert!(check.text.contains("задач 1"), "{}", check.text);
+    }
+
     use super::*;
 
     /// Конфиг с минимальным окружением в tempdir.

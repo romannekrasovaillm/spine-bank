@@ -351,6 +351,7 @@ impl McpServe {
             })
         };
         let mut artifact_note = None;
+        let mut archive_note: Option<String> = None;
         let mut provenance_out: Option<crate::judge::RubricProvenance> = None;
         // Отчёт, который контур только для чтения вернул хосту, а не записал
         // (J7): готовое содержимое файла и путь, куда его положить.
@@ -442,7 +443,35 @@ impl McpServe {
                         }
                     };
                     match written {
-                        Ok(p) => artifact_note = Some(p.display().to_string()),
+                        Ok(p) => {
+                            artifact_note = Some(p.display().to_string());
+                            // E1: архив истории — тот же путь, что у CLI
+                            // `rubric run`. Без него повторный `rubric_verify`
+                            // по тому же субъекту затирал артефакт и сырые
+                            // ответы, и прошлый прогон пропадал (живой TUI-тест
+                            // 0.3.9: честный отчёт исчез за поддельным).
+                            let label = match &subject {
+                                crate::rubric::ArtifactSubject::Target(t) => t.map_or_else(
+                                    || "(текст без файла)".to_string(),
+                                    |t| t.display().to_string(),
+                                ),
+                                crate::rubric::ArtifactSubject::Pack(p) => p.subject.clone(),
+                            };
+                            match crate::judge_rules::write_archive(
+                                &self.cfg.paths.reports_dir,
+                                &rub.name,
+                                &report,
+                                Some(label),
+                                &crate::judge_rules::now_stamp(),
+                            ) {
+                                Ok(md) => {
+                                    archive_note = Some(md.display().to_string());
+                                }
+                                Err(e) => {
+                                    archive_note = Some(format!("не записан: {e}"));
+                                }
+                            }
+                        }
                         Err(e) => {
                             artifact_note = Some(format!("не записан: {e}"));
                         }
@@ -488,6 +517,9 @@ impl McpServe {
                 &self.cfg.judge.families,
             ),
             "artifact": artifact_note,
+            // E1: куда легла архивная запись прогона (markdown + JSON-близнец):
+            // повторный verify того же субъекта её не затирает.
+            "archive": archive_note,
             "artifact_saved": artifact_json_out.is_none(),
             "artifact_json": artifact_json_out,
             "artifact_path": artifact_path_out,
