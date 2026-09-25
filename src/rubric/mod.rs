@@ -42,12 +42,15 @@ mod types;
 
 pub use artifact::{
     ArtifactExtras, ArtifactSubject, RUBRIC_REPORT_SCHEMA, RUBRIC_REPORTS_DIR, RubricArtifact,
-    artifact_json, artifact_json_for_subject, artifact_slug, independence_for, load_artifacts,
-    pack_artifact_slug, repo_root_of, write_artifact, write_artifact_for_subject,
+    SecondJudge, artifact_json, artifact_json_for_subject, artifact_slug, independence_for,
+    load_artifacts, pack_artifact_slug, repo_root_of, write_artifact, write_artifact_for_subject,
     write_artifact_for_subject_with, write_artifact_with,
 };
 pub use catalog::{list, load};
-pub use decision::{HUMAN_QUEUE_DIR, decide, human_package, write_human_package};
+pub use decision::{
+    HUMAN_QUEUE_DIR, SECOND_JUDGE_TOLERANCE, decide, human_package, judges_agree,
+    write_human_package,
+};
 pub use human_decision::{
     HUMAN_DECISION_SCHEMA, HumanDecision, HumanVerdict, decision_for, decision_path, read_decision,
     report_rel_path, write_decision,

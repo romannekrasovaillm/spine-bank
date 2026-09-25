@@ -404,6 +404,10 @@ impl McpServe {
                     provenance: Some(provenance),
                     author_source: Some(choice.source.clone()),
                     author_model_declared: choice.declared.clone(),
+                    // E5.1: парный прогон — забота CLI (`--second-model`); MCP
+                    // судит один раз, и отчёт об этом не умалчивает.
+                    judge_role: None,
+                    second_judge: None,
                     families: self.cfg.judge.families.clone(),
                     judge_config: Some(crate::rubric::JudgeConfigSnapshot {
                         samples: self.cfg.judge.samples.max(1),

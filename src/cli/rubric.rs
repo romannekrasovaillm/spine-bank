@@ -49,6 +49,12 @@ pub(crate) enum RubricCmd {
         /// Сэмплов судьи на критерий (по умолчанию — из секции `[judge]`).
         #[arg(long)]
         samples: Option<usize>,
+        /// Модель второго судьи (E5.1): независимая оценка того же досье другой
+        /// моделью. Два отчёта; расхождение решений или итогов больше допуска —
+        /// решение `human` (код выхода 2). Пока поддерживается для досье
+        /// (`--pack`).
+        #[arg(long)]
+        second_model: Option<String>,
         /// Оценить все принятые ADR кейса без свежего отчёта — одна команда
         /// закрывает `rubric_report_missing` и `rubric_report_stale` (ADR-048).
         #[arg(long)]
@@ -182,6 +188,7 @@ pub(crate) async fn cmd_rubric(cfg: &Arc<Config>, cmd: RubricCmd) -> Result<()> 
             samples,
             all_accepted,
             dir,
+            second_model,
         } => {
             let registry = Arc::new(LlmRegistry::from_config(cfg)?);
             let judge = match &model {
@@ -196,6 +203,12 @@ pub(crate) async fn cmd_rubric(cfg: &Arc<Config>, cmd: RubricCmd) -> Result<()> 
             } else {
                 let path = resolve_asset(&cfg.paths.rubrics_dir(), &rubric, "yaml");
                 arch_harness::rubric::load(&path)?
+            };
+            // E5.1: второй судья — другая модель из `[models]`. Расхождение
+            // двух независимых оценок уходит человеку.
+            let second = match second_model.clone() {
+                Some(name) => Some((name.clone(), registry.get(&name)?)),
+                None => None,
             };
             // Досье (ADR-051): субъект и вид заданы — собираем из репозитория
             // и судим с проверкой цитат по ролям; иначе обычный документ.
@@ -240,7 +253,7 @@ pub(crate) async fn cmd_rubric(cfg: &Arc<Config>, cmd: RubricCmd) -> Result<()> 
                 judge_cfg.samples = samples;
             }
             if let Some(pack) = &dossier {
-                let (report, raw) = arch_harness::rubric::evaluate_pack_collecting(
+                let (mut report, raw) = arch_harness::rubric::evaluate_pack_collecting(
                     &rub,
                     pack,
                     judge.as_ref(),
@@ -276,6 +289,76 @@ pub(crate) async fn cmd_rubric(cfg: &Arc<Config>, cmd: RubricCmd) -> Result<()> 
                     author_model.clone(),
                     arch_harness::handoff::author_model_from_contract(&repo),
                 );
+                // E5.1: второй судья другой модели. Пока судил один — сводки нет.
+                let second_summary = if let Some((name, judge2)) = &second {
+                    let (second_report, second_raw) =
+                        arch_harness::rubric::evaluate_pack_collecting(
+                            &rub,
+                            pack,
+                            judge2.as_ref(),
+                            &judge_cfg,
+                        )
+                        .await?;
+                    let mut provenance2 = arch_harness::judge::RubricProvenance::launched(
+                        arch_harness::judge::launcher_for(cfg, name),
+                    );
+                    if cfg.judge.record_operator {
+                        provenance2.operator = arch_harness::judge::operator(&repo);
+                    }
+                    let extras2 = arch_harness::rubric::ArtifactExtras {
+                        provenance: Some(provenance2),
+                        author_source: Some(choice.source.clone()),
+                        author_model_declared: choice.declared.clone(),
+                        families: cfg.judge.families.clone(),
+                        judge_config: Some(arch_harness::rubric::JudgeConfigSnapshot {
+                            samples: judge_cfg.samples.max(1),
+                            unstable_stdev: judge_cfg.unstable_stdev,
+                            evidence_min_similarity: judge_cfg.evidence_min_similarity,
+                        }),
+                        raw_answers: second_raw
+                            .into_iter()
+                            .map(|text| arch_harness::judge::RawAnswerInput {
+                                text,
+                                dropped: false,
+                            })
+                            .collect(),
+                        judge_role: Some("second".to_string()),
+                        second_judge: None,
+                    };
+                    let second_path = arch_harness::rubric::write_artifact_for_subject_with(
+                        &repo,
+                        &second_report,
+                        &arch_harness::rubric::ArtifactSubject::Pack(pack),
+                        choice.author.as_deref(),
+                        &extras2,
+                    )?;
+                    eprintln!("Отчёт второго судьи: {}", second_path.display());
+                    let (agreement, differences) = arch_harness::rubric::judges_agree(
+                        &report,
+                        &second_report,
+                        arch_harness::rubric::SECOND_JUDGE_TOLERANCE,
+                    );
+                    if !agreement {
+                        // E5.1: расхождение независимых оценок — не «среднее»,
+                        // а решение человека.
+                        report.decision = Some(arch_harness::rubric::RubricDecision::Human);
+                        report.decision_reasons.push(format!(
+                            "второй судья ({}) разошёлся с первым: {}",
+                            second_report.judge_model,
+                            differences.join("; ")
+                        ));
+                    }
+                    Some(arch_harness::rubric::SecondJudge {
+                        model: second_report.judge_model.clone(),
+                        report: arch_harness::rubric::report_rel_path(&repo, &second_path),
+                        decision: second_report.decision,
+                        weighted_total: second_report.weighted_total,
+                        agreement,
+                        differences,
+                    })
+                } else {
+                    None
+                };
                 let model_name = model.clone().unwrap_or_else(|| cfg.default_model.clone());
                 let mut provenance = arch_harness::judge::RubricProvenance::launched(
                     arch_harness::judge::launcher_for(cfg, &model_name),
@@ -302,6 +385,8 @@ pub(crate) async fn cmd_rubric(cfg: &Arc<Config>, cmd: RubricCmd) -> Result<()> 
                             dropped: false,
                         })
                         .collect(),
+                    judge_role: None,
+                    second_judge: second_summary.clone(),
                 };
                 let artifact = match arch_harness::rubric::write_artifact_for_subject_with(
                     &repo,
@@ -328,6 +413,12 @@ pub(crate) async fn cmd_rubric(cfg: &Arc<Config>, cmd: RubricCmd) -> Result<()> 
                     artifact.as_deref(),
                 ));
             } else {
+                if second.is_some() {
+                    anyhow::bail!(
+                        "`--second-model` пока поддерживается только для досье (`--pack`): \
+                         парный прогон по документу — следующий шаг (E5.1)"
+                    );
+                }
                 // Цели прогона: один документ либо все принятые ADR без свежего
                 // отчёта (J9, ADR-048).
                 let targets: Vec<PathBuf> = if all_accepted {
@@ -424,6 +515,8 @@ pub(crate) async fn cmd_rubric(cfg: &Arc<Config>, cmd: RubricCmd) -> Result<()> 
                                 dropped: false,
                             })
                             .collect(),
+                        judge_role: None,
+                        second_judge: None,
                     };
                     let artifact = match arch_harness::rubric::write_artifact_with(
                         &repo,

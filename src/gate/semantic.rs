@@ -232,6 +232,9 @@ enum SemanticState {
     /// Оговорку судьи разобрал архитектор: решение записано и принято (E4.5) —
     /// эскалации нет, но находка остаётся видимой.
     HumanAccepted(String),
+    /// Два независимых судьи разошлись (E5.1): их оценки одного входа не
+    /// сошлись — решение человека.
+    JudgesDisagreed(String),
     /// Всё в порядке.
     Ok,
 }
@@ -244,9 +247,10 @@ impl SemanticState {
     fn escalates(&self, policy: crate::config::HumanPolicy) -> bool {
         match self {
             Self::InjectionSuspected(_) | Self::InvalidSamples(_) => true,
-            Self::PartialEvidence(_) | Self::Unconfirmed(_) | Self::CoverageIncomplete(_) => {
-                policy == crate::config::HumanPolicy::Human
-            }
+            Self::PartialEvidence(_)
+            | Self::Unconfirmed(_)
+            | Self::CoverageIncomplete(_)
+            | Self::JudgesDisagreed(_) => policy == crate::config::HumanPolicy::Human,
             _ => false,
         }
     }
@@ -350,6 +354,18 @@ impl SemanticState {
                     ratio * 100.0
                 ),
             )],
+            Self::JudgesDisagreed(detail) => vec![GateFinding::ruled(
+                if escalated { "error" } else { "warn" }.to_string(),
+                "judge_disagreement".to_string(),
+                format!(
+                    "{who}: два независимых судьи разошлись ({detail}){}",
+                    if escalated {
+                        " — решение человека"
+                    } else {
+                        ""
+                    }
+                ),
+            )],
             Self::HumanAccepted(decision) => vec![GateFinding::ruled(
                 "warn".to_string(),
                 "human_decision_accepted".to_string(),
@@ -424,6 +440,19 @@ fn semantic_subject_state(
     }
     if artifact.invalid_samples_ratio > 0.0 {
         return SemanticState::InvalidSamplesWarn(artifact.invalid_samples_ratio);
+    }
+    // E5.1: два независимых судьи разошлись — суждение не принято, решает
+    // человек (политика маршрута решает, блокирует ли это вердикт).
+    if let Some(second) = artifact.second_judge.as_ref().filter(|s| !s.agreement) {
+        return SemanticState::JudgesDisagreed(format!(
+            "второй судья {}: {}",
+            second.model,
+            if second.differences.is_empty() {
+                "оценки не сошлись".to_string()
+            } else {
+                second.differences.join("; ")
+            }
+        ));
     }
     // E4.5: решение архитектора по этому отчёту снимает эскалацию оговорок
     // судьи (инъекции и невалидные сэмплы оно не снимает — они выше).
@@ -1173,6 +1202,68 @@ mod tests {
             &options,
         )
         .expect("гейт")
+    }
+
+    /// E5.1: расхождение двух судей — решение человека. На Critical оговорка
+    /// блокирует вердикт (SKIP → INCOMPLETE), на Fast остаётся предупреждением.
+    #[test]
+    fn judge_disagreement_follows_route_policy() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        make_semantic_repo(dir);
+        let rubrics = semantic_rubrics_dir(dir);
+        write_semantic_report(dir, "docs/adr/ADR-001-reshenie.md", 5, &[], 4.5, None);
+        // Второй судья разошёлся с первым: отметка в отчёте (E5.1).
+        let path = dir
+            .join(crate::rubric::RUBRIC_REPORTS_DIR)
+            .join("semantic.json");
+        let mut artifact: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("отчёт")).expect("JSON");
+        artifact["second_judge"] = serde_json::json!({
+            "model": "judge-2",
+            "report": "reports/rubric/semantic--second.json",
+            "decision": "fail",
+            "weighted_total": 1.0,
+            "agreement": false,
+            "differences": ["решения разошлись: pass и fail"],
+        });
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&artifact).expect("json"),
+        )
+        .expect("write report");
+        let policy = crate::config::DecisionPolicyConfig::default();
+        let critical = run_semantic_on(
+            dir,
+            Route::Critical,
+            policy.clone(),
+            semantic_cfg(crate::config::SemanticScope::All),
+            &rubrics,
+        );
+        assert_eq!(
+            status_of(&critical, "semantic_quality"),
+            GateStatus::Skip,
+            "{}",
+            crate::gate::render(&critical)
+        );
+        assert!(
+            semantic_rules(&critical).contains(&"judge_disagreement".to_string()),
+            "{:?}",
+            semantic_rules(&critical)
+        );
+        let fast = run_semantic_on(
+            dir,
+            Route::Fast,
+            policy,
+            semantic_cfg(crate::config::SemanticScope::All),
+            &rubrics,
+        );
+        assert_eq!(status_of(&fast, "semantic_quality"), GateStatus::Pass);
+        assert!(
+            semantic_rules(&fast).contains(&"judge_disagreement".to_string()),
+            "на Fast находка видна предупреждением: {:?}",
+            semantic_rules(&fast)
+        );
     }
 
     /// E4.5: записанное решение архитектора (`accept`) снимает эскалацию

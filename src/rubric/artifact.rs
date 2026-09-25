@@ -130,6 +130,12 @@ pub struct RubricArtifact {
     /// пусто, сверка тогда идёт по итогу и меткам).
     #[serde(default)]
     pub scores: Vec<CriterionScore>,
+    /// Роль судьи в парном прогоне (E5.1): `None` — обычный отчёт.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub judge_role: Option<String>,
+    /// Сводка второго судьи (E5.1): независимая оценка того же входа.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub second_judge: Option<SecondJudge>,
     /// Доля сэмплов судьи с баллом вне шкалы (E3.2) — по ней гейт решает,
     /// отправлять ли решение человеку. Поле аддитивное: отсутствие = 0.
     #[serde(default)]
@@ -188,6 +194,26 @@ pub fn artifact_slug(target: Option<&Path>) -> String {
     }
 }
 
+/// Сводка второго судьи (E5.1): независимая оценка того же входа другой
+/// моделью. `None` — судил один судья.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecondJudge {
+    /// Метка модели второго судьи.
+    pub model: String,
+    /// Путь к отчёту второго судьи относительно репозитория.
+    pub report: String,
+    /// Его решение.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision: Option<crate::rubric::RubricDecision>,
+    /// Его взвешенный итог.
+    pub weighted_total: f64,
+    /// Согласились ли судьи.
+    pub agreement: bool,
+    /// Чем разошлись (пусто при согласии).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub differences: Vec<String>,
+}
+
 /// Дополнительные сведения отчёта, которых нет в [`RubricReport`]:
 /// происхождение оценки (ADR-048). Отдельная структура, а не новые аргументы
 /// [`write_artifact`], — вызывающие без происхождения не переписываются.
@@ -209,6 +235,13 @@ pub struct ArtifactExtras {
     /// (`reports/rubric/raw/<slug>/sample-<n>.json`), их хэши идут в
     /// `provenance.samples` (J2, ADR-048). Пусто — ответы не сохранены.
     pub raw_answers: Vec<crate::judge::RawAnswerInput>,
+    /// Роль судьи в парном прогоне (E5.1): `None` — обычный отчёт,
+    /// `Some("second")` — отчёт второго судьи. Роль добавляется к имени файла
+    /// и каталогу сырых ответов, иначе два отчёта об одном входе затёрли бы
+    /// друг друга.
+    pub judge_role: Option<String>,
+    /// Сводка второго судьи (E5.1) — в отчёте основного судьи.
+    pub second_judge: Option<SecondJudge>,
 }
 
 /// Записывает отчёт рубрики в `<repo>/reports/rubric/<slug>.json` без
@@ -409,6 +442,16 @@ fn build_artifact(
             pack.inputs.clone(),
         ),
     };
+    // E5.1: роль судьи разводит файлы парного прогона — иначе отчёт второго
+    // судьи затёр бы отчёт первого.
+    let file_stem = match extras
+        .judge_role
+        .as_deref()
+        .filter(|r| !r.trim().is_empty())
+    {
+        Some(role) => format!("{file_stem}--{role}"),
+        None => file_stem,
+    };
     // Сырые ответы судьи — рядом с отчётом: отчёт обязан быть воспроизводим из
     // ответов, на которых он объявлен собранным (J2, ADR-048). Их хэши попадают
     // в происхождение независимо от записи файлов: в read-only контуре
@@ -479,6 +522,8 @@ fn build_artifact(
         inputs,
         scores: report.scores.clone(),
         invalid_samples_ratio: report.invalid_samples_ratio,
+        judge_role: extras.judge_role.clone(),
+        second_judge: extras.second_judge.clone(),
         decision: report.decision,
         decision_reasons: report.decision_reasons.clone(),
         // E2: пометки инъекций входа переезжают в отчёт для гейта. `None` —

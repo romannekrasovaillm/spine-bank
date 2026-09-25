@@ -940,6 +940,8 @@ pub(super) fn component_decision_quality(
     // E3.3: `evidence_partial` на Critical — оговорка, которую проект не
     // принимает молча.
     let mut partial_on_critical = 0usize;
+    // E5.1: два независимых судьи разошлись — решение человека.
+    let mut judges_disagreed = 0usize;
     for adr in &adrs {
         let Ok(text) = std::fs::read_to_string(adr) else {
             continue;
@@ -989,6 +991,25 @@ pub(super) fn component_decision_quality(
                     "{rel}: во входе есть строки с паттернами prompt-инъекций ({lines:?}) — \
                      цитаты оттуда свидетельствами не засчитаны, суждение по этому входу \
                      механика подтвердить не может"
+                ),
+            ));
+            continue;
+        }
+        // E5.1: два независимых судьи разошлись — механика не выбирает, кому
+        // верить, и отправляет решение человеку.
+        if let Some(second) = artifact.second_judge.as_ref().filter(|s| !s.agreement) {
+            judges_disagreed += 1;
+            findings.push(GateFinding::ruled(
+                "error".to_string(),
+                "judge_disagreement".to_string(),
+                format!(
+                    "{rel}: второй судья {} разошёлся с первым ({}); решение человека",
+                    second.model,
+                    if second.differences.is_empty() {
+                        "оценки не сошлись".to_string()
+                    } else {
+                        second.differences.join("; ")
+                    }
                 ),
             ));
             continue;
@@ -1357,7 +1378,8 @@ pub(super) fn component_decision_quality(
              остаются одни хэши"
         ));
     }
-    let unconfirmed = injection_suspected + invalid_over_threshold + partial_on_critical;
+    let unconfirmed =
+        injection_suspected + invalid_over_threshold + partial_on_critical + judges_disagreed;
     if unconfirmed > 0 {
         // E2/E3: «проверить нельзя», а не «нарушено» и не «нечего проверять» —
         // SKIP обязательной составляющей даёт вердикт INCOMPLETE (exit 3).
@@ -1366,8 +1388,8 @@ pub(super) fn component_decision_quality(
             format!(
                 "{detail}; решений, которые механика не подтверждает: {unconfirmed} \
                  (вход с инъекцией: {injection_suspected}, невалидных сэмплов сверх порога: \
-                 {invalid_over_threshold}, evidence_partial на Critical: {partial_on_critical}) — \
-                 решение за человеком"
+                 {invalid_over_threshold}, evidence_partial на Critical: {partial_on_critical}, \
+                 расхождение судей: {judges_disagreed}) — решение за человеком"
             ),
             findings,
         )

@@ -3074,6 +3074,76 @@ fn rubric_run_pack_saves_raw_answers_provenance_and_reverifies() {
     assert!(out.status.success(), "reverify: {stdout}");
     assert!(stdout.contains("воспроизводится"), "{stdout}");
 
+    // (б2) E5.1: второй судья другой модели. Основной судья ставит 2 (итог 2.0),
+    // второй — 5 (итог 5.0): расхождение больше допуска → решение `human`,
+    // код выхода 2, и в репозитории два отчёта об одном входе.
+    let script2 = home.join("fake-judge-2.sh");
+    std::fs::write(
+        &script2,
+        "#!/bin/sh\n\
+         if [ \"${1:-}\" = \"--version\" ]; then echo 'fake-judge 2.0'; exit 0; fi\n\
+         cat >/dev/null\n\
+         printf '%s' '{\"scores\":[{\"criterion_id\":\"no_contradiction\",\"score\":5,\"rationale\":\"Цитата subject: \\\"Решение: контроль без LLM в гейте.\\\". Цитата reference: \\\"Rule: механика контроля без LLM.\\\". всё чисто\"}],\"verdict\":\"чисто\"}'\n",
+    )
+    .expect("fake judge 2");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mut perms = std::fs::metadata(&script2).expect("stat 2").permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script2, perms).expect("chmod +x 2");
+    }
+    let config_path = home.join("arch-harness.toml");
+    let config_text = format!(
+        "{}\n[models.fakejudge2]\nkind = \"cli\"\ncommand = \"{}\"\nmodel = \"fake-judge-2\"\n",
+        std::fs::read_to_string(&config_path).expect("конфиг"),
+        script2.display()
+    );
+    std::fs::write(&config_path, config_text).expect("конфиг 2");
+    let out = arch_cmd(home)
+        .args(["rubric", "run", "t-semantic"])
+        .args([
+            "--pack",
+            "adr_vs_spine",
+            "--subject",
+            "docs/adr/ADR-001-x.md",
+            "--second-model",
+            "fakejudge2",
+        ])
+        .arg("--root")
+        .arg(repo.as_os_str())
+        .output()
+        .expect("rubric run с двумя судьями");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "расхождение судей — решение human: {stdout}"
+    );
+    assert!(stdout.contains("второй судья"), "{stdout}");
+    assert!(stdout.contains("разошёлся"), "{stdout}");
+    let second_artifact = repo.join("reports/rubric/ADR-001-x--adr_vs_spine--second.json");
+    assert!(
+        second_artifact.is_file(),
+        "отчёт второго судьи: {}",
+        second_artifact.display()
+    );
+    let artifact: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&artifact_path).expect("основной отчёт"))
+            .expect("JSON");
+    assert_eq!(artifact["decision"], "human", "{artifact}");
+    assert_eq!(
+        artifact["second_judge"]["model"], "fake-judge-2",
+        "{artifact}"
+    );
+    assert_eq!(artifact["second_judge"]["agreement"], false, "{artifact}");
+    assert!(
+        artifact["second_judge"]["differences"][0]
+            .as_str()
+            .is_some_and(|d| d.contains("итоги разошлись")),
+        "{artifact}"
+    );
+
     // (в) E1.3: правка источника досье после оценки делает отчёт устаревшим.
     // Это находка с ненулевым кодом, а не «сверка невозможна» (код 0): иначе
     // подмена предмета оценки проходила бы как «отчёт в порядке».

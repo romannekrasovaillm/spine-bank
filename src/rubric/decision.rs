@@ -85,6 +85,43 @@ pub fn decide(rubric: &Rubric, report: &RubricReport) -> (RubricDecision, Vec<St
     (RubricDecision::Pass, Vec::new())
 }
 
+/// Допуск расхождения взвешенных итогов двух судей (E5.1): внутри него оценки
+/// считаются сошедшимися. `0.75` — меньше балла по шкале 1..5: расхождение
+/// «4.0 против 4.5» это шум сэмплов, «4.0 против 2.5» — разные суждения.
+pub const SECOND_JUDGE_TOLERANCE: f64 = 0.75;
+
+/// Согласились ли два судьи (E5.1): решения совпадают, а взвешенные итоги не
+/// разошлись больше допуска.
+///
+/// Возвращает вердикт согласия и человекочитаемые расхождения. Согласие — не
+/// «оба правы», а «две независимые оценки сошлись»: именно оно позволяет
+/// принять суждение автоматически, не разбирая его человеком.
+#[must_use]
+pub fn judges_agree(
+    first: &RubricReport,
+    second: &RubricReport,
+    tolerance: f64,
+) -> (bool, Vec<String>) {
+    let mut differences = Vec::new();
+    if let (Some(a), Some(b)) = (first.decision, second.decision) {
+        if a != b {
+            differences.push(format!(
+                "решения разошлись: {} и {}",
+                a.as_str(),
+                b.as_str()
+            ));
+        }
+    }
+    let delta = (first.weighted_total - second.weighted_total).abs();
+    if delta > tolerance {
+        differences.push(format!(
+            "итоги разошлись: {:.2} и {:.2} (Δ{delta:.2} > допуска {tolerance:.2})",
+            first.weighted_total, second.weighted_total
+        ));
+    }
+    (differences.is_empty(), differences)
+}
+
 /// Каталог пакетов для человека внутри репозитория.
 pub const HUMAN_QUEUE_DIR: &str = "reports/human";
 
@@ -304,6 +341,46 @@ mod tests {
             "{:?}",
             report.decision_reasons
         );
+    }
+
+    /// E5.1: согласие судей — по решениям и по итогам с допуском; расхождение
+    /// называется человекочитаемо (оно идёт в отчёт и в находку гейта).
+    #[test]
+    fn judges_agreement_is_by_decision_and_tolerance() {
+        let report = |decision: RubricDecision, total: f64| RubricReport {
+            rubric_name: "t".into(),
+            judge_model: "judge".into(),
+            judge_samples: 1,
+            scores: Vec::new(),
+            weighted_total: total,
+            verdict: "ok".into(),
+            evidence_unconfirmed_ratio: 0.0,
+            input_injections: Vec::new(),
+            invalid_samples_ratio: 0.0,
+            decision: Some(decision),
+            decision_reasons: Vec::new(),
+        };
+        let (agree, diffs) = judges_agree(
+            &report(RubricDecision::Pass, 4.0),
+            &report(RubricDecision::Pass, 4.5),
+            SECOND_JUDGE_TOLERANCE,
+        );
+        assert!(agree, "решения совпали, итоги внутри допуска: {diffs:?}");
+        assert!(diffs.is_empty());
+        let (agree, diffs) = judges_agree(
+            &report(RubricDecision::Pass, 4.0),
+            &report(RubricDecision::Pass, 2.5),
+            SECOND_JUDGE_TOLERANCE,
+        );
+        assert!(!agree, "итоги разошлись больше допуска");
+        assert!(diffs[0].contains("итоги разошлись"), "{diffs:?}");
+        let (agree, diffs) = judges_agree(
+            &report(RubricDecision::Pass, 4.0),
+            &report(RubricDecision::Fail, 4.0),
+            SECOND_JUDGE_TOLERANCE,
+        );
+        assert!(!agree, "решения разошлись");
+        assert!(diffs[0].contains("решения разошлись"), "{diffs:?}");
     }
 
     /// E4.4: пакет для архитектора несёт решение, причины, цитаты судьи, пути
