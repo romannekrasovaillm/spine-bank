@@ -222,6 +222,54 @@ impl CriterionFlag {
     }
 }
 
+/// Единое решение рубрики (E4.1): то, что читает CI и человек.
+///
+/// Три состояния, а не два: «механика не подтверждает суждение» — это не
+/// «нарушение» (субъект может быть чист) и не «годно» (вердикту модели нельзя
+/// верить молча). Код выхода: `pass` 0, `fail` 1, `human` 2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RubricDecision {
+    /// Механика не нашла ничего, чего она не подтверждает.
+    Pass,
+    /// Подтверждённое нарушение: блокирующий критерий низкий, цитаты на месте.
+    Fail,
+    /// Решает человек: суждение модели механике нечем подтвердить.
+    Human,
+}
+
+impl RubricDecision {
+    /// Строковое имя для JSON, журналов и пакета человеку.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pass => "pass",
+            Self::Fail => "fail",
+            Self::Human => "human",
+        }
+    }
+
+    /// Код выхода решения (E4.1): 0 / 1 / 2.
+    #[must_use]
+    pub fn exit_code(self) -> i32 {
+        match self {
+            Self::Pass => 0,
+            Self::Fail => 1,
+            Self::Human => 2,
+        }
+    }
+
+    /// Человекочитаемая подпись для вывода CLI.
+    #[must_use]
+    pub fn label_ru(self) -> &'static str {
+        match self {
+            Self::Pass => "годно",
+            Self::Fail => "нарушение",
+            Self::Human => "нужен человек",
+        }
+    }
+}
+
 /// Оценка одного критерия.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CriterionScore {

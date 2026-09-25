@@ -134,6 +134,14 @@ pub struct RubricArtifact {
     /// отправлять ли решение человеку. Поле аддитивное: отсутствие = 0.
     #[serde(default)]
     pub invalid_samples_ratio: f64,
+    /// Единое решение рубрики (E4.1): `pass` / `fail` / `human`. Гейт и CI
+    /// читают именно его, а не пересчитывают метки заново. Поле аддитивное:
+    /// у отчётов до 0.3.9 его нет (читатель решает сам).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision: Option<crate::rubric::RubricDecision>,
+    /// Почему решение такое (E4.4): причины идут в пакет для архитектора.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decision_reasons: Vec<String>,
     /// Строки входа с паттернами prompt-инъекций (E2). `None` — отчёт записан
     /// до появления детектора (сверка его не штрафует), `Some([])` — вход
     /// сканировали и он чист, `Some([n, …])` — помеченные строки.
@@ -471,6 +479,8 @@ fn build_artifact(
         inputs,
         scores: report.scores.clone(),
         invalid_samples_ratio: report.invalid_samples_ratio,
+        decision: report.decision,
+        decision_reasons: report.decision_reasons.clone(),
         // E2: пометки инъекций входа переезжают в отчёт для гейта. `None` —
         // отчёт записан до появления детектора: отсутствие поля означает «не
         // сканировали», и сверка его не штрафует (как provenance и scores).

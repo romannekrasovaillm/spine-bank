@@ -52,6 +52,13 @@ pub struct RubricReport {
     /// человеку. Поле аддитивное: у отчётов до 0.3.9 его нет (читается как 0).
     #[serde(default)]
     pub invalid_samples_ratio: f64,
+    /// Единое решение рубрики (E4.1): `pass` / `fail` / `human`. `None` — отчёт
+    /// записан до появления решения (аддитивное поле): читатель решает сам.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision: Option<crate::rubric::RubricDecision>,
+    /// Почему решение такое (E4.4): причины идут в пакет для архитектора.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decision_reasons: Vec<String>,
 }
 
 /// Строка входа с паттерном prompt-инъекции (E2.1): номер строки и сработавший
@@ -135,6 +142,20 @@ impl RubricReport {
                  входу механика подтвердить не может — нужен человек.\n",
                 self.input_injections.len()
             );
+        }
+        // E4.1: решение — первое, что читает человек и CI.
+        if let Some(decision) = self.decision {
+            let _ = writeln!(
+                out,
+                "**Решение:** {} (`{}`, код выхода {})",
+                decision.label_ru(),
+                decision.as_str(),
+                decision.exit_code()
+            );
+            for reason in &self.decision_reasons {
+                let _ = writeln!(out, "- {reason}");
+            }
+            out.push('\n');
         }
         let _ = writeln!(out, "| Критерий | Вес | Балл | Метки | Обоснование |");
         let _ = writeln!(out, "| --- | --- | --- | --- | --- |");
@@ -783,7 +804,7 @@ pub(crate) fn build_report(
         .filter(|s| s.flags.iter().any(|f| f.excludes_from_total()))
         .count();
     let judge_verdict = runs.last().map_or_else(String::new, |r| r.verdict.clone());
-    Ok(RubricReport {
+    let report = RubricReport {
         rubric_name: rubric.name.clone(),
         judge_model: judge_model.to_string(),
         judge_samples: runs.len(),
@@ -801,6 +822,16 @@ pub(crate) fn build_report(
         } else {
             invalid_samples as f64 / counted_samples as f64
         },
+        decision: None,
+        decision_reasons: Vec::new(),
+    };
+    // E4.1: решение считается из готового отчёта — один раз и в одном месте,
+    // чтобы CLI, гейт и пакет человеку читали одно и то же.
+    let (decision, reasons) = super::decision::decide(rubric, &report);
+    Ok(RubricReport {
+        decision: Some(decision),
+        decision_reasons: reasons,
+        ..report
     })
 }
 
@@ -1477,6 +1508,8 @@ mod tests {
             evidence_unconfirmed_ratio: 0.0,
             input_injections: Vec::new(),
             invalid_samples_ratio: 0.0,
+            decision: None,
+            decision_reasons: Vec::new(),
         };
         let md = report.to_markdown();
         assert!(md.contains("# Оценка по рубрике «adr-quality»"));

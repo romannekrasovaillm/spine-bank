@@ -99,6 +99,46 @@ pub(crate) enum RubricCmd {
     },
 }
 
+/// Печатает решение рубрики и, если оно `human`, кладёт пакет для архитектора
+/// (E4.1/E4.4). Возвращает код выхода решения: 0 — pass, 1 — fail, 2 — human.
+fn emit_decision(
+    repo: &Path,
+    slug: &str,
+    subject: Option<&str>,
+    rubric_name: &str,
+    report: &arch_harness::rubric::RubricReport,
+    artifact: Option<&Path>,
+) -> i32 {
+    let Some(decision) = report.decision else {
+        return 0;
+    };
+    println!(
+        "Решение рубрики: {} ({}) — код выхода {}",
+        decision.label_ru(),
+        decision.as_str(),
+        decision.exit_code()
+    );
+    for reason in &report.decision_reasons {
+        println!("  · {reason}");
+    }
+    if decision == arch_harness::rubric::RubricDecision::Human {
+        let raw = arch_harness::judge::raw_dir(repo, slug);
+        let body = arch_harness::rubric::human_package(
+            rubric_name,
+            subject,
+            report,
+            &report.decision_reasons,
+            Some(&raw),
+            artifact,
+        );
+        match arch_harness::rubric::write_human_package(repo, slug, &body) {
+            Ok(path) => println!("Пакет архитектору: {}", path.display()),
+            Err(e) => eprintln!("⚠ пакет архитектору не записан: {e}"),
+        }
+    }
+    decision.exit_code()
+}
+
 pub(crate) async fn cmd_rubric(cfg: &Arc<Config>, cmd: RubricCmd) -> Result<()> {
     match cmd {
         RubricCmd::List => {
@@ -171,6 +211,8 @@ pub(crate) async fn cmd_rubric(cfg: &Arc<Config>, cmd: RubricCmd) -> Result<()> 
                      собирается по одному субъекту"
                 );
             }
+            // E4.1: худшее решение прогона определяет код выхода (0/1/2).
+            let mut exit_code = 0i32;
             // `--samples` перекрывает секцию [judge] для этого прогона — и для
             // документа, и для досье: судят по одним правилам (J8, ADR-048).
             let mut judge_cfg = cfg.judge.clone();
@@ -236,16 +278,30 @@ pub(crate) async fn cmd_rubric(cfg: &Arc<Config>, cmd: RubricCmd) -> Result<()> 
                         })
                         .collect(),
                 };
-                match arch_harness::rubric::write_artifact_for_subject_with(
+                let artifact = match arch_harness::rubric::write_artifact_for_subject_with(
                     &repo,
                     &report,
                     &arch_harness::rubric::ArtifactSubject::Pack(pack),
                     choice.author.as_deref(),
                     &extras,
                 ) {
-                    Ok(path) => eprintln!("Отчёт для гейта: {}", path.display()),
-                    Err(e) => eprintln!("⚠ машиночитаемый отчёт не записан: {e}"),
-                }
+                    Ok(path) => {
+                        eprintln!("Отчёт для гейта: {}", path.display());
+                        Some(path)
+                    }
+                    Err(e) => {
+                        eprintln!("⚠ машиночитаемый отчёт не записан: {e}");
+                        None
+                    }
+                };
+                exit_code = exit_code.max(emit_decision(
+                    &repo,
+                    &arch_harness::rubric::pack_artifact_slug(pack.kind.as_str(), &pack.subject),
+                    Some(&pack.subject),
+                    &rub.name,
+                    &report,
+                    artifact.as_deref(),
+                ));
             } else {
                 // Цели прогона: один документ либо все принятые ADR без свежего
                 // отчёта (J9, ADR-048).
@@ -344,17 +400,36 @@ pub(crate) async fn cmd_rubric(cfg: &Arc<Config>, cmd: RubricCmd) -> Result<()> 
                             })
                             .collect(),
                     };
-                    match arch_harness::rubric::write_artifact_with(
+                    let artifact = match arch_harness::rubric::write_artifact_with(
                         &repo,
                         &report,
                         Some(&abs_target),
                         choice.author.as_deref(),
                         &extras,
                     ) {
-                        Ok(path) => eprintln!("Отчёт для гейта: {}", path.display()),
-                        Err(e) => eprintln!("⚠ машиночитаемый отчёт не записан: {e}"),
-                    }
+                        Ok(path) => {
+                            eprintln!("Отчёт для гейта: {}", path.display());
+                            Some(path)
+                        }
+                        Err(e) => {
+                            eprintln!("⚠ машиночитаемый отчёт не записан: {e}");
+                            None
+                        }
+                    };
+                    exit_code = exit_code.max(emit_decision(
+                        &repo,
+                        &arch_harness::rubric::artifact_slug(Some(&abs_target)),
+                        None,
+                        &rub.name,
+                        &report,
+                        artifact.as_deref(),
+                    ));
                 }
+            }
+            // E4.1: решение рубрики — код выхода 0 (годно) / 1 (нарушение) /
+            // 2 (нужен человек). До 0.3.9 `rubric run` всегда возвращал 0.
+            if exit_code != 0 {
+                std::process::exit(exit_code);
             }
         }
         RubricCmd::Handover { dir, rubric } => {

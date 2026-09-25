@@ -31,6 +31,7 @@
 
 mod artifact;
 mod catalog;
+mod decision;
 mod judge;
 mod report;
 #[cfg(test)]
@@ -45,6 +46,7 @@ pub use artifact::{
     write_artifact_for_subject_with, write_artifact_with,
 };
 pub use catalog::{list, load};
+pub use decision::{HUMAN_QUEUE_DIR, decide, human_package, write_human_package};
 pub use judge::{
     check_target_len, evaluate_collecting, evaluate_pack, evaluate_pack_collecting,
     evaluate_with_options, generate_dynamic,
@@ -55,5 +57,5 @@ pub use report::{InputInjection, RubricReport, scan_injections, weighted_total};
 pub use tools::tools;
 pub use types::{
     Coverage, Criterion, CriterionFlag, CriterionScore, CriterionSnapshot, EvidenceOn,
-    JudgeConfigSnapshot, MAX_TARGET_CHARS, Rubric, RubricSummary,
+    JudgeConfigSnapshot, MAX_TARGET_CHARS, Rubric, RubricDecision, RubricSummary,
 };
