@@ -47,3 +47,52 @@ type_tokens.push(tok);
   `short_alter_actions_without_column_keyword_are_applied`).
 - Мутанты «не падает, а молчит»: если подмена убирает находку или вердикт,
   которые контур обязан выдавать, это пробел в тестах, а не эквивалентность.
+
+### `src/gate/route.rs`: `replace || with && in component_route_lock`
+
+```rust
+if !git.repo || !git.head {
+    return GateComponent::pass("route_lock", detail);
+}
+```
+
+Мутация `||` → `&&` требует «оба состояния ложны» вместо «любое из них» и
+различима только если ровно одно из них истинно. Все достижимые сочетания
+`GitProbe` дают один результат:
+
+- `repo = false` (не git-репозиторий): ранний выход пропускается, но следующая
+  проверка `!git_rev_exists(...)` истинна (git-команд нет) — снова PASS с тем же
+  `detail`;
+- `repo = true, head = false` (репозиторий без коммитов): `rev` не резолвится,
+  `!git_rev_exists(...)` истинна — снова PASS;
+- `repo = true, head = true` — рабочий случай: обе ветки идут дальше;
+- `repo = false, head = true` недостижимо: поле `head` заполняет только
+  `GitProbe::probe`, и оно требует успешного `git rev-parse --git-dir`.
+
+Сообщение и статус у обеих ветвей совпадают побуквенно, поэтому мутант
+эквивалентен. Граница удержана тестами `route_lock_passes_without_git_state`
+(оба недостижимых-для-сравнения состояния — PASS) и
+`route_lock_lowering_without_adr_fails` (в рабочем состоянии храповик краснеет).
+
+### `src/contract_diff/openapi.rs`: `replace || with && in effective_parameters`
+
+```rust
+let resolved = resolve_schema(doc, param, 0);
+if resolved.get("$ref").is_some() || !resolved.is_object() {
+    continue;
+}
+let (Some(name), Some(in_)) = (...) else { continue };
+```
+
+Мутация различима только когда ровно одно из условий истинно, и в обоих
+случаях параметр всё равно отсеивается следующим `let … else`:
+
+- остался `$ref`, но значение — объект: `name`/`in` в нём нет, `let … else`
+  пропускает параметр;
+- значение не объект и без `$ref` (строка/число): `Value::get("name")` на
+  не-объекте даёт `None`, `let … else` снова пропускает.
+
+Карта эффективных параметров при мутанте не меняется, поэтому мутант
+эквивалентен. Граница удержана тестом `ineffective_parameters_are_skipped`
+(нераскрытый `$ref` и не-объект в карту не попадают) и тестами CD-003/CD-008,
+которые читают параметры и схемы тела.
