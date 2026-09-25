@@ -642,4 +642,46 @@ ALTER TABLE charges ADD COLUMN currency varchar(3);
             "короткий ALTER применён: {findings:?}"
         );
     }
+
+    /// Несколько действий в одном `ALTER TABLE` разделяются запятыми верхнего
+    /// уровня: и добавление, и удаление колонки в одном операторе видны.
+    #[test]
+    fn multiple_alter_actions_in_one_statement_are_applied() {
+        let new = format!(
+            "{DDL_V1}\nALTER TABLE charges ADD COLUMN trace_id varchar(36), DROP COLUMN note;\n"
+        );
+        let findings = diff_ddl(DDL_V1, &new);
+        assert!(
+            has_message(&findings, "trace_id"),
+            "добавление применено: {findings:?}"
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule == "CD-S02" && f.message.contains("note")),
+            "удаление применено: {findings:?}"
+        );
+    }
+
+    /// Обязательность читается по двум независимым признакам: `NOT NULL` и
+    /// `PRIMARY KEY`; `DEFAULT` — отдельный признак значения по умолчанию.
+    #[test]
+    fn column_flags_read_not_null_primary_key_and_default_separately() {
+        let old = "CREATE TABLE t (\n  id varchar(36) NOT NULL\n);\n";
+        // PRIMARY KEY без NOT NULL — всё равно обязательная колонка без
+        // DEFAULT, значит error CD-S04.
+        let pk = format!("{old}\nALTER TABLE t ADD COLUMN code varchar(4) PRIMARY KEY;\n");
+        let findings = diff_ddl(old, &pk);
+        assert!(
+            findings.iter().any(|f| f.rule == "CD-S04"),
+            "PRIMARY KEY = обязательность: {findings:?}"
+        );
+        // DEFAULT без обязательности — не error.
+        let def = format!("{old}\nALTER TABLE t ADD COLUMN code varchar(4) DEFAULT 'x';\n");
+        let findings = diff_ddl(old, &def);
+        assert!(
+            !findings.iter().any(|f| f.rule == "CD-S04"),
+            "DEFAULT закрывает ошибку: {findings:?}"
+        );
+    }
 }
