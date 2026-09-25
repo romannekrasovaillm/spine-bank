@@ -44,6 +44,10 @@ pub const SOURCE_END: &str = "=== КОНЕЦ ИСТОЧНИКА ===";
 pub const SPINE_FILE: &str = "ARCHITECTURE-SPINE.md";
 /// Каталог модели архитектуры внутри корня досье.
 pub const MODEL_DIR: &str = "model";
+/// Каталог стандартов корпоративного слоя (E10.1): солюшен-документ
+/// сверяется с ними как ссылочными источниками досье. Один файл — один
+/// стандарт; идентификатор берётся из шапки (`id: STD-1`) либо из имени файла.
+pub const STANDARDS_DIR: &str = "docs/standards";
 /// Каталог результатов детекторов внутри репозитория (E7.1). Формат открыт:
 /// один JSON на детектор — `{"name": "...", "status": "pass"|"fail", ...}`;
 /// остальные поля свободны (в них детектор кладёт свои находки, и судья их
@@ -75,15 +79,20 @@ pub enum PackKind {
     NfrMechanism,
     /// Файл кода против инвариантов спайна (класс `D11`).
     CodeVsSpine,
+    /// Солюшен-документ против стандартов корпоративного слоя (E10.1, класс
+    /// «решение слоя расходится со стандартом ДКА»): субъект — документ
+    /// решения, ссылки — стандарты `docs/standards/**`.
+    SolutionVsStandards,
 }
 
 impl PackKind {
     /// Все виды досье в порядке объявления (реестр CLI/MCP).
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::AdrVsSpine,
         Self::EntityLinks,
         Self::NfrMechanism,
         Self::CodeVsSpine,
+        Self::SolutionVsStandards,
     ];
 
     /// Строковое имя вида — как в YAML рубрик, CLI и отчётах.
@@ -94,6 +103,7 @@ impl PackKind {
             Self::EntityLinks => "entity_links",
             Self::NfrMechanism => "nfr_mechanism",
             Self::CodeVsSpine => "code_vs_spine",
+            Self::SolutionVsStandards => "solution_vs_standards",
         }
     }
 
@@ -129,6 +139,9 @@ impl PackKind {
             Self::EntityLinks => "идентификатор сущности модели (`CMP-001`, `INT-002`, …)",
             Self::NfrMechanism => "идентификатор NFR (`NFR-001`)",
             Self::CodeVsSpine => "путь к файлу кода относительно корня (`src/control.rs`)",
+            Self::SolutionVsStandards => {
+                "путь к солюшен-документу (`docs/solution/SOL-1.md`); стандарты — из `docs/standards/`"
+            }
         }
     }
 }
@@ -518,6 +531,7 @@ fn collector(kind: PackKind, repo: &Path, subject: &str) -> Result<Vec<Source>> 
         PackKind::EntityLinks => entity_links(repo, subject),
         PackKind::NfrMechanism => nfr_mechanism(repo, subject),
         PackKind::CodeVsSpine => code_vs_spine(repo, subject),
+        PackKind::SolutionVsStandards => solution_vs_standards(repo, subject),
     }
 }
 
@@ -840,6 +854,92 @@ fn adr_vs_spine(repo: &Path, subject: &str) -> Result<Vec<Source>> {
     let mut out = vec![Source::subject(relative(repo, &path), text)];
     out.extend(spine_sources(repo)?);
     Ok(out)
+}
+
+/// Досье `solution_vs_standards` (E10.1): солюшен-документ + стандарты
+/// корпоративного слоя. Стандарты читаются из [`STANDARDS_DIR`] (рекурсивно,
+/// отсортированы по пути), идентификатор — из шапки `id:` или из имени файла.
+/// Нет ни одного стандарта — явная ошибка: сверять документ не с чем, а молча
+/// пустое досье дало бы «нарушений нет» на ровном месте.
+fn solution_vs_standards(repo: &Path, subject: &str) -> Result<Vec<Source>> {
+    let path = resolve_subject_path(repo, subject, PackKind::SolutionVsStandards)?;
+    let text = std::fs::read_to_string(&path).map_err(|e| HarnessError::io(&path, e))?;
+    let mut out = vec![Source::subject(relative(repo, &path), text)];
+    let standards = standards_sources(repo);
+    if standards.is_empty() {
+        return Err(pack_error(
+            "pack_no_standards",
+            format!(
+                "в {STANDARDS_DIR} нет стандартов слоя — сверять документ не с чем;                  положите стандарты файлами (`{STANDARDS_DIR}/STD-1.md`)"
+            ),
+        ));
+    }
+    out.extend(standards);
+    Ok(out)
+}
+
+/// Стандарты слоя как ссылочные источники: `docs/standards/**` (рекурсивно),
+/// отсортированы по пути; идентификатор — шапка `id:` либо имя файла.
+fn standards_sources(repo: &Path) -> Vec<Source> {
+    let dir = repo.join(STANDARDS_DIR);
+    if !dir.is_dir() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for entry in walk_files(&dir) {
+        let Ok(text) = std::fs::read_to_string(&entry) else {
+            continue;
+        };
+        let rel = relative(repo, &entry);
+        let id = standards_id(&text, &entry);
+        out.push(Source {
+            path: rel,
+            text,
+            role: InputRole::Reference,
+            id: Some(id),
+            status: None,
+        });
+    }
+    out.sort_by(|a, b| a.path.cmp(&b.path));
+    out
+}
+
+/// Идентификатор стандарта: первое поле `id:` шапки, иначе имя файла без
+/// расширения. Шапка — первые строки файла (`id: STD-1`), как в model-картах.
+fn standards_id(text: &str, path: &Path) -> String {
+    for line in text.lines().take(12) {
+        let trimmed = line.trim().trim_start_matches("- ").trim();
+        if let Some(rest) = trimmed.strip_prefix("id:") {
+            let value = rest.trim().trim_matches(['"', '\'', '*']).trim();
+            if !value.is_empty() {
+                return value.to_string();
+            }
+        }
+    }
+    path.file_stem()
+        .map_or_else(|| "STD".to_string(), |s| s.to_string_lossy().into_owned())
+}
+
+/// Рекурсивный обход каталога файлами (без следования симлинкам), отсортирован.
+fn walk_files(dir: &Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&current) else {
+            continue;
+        };
+        let mut paths: Vec<std::path::PathBuf> = entries.flatten().map(|e| e.path()).collect();
+        paths.sort();
+        for path in paths {
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.is_file() {
+                out.push(path);
+            }
+        }
+    }
+    out.sort();
+    out
 }
 
 /// Досье `code_vs_spine`: файл кода + инварианты спайна. Субъект с диапазоном
@@ -1380,6 +1480,119 @@ mod tests {
         assert_eq!(sources[1].role, InputRole::Reference);
         assert_eq!(sources[1].id.as_deref(), Some("AD-2"));
         assert!(sources[1].text.contains("Rule: механика контроля без LLM"));
+    }
+
+    // --- E10.1: досье «солюшен против стандартов слоя ДКА» -------------------
+
+    /// Стандарт слоя с шапкой `id:` и без неё: идентификатор берётся из шапки,
+    /// иначе — из имени файла.
+    #[test]
+    fn solution_pack_pairs_document_with_standards() {
+        let tmp = repo_with_spine();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("docs/solution")).expect("mkdir solution");
+        std::fs::create_dir_all(root.join("docs/standards/nested")).expect("mkdir standards");
+        std::fs::write(
+            root.join("docs/solution/SOL-1.md"),
+            "# Решение: платежный шлюз\n\nОбработка синхронная, ретраев нет.\n",
+        )
+        .expect("документ");
+        std::fs::write(
+            root.join("docs/standards/STD-1.md"),
+            "id: STD-1\n\n# Стандарт: асинхронные интеграции\n\nВнешние вызовы — только асинхронно.\n",
+        )
+        .expect("стандарт 1");
+        std::fs::write(
+            root.join("docs/standards/nested/retry.md"),
+            "# Стандарт: ретраи\n\nРетраи обязательны для внешних вызовов.\n",
+        )
+        .expect("стандарт 2");
+
+        let packs = build(
+            root,
+            PackKind::SolutionVsStandards,
+            "docs/solution/SOL-1.md",
+        )
+        .expect("досье собирается");
+        assert_eq!(packs.len(), 1, "документ не дробится");
+        let pack = &packs[0];
+        assert_eq!(pack.subject, "docs/solution/SOL-1.md");
+        assert_eq!(
+            pack.inputs
+                .iter()
+                .map(|i| i.path.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                "docs/solution/SOL-1.md",
+                "docs/standards/STD-1.md",
+                "docs/standards/nested/retry.md"
+            ],
+            "субъект, затем стандарты по пути"
+        );
+        assert_eq!(pack.inputs[1].role, InputRole::Reference);
+        assert_eq!(pack.inputs[1].id.as_deref(), Some("STD-1"), "id из шапки");
+        assert_eq!(
+            pack.inputs[2].id.as_deref(),
+            Some("retry"),
+            "id из имени файла"
+        );
+        assert!(pack.text.contains("STD-1"), "текст стандарта в досье");
+        assert_eq!(pack.sha256.len(), 64);
+        // Источники с указателями (E9.1) видны механике цитат.
+        let sources = pack.source_texts();
+        assert_eq!(sources.len(), 3);
+        assert_eq!(sources[1].role, InputRole::Reference);
+        assert_eq!(sources[1].id.as_deref(), Some("STD-1"));
+    }
+
+    /// Нет стандартов — явная ошибка: пустое досье дало бы «нарушений нет».
+    #[test]
+    fn solution_pack_without_standards_is_an_explicit_error() {
+        let tmp = repo_with_spine();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("docs/solution")).expect("mkdir solution");
+        std::fs::write(root.join("docs/solution/SOL-1.md"), "# Решение\n").expect("документ");
+        let err = build(
+            root,
+            PackKind::SolutionVsStandards,
+            "docs/solution/SOL-1.md",
+        )
+        .expect_err("без стандартов досье не собирается");
+        let msg = err.to_string();
+        assert!(msg.contains("pack_no_standards"), "{msg}");
+        assert!(msg.contains(STANDARDS_DIR), "подсказка где искать: {msg}");
+    }
+
+    /// Рубрика слоя ДКА объявляет ровно этот вид досье и требует цитаты на
+    /// обе роли — иначе нарушение не подкрепить стандартом (E10.1).
+    #[test]
+    fn solution_rubric_demands_document_and_standard_citations() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("assets/rubrics/solution_standards.yaml");
+        let rubric = crate::rubric::load(&path).expect("рубрика грузится");
+        assert_eq!(
+            rubric.pack.map(PackKind::as_str),
+            Some("solution_vs_standards")
+        );
+        let blocking = rubric
+            .criteria
+            .iter()
+            .find(|c| c.blocking)
+            .expect("блокирующий критерий есть");
+        assert_eq!(blocking.id, "standard_compliance");
+        assert!(blocking.evidence_on.requires_low());
+        assert_eq!(
+            blocking
+                .evidence_role_list()
+                .expect("роли разбираются")
+                .len(),
+            2,
+            "цитата на документ и на стандарт"
+        );
+        assert!(
+            blocking.coverage.is_some(),
+            "покрытие стандартов проверяется"
+        );
     }
 
     #[test]

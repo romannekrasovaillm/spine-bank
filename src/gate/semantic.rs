@@ -643,6 +643,12 @@ fn semantic_subjects(
                 push(file);
             }
         }
+        crate::rubric_pack::PackKind::SolutionVsStandards => {
+            // E10.1: смысловая рубрика слоя ДКА судит солюшен-документы.
+            for doc in solution_docs(repo) {
+                push(doc);
+            }
+        }
     }
     let Some(changed) = changed else {
         return out;
@@ -727,6 +733,35 @@ fn linked_entities(repo: &Path, kind: crate::rubric_pack::PackKind) -> Vec<Strin
 
 /// Файлы кода под корнями компонент (`CMP.code_roots`) — субъекты рубрики
 /// «код против инварианта».
+/// Солюшен-документы слоя ДКА (E10.1): `docs/solution/**/*.md` (рекурсивно).
+fn solution_docs(repo: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    collect_markdown(repo, &repo.join("docs/solution"), &mut out);
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Рекурсивный сбор markdown-файлов относительно корня.
+fn collect_markdown(repo: &Path, dir: &Path, out: &mut Vec<String>) {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in rd.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_markdown(repo, &path, out);
+        } else if path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("md"))
+        {
+            if let Ok(rel) = path.strip_prefix(repo) {
+                out.push(rel.to_string_lossy().into_owned());
+            }
+        }
+    }
+}
+
 fn code_files(repo: &Path) -> Vec<String> {
     let Ok(model) = crate::model::load_model_tolerant(&repo.join("model")) else {
         return Vec::new();
