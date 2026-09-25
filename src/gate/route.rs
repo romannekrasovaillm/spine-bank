@@ -290,4 +290,119 @@ mod tests {
         );
         assert_eq!(report.outcome, GateOutcome::Fail);
     }
+
+    /// Заявленный маршрут, равный базовому, — не понижение: сравнивать
+    /// нужно строго, иначе «ничего не меняли» краснело бы как `route_lowered`.
+    #[test]
+    fn equal_route_is_not_a_lowering() {
+        let (tmp, repo, base) = repo_with_locked_route("standard");
+        let probe = GitProbe::probe(&repo);
+        let component = component_route_lock(
+            &repo,
+            Some(&base),
+            &probe,
+            &RouteLock {
+                route: Route::Standard,
+                decided_by: None,
+            },
+        );
+        assert_eq!(component.status, GateStatus::Pass, "{}", component.detail);
+        drop(tmp);
+    }
+
+    /// База — не коммит (дерево): сравнение маршрутов не выполняется, а не
+    /// «сравнилось как получится»: `git show <дерево>:<файл>` содержимое
+    /// отдал бы, но ревизии-коммита для храповика нет.
+    #[test]
+    fn non_commit_revision_is_not_a_comparison_base() {
+        let (tmp, repo, _base) = repo_with_locked_route("standard");
+        // Маршрут в рабочем дереве понижен, но база — дерево, а не коммит.
+        std::fs::write(repo.join(".arch-handoff/ROUTE.lock"), "route: fast\n").expect("lowered");
+        let tree = git_stdout(&repo, &["rev-parse", "HEAD^{tree}"]);
+        let probe = GitProbe::probe(&repo);
+        let component = component_route_lock(
+            &repo,
+            Some(&tree),
+            &probe,
+            &RouteLock {
+                route: Route::Fast,
+                decided_by: None,
+            },
+        );
+        assert_eq!(component.status, GateStatus::Pass, "{}", component.detail);
+        drop(tmp);
+    }
+
+    /// Храповик не срабатывает без git-состояния: вне репозитория и без HEAD
+    /// составляющая проходит, а не падает.
+    #[test]
+    fn route_lock_passes_without_git_state() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("plain");
+        std::fs::create_dir_all(repo.join(".arch-handoff")).expect("mkdir");
+        std::fs::write(repo.join(".arch-handoff/ROUTE.lock"), "route: fast\n").expect("lock");
+        let probe = GitProbe {
+            repo: false,
+            head: false,
+        };
+        let component = component_route_lock(
+            &repo,
+            None,
+            &probe,
+            &RouteLock {
+                route: Route::Fast,
+                decided_by: None,
+            },
+        );
+        assert_eq!(component.status, GateStatus::Pass, "{}", component.detail);
+        // В git-репозитории без коммитов HEAD нет — тоже проход.
+        let empty = tmp.path().join("empty");
+        std::fs::create_dir_all(empty.join(".arch-handoff")).expect("mkdir");
+        std::fs::write(empty.join(".arch-handoff/ROUTE.lock"), "route: fast\n").expect("lock");
+        git(&empty, &["init", "-q"]);
+        let probe = GitProbe::probe(&empty);
+        assert!(!probe.head, "в репозитории без коммитов HEAD нет");
+        let component = component_route_lock(
+            &empty,
+            None,
+            &probe,
+            &RouteLock {
+                route: Route::Fast,
+                decided_by: None,
+            },
+        );
+        assert_eq!(component.status, GateStatus::Pass, "{}", component.detail);
+    }
+
+    /// Репозиторий с закоммиченным `ROUTE.lock`; возвращает и SHA коммита.
+    fn repo_with_locked_route(route: &str) -> (tempfile::TempDir, PathBuf, String) {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(repo.join(".arch-handoff")).expect("mkdir");
+        std::fs::write(
+            repo.join(".arch-handoff/ROUTE.lock"),
+            format!("route: {route}\n"),
+        )
+        .expect("lock");
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-q", "-m", "lock"]);
+        let base = git_stdout(&repo, &["rev-parse", "HEAD"]);
+        (tmp, repo, base)
+    }
+
+    /// Первая строка stdout git (для SHA/дерева в тестах).
+    fn git_stdout(dir: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .expect("git");
+        assert!(out.status.success(), "git {}", args.join(" "));
+        String::from_utf8(out.stdout)
+            .expect("utf8")
+            .trim()
+            .to_string()
+    }
 }

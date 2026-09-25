@@ -191,3 +191,92 @@ pub(super) fn canonical_rel(repo: &Path, file: &Path) -> Option<PathBuf> {
     let abs_repo = repo.canonicalize().ok()?;
     abs_file.strip_prefix(&abs_repo).ok().map(Path::to_path_buf)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Реестр правил виден в обоих исторических расположениях — и корневом,
+    /// и пакетном; отсутствие обоих — честное `false`.
+    #[test]
+    fn has_any_registry_sees_both_locations() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path();
+        assert!(!has_any_registry(repo), "пустой каталог — реестра нет");
+
+        std::fs::write(
+            repo.join(crate::control::ROOT_CONSTRAINTS_PATH),
+            "rules: []\n",
+        )
+        .expect("root registry");
+        assert!(has_any_registry(repo), "корневой реестр виден");
+
+        std::fs::remove_file(repo.join(crate::control::ROOT_CONSTRAINTS_PATH)).expect("rm");
+        std::fs::create_dir_all(repo.join(".arch-handoff")).expect("mkdir");
+        std::fs::write(
+            repo.join(crate::control::HANDOFF_CONSTRAINTS_PATH),
+            "rules: []\n",
+        )
+        .expect("handoff registry");
+        assert!(has_any_registry(repo), "пакетный реестр виден");
+    }
+
+    /// Путь в ревизии: существующий — да, отсутствующий — нет (иначе
+    /// храповик маршрута сравнивал бы несуществующий файл).
+    #[test]
+    fn git_rev_has_path_distinguishes_present_and_missing() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("mkdir");
+        std::fs::write(repo.join("ROUTE.lock"), "route: fast\n").expect("lock");
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-q", "-m", "lock"]);
+        assert!(git_rev_exists(&repo, "HEAD"), "коммит есть");
+        assert!(git_rev_has_path(&repo, "HEAD", "ROUTE.lock"), "путь есть");
+        assert!(
+            !git_rev_has_path(&repo, "HEAD", "nope.lock"),
+            "отсутствующего пути нет"
+        );
+    }
+
+    /// Причина из stderr git: первая НЕПУСТАЯ строка, без префикса `fatal:`,
+    /// с потолком 160 символов; пустой stderr — своя формулировка, а не
+    /// пустая строка.
+    #[test]
+    fn git_stderr_reason_is_first_nonempty_line_without_fatal() {
+        assert_eq!(
+            git_stderr_reason(b""),
+            "git завершился с ошибкой без сообщения"
+        );
+        assert_eq!(
+            git_stderr_reason(b"\n   \nfatal: not a git repository\nusage: git ...\n"),
+            "not a git repository"
+        );
+        // Без префикса `fatal:` строка отдаётся как есть (обрезанная по краям).
+        assert_eq!(git_stderr_reason(b"  error: pathspec\n"), "error: pathspec");
+        // Длинная строка обрезается до 160 символов.
+        let long = "x".repeat(300);
+        assert_eq!(git_stderr_reason(long.as_bytes()).chars().count(), 160);
+    }
+
+    /// git в каталоге с тестовой идентичностью коммиттера (как testkit гейта).
+    fn git(dir: &Path, args: &[&str]) {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .expect("git");
+        assert!(
+            out.status.success(),
+            "git {}: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}

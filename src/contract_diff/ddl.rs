@@ -212,12 +212,23 @@ fn apply_alter_action(columns: &mut BTreeMap<String, DdlColumn>, action: &str) {
         return;
     }
     if low.starts_with("alter column ") || low.starts_with("alter ") || low.starts_with("modify ") {
-        let name_idx = 1;
-        let Some(raw_name) = tokens.get(name_idx) else {
+        // «ALTER COLUMN <имя> …» — имя третьим словом, «ALTER <имя> …» и
+        // «MODIFY <имя> …» — вторым. До 0.3.11 индекс был жёстко вторым,
+        // поэтому каноническая форма Postgres молча игнорировалась: именем
+        // становилось слово COLUMN, а такой колонки в таблице нет.
+        let after_name = if low.starts_with("alter column ") {
+            3
+        } else {
+            2
+        };
+        let Some(raw_name) = tokens.get(after_name - 1) else {
             return;
         };
         let name = sql_ident(raw_name);
-        let rest = tokens.get(2..).map(|t| t.join(" ")).unwrap_or_default();
+        let rest = tokens
+            .get(after_name..)
+            .map(|t| t.join(" "))
+            .unwrap_or_default();
         let rest_low = rest.to_ascii_lowercase();
         let Some(col) = columns.get_mut(&name) else {
             return;
@@ -233,8 +244,9 @@ fn apply_alter_action(columns: &mut BTreeMap<String, DdlColumn>, action: &str) {
         } else if rest_low.starts_with("drop not null") {
             col.not_null = false;
         } else if low.starts_with("modify ") {
-            // MySQL: MODIFY <name> <type> [constraints].
-            let def = tokens.get(2..).map(|t| t.join(" ")).unwrap_or_default();
+            // MySQL: MODIFY <name> <type> [constraints] — здесь `rest` уже
+            // начинается с типа (имя вторым словом).
+            let def = rest.clone();
             if let Some((_, new_col)) = parse_column_def(&format!("{name} {def}")) {
                 *col = new_col;
             }
@@ -422,6 +434,7 @@ pub(crate) fn diff_ddl(old: &str, new: &str) -> Vec<Finding> {
 
 #[cfg(test)]
 mod tests {
+    use super::diff_ddl;
     use crate::contract_diff::testkit::diff_text;
     use crate::tool::ToolOutput;
 
@@ -499,11 +512,104 @@ ALTER TABLE charges ADD COLUMN currency varchar(3);
         let out = diff_ddl_text(DDL_V1, &new).await;
         assert!(!out.content.contains("CD-S03"), "{}", out.content);
         assert!(out.content.contains("Итог: PASS"), "{}", out.content);
-        // ALTER COLUMN TYPE через отдельный оператор (int → bigint — warn).
-        let new = format!(
-            "{DDL_V1}\nALTER TABLE charges ALTER COLUMN amount_minor SET DATA TYPE numeric(20,0);\n"
-        );
+        // ALTER COLUMN через отдельный оператор: расширение того же типа
+        // безопасно (varchar(36) → varchar(64)).
+        let new =
+            format!("{DDL_V1}\nALTER TABLE charges ALTER COLUMN id SET DATA TYPE varchar(64);\n");
         let out = diff_ddl_text(DDL_V1, &new).await;
         assert!(!out.content.contains("CD-S03"), "{}", out.content);
+        // А несовместимая смена через тот же оператор ВИДНА: до 0.3.11 имя
+        // колонки читалось вторым словом («COLUMN»), оператор игнорировался,
+        // и такой дифф молча проходил зелёным.
+        let new = format!(
+            "{DDL_V1}\nALTER TABLE charges ALTER COLUMN amount_minor SET DATA TYPE varchar(4);\n"
+        );
+        let out = diff_ddl_text(DDL_V1, &new).await;
+        assert!(out.content.contains("CD-S03"), "{}", out.content);
+    }
+
+    /// Поиск CD-S05 по конкретному сообщению (CD-S05 встречается и у
+    /// добавленной таблицы, и у снятого NOT NULL).
+    fn has_message(findings: &[crate::contract_diff::types::Finding], needle: &str) -> bool {
+        findings.iter().any(|f| f.message.contains(needle))
+    }
+
+    /// Существующая в обеих версиях таблица не считается добавленной, а
+    /// неизменившиеся колонки не дают «снято NOT NULL».
+    #[test]
+    fn unchanged_tables_and_columns_produce_no_findings() {
+        let findings = diff_ddl(DDL_V1, DDL_V1);
+        assert!(findings.is_empty(), "{findings:?}");
+        // Таблица есть в обеих версиях — «добавлена таблица» не печатается.
+        assert!(!has_message(&findings, "добавлена таблица"), "{findings:?}");
+        assert!(!has_message(&findings, "снято NOT NULL"), "{findings:?}");
+    }
+
+    /// Добавленная nullable-колонка без DEFAULT — не CD-S04: ошибка только
+    /// у обязательной колонки без значения по умолчанию.
+    #[test]
+    fn added_nullable_column_without_default_is_not_breaking() {
+        let new = format!("{DDL_V1}\nALTER TABLE charges ADD COLUMN trace_id varchar(36);\n");
+        let findings = diff_ddl(DDL_V1, &new);
+        assert!(
+            !findings.iter().any(|f| f.rule == "CD-S04"),
+            "nullable-колонка без DEFAULT не ломает: {findings:?}"
+        );
+        assert!(
+            has_message(&findings, "trace_id"),
+            "колонка названа: {findings:?}"
+        );
+    }
+
+    /// `ALTER COLUMN … SET DATA TYPE` действительно меняет тип: несовместимый
+    /// тип даёт CD-S03, а не «тихое» игнорирование операнда.
+    #[test]
+    fn alter_column_set_data_type_is_applied() {
+        let new = format!(
+            "{DDL_V1}\nALTER TABLE charges ALTER COLUMN amount_minor SET DATA TYPE varchar(4);\n"
+        );
+        let findings = diff_ddl(DDL_V1, &new);
+        assert!(
+            findings.iter().any(|f| f.rule == "CD-S03"),
+            "bigint → varchar(4) несовместимо: {findings:?}"
+        );
+        // Расширение через тот же оператор — не ошибка.
+        let widen =
+            format!("{DDL_V1}\nALTER TABLE charges ALTER COLUMN id SET DATA TYPE varchar(64);\n");
+        let findings = diff_ddl(DDL_V1, &widen);
+        assert!(
+            !findings.iter().any(|f| f.rule == "CD-S03"),
+            "varchar(36) → varchar(64) — расширение: {findings:?}"
+        );
+    }
+
+    /// Параметризованные типы: разные имена типов — не расширение, даже если
+    /// параметры совпали; разное число параметров — тоже не расширение.
+    #[test]
+    fn parameterized_type_widening_requires_same_name_and_params() {
+        // varchar(5) → char(5): другое имя типа при тех же параметрах.
+        let old = "CREATE TABLE t (\n  c varchar(5)\n);\n";
+        let new = "CREATE TABLE t (\n  c char(5)\n);\n";
+        let findings = diff_ddl(old, new);
+        assert!(
+            findings.iter().any(|f| f.rule == "CD-S03"),
+            "смена имени типа — не widening: {findings:?}"
+        );
+        // numeric(5) → numeric(5,2): параметров стало больше.
+        let old = "CREATE TABLE t (\n  c numeric(5)\n);\n";
+        let new = "CREATE TABLE t (\n  c numeric(5,2)\n);\n";
+        let findings = diff_ddl(old, new);
+        assert!(
+            findings.iter().any(|f| f.rule == "CD-S03"),
+            "разное число параметров — не widening: {findings:?}"
+        );
+        // numeric(5,2) → numeric(9,2): расширение того же типа.
+        let old = "CREATE TABLE t (\n  c numeric(5,2)\n);\n";
+        let new = "CREATE TABLE t (\n  c numeric(9,2)\n);\n";
+        let findings = diff_ddl(old, new);
+        assert!(
+            !findings.iter().any(|f| f.rule == "CD-S03"),
+            "numeric(5,2) → numeric(9,2) — расширение: {findings:?}"
+        );
     }
 }

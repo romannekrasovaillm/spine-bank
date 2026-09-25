@@ -270,6 +270,7 @@ fn build_impact(case: &Path, old: &Path, new: &Path) -> Result<ContractImpact> {
 
 #[cfg(test)]
 mod tests {
+    use super::{diff_contracts, diff_report};
     use std::sync::Arc;
 
     use serde_json::json;
@@ -369,5 +370,89 @@ mod tests {
             out.content
         );
         assert!(out.content.contains("C-001"), "{}", out.content);
+    }
+
+    /// `diff_contracts` возвращает находки ломающего диффа, а не пустой
+    /// список «на всякий случай»; идентичные контракты — пусто.
+    #[test]
+    fn diff_contracts_reports_breaking_change_and_clean_pair() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let old = dir.path().join("old.proto");
+        let new = dir.path().join("new.proto");
+        let same = dir.path().join("same.proto");
+        std::fs::write(&old, PROTO_V1).expect("old");
+        std::fs::write(
+            &new,
+            PROTO_V1.replace("  optional string currency = 3;\n", ""),
+        )
+        .expect("new");
+        std::fs::write(&same, PROTO_V1).expect("same");
+        let findings = diff_contracts(&old, &new).expect("дифф");
+        assert!(!findings.is_empty(), "ломающий дифф даёт находки");
+        assert!(findings.iter().any(|f| f.rule == "CD-P02"), "{findings:?}");
+        assert!(
+            diff_contracts(&old, &same).expect("дифф").is_empty(),
+            "идентичные контракты — чисто"
+        );
+    }
+
+    /// Связка с моделью на уровне структуры: INT, чей `contract` совпал с
+    /// путём old, попадает в `matched_int`, сам INT в потребители НЕ входит
+    /// (он и есть источник), входят только CMP/SYS радиуса.
+    #[test]
+    fn impact_links_int_by_old_path_and_lists_only_cmp_sys_consumers() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let case = dir.path().join("case");
+        let model = case.join("model");
+        std::fs::create_dir_all(&model).expect("mkdir model");
+        for (name, fm) in [
+            (
+                "CMP-001.md",
+                "---\nid: CMP-001\ntype: cmp\ntitle: Платёжный шлюз\nstatus: designed\ndepends_on: [INT-001]\n---\n\nТело.\n",
+            ),
+            (
+                "SYS-001.md",
+                "---\nid: SYS-001\ntype: sys\ntitle: Процессинг\nstatus: designed\ndepends_on: [INT-001]\n---\n\nТело.\n",
+            ),
+            (
+                "INT-001.md",
+                "---\nid: INT-001\ntype: int\ntitle: Рельс процессинга\nstatus: accepted\ncontract: contracts/old.proto\n---\n\nТело.\n",
+            ),
+            (
+                "INT-002.md",
+                "---\nid: INT-002\ntype: int\ntitle: Другой рельс\nstatus: accepted\ncontract: contracts/other.proto\n---\n\nТело.\n",
+            ),
+        ] {
+            std::fs::write(model.join(name), fm).expect("сущность");
+        }
+        std::fs::write(case.join("CONSTRAINTS.yaml"), "constraints: []\n").expect("constraints");
+        let contracts = case.join("contracts");
+        std::fs::create_dir_all(&contracts).expect("mkdir contracts");
+        let old = contracts.join("old.proto");
+        let new = contracts.join("new.proto");
+        std::fs::write(&old, PROTO_V1).expect("old");
+        std::fs::write(
+            &new,
+            PROTO_V1.replace("  optional string currency = 3;\n", ""),
+        )
+        .expect("new");
+
+        let report = diff_report(&old, &new, None, Some(&case)).expect("дифф с моделью");
+        let impact = report.impact.expect("связка с моделью");
+        assert_eq!(impact.matched_int, vec!["INT-001".to_string()]);
+        assert_eq!(
+            impact.matched_paths,
+            vec!["contracts/old.proto".to_string()]
+        );
+        let mut consumers = impact.consumers.clone();
+        consumers.sort();
+        assert_eq!(
+            consumers,
+            vec![
+                "CMP-001 · Платёжный шлюз".to_string(),
+                "SYS-001 · Процессинг".to_string(),
+            ],
+            "в потребители входят только CMP/SYS, и сам INT-001 в них не дублируется"
+        );
     }
 }

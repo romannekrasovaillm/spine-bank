@@ -195,8 +195,10 @@ fn diff_js_object(old: &Value, new: &Value, loc: &str, depth: usize, out: &mut V
 
 #[cfg(test)]
 mod tests {
+    use super::{MAX_JSONSCHEMA_DEPTH, diff_jsonschema};
     use crate::contract_diff::testkit::diff_text;
     use crate::tool::ToolOutput;
+    use std::path::Path;
 
     const JSCHEMA_V1: &str = r#"{
   "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -304,5 +306,145 @@ mod tests {
         let out = diff_js_text(JSCHEMA_V1, &new).await;
         assert!(out.content.contains("CD-J02"), "{}", out.content);
         assert!(out.content.contains("Итог: FAIL"), "{}", out.content);
+    }
+
+    /// Не-JSON-Schema хотя бы на одной стороне — ошибка формата, а не
+    /// «сравнили и всё чисто».
+    #[test]
+    fn non_schema_side_is_an_error() {
+        let schema = JSCHEMA_V1;
+        assert!(
+            diff_jsonschema(
+                schema,
+                "{\"hello\": 1}",
+                Path::new("o.json"),
+                Path::new("n.json")
+            )
+            .is_err()
+        );
+        assert!(
+            diff_jsonschema(
+                "{\"hello\": 1}",
+                schema,
+                Path::new("o.json"),
+                Path::new("n.json")
+            )
+            .is_err()
+        );
+        assert!(diff_jsonschema(schema, schema, Path::new("o.json"), Path::new("n.json")).is_ok());
+    }
+
+    /// Обязательность: снятие — CD-J04 (warn), появление — CD-J02 (error),
+    /// сохранение — тишина.
+    #[test]
+    fn required_changes_are_directional() {
+        let kept = JSCHEMA_V1.replace(
+            "\"required\": [\"id\", \"amount\"]",
+            "\"required\": [\"id\"]",
+        );
+        let findings = diff_jsonschema(JSCHEMA_V1, &kept, Path::new("o.json"), Path::new("n.json"))
+            .expect("дифф");
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule == "CD-J04" && f.message.contains("amount")),
+            "снятие обязательности — CD-J04: {findings:?}"
+        );
+        assert!(
+            !findings.iter().any(|f| f.rule == "CD-J02"),
+            "ничего не стало обязательным: {findings:?}"
+        );
+
+        // «id» остался обязательным — ни CD-J04, ни CD-J02 по нему.
+        let extended = JSCHEMA_V1.replace(
+            "\"required\": [\"id\", \"amount\"]",
+            "\"required\": [\"id\", \"amount\", \"meta\"]",
+        );
+        let findings = diff_jsonschema(
+            JSCHEMA_V1,
+            &extended,
+            Path::new("o.json"),
+            Path::new("n.json"),
+        )
+        .expect("дифф");
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.message.contains("«id»") && (f.rule == "CD-J04" || f.rule == "CD-J02")),
+            "сохранённая обязательность не даёт находок: {findings:?}"
+        );
+    }
+
+    /// Исчезновение вложенной схемы (у свойства пропал `properties`) — смена
+    /// формы, а не «удалены все вложенные свойства».
+    #[test]
+    fn removed_nested_schema_is_not_spurious_deletions() {
+        let flattened = JSCHEMA_V1.replace(
+            "\"meta\": {\n      \"type\": \"object\",\n      \"properties\": {\n        \"channel\": {\"type\": \"string\"}\n      },\n      \"required\": [\"channel\"]\n    }",
+            "\"meta\": {\"type\": \"object\"}",
+        );
+        assert!(
+            flattened.contains("\"meta\": {\"type\": \"object\"}"),
+            "фикстура изменена"
+        );
+        let findings = diff_jsonschema(
+            JSCHEMA_V1,
+            &flattened,
+            Path::new("o.json"),
+            Path::new("n.json"),
+        )
+        .expect("дифф");
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.rule == "CD-J01" && f.message.contains("channel")),
+            "вложенных свойств не «удаляли»: {findings:?}"
+        );
+    }
+
+    /// Потолок рекурсии: правка на глубине MAX видна, на MAX+1 — нет
+    /// (потолок назван в модуле: [`MAX_JSONSCHEMA_DEPTH`]).
+    #[test]
+    fn recursion_depth_limit_is_exact() {
+        let base = nested_schema(MAX_JSONSCHEMA_DEPTH + 3, None);
+        let at_limit = nested_schema(MAX_JSONSCHEMA_DEPTH + 3, Some(MAX_JSONSCHEMA_DEPTH));
+        let over_limit = nested_schema(MAX_JSONSCHEMA_DEPTH + 3, Some(MAX_JSONSCHEMA_DEPTH + 1));
+        let diff = |new: &serde_json::Value| {
+            diff_jsonschema(
+                &base.to_string(),
+                &new.to_string(),
+                Path::new("o.json"),
+                Path::new("n.json"),
+            )
+            .expect("дифф")
+        };
+        let findings = diff(&at_limit);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule == "CD-J01" && f.message.contains("drop")),
+            "на глубине {MAX_JSONSCHEMA_DEPTH} правка видна: {findings:?}"
+        );
+        let findings = diff(&over_limit);
+        assert!(
+            !findings.iter().any(|f| f.rule == "CD-J01"),
+            "глубже потолка не смотрим: {findings:?}"
+        );
+    }
+
+    /// Цепочка вложенных объектов `keep` длиной `total`; свойство `drop`
+    /// отсутствует на глубине `remove_at` (глубина 0 — корень).
+    fn nested_schema(total: usize, remove_at: Option<usize>) -> serde_json::Value {
+        fn node(depth: usize, total: usize, remove_at: Option<usize>) -> serde_json::Value {
+            let mut props = serde_json::Map::new();
+            if remove_at != Some(depth) {
+                props.insert("drop".to_string(), serde_json::json!({"type": "string"}));
+            }
+            if depth < total {
+                props.insert("keep".to_string(), node(depth + 1, total, remove_at));
+            }
+            serde_json::json!({"type": "object", "properties": props})
+        }
+        node(0, total, remove_at)
     }
 }

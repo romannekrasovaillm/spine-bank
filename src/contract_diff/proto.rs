@@ -359,6 +359,7 @@ pub(crate) fn diff_proto(old: &str, new: &str) -> Vec<Finding> {
 
 #[cfg(test)]
 mod tests {
+    use super::diff_proto;
     use crate::contract_diff::testkit::{PROTO_V1, diff_text};
     use crate::tool::ToolOutput;
 
@@ -474,5 +475,125 @@ mod tests {
             out.content
         );
         assert!(out.content.contains("Итог: FAIL"), "{}", out.content);
+    }
+
+    /// Добавленное поле сообщения названо (CD-P05), а не пропущено.
+    #[test]
+    fn added_field_is_reported() {
+        let new = PROTO_V1.replace(
+            "  string status = 1;\n",
+            "  string status = 1;\n  string reason = 2;\n",
+        );
+        let findings = diff_proto(PROTO_V1, &new);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule == "CD-P05" && f.location.contains("ChargeResponse")),
+            "{findings:?}"
+        );
+    }
+
+    /// Новый номер поля с уже существующим именем — не «добавленное поле»
+    /// (поле узнано по имени), а смена номера; ложного CD-P05 быть не должно.
+    #[test]
+    fn same_name_under_new_tag_is_not_an_added_field() {
+        let new = PROTO_V1
+            .replace("  optional string currency = 3;\n", "")
+            .replace("  optional string currency = 3;\n", "");
+        // Тот же набор полей, но currency переехала на номер 9.
+        let renamed_tag = PROTO_V1.replace(
+            "  optional string currency = 3;\n",
+            "  optional string currency = 9;\n",
+        );
+        assert!(!diff_proto(PROTO_V1, &new).is_empty());
+        let findings = diff_proto(PROTO_V1, &renamed_tag);
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.rule == "CD-P05" && f.message.contains("добавлено поле")),
+            "переезд номера — не новое поле: {findings:?}"
+        );
+    }
+
+    /// Удаление поля «прикрыто» либо номером в reserved, либо именем —
+    /// каждого признака достаточно по отдельности.
+    #[test]
+    fn removal_is_covered_by_tag_or_by_name_independently() {
+        let by_tag = PROTO_V1
+            .replace("  optional string currency = 3;\n", "")
+            .replace(
+                "  Address billing = 4;",
+                "  Address billing = 4;\n  reserved 3;",
+            );
+        let findings = diff_proto(PROTO_V1, &by_tag);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule == "CD-P05" && f.message.contains("currency")),
+            "reserved по номеру прикрывает удаление: {findings:?}"
+        );
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.rule == "CD-P02" && f.message.contains("currency")),
+            "ошибки быть не должно: {findings:?}"
+        );
+
+        let by_name = PROTO_V1
+            .replace("  optional string currency = 3;\n", "")
+            .replace(
+                "  Address billing = 4;",
+                "  Address billing = 4;\n  reserved \"currency\";",
+            );
+        let findings = diff_proto(PROTO_V1, &by_name);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule == "CD-P05" && f.message.contains("currency")),
+            "reserved по имени прикрывает удаление: {findings:?}"
+        );
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.rule == "CD-P02" && f.message.contains("currency")),
+            "ошибки быть не должно: {findings:?}"
+        );
+    }
+
+    /// Диапазон reserved разворачивается с потолком: номер 10001 в диапазоне
+    /// «1 to 100000» прикрыт (потолок считается от начала диапазона).
+    #[test]
+    fn reserved_range_expands_with_cap_from_range_start() {
+        let old = PROTO_V1.replace(
+            "  Address billing = 4;",
+            "  Address billing = 4;\n  string far = 10001;",
+        );
+        let new = old.replace("  string far = 10001;\n", "").replace(
+            "  Address billing = 4;",
+            "  Address billing = 4;\n  reserved 1 to 100000;",
+        );
+        let findings = diff_proto(&old, &new);
+        assert!(
+            findings.iter().any(|f| f.message.contains("far")),
+            "удаление далеко стоящего поля названо: {findings:?}"
+        );
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.rule == "CD-P02" && f.message.contains("far")),
+            "диапазон 1 to 100000 покрывает 10001: {findings:?}"
+        );
+    }
+
+    /// `rpc` вне блока service не приписывается последнему сервису
+    /// (консервативный скелет: непонятную строку пропускаем).
+    #[test]
+    fn rpc_outside_service_is_ignored() {
+        let stray = format!("{PROTO_V1}\n  rpc Stray (ChargeRequest) returns (ChargeResponse);\n");
+        let findings = diff_proto(PROTO_V1, &stray);
+        assert!(
+            findings.is_empty(),
+            "строка вне service ничего не добавляет: {findings:?}"
+        );
     }
 }

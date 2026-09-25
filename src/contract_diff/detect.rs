@@ -123,3 +123,187 @@ fn detect_by_markers(content: &str, unknown: &dyn Fn() -> HarnessError) -> Resul
     }
     Err(unknown())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::contract_diff::types::ContractFormat;
+
+    fn detect(name: &str, content: &str) -> Result<ContractFormat> {
+        detect_format(Path::new(name), content)
+    }
+
+    /// Расширение решает раньше содержимого — включая файлы, чьё содержимое
+    /// выглядело бы как другой формат.
+    #[test]
+    fn extension_wins_over_content() {
+        assert_eq!(
+            detect("s.proto", "{\"openapi\": \"3.0.0\"}").expect("proto"),
+            ContractFormat::Proto
+        );
+        assert_eq!(
+            detect("s.avsc", "CREATE TABLE t (id int);").expect("avro"),
+            ContractFormat::Avro
+        );
+        assert_eq!(
+            detect("s.sql", "{\"properties\": {}}").expect("ddl"),
+            ContractFormat::Ddl
+        );
+    }
+
+    /// `syntax` без слова proto — не proto: иначе строка «syntax = "avro"»
+    /// уводила бы в protobuf-дифф.
+    #[test]
+    fn syntax_without_proto_word_is_not_proto() {
+        let err = detect("schema.txt", "syntax = \"avro\";\n").expect_err("не формат");
+        assert!(err.to_string().contains("не удалось определить формат"));
+    }
+
+    /// Каждое DDL-слово проверяется отдельно: CREATE, ALTER и DROP —
+    /// независимые признаки, а не пара.
+    #[test]
+    fn ddl_keywords_are_recognized_individually() {
+        for text in [
+            "CREATE TABLE t (id int);",
+            "ALTER TABLE t ADD COLUMN name text;",
+            "DROP TABLE t;",
+            "create table t (id int);",
+        ] {
+            assert_eq!(
+                detect("a.txt", text).expect("ddl"),
+                ContractFormat::Ddl,
+                "{text}"
+            );
+        }
+    }
+
+    /// Avro — ровно `type: record` **и** `fields`; ни одного из двух мало.
+    #[test]
+    fn avro_needs_type_record_and_fields() {
+        assert_eq!(
+            detect("a.json", "{\"type\": \"record\", \"fields\": []}").expect("avro"),
+            ContractFormat::Avro
+        );
+        // type: record без fields — не Avro (JSON Schema по ключу type).
+        assert_eq!(
+            detect("a.json", "{\"type\": \"record\"}").expect("jsonschema"),
+            ContractFormat::JsonSchema
+        );
+        // fields без type: record — тоже не Avro.
+        assert!(detect("a.json", "{\"fields\": []}").is_err());
+        // type: string с fields — не Avro.
+        assert_eq!(
+            detect("a.json", "{\"type\": \"string\", \"fields\": []}").expect("jsonschema"),
+            ContractFormat::JsonSchema
+        );
+    }
+
+    /// `$schema` опознаётся по любой из двух половин: «json-schema» и «draft».
+    #[test]
+    fn json_schema_uri_markers_are_independent() {
+        assert_eq!(
+            detect(
+                "s.json",
+                "{\"$schema\": \"https://json-schema.org/draft/2020-12/schema\"}"
+            )
+            .expect("json-schema"),
+            ContractFormat::JsonSchema
+        );
+        assert_eq!(
+            detect("s.json", "{\"$schema\": \"http://draft.example/7\"}").expect("draft"),
+            ContractFormat::JsonSchema
+        );
+        assert_eq!(
+            detect("s.json", "{\"$schema\": \"http://x/json-schema/v1\"}").expect("json-schema"),
+            ContractFormat::JsonSchema
+        );
+    }
+
+    /// Каждый типовой ключ схемы опознаётся сам по себе.
+    #[test]
+    fn json_schema_marker_keys_are_independent() {
+        for text in [
+            "{\"properties\": {\"id\": {\"type\": \"string\"}}}",
+            "{\"required\": [\"id\"]}",
+            "{\"type\": \"object\"}",
+            "{\"items\": {\"type\": \"string\"}}",
+        ] {
+            assert_eq!(
+                detect("s.json", text).expect("json-schema"),
+                ContractFormat::JsonSchema,
+                "{text}"
+            );
+        }
+    }
+
+    /// Текстовые маркеры proto: каждое из слов message/service/package само
+    /// по себе достаточно (содержимое при этом не парсится как JSON/YAML).
+    #[test]
+    fn markers_recognize_each_proto_keyword() {
+        for text in [
+            "{\n  message Foo {\n",
+            "{\n  service Payments {\n",
+            "{\n  package acme.payments;\n",
+        ] {
+            assert_eq!(
+                detect("x.txt", text).expect("proto"),
+                ContractFormat::Proto,
+                "{text}"
+            );
+        }
+    }
+
+    /// Маркеры `OpenAPI`: подстрока `"openapi"` в битом JSON и строка
+    /// `openapi:` в битом YAML — независимые признаки.
+    #[test]
+    fn markers_recognize_openapi_variants() {
+        assert_eq!(
+            detect("x.txt", "{\n  \"openapi\": 3").expect("openapi-подстрока"),
+            ContractFormat::OpenApi
+        );
+        assert_eq!(
+            detect("x.yaml", "openapi: 3.0.0\n  bad: [\n").expect("openapi-строка"),
+            ContractFormat::OpenApi
+        );
+    }
+
+    /// `AsyncAPI` отвергается с объяснением: `contract_diff` его не сравнивает.
+    #[test]
+    fn asyncapi_is_rejected_with_reason() {
+        let err = detect("a.yaml", "asyncapi: 2.6.0\ninfo:\n  title: t\n").expect_err("asyncapi");
+        let text = err.to_string();
+        assert!(text.contains("AsyncAPI"), "{text}");
+        assert!(text.contains("asyncapi_lint"), "{text}");
+    }
+
+    /// Валидный YAML с полем openapi идёт по разбору документа, а не по маркерам.
+    #[test]
+    fn valid_yaml_openapi_document_is_detected() {
+        assert_eq!(
+            detect("a.yaml", "openapi: 3.0.0\ninfo:\n  title: t\npaths: {}\n").expect("openapi"),
+            ContractFormat::OpenApi
+        );
+    }
+
+    /// Неопознанное содержимое — ошибка со списком проверенных признаков и
+    /// подсказкой задать формат явно.
+    #[test]
+    fn unknown_content_lists_checked_markers() {
+        let err = detect("z.txt", "просто текст без маркеров").expect_err("не формат");
+        let text = err.to_string();
+        assert!(text.contains("z.txt"), "{text}");
+        assert!(text.contains("задайте format явно"), "{text}");
+        assert!(text.contains("CREATE/ALTER/DROP"), "{text}");
+    }
+
+    /// Битый JSON уходит на текстовые маркеры, а не падает с ошибкой парсера.
+    #[test]
+    fn broken_json_falls_back_to_markers() {
+        assert_eq!(
+            detect("b.json", "{ \"openapi\": ").expect("маркер"),
+            ContractFormat::OpenApi
+        );
+        // Битый JSON без маркеров — честный отказ.
+        assert!(detect("b.json", "{ \"foo\": ").is_err());
+    }
+}

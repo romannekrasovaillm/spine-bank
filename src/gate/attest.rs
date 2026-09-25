@@ -311,4 +311,101 @@ mod tests {
             "{a}"
         );
     }
+
+    /// База из конверта, отличная от текущего HEAD, берётся из конверта:
+    /// коммит, не менявший входы, не должен объявлять конверт устаревшим.
+    #[test]
+    fn envelope_base_sha_other_than_head_is_honoured() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        make_gate_repo(dir);
+        let limits = (1, 4);
+        let report = run_with(
+            dir,
+            Some(Route::Fast),
+            None,
+            None,
+            limits,
+            &GateRequirements::default(),
+        )
+        .expect("gate");
+        let envelope = dir.join("verdict.json");
+        std::fs::write(
+            &envelope,
+            serde_json::to_string_pretty(&report.envelope_json()).expect("json"),
+        )
+        .expect("write");
+        let base = git_rev(dir, "HEAD");
+        // Второй коммит входов вердикта не меняет (заметка вне входов).
+        std::fs::write(dir.join("notes.txt"), "заметка\n").expect("notes");
+        git(dir, &["add", "notes.txt"]);
+        git(dir, &["commit", "-q", "-m", "notes"]);
+        assert_ne!(base, git_rev(dir, "HEAD"), "HEAD сдвинулся");
+        let drift = verify_envelope(dir, &envelope, limits).expect("verify");
+        assert!(
+            drift.same,
+            "база из конверта honoured: changed={:?} missing={:?}",
+            drift.changed, drift.missing
+        );
+        // Тот же конверт с базой, равной текущему HEAD, тоже сходится.
+        let mut value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&envelope).expect("read")).expect("json");
+        value["inputs"]["base"] = serde_json::Value::String(git_rev(dir, "HEAD"));
+        std::fs::write(&envelope, value.to_string()).expect("write head base");
+        let drift = verify_envelope(dir, &envelope, limits).expect("verify");
+        assert!(drift.same, "changed={:?}", drift.changed);
+    }
+
+    /// «absent» в базе — не SHA: конверт, снятый без git-базы, в репозитории
+    /// с историей расходится именно по входу `base`, и это названо, а не
+    /// спрятано за «всё совпало».
+    #[test]
+    fn envelope_base_absent_is_reported_as_drift() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        make_gate_repo(dir);
+        let limits = (1, 4);
+        let report = run_with(
+            dir,
+            Some(Route::Fast),
+            None,
+            None,
+            limits,
+            &GateRequirements::default(),
+        )
+        .expect("gate");
+        let envelope = dir.join("verdict.json");
+        let mut value = report.envelope_json();
+        value["inputs"]["base"] = serde_json::Value::String("absent".to_string());
+        std::fs::write(
+            &envelope,
+            serde_json::to_string_pretty(&value).expect("json"),
+        )
+        .expect("write");
+        let drift = verify_envelope(dir, &envelope, limits).expect("verify");
+        assert!(!drift.same, "«absent» в git-репозитории — расхождение");
+        // Объявленное «absent», а сейчас вход есть — это missing, а не changed:
+        // конверт снят там, где базы не было вовсе.
+        assert!(
+            drift.missing.iter().any(|name| name == "base"),
+            "changed={:?} missing={:?}",
+            drift.changed,
+            drift.missing
+        );
+    }
+
+    /// SHA коммита в каталоге (для базы конверта).
+    fn git_rev(dir: &Path, rev: &str) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["rev-parse", rev])
+            .output()
+            .expect("git");
+        assert!(out.status.success(), "git rev-parse {rev}");
+        String::from_utf8(out.stdout)
+            .expect("utf8")
+            .trim()
+            .to_string()
+    }
 }
