@@ -104,7 +104,15 @@ pub(super) fn component_semantic_quality(
             truncated = true;
         }
         for subject in subjects.into_iter().take(MAX_SEMANTIC_SUBJECTS) {
-            let state = semantic_subject_state(repo, &rubric, kind, &subject, &artifacts, cfg);
+            let state = semantic_subject_state(
+                repo,
+                &rubric,
+                kind,
+                &subject,
+                &artifacts,
+                cfg,
+                human_policy,
+            );
             checked += usize::from(!matches!(state, SemanticState::Skipped));
             match &state {
                 SemanticState::InjectionSuspected(_) => injection_suspected += 1,
@@ -235,6 +243,9 @@ enum SemanticState {
     /// Два независимых судьи разошлись (E5.1): их оценки одного входа не
     /// сошлись — решение человека.
     JudgesDisagreed(String),
+    /// Судья не квалифицирован на эталонном наборе, а маршрут блокирующий
+    /// (E6.3): «промах» неотличим от «не умеет» — решение человека.
+    JudgeUnqualified(String),
     /// Всё в порядке.
     Ok,
 }
@@ -246,7 +257,9 @@ impl SemanticState {
     /// архитектора уже принято, E4.5) и остальные состояния не блокируют.
     fn escalates(&self, policy: crate::config::HumanPolicy) -> bool {
         match self {
-            Self::InjectionSuspected(_) | Self::InvalidSamples(_) => true,
+            Self::InjectionSuspected(_) | Self::InvalidSamples(_) | Self::JudgeUnqualified(_) => {
+                true
+            }
             Self::PartialEvidence(_)
             | Self::Unconfirmed(_)
             | Self::CoverageIncomplete(_)
@@ -354,6 +367,11 @@ impl SemanticState {
                     ratio * 100.0
                 ),
             )],
+            Self::JudgeUnqualified(reason) => vec![GateFinding::ruled(
+                "error".to_string(),
+                "judge_unqualified".to_string(),
+                format!("{who}: {reason} — `arch-be rubric qualify`"),
+            )],
             Self::JudgesDisagreed(detail) => vec![GateFinding::ruled(
                 if escalated { "error" } else { "warn" }.to_string(),
                 "judge_disagreement".to_string(),
@@ -411,6 +429,7 @@ fn semantic_subject_state(
     subject: &SemanticSubject,
     artifacts: &[crate::rubric::RubricArtifact],
     cfg: &crate::config::SemanticQualityConfig,
+    human_policy: crate::config::HumanPolicy,
 ) -> SemanticState {
     let Ok(packs) = crate::rubric_pack::build(repo, kind, &subject.subject) else {
         // Досье не собирается (секрет, лимит, битый маркер) — это не «нет
@@ -440,6 +459,18 @@ fn semantic_subject_state(
     }
     if artifact.invalid_samples_ratio > 0.0 {
         return SemanticState::InvalidSamplesWarn(artifact.invalid_samples_ratio);
+    }
+    // E6.3: на блокирующем маршруте судья обязан быть квалифицирован на
+    // эталонном наборе. Проверка первая: остальное о необученном судье
+    // говорит мало.
+    if human_policy == crate::config::HumanPolicy::Human && cfg.require_qualified_judge {
+        let state = crate::rubric::qualification(repo, &artifact.rubric, &artifact.judge_model);
+        if !matches!(state, crate::rubric::Qualification::Qualified(_)) {
+            return SemanticState::JudgeUnqualified(crate::rubric::refusal_reason(
+                &state,
+                &artifact.judge_model,
+            ));
+        }
     }
     // E5.1: два независимых судьи разошлись — суждение не принято, решает
     // человек (политика маршрута решает, блокирует ли это вердикт).
@@ -762,6 +793,9 @@ mod tests {
             min_score: 3.5,
             require_distinct_judge: false,
             max_invalid_samples_ratio: 0.5,
+            // E6.3: тесты составляющей включают допуск судьи осознанно — в
+            // конфиге проекта он по умолчанию выключен.
+            require_qualified_judge: true,
         }
     }
 
@@ -1178,6 +1212,43 @@ mod tests {
         );
     }
 
+    /// Пройденная квалификация судьи `judge-x` на рубрике
+    /// `adr_spine_consistency`: на Critical её требует E6.3, поэтому тесты про
+    /// оговорки судьи задают это условие явно (как это сделал бы проект).
+    fn write_passing_qualification(dir: &Path, rubrics: &Path) {
+        let rubric =
+            crate::rubric::load(&rubrics.join("adr_spine_consistency.yaml")).expect("рубрика");
+        let set = crate::rubric::QualificationSet {
+            dir: PathBuf::from("/набор"),
+            cases: Vec::new(),
+            sha256: "d".repeat(64),
+        };
+        let outcome = |truth: crate::rubric::Truth| crate::rubric::CaseOutcome {
+            file: "code/x.py".to_string(),
+            class: "ignored_key".to_string(),
+            truth,
+            decision: Some(match truth {
+                crate::rubric::Truth::Defective => crate::rubric::RubricDecision::Fail,
+                crate::rubric::Truth::Clean => crate::rubric::RubricDecision::Pass,
+            }),
+            weighted_total: 4.0,
+            flags: Vec::new(),
+            error: None,
+        };
+        let report = crate::rubric::build_qualification_report(
+            &rubric,
+            "judge-x",
+            &set,
+            vec![
+                outcome(crate::rubric::Truth::Defective),
+                outcome(crate::rubric::Truth::Clean),
+            ],
+            1,
+        );
+        assert!(report.passed, "{:?}", report.failures);
+        crate::rubric::write_qualification(dir, &report).expect("квалификация");
+    }
+
     /// Прогон гейта на заданном маршруте и с заданной политикой решения (E4.2).
     fn run_semantic_on(
         dir: &Path,
@@ -1202,6 +1273,82 @@ mod tests {
             &options,
         )
         .expect("гейт")
+    }
+
+    /// E6.3: на Critical судья без пройденной квалификации к гейту не
+    /// допускается — SKIP с находкой `judge_unqualified`; после квалификации
+    /// проходит обычным путём.
+    #[test]
+    fn unqualified_judge_blocks_on_critical() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        make_semantic_repo(dir);
+        let rubrics = semantic_rubrics_dir(dir);
+        write_semantic_report(dir, "docs/adr/ADR-001-reshenie.md", 5, &[], 4.6, None);
+        let policy = crate::config::DecisionPolicyConfig::default();
+        let before = run_semantic_on(
+            dir,
+            Route::Critical,
+            policy.clone(),
+            semantic_cfg(crate::config::SemanticScope::All),
+            &rubrics,
+        );
+        assert_eq!(
+            status_of(&before, "semantic_quality"),
+            GateStatus::Skip,
+            "{}",
+            crate::gate::render(&before)
+        );
+        assert!(
+            semantic_rules(&before).contains(&"judge_unqualified".to_string()),
+            "{:?}",
+            semantic_rules(&before)
+        );
+        // Квалификация судьи `judge-x` на этой рубрике пройдена.
+        let rubric =
+            crate::rubric::load(&rubrics.join("adr_spine_consistency.yaml")).expect("рубрика");
+        let set = crate::rubric::QualificationSet {
+            dir: std::path::PathBuf::from("/набор"),
+            cases: Vec::new(),
+            sha256: "c".repeat(64),
+        };
+        let outcome = |truth| crate::rubric::CaseOutcome {
+            file: "code/x.py".to_string(),
+            class: "ignored_key".to_string(),
+            truth,
+            decision: Some(match truth {
+                crate::rubric::Truth::Defective => crate::rubric::RubricDecision::Fail,
+                crate::rubric::Truth::Clean => crate::rubric::RubricDecision::Pass,
+            }),
+            weighted_total: 4.0,
+            flags: Vec::new(),
+            error: None,
+        };
+        let qualification = crate::rubric::build_qualification_report(
+            &rubric,
+            "judge-x",
+            &set,
+            vec![
+                outcome(crate::rubric::Truth::Defective),
+                outcome(crate::rubric::Truth::Clean),
+            ],
+            1,
+        );
+        assert!(qualification.passed, "{:?}", qualification.failures);
+        crate::rubric::write_qualification(dir, &qualification).expect("квалификация");
+        let after = run_semantic_on(
+            dir,
+            Route::Critical,
+            policy,
+            semantic_cfg(crate::config::SemanticScope::All),
+            &rubrics,
+        );
+        assert_eq!(
+            status_of(&after, "semantic_quality"),
+            GateStatus::Pass,
+            "квалифицированный судья проходит: {}",
+            crate::gate::render(&after)
+        );
     }
 
     /// E5.1: расхождение двух судей — решение человека. На Critical оговорка
@@ -1232,6 +1379,7 @@ mod tests {
             serde_json::to_string_pretty(&artifact).expect("json"),
         )
         .expect("write report");
+        write_passing_qualification(dir, &rubrics);
         let policy = crate::config::DecisionPolicyConfig::default();
         let critical = run_semantic_on(
             dir,
@@ -1283,6 +1431,7 @@ mod tests {
             4.0,
             None,
         );
+        write_passing_qualification(dir, &rubrics);
         let policy = crate::config::DecisionPolicyConfig::default();
         let before = run_semantic_on(
             dir,
@@ -1384,6 +1533,7 @@ mod tests {
             4.0,
             None,
         );
+        write_passing_qualification(dir, &rubrics);
         let policy = crate::config::DecisionPolicyConfig::default();
         // Critical: блок до решения архитектора.
         let critical = run_semantic_on(

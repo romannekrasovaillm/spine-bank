@@ -34,6 +34,7 @@ mod catalog;
 mod decision;
 mod human_decision;
 mod judge;
+mod qualify;
 mod report;
 #[cfg(test)]
 mod testkit;
@@ -60,6 +61,12 @@ pub use judge::{
     evaluate_with_options, generate_dynamic,
 };
 pub(crate) use judge::{judge_system_prompt, judge_user_prompt};
+pub use qualify::{
+    CaseOutcome, MAX_HUMAN_SHARE, MIN_ACCURACY, MIN_COMPLETENESS, QUALIFICATION_DIR,
+    QUALIFICATION_SCHEMA, Qualification, QualificationReport, QualificationSet, Thresholds, Truth,
+    build_report as build_qualification_report, load_set, qualification, refusal_reason,
+    run as run_qualification, stored as stored_qualification, write as write_qualification,
+};
 pub(crate) use report::{EvidenceScope, build_report, parse_judge_response};
 pub use report::{InputInjection, RubricReport, scan_injections, weighted_total};
 pub use tools::tools;

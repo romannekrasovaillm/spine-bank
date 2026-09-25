@@ -1,0 +1,122 @@
+# Набор квалификации: истина по случаям (E6.1).
+cases:
+  - file: code/ignored-key-bad-01.py
+    class: ignored_key
+    truth: defective
+    note: "ключ принят и не используется"
+  - file: code/ignored-key-bad-02.py
+    class: ignored_key
+    truth: defective
+    note: "ключ принят и не используется"
+  - file: code/ignored-key-bad-03.py
+    class: ignored_key
+    truth: defective
+    note: "ключ принят и не используется"
+  - file: code/ignored-key-ok-01.py
+    class: ignored_key
+    truth: clean
+    note: "ключ используется для дедупликации до записи"
+  - file: code/ignored-key-ok-02.py
+    class: ignored_key
+    truth: clean
+    note: "ключ используется для дедупликации до записи"
+  - file: code/ignored-key-ok-03.py
+    class: ignored_key
+    truth: clean
+    note: "ключ используется для дедупликации до записи"
+  - file: code/no-return-bad-01.py
+    class: no_return
+    truth: defective
+    note: "дубль найден, но прежний результат не возвращается"
+  - file: code/no-return-bad-02.py
+    class: no_return
+    truth: defective
+    note: "дубль найден, но прежний результат не возвращается"
+  - file: code/no-return-bad-03.py
+    class: no_return
+    truth: defective
+    note: "дубль найден, но прежний результат не возвращается"
+  - file: code/no-return-ok-01.py
+    class: no_return
+    truth: clean
+    note: "дубль возвращает прежний результат"
+  - file: code/no-return-ok-02.py
+    class: no_return
+    truth: clean
+    note: "дубль возвращает прежний результат"
+  - file: code/no-return-ok-03.py
+    class: no_return
+    truth: clean
+    note: "дубль возвращает прежний результат"
+  - file: code/float-money-bad-01.py
+    class: float_money
+    truth: defective
+    note: "деньги считаются во float"
+  - file: code/float-money-bad-02.py
+    class: float_money
+    truth: defective
+    note: "деньги считаются во float"
+  - file: code/float-money-bad-03.py
+    class: float_money
+    truth: defective
+    note: "деньги считаются во float"
+  - file: code/float-money-ok-01.py
+    class: float_money
+    truth: clean
+    note: "деньги считаются в целых копейках"
+  - file: code/float-money-ok-02.py
+    class: float_money
+    truth: clean
+    note: "деньги считаются в целых копейках"
+  - file: code/float-money-ok-03.py
+    class: float_money
+    truth: clean
+    note: "деньги считаются в целых копейках"
+  - file: code/comment-only-bad-01.py
+    class: comment_only
+    truth: defective
+    note: "лимит описан в комментарии, проверки нет"
+  - file: code/comment-only-bad-02.py
+    class: comment_only
+    truth: defective
+    note: "лимит описан в комментарии, проверки нет"
+  - file: code/comment-only-bad-03.py
+    class: comment_only
+    truth: defective
+    note: "лимит описан в комментарии, проверки нет"
+  - file: code/comment-only-ok-01.py
+    class: comment_only
+    truth: clean
+    note: "лимит проверяется до адаптера"
+  - file: code/comment-only-ok-02.py
+    class: comment_only
+    truth: clean
+    note: "лимит проверяется до адаптера"
+  - file: code/comment-only-ok-03.py
+    class: comment_only
+    truth: clean
+    note: "лимит проверяется до адаптера"
+  - file: code/flag-bypass-bad-01.py
+    class: flag_bypass
+    truth: defective
+    note: "отладочный флаг обходит проверку"
+  - file: code/flag-bypass-bad-02.py
+    class: flag_bypass
+    truth: defective
+    note: "отладочный флаг обходит проверку"
+  - file: code/flag-bypass-bad-03.py
+    class: flag_bypass
+    truth: defective
+    note: "отладочный флаг обходит проверку"
+  - file: code/flag-bypass-ok-01.py
+    class: flag_bypass
+    truth: clean
+    note: "отладочный флаг не отменяет контроль"
+  - file: code/flag-bypass-ok-02.py
+    class: flag_bypass
+    truth: clean
+    note: "отладочный флаг не отменяет контроль"
+  - file: code/flag-bypass-ok-03.py
+    class: flag_bypass
+    truth: clean
+    note: "отладочный флаг не отменяет контроль"

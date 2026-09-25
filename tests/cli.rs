@@ -2905,6 +2905,98 @@ fn rubric_pack_prints_dossier_sources_and_hash() {
     assert!(err.contains("pack_subject_not_found"), "{err}");
 }
 
+/// E6.1–E6.3: квалификация судьи на эталонном наборе. Судья-«перестраховщик»
+/// (валидный JSON с выдуманной цитатой) не даёт засчитываемых вердиктов —
+/// отчёт квалификации это фиксирует по всем 30 случаям, и команда возвращает
+/// код 1: без пройденной квалификации модель к блокирующему гейту не
+/// допускается.
+#[test]
+fn rubric_qualify_records_unqualified_judge() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let home = tmp.path();
+    let repo = home.join("case");
+    std::fs::create_dir_all(&repo).expect("mkdir case");
+    let script = home.join("fake-judge.sh");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\n\
+         if [ \"${1:-}\" = \"--version\" ]; then echo 'fake-judge 1.0'; exit 0; fi\n\
+         cat >/dev/null\n\
+         printf '%s' '{\"scores\":[{\"criterion_id\":\"no_violation\",\"score\":5,\"rationale\":\"Цитата: \\\"такой строки в коде нет\\\" — чисто\"}],\"verdict\":\"чисто\"}'\n",
+    )
+    .expect("script");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mut perms = std::fs::metadata(&script).expect("stat").permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).expect("chmod");
+    }
+    // Рубрика — из ассетов крейта, как её ставит `arch-be init`.
+    let rubrics = home.join("assets/rubrics");
+    std::fs::create_dir_all(&rubrics).expect("rubrics");
+    std::fs::copy(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("assets/rubrics/code_invariant_conformance.yaml"),
+        rubrics.join("code_invariant_conformance.yaml"),
+    )
+    .expect("copy rubric");
+    std::fs::write(
+        home.join("arch-harness.toml"),
+        format!(
+            "default_model = \"fakejudge\"\n\n[paths]\nassets_dir = \"{}\"\n\n\
+             [models.fakejudge]\nkind = \"cli\"\ncommand = \"{}\"\nmodel = \"fake-judge-1\"\n\n\
+             [judge]\nsamples = 1\n",
+            home.join("assets").display(),
+            script.display()
+        ),
+    )
+    .expect("config");
+    let set =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/qualification/code_vs_spine");
+    let out = arch_cmd(home)
+        .args(["rubric", "qualify", "code_invariant_conformance"])
+        .arg("--set")
+        .arg(set.as_os_str())
+        .arg("--repo")
+        .arg(repo.as_os_str())
+        .output()
+        .expect("rubric qualify");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "пороги допуска не пройдены: {stdout}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout.contains("Квалификация судьи"), "{stdout}");
+    assert!(stdout.contains("не пройден"), "{stdout}");
+    assert!(
+        stdout.contains("ignored_key"),
+        "метрики по классам: {stdout}"
+    );
+    let report_path =
+        repo.join("reports/qualification/code_invariant_conformance--fake-judge-1.json");
+    assert!(report_path.is_file(), "{}", report_path.display());
+    let report: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&report_path).expect("отчёт")).expect("JSON");
+    assert_eq!(report["totals"]["total"], 30, "{report}");
+    assert_eq!(report["passed"], false, "{report}");
+    assert_eq!(
+        report["cases"].as_array().map(Vec::len),
+        Some(30),
+        "{report}"
+    );
+    assert!(
+        report["human_share"].as_f64().is_some_and(|h| h > 0.9),
+        "судья без вердиктов — воздержание: {report}"
+    );
+    assert!(
+        report["set_sha256"].as_str().is_some_and(|s| s.len() == 64),
+        "хэш набора записан: {report}"
+    );
+}
+
 /// F1 (ADR-051/048): прогон смысловой рубрики по досье (`rubric run --pack`)
 /// пишет сырые ответы судьи и происхождение так же, как прогон по документу
 /// (J1/J2), и `rubric reverify` воспроизводит такой отчёт из его ответов, а

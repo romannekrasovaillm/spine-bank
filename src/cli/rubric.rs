@@ -112,6 +112,23 @@ pub(crate) enum RubricCmd {
         #[arg(long, default_value = "")]
         reason: String,
     },
+    /// Квалификация судьи на эталонном наборе дефектов (E6.1–E6.2): прогоняет
+    /// судью по случаям с известной истиной, считает полноту, точность и долю
+    /// `human` по классам дефектов и пишет отчёт с версией модели. Ненулевой
+    /// код — пороги допуска не пройдены (E6.3).
+    Qualify {
+        /// Рубрика (имя в каталоге рубрик).
+        rubric: String,
+        /// Каталог набора: `ARCHITECTURE-SPINE.md`, `cases.yaml`, `code/`.
+        #[arg(long)]
+        set: PathBuf,
+        /// Модель-судья (по умолчанию — модель по умолчанию конфига).
+        #[arg(long)]
+        model: Option<String>,
+        /// Куда положить отчёт квалификации (по умолчанию — текущий каталог).
+        #[arg(long)]
+        repo: Option<PathBuf>,
+    },
     /// Собрать досье судьи (вход смысловой рубрики) и напечатать его с хэшем.
     Pack {
         /// Вид досье: `adr_vs_spine` | `entity_links` | `nfr_mechanism` |
@@ -726,6 +743,35 @@ pub(crate) async fn cmd_rubric(cfg: &Arc<Config>, cmd: RubricCmd) -> Result<()> 
                 verdict = verdict.as_str(),
                 by = by,
             );
+        }
+        RubricCmd::Qualify {
+            rubric,
+            set,
+            model,
+            repo,
+        } => {
+            let registry = Arc::new(LlmRegistry::from_config(cfg)?);
+            let judge = match &model {
+                Some(name) => registry.get(name)?,
+                None => registry.default(),
+            };
+            let path = resolve_asset(&cfg.paths.rubrics_dir(), &rubric, "yaml");
+            let rub = arch_harness::rubric::load(&path)?;
+            let report = arch_harness::rubric::run_qualification(
+                &set,
+                &rub,
+                judge.model(),
+                judge.as_ref(),
+                &cfg.judge,
+            )
+            .await?;
+            print!("{}", report.summary());
+            let repo = repo.unwrap_or_else(|| PathBuf::from("."));
+            let written = arch_harness::rubric::write_qualification(&repo, &report)?;
+            println!("Отчёт квалификации: {}", written.display());
+            if !report.passed {
+                std::process::exit(1);
+            }
         }
         RubricCmd::Pack {
             kind,

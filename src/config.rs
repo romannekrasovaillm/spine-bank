@@ -999,6 +999,10 @@ pub struct SemanticQualityConfig {
     /// (E3.2): выше порога составляющая уходит в SKIP — вердикт INCOMPLETE.
     #[serde(default = "default_max_invalid_ratio")]
     pub max_invalid_samples_ratio: f64,
+    /// Требовать от судьи пройденную квалификацию (E6.3): на блокирующем
+    /// маршруте находка `judge_unqualified` → INCOMPLETE. Дефолт `false`.
+    #[serde(default)]
+    pub require_qualified_judge: bool,
 }
 
 /// Дефолт порога доли невалидных сэмплов (E3.2): половина и больше.
@@ -1029,6 +1033,7 @@ impl Default for SemanticQualityConfig {
             min_score: default_semantic_min_score(),
             require_distinct_judge: false,
             max_invalid_samples_ratio: default_max_invalid_ratio(),
+            require_qualified_judge: false,
         }
     }
 }
@@ -1064,6 +1069,13 @@ pub struct DecisionQualityConfig {
     /// больше — не «шум одного ответа». Любая ненулевая доля ниже порога
     /// оставляет warn-находку, поэтому невалидный сэмпл не бывает невидимым.
     pub max_invalid_samples_ratio: f64,
+    /// Требовать от судьи пройденную квалификацию на эталонном наборе (E6.3):
+    /// на блокирующем маршруте находка `judge_unqualified` → INCOMPLETE.
+    /// Дефолт `false` — поведение 0.3.8: допуск включает проект осознанно,
+    /// прогнав `arch-be rubric qualify` (иначе ужесточение покраснило бы
+    /// чужие пайплайны без предупреждения).
+    #[serde(default)]
+    pub require_qualified_judge: bool,
 }
 
 impl Default for DecisionQualityConfig {
@@ -1074,6 +1086,7 @@ impl Default for DecisionQualityConfig {
             require_distinct_family: false,
             min_independence: crate::judge::INDEPENDENCE_NONE.to_string(),
             max_invalid_samples_ratio: 0.5,
+            require_qualified_judge: false,
         }
     }
 }

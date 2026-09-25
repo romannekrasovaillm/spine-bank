@@ -904,6 +904,8 @@ pub(super) fn component_decision_quality(
     }
     let adr_dir = repo.join("docs/adr");
     let artifacts = crate::rubric::load_artifacts(repo);
+    // E4.2: политика маршрута — одна на обе ветки (документы и досье).
+    let human_policy = options.decision_policy.for_route(options.route);
     // E1.4: смысловые рубрики по досье судятся и без каталога ADR — иначе
     // решение о коде выпадало бы из decision_quality целиком.
     if !adr_dir.is_dir() && !artifacts.iter().any(|a| a.pack_kind.is_some()) {
@@ -942,6 +944,8 @@ pub(super) fn component_decision_quality(
     let mut partial_on_critical = 0usize;
     // E5.1: два независимых судьи разошлись — решение человека.
     let mut judges_disagreed = 0usize;
+    // E6.3: судья не квалифицирован на эталонном наборе, а маршрут блокирующий.
+    let mut judge_unqualified = 0usize;
     for adr in &adrs {
         let Ok(text) = std::fs::read_to_string(adr) else {
             continue;
@@ -995,24 +999,22 @@ pub(super) fn component_decision_quality(
             ));
             continue;
         }
-        // E5.1: два независимых судьи разошлись — механика не выбирает, кому
-        // верить, и отправляет решение человеку.
-        if let Some(second) = artifact.second_judge.as_ref().filter(|s| !s.agreement) {
-            judges_disagreed += 1;
-            findings.push(GateFinding::ruled(
-                "error".to_string(),
-                "judge_disagreement".to_string(),
-                format!(
-                    "{rel}: второй судья {} разошёлся с первым ({}); решение человека",
-                    second.model,
-                    if second.differences.is_empty() {
-                        "оценки не сошлись".to_string()
-                    } else {
-                        second.differences.join("; ")
-                    }
-                ),
-            ));
-            continue;
+        // E6.3: там, где решение блокируется, судья обязан быть квалифицирован
+        // на эталонном наборе: иначе «промах» неотличим от «не умеет».
+        if human_policy == crate::config::HumanPolicy::Human && cfg.require_qualified_judge {
+            let state = crate::rubric::qualification(repo, &artifact.rubric, &artifact.judge_model);
+            if !matches!(state, crate::rubric::Qualification::Qualified(_)) {
+                judge_unqualified += 1;
+                findings.push(GateFinding::ruled(
+                    "error".to_string(),
+                    "judge_unqualified".to_string(),
+                    format!(
+                        "{rel}: {} — `arch-be rubric qualify`",
+                        crate::rubric::refusal_reason(&state, &artifact.judge_model)
+                    ),
+                ));
+                continue;
+            }
         }
         // E3.2: невалидные сэмплы судьи. Выше порога — суждению верить нельзя,
         // решение за человеком; ниже — предупреждение, но не молчание.
@@ -1048,7 +1050,6 @@ pub(super) fn component_decision_quality(
             .any(|s| s.has_flag(crate::rubric::CriterionFlag::EvidencePartial));
         // E4.2: политика маршрута решает, блокирует ли оговорка судьи
         // (по умолчанию — только на Critical).
-        let human_policy = options.decision_policy.for_route(options.route);
         if partial && human_policy == crate::config::HumanPolicy::Human {
             // E4.5: решение архитектора по этому отчёту снимает эскалацию —
             // спорное уже разобрано человеком, и повторно звать его незачем.
@@ -1279,6 +1280,42 @@ pub(super) fn component_decision_quality(
         };
         pack_judged += 1;
         let what = format!("{subject} [{}]", artifact.rubric);
+        // E6.3: на блокирующем маршруте судья обязан быть квалифицирован на
+        // эталонном наборе — иначе «промах» неотличим от «не умеет».
+        if human_policy == crate::config::HumanPolicy::Human && cfg.require_qualified_judge {
+            let state = crate::rubric::qualification(repo, &artifact.rubric, &artifact.judge_model);
+            if !matches!(state, crate::rubric::Qualification::Qualified(_)) {
+                judge_unqualified += 1;
+                findings.push(GateFinding::ruled(
+                    "error".to_string(),
+                    "judge_unqualified".to_string(),
+                    format!(
+                        "{what}: {} — `arch-be rubric qualify`",
+                        crate::rubric::refusal_reason(&state, &artifact.judge_model)
+                    ),
+                ));
+                continue;
+            }
+        }
+        // E5.1: два независимых судьи разошлись — механика не выбирает, кому
+        // верить, и отправляет решение человеку.
+        if let Some(second) = artifact.second_judge.as_ref().filter(|s| !s.agreement) {
+            judges_disagreed += 1;
+            findings.push(GateFinding::ruled(
+                "error".to_string(),
+                "judge_disagreement".to_string(),
+                format!(
+                    "{what}: второй судья {} разошёлся с первым ({}); решение человека",
+                    second.model,
+                    if second.differences.is_empty() {
+                        "оценки не сошлись".to_string()
+                    } else {
+                        second.differences.join("; ")
+                    }
+                ),
+            ));
+            continue;
+        }
         let check = crate::judge::reverify(repo, artifact, &options.rubrics_dir, &options.judge);
         if !check.raw_saved {
             pack_unreproducible += 1;
@@ -1378,8 +1415,11 @@ pub(super) fn component_decision_quality(
              остаются одни хэши"
         ));
     }
-    let unconfirmed =
-        injection_suspected + invalid_over_threshold + partial_on_critical + judges_disagreed;
+    let unconfirmed = injection_suspected
+        + invalid_over_threshold
+        + partial_on_critical
+        + judges_disagreed
+        + judge_unqualified;
     if unconfirmed > 0 {
         // E2/E3: «проверить нельзя», а не «нарушено» и не «нечего проверять» —
         // SKIP обязательной составляющей даёт вердикт INCOMPLETE (exit 3).
@@ -1389,7 +1429,8 @@ pub(super) fn component_decision_quality(
                 "{detail}; решений, которые механика не подтверждает: {unconfirmed} \
                  (вход с инъекцией: {injection_suspected}, невалидных сэмплов сверх порога: \
                  {invalid_over_threshold}, evidence_partial на Critical: {partial_on_critical}, \
-                 расхождение судей: {judges_disagreed}) — решение за человеком"
+                 расхождение судей: {judges_disagreed}, судья не квалифицирован: \
+                 {judge_unqualified}) — решение за человеком"
             ),
             findings,
         )
@@ -1408,7 +1449,8 @@ mod tests {
     use crate::gate::testkit::*;
 
     use crate::gate::{
-        GateOptions, GateOutcome, GateRequirements, GateStatus, render, run, run_opts, run_with,
+        GateOptions, GateOutcome, GateReport, GateRequirements, GateStatus, render, run, run_opts,
+        run_with,
     };
 
     // --- Н7: качество решений как составляющая гейта (ADR-042) -------------
@@ -2606,6 +2648,106 @@ mod tests {
         path
     }
 
+    /// Пройденная квалификация судьи `judge-x` на рубрике `adr_quality`: на
+    /// Critical её требует E6.3 — тесты прочих находок задают условие явно.
+    fn write_passing_qualification(dir: &Path) {
+        let rubric = crate::rubric::load(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("assets/rubrics/adr_quality.yaml"),
+        )
+        .expect("рубрика adr_quality");
+        let set = crate::rubric::QualificationSet {
+            dir: std::path::PathBuf::from("/набор"),
+            cases: Vec::new(),
+            sha256: "e".repeat(64),
+        };
+        let outcome = |truth: crate::rubric::Truth| crate::rubric::CaseOutcome {
+            file: "code/x.py".to_string(),
+            class: "ignored_key".to_string(),
+            truth,
+            decision: Some(match truth {
+                crate::rubric::Truth::Defective => crate::rubric::RubricDecision::Fail,
+                crate::rubric::Truth::Clean => crate::rubric::RubricDecision::Pass,
+            }),
+            weighted_total: 4.0,
+            flags: Vec::new(),
+            error: None,
+        };
+        let report = crate::rubric::build_qualification_report(
+            &rubric,
+            "judge-x",
+            &set,
+            vec![
+                outcome(crate::rubric::Truth::Defective),
+                outcome(crate::rubric::Truth::Clean),
+            ],
+            1,
+        );
+        assert!(report.passed, "{:?}", report.failures);
+        crate::rubric::write_qualification(dir, &report).expect("квалификация");
+    }
+
+    /// Прогон гейта с настройками допуска судьи (E6.3).
+    fn run_quality_on(dir: &Path, route: Route, require_qualified: bool) -> GateReport {
+        let mut options = GateOptions::default();
+        options.decision_quality.require_qualified_judge = require_qualified;
+        options.route = Some(route);
+        crate::gate::verdict::run_inner(
+            dir,
+            Some(route),
+            None,
+            None,
+            (1, 4),
+            &with_quality(route),
+            &options,
+        )
+        .expect("гейт")
+    }
+
+    /// E6.3: с включённым допуском судья без квалификации на Critical не
+    /// проходит (SKIP → INCOMPLETE), после пройденной — проходит; с выключенным
+    /// флагом проверки нет (поведение 0.3.8).
+    #[test]
+    fn decision_quality_requires_qualification_when_enabled() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        make_quality_repo(dir, Some(4.5), Some("judge-x"));
+        let before = run_quality_on(dir, Route::Critical, true);
+        assert_eq!(
+            status_of(&before, "decision_quality"),
+            GateStatus::Skip,
+            "{}",
+            render(&before)
+        );
+        let comp = before
+            .components
+            .iter()
+            .find(|c| c.name == "decision_quality")
+            .expect("comp");
+        assert!(
+            comp.findings
+                .iter()
+                .any(|f| f.rule.as_deref() == Some("judge_unqualified")),
+            "{:?}",
+            comp.findings
+        );
+        write_passing_qualification(dir);
+        let after = run_quality_on(dir, Route::Critical, true);
+        assert_eq!(
+            status_of(&after, "decision_quality"),
+            GateStatus::Pass,
+            "{}",
+            render(&after)
+        );
+        let off = run_quality_on(dir, Route::Critical, false);
+        assert_eq!(
+            status_of(&off, "decision_quality"),
+            GateStatus::Pass,
+            "без флага проверки нет: {}",
+            render(&off)
+        );
+    }
+
     /// E3.2: доля сэмплов судьи с баллом вне шкалы выше порога — суждению
     /// верить нельзя: SKIP с находкой `rubric_invalid_samples`, вердикт
     /// INCOMPLETE (exit 3), решение за человеком.
@@ -2686,6 +2828,8 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tmp");
         let dir = tmp.path();
         make_quality_repo(dir, Some(4.5), Some("judge-x"));
+        write_passing_qualification(dir);
+        write_passing_qualification(dir);
         patch_quality_report(dir, None, &["evidence_partial"]);
         // Critical: оговорку судьи принимает человек.
         let critical = run_with(
