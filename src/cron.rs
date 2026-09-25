@@ -49,6 +49,11 @@ pub struct CronJob {
     pub model: Option<String>,
     /// Каталог отчётов (None — `reports_dir/cron`).
     pub out: Option<PathBuf>,
+    /// Лимит итераций «модель ↔ инструменты» для этой задачи (None —
+    /// [`MAX_TURNS`]). Даёт длинным задачам (например дайджесту базы знаний)
+    /// больше шагов, не поднимая лимит всем подряд.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_turns: Option<usize>,
 }
 
 /// Расписание (cron.toml).
@@ -76,7 +81,29 @@ pub fn load(path: &Path) -> Result<CronTab> {
             HarnessError::io(path, e)
         }
     })?;
-    Ok(toml::from_str(&text)?)
+    let mut tab: CronTab = toml::from_str(&text)?;
+    // Пути в образце расписания пишутся от дома (`~/.arch-harness/cron/…`), а
+    // ядро тильду само не раскрывает: без этого `cron tick`/`cron run` падали
+    // на «файл не найден» сразу после `arch-be init` (живой тест 0.3.9).
+    for job in &mut tab.jobs {
+        job.task_md = expand_tilde(&job.task_md);
+        job.out = job.out.take().map(|out| expand_tilde(&out));
+    }
+    Ok(tab)
+}
+
+/// Раскрывает ведущую `~/` (и одиночную `~`) в пути из расписания до домашнего
+/// каталога. Прочие пути не трогаются: относительные считаются от рабочего
+/// каталога, как и раньше.
+fn expand_tilde(path: &Path) -> PathBuf {
+    let raw = path.to_string_lossy();
+    let rest = raw
+        .strip_prefix("~/")
+        .or_else(|| (raw == "~").then_some(""));
+    match (rest, dirs::home_dir()) {
+        (Some(rest), Some(home)) => home.join(rest),
+        _ => path.to_path_buf(),
+    }
 }
 
 /// Задачи, которые должны сработать между `last` (последний тик) и `now`.
@@ -105,7 +132,7 @@ pub fn due_jobs(tab: &CronTab, last: DateTime<Local>, now: DateTime<Local>) -> V
 /// # Errors
 /// - `job.task_md` не читается → [`HarnessError::Io`];
 /// - ошибка модели → [`HarnessError::Llm`];
-/// - модель не выдала финальный текст за [`MAX_TURNS`] итераций → [`HarnessError::Cron`];
+/// - модель не выдала финальный текст за `max_turns` итераций → [`HarnessError::Cron`];
 /// - ошибка создания каталога / записи отчёта → [`HarnessError::Io`].
 pub async fn run_job(
     job: &CronJob,
@@ -122,7 +149,14 @@ pub async fn run_job(
     // Конфиг инструментам нужен только как контекст; сигнатура заморожена,
     // поэтому берём дефолтный. cwd — текущий каталог процесса.
     let ctx = ToolContext::new(std::env::current_dir()?, Arc::new(Config::default()));
-    let answer = agent_loop(llm, tools, &ctx, &task_md).await?;
+    let answer = agent_loop(
+        llm,
+        tools,
+        &ctx,
+        &task_md,
+        job.max_turns.unwrap_or(MAX_TURNS),
+    )
+    .await?;
 
     let (status, summary) = extract_status(&answer);
     let report = render_report(job, llm, at, started.elapsed(), &answer, &status, &summary);
@@ -180,19 +214,20 @@ fn is_due(job: &CronJob, last: DateTime<Local>, now: DateTime<Local>) -> bool {
 
 /// Локальный агентный цикл: system-промпт + md-задание, затем итерации
 /// «модель → вызовы инструментов → результаты», пока модель не ответит
-/// текстом без `tool_calls` (лимит — [`MAX_TURNS`]).
+/// текстом без `tool_calls` (лимит — `max_turns` задачи или [`MAX_TURNS`]).
 async fn agent_loop(
     llm: &dyn LlmProvider,
     tools: &ToolRegistry,
     ctx: &ToolContext,
     task_md: &str,
+    max_turns: usize,
 ) -> Result<String> {
     let mut messages = vec![
         ChatMessage::system(SYSTEM_PROMPT),
         ChatMessage::user(task_md),
     ];
     let specs = tools.specs();
-    for _ in 0..MAX_TURNS {
+    for _ in 0..max_turns {
         let req = ChatRequest::chat(messages.clone()).with_tools(specs.clone());
         let msg = llm.complete(req).await?;
         if msg.tool_calls.is_empty() {
@@ -212,7 +247,8 @@ async fn agent_loop(
         }
     }
     Err(HarnessError::Cron(format!(
-        "модель не завершила задачу за {MAX_TURNS} итераций инструментов"
+        "модель не завершила задачу за {max_turns} итераций инструментов — \
+         поднимите `max_turns` у задачи в cron.toml, если ей нужно больше шагов"
     )))
 }
 
@@ -330,6 +366,7 @@ mod tests {
             name: name.into(),
             schedule: schedule.into(),
             task_md: PathBuf::from("task.md"),
+            max_turns: None,
             model: None,
             out: None,
         }
@@ -363,6 +400,33 @@ out = "out/quarter"
         assert_eq!(tab.jobs[0].task_md, PathBuf::from("tasks/review.md"));
         assert_eq!(tab.jobs[1].model.as_deref(), Some("deepseek-reasoner"));
         assert_eq!(tab.jobs[1].out, Some(PathBuf::from("out/quarter")));
+    }
+
+    /// Тильда в `task_md`/`out` раскрывается до домашнего каталога: образец
+    /// `cron.toml` после `arch-be init` обязан работать без ручной правки.
+    #[test]
+    fn load_expands_tilde_in_paths() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let path = dir.path().join("cron.toml");
+        std::fs::write(
+            &path,
+            "[[job]]\nname = \"kb\"\nschedule = \"30 9 * * *\"\n\
+             task_md = \"~/.arch-harness/cron/kb_digest.md\"\nout = \"~/.arch-harness/reports/cron\"\n",
+        )
+        .expect("расписание");
+        let tab = load(&path).expect("загрузка");
+        let job = &tab.jobs[0];
+        let home = dirs::home_dir().expect("домашний каталог");
+        assert_eq!(job.task_md, home.join(".arch-harness/cron/kb_digest.md"));
+        assert_eq!(
+            job.out.as_deref(),
+            Some(home.join(".arch-harness/reports/cron").as_path())
+        );
+        assert!(
+            !job.task_md.to_string_lossy().contains('~'),
+            "тильда раскрыта: {}",
+            job.task_md.display()
+        );
     }
 
     #[test]
@@ -450,6 +514,48 @@ out = "out/quarter"
             "обзор-компонента-v2"
         );
         assert_eq!(sanitize_file_name("a-b_c"), "a-b_c");
+    }
+
+    /// Лимит итераций берётся из задачи (`max_turns`), а не только из
+    /// константы: дайджест базы знаний на большом корпусе не укладывался в 16
+    /// шагов и падал без отчёта (живой прогон 0.3.9).
+    #[tokio::test]
+    async fn job_max_turns_limits_the_agent_loop() {
+        #[derive(Debug)]
+        struct LoopLlm;
+        #[async_trait::async_trait]
+        impl LlmProvider for LoopLlm {
+            fn name(&self) -> &'static str {
+                "loop"
+            }
+            fn model(&self) -> &'static str {
+                "loop-1"
+            }
+            async fn complete(&self, _req: ChatRequest) -> Result<ChatMessage> {
+                // Модель бесконечно просит инструмент — цикл обязан упереться в лимит.
+                Ok(ChatMessage::assistant(
+                    "",
+                    vec![crate::llm::ToolCall {
+                        id: "1".to_string(),
+                        name: "нет_такого_инструмента".to_string(),
+                        arguments: serde_json::json!({}),
+                    }],
+                ))
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let task = dir.path().join("task.md");
+        std::fs::write(&task, "Задача без конца.").unwrap();
+        let reports = dir.path().join("reports");
+        let mut j = job("длинная задача", "*/15 * * * *");
+        j.task_md = task;
+        j.max_turns = Some(3);
+        let err = run_job(&j, &LoopLlm, &ToolRegistry::new(), &reports)
+            .await
+            .expect_err("лимит исчерпан");
+        let msg = err.to_string();
+        assert!(msg.contains("за 3 итераций"), "лимит из задачи: {msg}");
+        assert!(msg.contains("max_turns"), "подсказка про настройку: {msg}");
     }
 
     #[tokio::test]
