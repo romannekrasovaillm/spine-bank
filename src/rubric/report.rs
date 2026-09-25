@@ -19,6 +19,25 @@ const ERR_FRAGMENT_CHARS: usize = 400;
 /// quoted-span — слово в кавычках, а не свидетельство, и не засчитывается.
 const MIN_QUOTE_CHARS: usize = 8;
 
+/// С какого балла вердикт судьи расходится с красным детектором (E7.2).
+///
+/// Нарушение — это балл ≤ 2: если судья его подтвердил, он с детектором
+/// согласен. Всё, что выше, — «нарушения нет» или «не знаю» (живой прогон
+/// 2026-09-25 дал ровно тройку при красном детекторе): детектор сообщает о
+/// нарушении, а судья его не подтвердил — механика не выбирает, кому верить,
+/// и передаёт решение человеку.
+const DETECTOR_CONTRADICTION_MIN_SCORE: u8 = 3;
+
+/// Красный ли исход детектора. Значения свободного поля `status`: пишет их
+/// проект, поэтому принимаются синонимы, а незнакомое значение считается
+/// «неизвестно» (не повод для находки).
+fn detector_failed(status: &str) -> bool {
+    matches!(
+        status.trim().to_ascii_lowercase().as_str(),
+        "fail" | "failed" | "error" | "red"
+    )
+}
+
 /// Отчёт по рубрике.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RubricReport {
@@ -175,7 +194,8 @@ impl RubricReport {
                     | CriterionFlag::AccusationUnconfirmed
                     | CriterionFlag::CoverageIncomplete
                     | CriterionFlag::InjectionQuote
-                    | CriterionFlag::InvalidSamples => f.as_str().to_string(),
+                    | CriterionFlag::InvalidSamples
+                    | CriterionFlag::DetectorContradiction => f.as_str().to_string(),
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
@@ -276,6 +296,22 @@ impl RubricReport {
                  в расчёт не вошли; доля по отчёту {:.0}%",
                 invalid.join(", "),
                 self.invalid_samples_ratio * 100.0
+            );
+        }
+        // E7.2: противоречие с детектором — отдельная строка: читателю важно
+        // отличать «судья не нашёл» от «судья не согласовал с измерением».
+        let contradicted: Vec<&str> = self
+            .scores
+            .iter()
+            .filter(|s| s.has_flag(CriterionFlag::DetectorContradiction))
+            .map(|s| s.criterion_id.as_str())
+            .collect();
+        if !contradicted.is_empty() {
+            let _ = writeln!(
+                out,
+                "**Противоречие с детекторами (detector_contradiction):** {} — судья \
+                 поставил «чисто» при красном детекторе; решение принимает человек",
+                contradicted.join(", ")
             );
         }
         // Смысловые рубрики (ADR-051): два своих повода исключить критерий —
@@ -611,6 +647,19 @@ pub(crate) fn build_report(
         EvidenceScope::Target(_) => clean_text.as_deref().map(EvidenceScope::Target),
         EvidenceScope::Pack(_) => clean_pack.as_ref().map(EvidenceScope::Pack),
     };
+    // E7.2: красные детекторы из досье — «чисто» судьи противоречит им.
+    let failing_detectors: Vec<String> = match scope {
+        EvidenceScope::Pack(pack) => pack
+            .inputs
+            .iter()
+            .filter(|i| i.role == crate::rubric_pack::InputRole::Detector)
+            .filter(|i| i.status.as_deref().is_some_and(detector_failed))
+            .map(|i| i.key().to_string())
+            .collect(),
+        EvidenceScope::Target(_) => Vec::new(),
+    };
+    let blocking_exists = rubric.criteria.iter().any(|c| c.blocking);
+    let first_criterion = rubric.criteria.first().map(|c| c.id.clone());
     let mut scores = Vec::with_capacity(rubric.criteria.len());
     let mut unconfirmed_samples = 0usize;
     let mut counted_samples = 0usize;
@@ -722,6 +771,18 @@ pub(crate) fn build_report(
             && !quotes_confirmed(&rationale, &roles, scope, cfg.evidence_min_similarity)
         {
             flags.push(CriterionFlag::AccusationUnconfirmed);
+        }
+        // E7.2: «чисто» (высокий балл без исключающих меток) при красном
+        // детекторе — противоречие: судья не согласовал вердикт с измерением.
+        // Проверяется у блокирующего критерия, а если такого нет — у первого.
+        let detector_scope =
+            c.blocking || (!blocking_exists && Some(&c.id) == first_criterion.as_ref());
+        if detector_scope
+            && !failing_detectors.is_empty()
+            && median_score >= DETECTOR_CONTRADICTION_MIN_SCORE
+            && !flags.iter().any(|f| f.excludes_from_total())
+        {
+            flags.push(CriterionFlag::DetectorContradiction);
         }
         // E2.2: критерий, чьё свидетельство опирается на строку-инъекцию,
         // помечается отдельно — читателю важно отличие «судья выдумал цитату»
@@ -2050,6 +2111,107 @@ mod tests {
         assert!(md.contains("не подтверждён"), "{md}");
         assert!(md.contains("невалидные сэмплы"), "{md}");
         assert!(md.contains("решение принимает человек"), "{md}");
+    }
+
+    // --- E7.2: согласование вердикта судьи с детекторами ---------------------
+
+    /// Досье с результатом детектора: роль `detector`, исход — в теле.
+    fn pack_with_detector(status: &str, code: &str) -> crate::rubric_pack::ContextPack {
+        let text = format!(
+            "=== ИСТОЧНИК subject: src/pay.py ===\n{code}\n=== КОНЕЦ ИСТОЧНИКА ===\n\
+             === ИСТОЧНИК detector: reports/detectors/fitness.json ===\n\
+             {{\"name\": \"fitness\", \"status\": \"{status}\"}}\n=== КОНЕЦ ИСТОЧНИКА ===\n"
+        );
+        crate::rubric_pack::ContextPack::from_text(
+            crate::rubric_pack::PackKind::CodeVsSpine,
+            "src/pay.py",
+            &text,
+        )
+        .expect("досье с детектором")
+    }
+
+    /// E7.2: вердикт выше «нарушения» при красном детекторе — противоречие: метка
+    /// `detector_contradiction`, решение `human` (и для «чисто», и для
+    /// неуверенной тройки: детектор говорит о нарушении, судья его не
+    /// подтвердил). Согласие с детектором (судья нашёл нарушение с цитатой) и
+    /// зелёный детектор метки не дают.
+    #[test]
+    fn clean_verdict_with_red_detector_is_a_contradiction() {
+        let code = "def charge(key):\n    return key\n";
+        let mut main = criterion("no_violation", 1.0, EvidenceOn::Low, &[]);
+        main.blocking = true;
+        let rubric = rubric_of(vec![main]);
+        let clean = "{\"scores\":[{\"criterion_id\":\"no_violation\",\"score\":5,\
+                     \"rationale\":\"Цитата: \\\"def charge(key):\\\" — нарушений нет\"}],\
+                     \"verdict\":\"чисто\"}";
+        let accuse = "{\"scores\":[{\"criterion_id\":\"no_violation\",\"score\":1,\
+                       \"rationale\":\"Цитата: \\\"def charge(key):\\\" — ключ не проверяется\"}],\
+                       \"verdict\":\"нарушение\"}";
+
+        let build = |status: &str, answer: &str| {
+            let pack = pack_with_detector(status, code);
+            let runs = vec![parse_judge_response(answer).expect("ответ")];
+            build_report(
+                &rubric,
+                "judge-x",
+                &runs,
+                &EvidenceScope::Pack(&pack),
+                &one_sample(),
+            )
+            .expect("отчёт")
+        };
+
+        // Красный детектор + «чисто» — противоречие, решение человеку.
+        let report = build("fail", clean);
+        assert!(
+            report.scores[0].has_flag(CriterionFlag::DetectorContradiction),
+            "{:?}",
+            report.scores[0].flags
+        );
+        assert_eq!(
+            report.decision,
+            Some(crate::rubric::RubricDecision::Human),
+            "{:?}",
+            report.decision_reasons
+        );
+        assert!(
+            report
+                .decision_reasons
+                .iter()
+                .any(|r| r.contains("detector_contradiction")),
+            "{:?}",
+            report.decision_reasons
+        );
+        let md = report.to_markdown();
+        assert!(md.contains("Противоречие с детекторами"), "{md}");
+
+        // Красный детектор + обвинение судьи — согласие, метки нет.
+        let report = build("fail", accuse);
+        assert!(
+            !report.scores[0].has_flag(CriterionFlag::DetectorContradiction),
+            "судья согласен с детектором: {:?}",
+            report.scores[0].flags
+        );
+        assert_eq!(
+            report.decision,
+            Some(crate::rubric::RubricDecision::Fail),
+            "{:?}",
+            report.decision_reasons
+        );
+
+        // Зелёный детектор + «чисто» — согласие.
+        let report = build("pass", clean);
+        assert!(
+            !report.scores[0].has_flag(CriterionFlag::DetectorContradiction),
+            "{:?}",
+            report.scores[0].flags
+        );
+        assert_eq!(
+            report.decision,
+            Some(crate::rubric::RubricDecision::Pass),
+            "{:?}",
+            report.decision_reasons
+        );
     }
 
     /// Чистый вход: поля инъекций нет ни в отчёте, ни в JSON, а отчёт, снятый

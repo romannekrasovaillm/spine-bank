@@ -195,6 +195,10 @@ pub enum CriterionFlag {
     /// «пятёрка после обрезки», а невалидный сэмпл. Он не голосует за балл,
     /// а его доля (`invalid_samples_ratio`) видна в отчёте и в гейте.
     InvalidSamples,
+    /// Судья сказал «чисто», а детектор механического контура красный (E7.2):
+    /// вердикт судьи противоречит измерению, которое механика умеет читать.
+    /// Чисел это не меняет — решение уходит человеку.
+    DetectorContradiction,
 }
 
 impl CriterionFlag {
@@ -209,6 +213,7 @@ impl CriterionFlag {
             Self::CoverageIncomplete => "coverage_incomplete",
             Self::InjectionQuote => "injection_quote",
             Self::InvalidSamples => "invalid_samples",
+            Self::DetectorContradiction => "detector_contradiction",
         }
     }
 

@@ -175,12 +175,14 @@ pub(super) fn two_source_pack() -> crate::rubric_pack::ContextPack {
             sha256: crate::hash::sha256_hex(b"subject"),
             role: crate::rubric_pack::InputRole::Subject,
             id: None,
+            status: None,
         },
         crate::rubric_pack::PackInput {
             path: "ARCHITECTURE-SPINE.md#AD-2".into(),
             sha256: crate::hash::sha256_hex(b"reference"),
             role: crate::rubric_pack::InputRole::Reference,
             id: Some("AD-2".into()),
+            status: None,
         },
     ];
     let sha = crate::hash::sha256_hex(text.as_bytes());

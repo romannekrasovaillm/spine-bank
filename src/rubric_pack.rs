@@ -44,6 +44,12 @@ pub const SOURCE_END: &str = "=== КОНЕЦ ИСТОЧНИКА ===";
 pub const SPINE_FILE: &str = "ARCHITECTURE-SPINE.md";
 /// Каталог модели архитектуры внутри корня досье.
 pub const MODEL_DIR: &str = "model";
+/// Каталог результатов детекторов внутри репозитория (E7.1). Формат открыт:
+/// один JSON на детектор — `{"name": "...", "status": "pass"|"fail", ...}`;
+/// остальные поля свободны (в них детектор кладёт свои находки, и судья их
+/// читает). Пишет их механический контур проекта или CI, а не Spine: рубрика не
+/// исполняет правила, она читает их результат.
+pub const DETECTORS_DIR: &str = "reports/detectors";
 /// Потолок числа операций контракта, попадающих в досье `entity_links`
 /// (перечень операций — ориентация судьи, а не полный контракт).
 const MAX_CONTRACT_OPS: usize = 40;
@@ -136,6 +142,11 @@ pub enum InputRole {
     Subject,
     /// Источник, с которым сверяют субъект.
     Reference,
+    /// Результат детектора: механического контура (правила, контрактные тесты,
+    /// `ArchUnit`), а не суждения модели (E7.1). Детектор — свидетельство
+    /// ИЗВНЕ рубрики: судья обязан согласовать с ним вердикт, и «чисто» при
+    /// красном детекторе механика называет противоречием (E7.2).
+    Detector,
 }
 
 impl InputRole {
@@ -145,6 +156,7 @@ impl InputRole {
         match self {
             Self::Subject => "subject",
             Self::Reference => "reference",
+            Self::Detector => "detector",
         }
     }
 
@@ -156,10 +168,13 @@ impl InputRole {
     pub fn parse(raw: &str) -> Result<Self> {
         match raw.trim().to_ascii_lowercase().as_str() {
             "subject" => Ok(Self::Subject),
+            "detector" => Ok(Self::Detector),
             "reference" => Ok(Self::Reference),
             other => Err(pack_error(
                 "pack_unknown_role",
-                format!("неизвестная роль источника '{other}'; известные: subject, reference"),
+                format!(
+                    "неизвестная роль источника '{other}'; известные: subject, reference, detector"
+                ),
             )),
         }
     }
@@ -179,6 +194,11 @@ pub struct PackInput {
     /// источник адресуется путём.
     #[serde(default)]
     pub id: Option<String>,
+    /// Исход детектора: `pass` / `fail` (E7.1). Поле аддитивное и заполняется
+    /// только у источников роли `detector`: по нему механика сверяет вердикт
+    /// судьи с механическим контуром (E7.2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
 }
 
 impl PackInput {
@@ -318,6 +338,12 @@ impl ContextPack {
                     .split_once('#')
                     .map(|(_, frag)| frag.to_string())
                     .filter(|f| !f.is_empty()),
+                // Замороженное досье (golden-набор) тоже несёт исход детектора:
+                // он лежит в теле источника, и без него сверка E7.2 молчала бы
+                // ровно там, где досье хранится как текст.
+                status: (role == InputRole::Detector)
+                    .then(|| detector_status_of(body))
+                    .flatten(),
             });
             cursor = body_start + body_rel + SOURCE_END.len();
             if cursor >= text.len() {
@@ -428,6 +454,8 @@ struct Source {
     role: InputRole,
     /// Идентификатор для покрытия.
     id: Option<String>,
+    /// Исход детектора (`pass`/`fail`); у прочих ролей — `None`.
+    status: Option<String>,
 }
 
 impl Source {
@@ -438,6 +466,18 @@ impl Source {
             text,
             role: InputRole::Subject,
             id: None,
+            status: None,
+        }
+    }
+
+    /// Источник-детектор: результат механического контура (E7.1).
+    fn detector(path: String, text: String, id: Option<String>, status: Option<String>) -> Self {
+        Self {
+            path,
+            text,
+            role: InputRole::Detector,
+            id,
+            status,
         }
     }
 
@@ -448,6 +488,7 @@ impl Source {
             text,
             role: InputRole::Reference,
             id,
+            status: None,
         }
     }
 }
@@ -475,6 +516,7 @@ fn assemble(kind: PackKind, subject: String, sources: &[Source]) -> ContextPack 
             sha256: sha256_hex(trimmed.as_bytes()),
             role: s.role,
             id: s.id.clone(),
+            status: s.status.clone(),
         });
     }
     let sha256 = sha256_hex(text.as_bytes());
@@ -725,6 +767,71 @@ fn adr_vs_spine(repo: &Path, subject: &str) -> Result<Vec<Source>> {
 /// Досье `code_vs_spine`: файл кода + инварианты спайна. Субъект с диапазоном
 /// строк (`src/gate.rs#12-88`) даёт досье ровно об этом фрагменте — так
 /// вызывающий адресует уже нарезанные фрагменты поимённо.
+/// Разбор файла детектора (E7.1): обязателен только `status`, остальное —
+/// свободные поля с находками.
+#[derive(serde::Deserialize)]
+struct Detector {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+}
+
+/// Исход детектора из тела его источника: `{"status": "fail"}`. Не JSON и нет
+/// поля — `None` («неизвестно»), а не догадка.
+fn detector_status_of(body: &str) -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct Status {
+        #[serde(default)]
+        status: Option<String>,
+    }
+    serde_json::from_str::<Status>(body).ok()?.status
+}
+
+/// Результаты детекторов как источники досье (E7.1): механический контур
+/// (правила, контрактные тесты, `ArchUnit`) судья видит наравне с кодом и
+/// спайном, а их хэши привязывают отчёт к этому срезу измерений — правка
+/// результата обесценивает отчёт так же, как правка кода.
+fn detector_sources(repo: &Path) -> Result<Vec<Source>> {
+    let dir = repo.join(DETECTORS_DIR);
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Ok(Vec::new());
+    };
+    let mut paths: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.extension()
+                .is_some_and(|x| x.eq_ignore_ascii_case("json"))
+        })
+        .collect();
+    paths.sort();
+    let mut out = Vec::new();
+    for path in paths {
+        let text = std::fs::read_to_string(&path).map_err(|e| HarnessError::io(&path, e))?;
+        let parsed: Detector = serde_json::from_str(&text).map_err(|e| {
+            pack_error(
+                "pack_detector_malformed",
+                format!(
+                    "детектор {}: не разбирается как JSON ({e})",
+                    relative(repo, &path)
+                ),
+            )
+        })?;
+        let id = parsed
+            .name
+            .clone()
+            .or_else(|| path.file_stem().map(|s| s.to_string_lossy().into_owned()));
+        out.push(Source::detector(
+            relative(repo, &path),
+            text.trim_end().to_string(),
+            id,
+            parsed.status.clone(),
+        ));
+    }
+    Ok(out)
+}
+
 fn code_vs_spine(repo: &Path, subject: &str) -> Result<Vec<Source>> {
     let (_, range) = split_fragment(subject)?;
     let path = resolve_subject_path(repo, subject, PackKind::CodeVsSpine)?;
@@ -746,6 +853,8 @@ fn code_vs_spine(repo: &Path, subject: &str) -> Result<Vec<Source>> {
         }
     };
     let mut out = vec![Source::subject(relative(repo, &path), slice)];
+    // E7.1: результаты механического контура — отдельная роль источника.
+    out.extend(detector_sources(repo)?);
     out.extend(spine_sources(repo)?);
     Ok(out)
 }
@@ -786,6 +895,7 @@ fn card_source(
         text: card,
         role,
         id: Some(e.id.clone()),
+        status: None,
     }
 }
 
@@ -1512,6 +1622,85 @@ mod tests {
         );
     }
 
+    /// E7.1: результаты детекторов — отдельная роль источника с исходом и
+    /// хэшем: правка результата обесценивает отчёт так же, как правка кода.
+    #[test]
+    fn detectors_are_dossier_sources_with_status() {
+        let tmp = repo_with_spine();
+        let repo = tmp.path();
+        std::fs::create_dir_all(repo.join("src")).expect("src");
+        std::fs::write(
+            repo.join("src/pay.py"),
+            "def charge(key):\n    return key\n",
+        )
+        .expect("code");
+        let before = build(repo, PackKind::CodeVsSpine, "src/pay.py")
+            .expect("досье")
+            .into_iter()
+            .next()
+            .expect("досье");
+        assert!(
+            before.inputs.iter().all(|i| i.role != InputRole::Detector),
+            "без результатов детекторов их в досье нет"
+        );
+        std::fs::create_dir_all(repo.join(DETECTORS_DIR)).expect("detectors");
+        std::fs::write(
+            repo.join(DETECTORS_DIR).join("fitness.json"),
+            "{\"name\": \"fitness\", \"status\": \"fail\", \"findings\": [\"C-005: ключ не проверяется\"]}",
+        )
+        .expect("detector");
+        let with = build(repo, PackKind::CodeVsSpine, "src/pay.py")
+            .expect("досье")
+            .into_iter()
+            .next()
+            .expect("досье");
+        let detector = with
+            .inputs
+            .iter()
+            .find(|i| i.role == InputRole::Detector)
+            .expect("источник-детектор");
+        assert_eq!(detector.id.as_deref(), Some("fitness"));
+        assert_eq!(detector.status.as_deref(), Some("fail"));
+        assert_eq!(detector.sha256.len(), 64, "хэш результата записан");
+        assert!(
+            with.text
+                .contains("=== ИСТОЧНИК detector: reports/detectors/fitness.json ==="),
+            "роль видна судье в маркере: {}",
+            with.text
+        );
+        assert_ne!(
+            before.sha256, with.sha256,
+            "срез измерений привязан к отчёту"
+        );
+        // Правка результата детектора меняет хэш досье.
+        std::fs::write(
+            repo.join(DETECTORS_DIR).join("fitness.json"),
+            "{\"name\": \"fitness\", \"status\": \"pass\", \"findings\": []}",
+        )
+        .expect("detector 2");
+        let after = build(repo, PackKind::CodeVsSpine, "src/pay.py")
+            .expect("досье")
+            .into_iter()
+            .next()
+            .expect("досье");
+        assert_ne!(with.sha256, after.sha256);
+        // Замороженное досье тоже несёт исход: он в теле источника.
+        let frozen = ContextPack::from_text(
+            PackKind::CodeVsSpine,
+            "src/pay.py",
+            &format!(
+                "{SOURCE_BEGIN} detector: reports/detectors/fitness.json ===\n\
+                 {{\"status\": \"fail\"}}\n{SOURCE_END}\n"
+            ),
+        )
+        .expect("замороженное досье");
+        assert_eq!(
+            frozen.inputs[0].status.as_deref(),
+            Some("fail"),
+            "из тела источника"
+        );
+    }
+
     /// E1.3: сверка досье после оценки называет изменившийся источник поимённо,
     /// ловит и исчезновение, и появление источника, а перестановку источников
     /// без правки содержимого расхождением не считает (порядок в тексте досье
@@ -1523,6 +1712,7 @@ mod tests {
             sha256: sha.to_string(),
             role: InputRole::Reference,
             id: None,
+            status: None,
         };
         let pack = ContextPack {
             kind: PackKind::CodeVsSpine,
