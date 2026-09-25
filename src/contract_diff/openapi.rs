@@ -667,7 +667,10 @@ fn diff_schema_properties(
 
 #[cfg(test)]
 mod tests {
-    use super::SCHEMA_MAX_DEPTH;
+    use super::{
+        PathsMode, SCHEMA_MAX_DEPTH, effective_parameters, resolve_pointer, resolve_schema,
+        schema_paths,
+    };
     use crate::contract_diff::testkit::{BASE, diff_text};
 
     /// Блок path item `/v1/pets` в [`BASE`] (удаляется в тестах CD-001/CD-005).
@@ -1169,5 +1172,180 @@ paths:
         .await;
         assert!(out.is_error, "{}", out.content);
         assert!(out.content.contains("не OpenAPI 3.x"), "{}", out.content);
+    }
+
+    /// Версия `openapi` — ровно «3.x(.y)» с цифрами: «2.0», «3», «3.», «3.x»
+    /// отвергаются, иначе документ уходил бы в дифф как `OpenAPI` 3.x.
+    #[tokio::test]
+    async fn openapi_version_must_be_3xy_with_digits() {
+        let contract = |version: &str| {
+            format!("openapi: '{version}'\ninfo:\n  title: T\n  version: 1.0.0\npaths: {{}}\n")
+        };
+        for version in ["2.0", "3", "3.", "3.x", "3..0", "thirty"] {
+            let out = diff_text(
+                &contract(version),
+                &contract(version),
+                "old.yaml",
+                "new.yaml",
+            )
+            .await;
+            assert!(
+                out.is_error && out.content.contains("не OpenAPI 3.x"),
+                "версия «{version}» — не 3.x: {}",
+                out.content
+            );
+        }
+        for version in ["3.0.0", "3.0.3", "3.1", "3.10.2"] {
+            let out = diff_text(
+                &contract(version),
+                &contract(version),
+                "old.yaml",
+                "new.yaml",
+            )
+            .await;
+            assert!(!out.is_error, "версия «{version}» валидна: {}", out.content);
+            assert!(out.content.contains("Формат: openapi"), "{}", out.content);
+        }
+    }
+
+    /// Цепочка обязательных свойств длиной `levels`: на каждом уровне
+    /// свойство `c{k}` обязательно.
+    fn required_chain(levels: usize) -> serde_json::Value {
+        let mut node = serde_json::json!({"type": "object"});
+        for k in (0..levels).rev() {
+            let name = format!("c{}", k + 1);
+            let mut props = serde_json::Map::new();
+            props.insert(name.clone(), node);
+            node = serde_json::json!({
+                "type": "object",
+                "required": [name],
+                "properties": props,
+            });
+        }
+        node
+    }
+
+    /// Потолок обхода путей точен: ветка глубины [`SCHEMA_MAX_DEPTH`]
+    /// раскрывается, следующая — нет.
+    #[test]
+    fn schema_paths_stop_exactly_at_the_depth_limit() {
+        let doc = serde_json::json!({});
+        let paths = schema_paths(
+            &doc,
+            &required_chain(SCHEMA_MAX_DEPTH + 3),
+            PathsMode::Required,
+        );
+        let deepest = paths
+            .iter()
+            .map(|p| p.matches('.').count() + 1)
+            .max()
+            .expect("пути есть");
+        assert_eq!(
+            deepest,
+            SCHEMA_MAX_DEPTH + 1,
+            "сегментов в самом глубоком пути: {paths:?}"
+        );
+    }
+
+    /// Цепочка `$ref` раскрывается ровно до потолка: возвращается схема
+    /// на глубине [`SCHEMA_MAX_DEPTH`] + 1, а не на шаг раньше или позже.
+    #[test]
+    fn schema_ref_chain_stops_exactly_at_the_depth_limit() {
+        let mut schemas = serde_json::Map::new();
+        let levels = SCHEMA_MAX_DEPTH + 3;
+        for k in 0..levels {
+            let mut schema = serde_json::json!({"level": k});
+            if k + 1 < levels {
+                schema["$ref"] =
+                    serde_json::Value::String(format!("#/components/schemas/s{}", k + 1));
+            }
+            schemas.insert(format!("s{k}"), schema);
+        }
+        let doc = serde_json::json!({"components": {"schemas": schemas}});
+        let root = doc["components"]["schemas"]["s0"].clone();
+        let resolved = resolve_schema(&doc, &root, 0);
+        assert_eq!(
+            resolved.get("level").and_then(serde_json::Value::as_u64),
+            Some(SCHEMA_MAX_DEPTH as u64 + 1),
+            "раскрытие остановилось на потолке: {resolved}"
+        );
+    }
+
+    /// Вложенные `allOf` сливаются до потолка: свойства уровня
+    /// [`SCHEMA_MAX_DEPTH`] видны, следующего — нет.
+    #[test]
+    fn all_of_merge_stops_at_the_depth_limit() {
+        let levels = SCHEMA_MAX_DEPTH + 3;
+        let mut node = serde_json::json!({"type": "object"});
+        for k in (0..levels).rev() {
+            let mut props = serde_json::Map::new();
+            props.insert(format!("p{k}"), serde_json::json!({"type": "string"}));
+            node = serde_json::json!({
+                "type": "object",
+                "allOf": [node],
+                "properties": props,
+            });
+        }
+        let merged = resolve_schema(&serde_json::json!({}), &node, 0);
+        let props = merged
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .expect("properties");
+        // Слияние перекрывает собственные свойства схемы свойствами ветви:
+        // видно ровно то, что вернула самая глубокая раскрытая ветвь —
+        // уровень SCHEMA_MAX_DEPTH + 1.
+        assert!(
+            props.contains_key(&format!("p{}", SCHEMA_MAX_DEPTH + 1)),
+            "ветвь на потолке раскрыта: {props:?}"
+        );
+        assert!(
+            !props.contains_key(&format!("p{}", SCHEMA_MAX_DEPTH + 2)),
+            "глубже потолка ветвь не раскрывается: {props:?}"
+        );
+    }
+
+    /// `allOf` без `properties`/`required` не порождает пустых секций:
+    /// «пустой объект» и «секции нет» — разные состояния схемы.
+    #[test]
+    fn all_of_without_properties_does_not_invent_sections() {
+        let schema = serde_json::json!({"allOf": [{"type": "object"}]});
+        let merged = resolve_schema(&serde_json::json!({}), &schema, 0);
+        assert!(merged.get("properties").is_none(), "{merged}");
+        assert!(merged.get("required").is_none(), "{merged}");
+    }
+
+    /// JSON Pointer проходит по индексу массива (`#/a/0/b`).
+    #[test]
+    fn resolve_pointer_walks_array_index() {
+        let doc = serde_json::json!({"a": [{"b": 1}, {"b": 2}]});
+        assert_eq!(
+            resolve_pointer(&doc, "#/a/0/b"),
+            Some(&serde_json::json!(1))
+        );
+        assert_eq!(
+            resolve_pointer(&doc, "#/a/1/b"),
+            Some(&serde_json::json!(2))
+        );
+        assert_eq!(resolve_pointer(&doc, "#/a/2/b"), None);
+        assert_eq!(resolve_pointer(&doc, "#/a/x/b"), None);
+    }
+
+    /// Параметр остаётся нераскрытым `$ref` или вовсе не объектом — в карту
+    /// эффективных параметров он не попадает (иначе сравнение шло бы по
+    /// обрубку).
+    #[test]
+    fn ineffective_parameters_are_skipped() {
+        let doc = serde_json::json!({});
+        let path_item = serde_json::json!({
+            "parameters": [
+                {"$ref": "#/components/parameters/Unknown"},
+                "not-an-object",
+                {"name": "limit", "in": "query"}
+            ]
+        });
+        let op = serde_json::json!({});
+        let map = effective_parameters(&doc, &path_item, &op);
+        assert_eq!(map.len(), 1, "{map:?}");
+        assert!(map.contains_key(&("limit".to_string(), "query".to_string())));
     }
 }
