@@ -1690,4 +1690,365 @@ mod tests {
         assert!(out.is_error, "{}", out.content);
         assert!(!tmp.path().join("EVIDENCE.yaml").exists());
     }
+    // --- прямые проверки хэшей, служебных файлов и строк отчёта --------------
+
+    /// FNV-1a по эталонным векторам: смещение и простое для каждого байта.
+    #[test]
+    fn fnv1a64_matches_reference_vectors() {
+        assert_eq!(fnv1a64(b""), 0xcbf2_9ce4_8422_2325);
+        assert_eq!(fnv1a64(b"a"), 0xaf63_dc4c_8601_ec8c);
+        assert_ne!(fnv1a64(b"abc"), fnv1a64(b"abd"));
+    }
+
+    /// Дефолт алгоритма для бандлов старого формата — именно legacy: иначе
+    /// бандл без поля `hash_alg` не получил бы предупреждения о переупаковке.
+    #[test]
+    fn default_hash_alg_is_legacy() {
+        assert_eq!(default_hash_alg(), HASH_ALG_LEGACY);
+    }
+
+    /// Временные и служебные файлы: бэкапы, `.DS_Store` и редакторские
+    /// черновики — по расширению, без учёта регистра.
+    #[test]
+    fn is_transient_recognizes_each_form() {
+        for name in ["notes.md~", ".DS_Store", "draft.TMP", "x.swp", "y.SWO"] {
+            assert!(is_transient(name), "{name} — служебный");
+        }
+        for name in ["SPEC.md", "NOTES.txt", "data.json"] {
+            assert!(!is_transient(name), "{name} — не служебный");
+        }
+    }
+
+    /// Обход каталога: только файлы, рекурсивно, без `.git` и служебных.
+    #[test]
+    fn dir_files_returns_only_real_files_recursively() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path();
+        put(root, "a.md", "a");
+        put(root, "b.md~", "b");
+        put(root, "nested/c.md", "c");
+        put(root, ".git/config", "git");
+        let names: Vec<String> = dir_files(root)
+            .iter()
+            .map(|p| {
+                p.strip_prefix(root)
+                    .expect("внутри корня")
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect();
+        assert_eq!(names, vec!["a.md", "nested/c.md"], "{names:?}");
+    }
+
+    /// Хэш каталога считает суммарный размер всех файлов (а не только
+    /// последнего) и даёт sha256-дайджест.
+    #[test]
+    fn hash_artifact_sums_sizes_and_digests() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path();
+        put(root, "one.md", "12345");
+        put(root, "two.md", "123");
+        let (digest, size) = hash_artifact(root, HASH_ALG_SHA256).expect("хэш каталога");
+        assert_eq!(size, 8);
+        assert_eq!(digest.len(), 64, "{digest}");
+        // Тот же каталог, переданный иначе («.», с завершающим слэшем) — тот же хэш.
+        let (digest_dot, _) =
+            hash_artifact(&root.join("."), HASH_ALG_SHA256).expect("хэш через точку");
+        assert_eq!(digest, digest_dot, "путь-аргумент на вердикт не влияет");
+    }
+
+    /// Legacy-свёртка каталога: сверка с формулой по каждому файлу и
+    /// накопление размера.
+    #[test]
+    fn hash_artifact_legacy_matches_formula() {
+        use std::fmt::Write as _;
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path();
+        put(root, "a.md", "aa");
+        put(root, "b.md", "bbb");
+        let (digest, size) = hash_artifact_legacy(root).expect("legacy");
+        assert_eq!(size, 5);
+        let mut acc = String::new();
+        for name in ["a.md", "b.md"] {
+            let path = root.join(name);
+            let bytes = std::fs::read(&path).expect("read");
+            let _ = write!(acc, "{}:{:016x};", path.display(), fnv1a64(&bytes));
+        }
+        assert_eq!(digest, format!("{:016x}", fnv1a64(acc.as_bytes())));
+    }
+
+    /// Хэш одного файла legacy-алгоритмом — свёртка содержимого и его размер.
+    #[test]
+    fn hash_artifact_legacy_file_matches_content_hash() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let path = tmp.path().join("one.md");
+        std::fs::write(&path, "content").expect("write");
+        let (digest, size) = hash_artifact_legacy(&path).expect("legacy");
+        assert_eq!(size, 7);
+        assert_eq!(digest, format!("{:016x}", fnv1a64(b"content")));
+    }
+
+    /// `stub_file_of` называет проблемный файл: меньше порога — пустышка,
+    /// ровно порог с осмысленным текстом — нет; маркер-заглушка ловится и в
+    /// большом файле.
+    #[test]
+    fn stub_file_of_follows_threshold_strictly() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path();
+        let min = 10_u64;
+        put(root, "exact.md", &"x".repeat(min as usize));
+        assert!(
+            stub_file_of(root, min).is_none(),
+            "ровно порог — не пустышка"
+        );
+        std::fs::write(root.join("exact.md"), "x".repeat(min as usize - 1)).expect("write");
+        assert!(
+            stub_file_of(root, min).is_some(),
+            "меньше порога — пустышка"
+        );
+        std::fs::write(
+            root.join("exact.md"),
+            format!(
+                "{} TODO {}",
+                "y".repeat(min as usize),
+                "z".repeat(min as usize)
+            ),
+        )
+        .expect("write");
+        assert!(
+            stub_file_of(root, min).is_some(),
+            "маркер-заглушка видна и в большом файле"
+        );
+        // Файл — не каталог: адресного поиска нет.
+        let file = root.join("exact.md");
+        assert!(stub_file_of(&file, min).is_none());
+    }
+
+    /// Пустые значения и маркеры-заглушки поля A3.
+    #[test]
+    fn field_is_empty_recognizes_empty_and_placeholders() {
+        for value in ["", "   ", "—", "–", "-", "?", "TBD", "TODO", "нет", "n/a"] {
+            assert!(field_is_empty(value), "«{value}» — пустое");
+        }
+        assert!(!field_is_empty("Вариант Б: свой шлюз"));
+    }
+
+    /// Строка итога отчёта: полная форма или «PASS (N из M)»; половинчатая
+    /// форма машиной не читается.
+    #[test]
+    fn has_result_line_needs_complete_marker() {
+        assert!(has_result_line("Итог: PASS"));
+        assert!(has_result_line("  PASS (3 из 5)  "));
+        assert!(!has_result_line("PASS (3"));
+        assert!(!has_result_line("PASS 3 из 5"));
+        assert!(!has_result_line("FAIL — есть дефекты"));
+    }
+
+    /// Строка провала — любая из трёх форм, включая английскую.
+    #[test]
+    fn has_fail_line_recognizes_each_form() {
+        assert!(has_fail_line("Итог: FAIL"));
+        assert!(has_fail_line("fail"));
+        assert!(has_fail_line("FAIL — есть дефекты"));
+        assert!(!has_fail_line("PASS (3 из 5)"));
+    }
+
+    /// Прогресс бандла считается по манифесту: сколько обязательных ключей
+    /// маршрута уже описано.
+    #[test]
+    fn bundle_progress_counts_manifest_keys() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        put(dir, "PROBLEM.md", "проблема");
+        let (_bundle, _v) = pack(dir, Route::Fast).expect("pack");
+        let required = required_artifacts(Route::Fast);
+        // Ожидание считается по тому же манифесту: прогресс — сколько
+        // обязательных ключей маршрута в нём описано.
+        let text = std::fs::read_to_string(dir.join("EVIDENCE.yaml")).expect("манифест");
+        let bundle: EvidenceBundle = serde_yaml_ng::from_str(&text).expect("yaml");
+        let expected = required
+            .iter()
+            .filter(|(key, _)| bundle.items.iter().any(|i| &i.key == key))
+            .count();
+        assert!(
+            expected > 0 && expected < required.len(),
+            "фикстура неполная: {expected} из {}",
+            required.len()
+        );
+        assert_eq!(
+            bundle_progress(dir, Route::Fast),
+            Some(expected),
+            "прогресс по манифесту: {} обязательных ключей",
+            required.len()
+        );
+        // Каталог без манифеста — прогресса нет.
+        let empty = tmp.path().join("empty");
+        std::fs::create_dir_all(&empty).expect("mkdir");
+        assert!(bundle_progress(&empty, Route::Fast).is_none());
+    }
+    /// Порог размера строгий: ровно порог — артефакт написан, на байт меньше —
+    /// пустышка.
+    #[test]
+    fn semantic_size_threshold_is_strict() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        let cfg = crate::config::EvidenceConfig::default();
+        let min = cfg.min_bytes as usize;
+        let artifact = dir.join("SPEC.md");
+        std::fs::write(&artifact, "s".repeat(min)).expect("write");
+        let (findings, _notes) = semantic_check(dir, "spec", &artifact, &cfg, "error");
+        assert!(
+            !findings.iter().any(|f| f.rule == "evidence_stub"),
+            "ровно порог — не пустышка: {findings:?}"
+        );
+        std::fs::write(&artifact, "s".repeat(min - 1)).expect("write");
+        let (findings, _notes) = semantic_check(dir, "spec", &artifact, &cfg, "error");
+        assert!(
+            findings.iter().any(|f| f.rule == "evidence_stub"),
+            "меньше порога — пустышка: {findings:?}"
+        );
+    }
+
+    /// Заглушка A3 не разбирается по полям: у неё один честный диагноз
+    /// (не написан), а не пять «поле не заполнено».
+    #[test]
+    fn semantic_stub_a3_is_not_checked_field_by_field() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        let cfg = crate::config::EvidenceConfig::default();
+        let a3 = dir.join("DECISION.md");
+        std::fs::write(&a3, "TODO").expect("write");
+        let (findings, _notes) = semantic_check(dir, "decision_a3", &a3, &cfg, "error");
+        assert!(
+            findings.iter().any(|f| f.rule == "evidence_stub"),
+            "заглушка названа: {findings:?}"
+        );
+        assert!(
+            !findings.iter().any(|f| f.rule == "a3_not_signed"),
+            "поля заглушки не разбираются: {findings:?}"
+        );
+    }
+
+    /// Подпись A3 называется ровно один раз — по полю `decided_by`, а не по
+    /// каждому заполненному полю.
+    #[test]
+    fn semantic_a3_signature_note_names_only_decided_by() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        let cfg = crate::config::EvidenceConfig::default();
+        put_complete_critical(dir);
+        let a3 = dir.join("DECISION.md");
+        let (findings, notes) = semantic_check(dir, "decision_a3", &a3, &cfg, "error");
+        assert!(
+            !findings.iter().any(|f| f.rule == "a3_not_signed"),
+            "полный A3 подписан: {findings:?}"
+        );
+        let signatures: Vec<&String> = notes.iter().filter(|n| n.contains("подпись A3")).collect();
+        assert_eq!(signatures.len(), 1, "подпись названа один раз: {notes:?}");
+    }
+
+    /// Срок A3 «сегодня» — ещё не просрочен: сравнение строгое.
+    #[test]
+    fn semantic_a3_expiry_today_is_not_expired() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        let cfg = crate::config::EvidenceConfig::default();
+        put_complete_critical(dir);
+        let today = chrono::Local::now().date_naive();
+        let text = std::fs::read_to_string(dir.join("DECISION.md")).expect("read");
+        let text = text
+            .lines()
+            .map(|l| {
+                if l.contains("expiry") {
+                    format!("- **expiry**: {today}\n")
+                } else {
+                    format!("{l}\n")
+                }
+            })
+            .collect::<String>();
+        std::fs::write(dir.join("DECISION.md"), text).expect("write");
+        let a3 = dir.join("DECISION.md");
+        let (findings, _notes) = semantic_check(dir, "decision_a3", &a3, &cfg, "error");
+        assert!(
+            !findings.iter().any(|f| f.rule == "a3_expired"),
+            "срок истекает сегодня — не просрочен: {findings:?}"
+        );
+    }
+
+    /// Отчёт-заглушка не требует строки итога: диагноз уже назван — «не
+    /// написан», и второго требования к тому же файлу быть не должно.
+    #[test]
+    fn semantic_stub_report_does_not_require_result_line() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        let cfg = crate::config::EvidenceConfig::default();
+        let report = dir.join("VALIDATION.md");
+        std::fs::write(&report, "TODO").expect("write");
+        let (findings, _notes) = semantic_check(dir, "validation", &report, &cfg, "warn");
+        assert!(
+            findings.iter().any(|f| f.rule == "evidence_stub"),
+            "заглушка названа: {findings:?}"
+        );
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.message.contains("нет строки итога")),
+            "строку итога у заглушки не требуем: {findings:?}"
+        );
+    }
+
+    /// Заглушка репетиции отката не разбирается как отчёт: у неё нет ни
+    /// списка шагов, ни якоря, и требовать их — шум.
+    #[test]
+    fn semantic_stub_rehearsal_is_not_parsed_as_report() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        let cfg = crate::config::EvidenceConfig::default();
+        // Рядом лежит отчёт-заготовка: без охранной ветки её разбор дал бы
+        // находку `rehearsal_empty` поверх честного «не написан».
+        put(
+            dir,
+            "REHEARSAL.json",
+            r#"{"kind":"rollback_rehearsal","gate":"A4","passed":true,
+                    "baseline_commit":"abc123","rehearsed_at":"2026-09-19T10:00:00Z",
+                    "duration_secs":1.5,"steps":[],"verify":null,
+                    "log":["репетиция отката прошла"]}"#,
+        );
+        let rehearsal = dir.join("ROLLBACK-REHEARSAL.md");
+        std::fs::write(&rehearsal, "TODO").expect("write");
+        let (findings, _notes) =
+            semantic_check(dir, "rollback_rehearsal", &rehearsal, &cfg, "error");
+        assert!(
+            !findings.iter().any(|f| f.rule == "rehearsal_empty"),
+            "заглушку не разбираем как отчёт: {findings:?}"
+        );
+        assert!(
+            findings.iter().any(|f| f.rule == "evidence_stub"),
+            "заглушка названа: {findings:?}"
+        );
+        let extra: Vec<&SemanticFinding> = findings
+            .iter()
+            .filter(|f| f.rule != "evidence_stub")
+            .collect();
+        assert!(extra.is_empty(), "лишних требований нет: {extra:?}");
+    }
+
+    /// Обязательные артефакты маршрута, которых нет в манифесте, попадают в
+    /// `missing` поимённо.
+    #[test]
+    fn verify_lists_missing_required_artifacts() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        put(dir, "PROBLEM.md", &body("Проблема"));
+        pack(dir, Route::Critical).expect("pack");
+        let v = verify(dir).expect("verify");
+        assert!(!v.passed);
+        for key in ["decision_a3", "spine", "adversarial_review"] {
+            assert!(
+                v.missing.contains(&key.to_string()),
+                "{key} назван: {:?}",
+                v.missing
+            );
+        }
+    }
 }
