@@ -6,8 +6,8 @@ MCP-сервер, разложил скиллы, подключил хуки-г�
 Code, поэтому все шаги проверены живьём на qwen-code (0.0.5 и 0.24.0).
 
 > **Версия.** Инструкция сверена с последним релизом на GitHub —
-> **v0.3.10** (2026-09-25); в `main` уже идёт 0.3.11, но установочные ссылки
-> ниже ведут на `releases/latest`, то есть ровно на опубликованный релиз.
+> **v0.3.11** (2026-09-27); установочные ссылки ниже ведут на
+> `releases/latest`, то есть ровно на опубликованный релиз.
 > Релиз публикует **две редакции × четыре платформы** + сводный `SHA256SUMS`
 > (см. Часть 0). Что из релиза важно именно этому сценарию:
 >
@@ -21,6 +21,10 @@ Code, поэтому все шаги проверены живьём на qwen-c
 >   поле `archive`. Для записи подключайте сервер как `--rw=reports`.
 > - **0.3.10** — `doctor` проверяет задачи cron; `rubric_verify` больше не
 >   затирает прошлый отчёт по тому же субъекту.
+> - **0.3.11** — `ALTER TABLE … ALTER COLUMN … SET DATA TYPE` снова
+>   применяется: смена типа колонки в DDL больше не проходит незамеченной
+>   (несовместимая — `CD-S03`, exit 1); джоба `cargo-mutants` в Nightly
+>   больше не падает из-за невалидного номера шарда.
 
 > **Нативная поддержка.** У `arch-be connect` есть хост `gigacode`
 > (алиасы: `giga-code`, `gcode`): каталог настроек определяется
@@ -64,8 +68,9 @@ Spine публикует готовые бинари **двух редакций
 | Windows x86_64 | `arch-be-core-windows-x86_64.exe` | `arch-be-windows-x86_64.exe` |
 
 **Какая редакция нужна.** В GigaCode думает сам GigaCode, а Spine нужен как
-«орган»: MCP-сервер + CLI. Это **Core** — без своей LLM и без TUI (~10 МБ).
-Полная редакция **Harness** (~19 МБ) добавляет TUI и собственный агентный
+«орган»: MCP-сервер + CLI. Это **Core** — без своей LLM и без TUI
+(~16 МБ на Linux x86_64). Полная редакция **Harness** (~24 МБ) добавляет TUI
+и собственный агентный
 цикл: берите, только если хотите работать и в самом Spine. Обе редакции —
 одна кодовая база (различие лишь в том, кто «думает»), версии не расходятся.
 
@@ -89,7 +94,7 @@ $env:PROCESSOR_ARCHITECTURE   # Windows: AMD64 → windows-x86_64
 ```bash
 curl -L -o arch-be https://github.com/romannekrasovaillm/spine-bank/releases/latest/download/arch-be-core-linux-x86_64
 chmod +x arch-be && mkdir -p ~/.local/bin && mv arch-be ~/.local/bin/
-arch-be --version          # ожидается 0.3.10
+arch-be --version          # ожидается 0.3.11
 ```
 
 **Установка, Windows (PowerShell):**
@@ -143,7 +148,7 @@ curl.exe -L -o arch-be.exe https://github.com/romannekrasovaillm/spine-bank/rele
 ```text
 Разверни Spine (arch-be) в этом проекте по следующей инструкции.
 (проверено прогонами на qwen-code 0.0.5 и 0.24.0 — GigaCode CLI его форк;
- последний релиз Spine на GitHub — v0.3.10)
+ последний релиз Spine на GitHub — v0.3.11)
 Репозиторий Spine (если он есть локально): <ПУТЬ_К_КЛОНУ, напр. ~/spine-bank>
 
 ВАЖНО: пути `.qwen/settings.json` и `.qwen/skills/` ниже — от Qwen Code.
@@ -179,7 +184,7 @@ curl.exe -L -o arch-be.exe https://github.com/romannekrasovaillm/spine-bank/rele
    - ВАРИАНТ В (закрытый контур, офлайн-бандл): распакуй
      spine-offline-*.tar.gz и выполни ./install.sh из него (бинарь, движок
      Archify, init — всё офлайн; целостность проверяется по SHA256SUMS).
-   - Проверь: `arch-be --version` (ожидается 0.3.10).
+   - Проверь: `arch-be --version` (ожидается 0.3.11).
 
 2. MCP-сервер + скиллы (project-level, НЕ затирай существующее — мердж):
    - Выполни `arch-be connect gigacode --rw=reports` в корне проекта (если
@@ -338,7 +343,7 @@ Code — `/mcp__spine__spine-architect-review`; qwen-code 0.24 промпты
 [docs/HARNESSES.md](HARNESSES.md). Подробное подключение всех хостов —
 в [docs/CONNECT.md](CONNECT.md).
 
-## Нюансы релиза 0.3.7–0.3.10, важные при работе из GigaCode
+## Нюансы релиза 0.3.7–0.3.11, важные при работе из GigaCode
 
 - **`command_succeeds` под MCP не исполняется по умолчанию** (0.3.7,
   ADR-053). `fitness_check` вернёт `untrusted_skipped`, а гейт — `INCOMPLETE`
@@ -362,6 +367,12 @@ Code — `/mcp__spine__spine-architect-review`; qwen-code 0.24 промпты
   квалификация — `arch-be rubric qualify <рубрика> --set <набор>`.
 - **`doctor` проверяет cron** (0.3.10): называет задачи `cron.toml`, файлов
   которых нет, а не ограничивается наличием файла расписания.
+- **Смена типа колонки в DDL снова видна контуру** (0.3.11): каноническая
+  форма Postgres `ALTER TABLE … ALTER COLUMN … SET DATA TYPE` применяется
+  (раньше оператор молча игнорировался, и такой дифф давал PASS); короткие
+  формы (`ADD`/`DROP`/`ALTER <колонка>`) и MySQL-форма `MODIFY` работают.
+  Несовместимая смена типа в диффе — находка `CD-S03` (error, exit 1): кейс,
+  зелёный из-за слепоты парсера, станет красным — это и есть цель правки.
 
 ## Если что-то пошло не так
 
