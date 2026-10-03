@@ -104,13 +104,21 @@ warn-по-умолчанию либо за флагом, краснить чуж
       нарушающий код, — красный итог с control_plane_tampered. — A4 + A4.1b
       (пин MANIFEST на входе): `runner.rs` пост-гейт, `manifest_tampered`;
       RA-6 воспроизведён (до — код 0 при нарушении, после — красный).
-- [ ] B1: тестовый тег на коммите с красной джобой не создаёт GitHub Release.
-- [ ] B2: sbom-<edition>.cyclonedx.json и SHA256SUMS приложены к релизу
-      и соответствуют опубликованным бинарям.
-- [ ] B4/B5: actions по SHA, permissions, cargo deny, CODEOWNERS — под
-      фитнес-правилами dogfood (сам CONSTRAINTS.yaml).
+- [x] B1: тестовый тег на коммите с красной джобой не создаёт GitHub Release.
+      — `ci-green` (fail-closed, check-runs API, 11 обязательных джоб = ci.yml);
+      эмпирика — на теге 0.3.12 (структура и имена проверены независимо).
+- [x] B2: sbom-<edition>.cyclonedx.json и SHA256SUMS приложены к релизу
+      и соответствуют опубликованным бинарям. — SBOM в релизной матрице
+      (linux-x86_64 на редакцию), хэши SBOM в SHA256SUMS, `--locked` в CI.
+- [x] B4/B5: actions по SHA, permissions, cargo deny, CODEOWNERS — под
+      фитнес-правилами dogfood (сам CONSTRAINTS.yaml). — C-35…C-43, dogfood
+      59/0 PASS; 56/56 пинов сверены со списком архитектора.
 - [ ] C1–C3: plugins.lock, env_allow на Critical, составляющая secrets;
-      ключ в коде → `secret_literal` в пост-гейте.
-- [ ] ADR-055 (A5), ADR-056 (B3), ADR-057 (C4) приняты человеком;
-      D1–D4 — ADR или docs/experiments/, код за флагами.
-- [ ] CHANGELOG: раздел «Что может покраснеть» перечисляет новые находки.
+      ключ в коде → `secret_literal` в пост-гейте. — волна C, НЕ НАЧАТА.
+- [~] ADR-055 (A5), ADR-056 (B3), ADR-057 (C4) приняты человеком;
+      D1–D4 — ADR или docs/experiments/, код за флагами. — ADR-055
+      Accepted 2026-10-03 (вариант (а)); ADR-056 Accepted 2026-10-03
+      (вариант (а) GitHub-native SLSA); ADR-057 (C4) — не заводился,
+      волна C не начата.
+- [x] CHANGELOG: раздел «Что может покраснеть» перечисляет новые находки.
+      — [0.3.12] 2026-10-03: находки волн A и B.
