@@ -406,7 +406,18 @@ fn delta_mentions(body: &str, path: &str) -> Option<String> {
 /// Пустой список — путь не покрыт ни одной активной дельтой.
 #[must_use]
 pub fn mentioning_deltas(repo: &Path, path: &str) -> Vec<String> {
-    let mut names = Vec::new();
+    mentioning_delta_paths(repo, path)
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect()
+}
+
+/// То же, что [`mentioning_deltas`], но с путями `DELTA.md`: гейту (A5,
+/// ADR-055) нужно проверить, не появилась ли легализующая дельта в диапазоне
+/// прогона исполнителя, — имя без пути этот вопрос не решает.
+#[must_use]
+pub fn mentioning_delta_paths(repo: &Path, path: &str) -> Vec<(String, PathBuf)> {
+    let mut out = Vec::new();
     for d in list(repo) {
         if d.status != DeltaStatus::Proposed {
             continue;
@@ -415,10 +426,10 @@ pub fn mentioning_deltas(repo: &Path, path: &str) -> Vec<String> {
             continue;
         };
         if delta_mentions(&body, path).is_some() {
-            names.push(d.name);
+            out.push((d.name, d.path));
         }
     }
-    names
+    out
 }
 
 /// Первая непустая строка stderr git без префикса «fatal:» — краткая причина

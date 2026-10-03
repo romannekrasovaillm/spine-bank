@@ -374,6 +374,12 @@ pub struct GateOptions {
     /// Critical уходит человеку). `None` — библиотечный вызов без маршрута:
     /// поведение как на Fast (warn).
     pub route: Option<Route>,
+    /// Диапазон прогона исполнителя (A5, ADR-055): base-ref диапазона
+    /// `base..HEAD` изолированного worktree. `None` (дефолт) — обычный гейт:
+    /// поведение A1–A4, без проверки происхождения одобрений. `Some(base)` —
+    /// ADR/override/дельта, впервые появившиеся или изменённые в диапазоне,
+    /// ослабления не узаконивают (`self_approved`).
+    pub agent_range: Option<String>,
 }
 
 impl GateOptions {
@@ -394,6 +400,7 @@ impl GateOptions {
             decision_policy: cfg.gate.decision_policy.clone(),
             exec: crate::cmd_trust::ExecPolicy::default(),
             route: None,
+            agent_range: None,
         }
     }
 }
