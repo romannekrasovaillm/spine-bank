@@ -179,6 +179,45 @@ impl PostGate {
         }
     }
 
+    /// Манифест пакета изменён во время прогона (A4.1b): база сверки и пины
+    /// контрольной плоскости пришли бы из проверяемого репозитория, а не из
+    /// выдачи, — проверяемый управлял бы проверкой. Красный независимо от
+    /// остальных составляющих: судить по подменённым базе и пинам нельзя.
+    fn tampered(before: &str, now: &str) -> Self {
+        Self {
+            verdict: PostGateVerdict::Fail,
+            exit_code: None,
+            base: None,
+            summary: "MANIFEST.json изменён во время прогона — база и пины пост-гейта \
+                      недостоверны; вернуть пакет выдачи (пересоздать handoff)"
+                .to_string(),
+            findings: vec![format!(
+                "[manifest] manifest_tampered: MANIFEST.json изменён во время прогона \
+                 ({} → {}) — вернуть пакет выдачи (пересоздать handoff)",
+                short_hash(before),
+                short_hash(now)
+            )],
+        }
+    }
+
+    /// Манифест пакета удалён во время прогона (A4.1b): без базы сверки
+    /// пост-гейт стал бы SKIP — то же уклонение от проверки, что и подмена.
+    fn manifest_removed(before: &str) -> Self {
+        Self {
+            verdict: PostGateVerdict::Fail,
+            exit_code: None,
+            base: None,
+            summary: "MANIFEST.json удалён во время прогона — база и пины пост-гейта \
+                      недостоверны; вернуть пакет выдачи (пересоздать handoff)"
+                .to_string(),
+            findings: vec![format!(
+                "[manifest] manifest_tampered: MANIFEST.json удалён во время прогона \
+                 (было {}) — вернуть пакет выдачи (пересоздать handoff)",
+                short_hash(before)
+            )],
+        }
+    }
+
     /// Сборка итога из отчёта гейта: вердикт, exit-код, сводка, находки.
     fn from_report(report: &crate::gate::GateReport, base: String) -> Self {
         use crate::gate::GateOutcome;
@@ -219,6 +258,19 @@ impl PostGate {
 /// у команд составляющих; карточке фонового задания и ответу MCP хватает
 /// главных строк).
 const POST_GATE_MAX_FINDINGS: usize = 10;
+
+/// Путь `MANIFEST.json` handoff-пакета в репозитории прогона (A4.1b: тот же
+/// файл, что читает [`post_gate_base`], — снимается до запуска и сверяется
+/// после).
+fn manifest_path(repo: &Path) -> PathBuf {
+    repo.join(HANDOFF_DIR).join("MANIFEST.json")
+}
+
+/// Короткая метка хэша (первые 12 hex-символов) для находок о подмене:
+/// полный SHA-256 в сводке шумен, а различать снимки хватает и префикса.
+fn short_hash(hash: &str) -> &str {
+    &hash[..hash.len().min(12)]
+}
 
 /// Главные находки пост-гейта: error-строки FAIL-составляющих в порядке
 /// прогона; если error-строк нет (FAIL по сбою выполнения), берём остальные.
@@ -394,6 +446,15 @@ pub async fn run_harness(
         cmd.stdin(Stdio::null());
     }
 
+    // A4.1b: снимок MANIFEST.json ДО запуска исполнителя — проверяемый не
+    // управляет базой проверки. Отсутствие файла на старте — тоже факт:
+    // манифест, появившийся в прогоне, базой сверки не становится.
+    let manifest_before = if cfg.post_gate {
+        crate::hash::sha256_file(&manifest_path(repo))
+    } else {
+        None
+    };
+
     let started = Instant::now();
     let mut child = cmd.spawn().map_err(|e| {
         if e.kind() == ErrorKind::NotFound {
@@ -507,7 +568,7 @@ pub async fn run_harness(
     // Только по завершённому прогону: прерванный уже красный по termination,
     // судить промежуточное дерево нечем.
     let post_gate = if termination == Termination::Completed {
-        run_post_gate(repo, cfg).await
+        run_post_gate(repo, cfg, manifest_before).await
     } else {
         None
     };
@@ -578,9 +639,31 @@ fn post_gate_base(repo: &Path) -> PostGateBase {
 ///
 /// `None` — пост-гейт отключён адаптером (`post_gate = false`); предупреждение
 /// печатает [`execute_run`].
-async fn run_post_gate(repo: &Path, cfg: &CodingHarnessConfig) -> Option<PostGate> {
+///
+/// `manifest_before` — sha256 `MANIFEST.json`, снятый ДО запуска исполнителя
+/// (A4.1b). Манифест задаёт базу сверки и пины контрольной плоскости: если
+/// его не было на старте — сверять не с чем (SKIP, в т.ч. когда исполнитель
+/// создал манифест в прогоне); если он изменён/удалён — вердикт `Fail`,
+/// независимо от остальных составляющих.
+async fn run_post_gate(
+    repo: &Path,
+    cfg: &CodingHarnessConfig,
+    manifest_before: Option<String>,
+) -> Option<PostGate> {
     if !cfg.post_gate {
         return None;
+    }
+    // Нет манифеста на старте — нет доверенной базы: исполнитель не назначает
+    // её сам, пост-гейт пропускается (в т.ч. если манифест появился в прогоне).
+    let Some(before) = manifest_before else {
+        return Some(PostGate::skipped("нет handoff-пакета — пост-гейт пропущен"));
+    };
+    // Сверка манифеста — ДО разбора базы и прогона гейта: подмена обесценивает
+    // и базу, и пины, по которым гейт судил бы результат.
+    match crate::hash::sha256_file(&manifest_path(repo)) {
+        Some(now) if now == before => {}
+        Some(now) => return Some(PostGate::tampered(&before, &now)),
+        None => return Some(PostGate::manifest_removed(&before)),
     }
     let base = match post_gate_base(repo) {
         PostGateBase::Absent => {
@@ -2370,6 +2453,48 @@ mod tests {
         }
     }
 
+    /// Заглушка-исполнитель, подменяющая `MANIFEST.json`: своя база и пустые
+    /// пины `control_plane` под своё состояние (A4.1b). Пишет безобидный код —
+    /// прочие составляющие гейта PASS, красный обязан прийти от сверки.
+    fn a4_tamper_manifest_cfg() -> CodingHarnessConfig {
+        CodingHarnessConfig {
+            binary: "sh".into(),
+            args: vec![
+                "-c".into(),
+                "printf '%s' '{\"baseline_commit\":\"deadbeefdeadbeef\",\"model\":\"stub\",\
+                 \"control_plane\":{}}' > .arch-handoff/MANIFEST.json; \
+                 echo feature > feature.txt; git add -A; git commit -qm sneaky; \
+                 echo '{\"status\": \"complete\"}'"
+                    .into(),
+            ],
+            prompt_mode: PromptMode::Stdin,
+            timeout_secs: 30,
+            idle_timeout_secs: 0,
+            ..CodingHarnessConfig::default()
+        }
+    }
+
+    /// Заглушка-исполнитель, создающая `MANIFEST.json` в прогоне (на старте
+    /// его не было): база не назначена выдачей — пост-гейт обязан остаться
+    /// SKIP, а не поверить манифесту исполнителя (A4.1b).
+    fn a4_add_manifest_cfg() -> CodingHarnessConfig {
+        CodingHarnessConfig {
+            binary: "sh".into(),
+            args: vec![
+                "-c".into(),
+                "printf '%s' '{\"baseline_commit\":\"cafecafecafecafe\",\"model\":\"stub\",\
+                 \"control_plane\":{}}' > .arch-handoff/MANIFEST.json; \
+                 echo feature > feature.txt; git add -A; git commit -qm add-manifest; \
+                 echo '{\"status\": \"complete\"}'"
+                    .into(),
+            ],
+            prompt_mode: PromptMode::Stdin,
+            timeout_secs: 30,
+            idle_timeout_secs: 0,
+            ..CodingHarnessConfig::default()
+        }
+    }
+
     /// RA-6 после фикса: заглушка удаляет Stop-хук и пишет PAN — пост-гейт
     /// красный (`control_plane_tampered` + `no_pan_in_logs`), итог прогона
     /// ошибка, хотя исполнитель вернул код 0 / `status=complete`.
@@ -2422,6 +2547,99 @@ mod tests {
         let out = execute_run("stub", &cfg, &repo, "задача", String::new()).await;
         assert!(!out.is_error, "{}", out.content);
         assert!(out.content.contains("Пост-гейт: PASS"), "{}", out.content);
+    }
+
+    /// A4.1b: заглушка переписывает `MANIFEST.json` (своя база + пины под своё
+    /// состояние) при безобидном коде — пост-гейт красный с `manifest_tampered`
+    /// независимо от того, что остальные составляющие PASS. Проверяемый не
+    /// управляет базой проверки.
+    #[tokio::test]
+    async fn post_gate_red_on_manifest_tampering() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        a4_sandbox(&repo, true);
+        let cfg = a4_tamper_manifest_cfg();
+        let run = run_harness("stub", &cfg, &repo, "задача")
+            .await
+            .expect("run");
+        assert_eq!(run.exit_code, Some(0), "исполнитель завершился кодом 0");
+        let pg = run
+            .post_gate
+            .expect("пост-гейт обязан отработать (пакет был на старте)");
+        assert_eq!(pg.verdict, PostGateVerdict::Fail, "{pg:?}");
+        assert!(pg.verdict.is_red());
+        assert!(
+            pg.summary.contains("MANIFEST.json"),
+            "сводка о подмене: {}",
+            pg.summary
+        );
+        let joined = pg.findings.join("\n");
+        assert!(joined.contains("manifest_tampered"), "{joined}");
+        assert!(joined.contains("пересоздать handoff"), "{joined}");
+
+        // Итог для оркестратора — ошибка. Свежая песочница: повторный прогон
+        // той же заглушки перезаписал бы манифест идентично, и подмена не
+        // отличалась бы от снимка.
+        let repo2 = tmp.path().join("repo2");
+        a4_sandbox(&repo2, true);
+        let out = execute_run("stub", &cfg, &repo2, "задача", String::new()).await;
+        assert!(out.is_error, "{}", out.content);
+        assert!(out.content.contains("Пост-гейт: FAIL"), "{}", out.content);
+        assert!(out.content.contains("manifest_tampered"), "{}", out.content);
+    }
+
+    /// A4.1b: заглушка не трогает `MANIFEST.json` — находки `manifest_tampered`
+    /// нет, вердикт прежний (без тамперинга поведение не изменилось).
+    #[tokio::test]
+    async fn post_gate_no_tamper_finding_when_manifest_untouched() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        a4_sandbox(&repo, true);
+        let cfg = a4_clean_cfg();
+        let run = run_harness("stub", &cfg, &repo, "задача")
+            .await
+            .expect("run");
+        let pg = run.post_gate.expect("пост-гейт отработал");
+        assert_eq!(pg.verdict, PostGateVerdict::Pass, "{pg:?}");
+        assert!(
+            !pg.findings.iter().any(|f| f.contains("manifest_tampered")),
+            "ложная находка о подмене: {:?}",
+            pg.findings
+        );
+    }
+
+    /// A4.1b: манифеста не было ДО запуска, исполнитель создал его в прогоне —
+    /// это не тамперинг и не база: пост-гейт остаётся SKIP (нет доверенной
+    /// базы сверки), пометка о подмене не нужна.
+    #[tokio::test]
+    async fn post_gate_skips_when_manifest_appears_mid_run() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        a4_sandbox(&repo, true);
+        std::fs::remove_file(repo.join(".arch-handoff/MANIFEST.json")).expect("rm manifest");
+        let cfg = a4_add_manifest_cfg();
+        let run = run_harness("stub", &cfg, &repo, "задача")
+            .await
+            .expect("run");
+        assert!(
+            repo.join(".arch-handoff/MANIFEST.json").is_file(),
+            "исполнитель создал манифест в прогоне"
+        );
+        let pg = run.post_gate.expect("вердикт с пометкой SKIP");
+        assert_eq!(pg.verdict, PostGateVerdict::Skipped, "{pg:?}");
+        assert!(!pg.verdict.is_red());
+        assert!(
+            !pg.findings.iter().any(|f| f.contains("manifest_tampered")),
+            "появление манифеста в прогоне — не тамперинг: {:?}",
+            pg.findings
+        );
+        // Итог прогона — не ошибка (SKIP не красный). Свежая песочница:
+        // во второй прогон той же заглушки манифест уже был бы на старте.
+        let repo2 = tmp.path().join("repo2");
+        a4_sandbox(&repo2, true);
+        std::fs::remove_file(repo2.join(".arch-handoff/MANIFEST.json")).expect("rm manifest");
+        let out = execute_run("stub", &cfg, &repo2, "задача", String::new()).await;
+        assert!(!out.is_error, "{}", out.content);
     }
 
     /// Отключение адаптером: вердикта нет (None), предупреждение — в выводе.
