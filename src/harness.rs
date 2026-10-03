@@ -687,6 +687,10 @@ async fn run_post_gate(
     // изменил ОТНОСИТЕЛЬНО выдачи пакета.
     let repo_owned = repo.to_path_buf();
     let base_owned = base.clone();
+    // A5 (ADR-055): база сверки — он же диапазон прогона исполнителя
+    // (`baseline_commit..HEAD`). ADR, override и дельты, появившиеся или
+    // изменённые в нём, ослабления не узаконивают (`self_approved`).
+    let range_owned = base.clone();
     let gate = tokio::task::spawn_blocking(move || {
         // Пороги маршрутов — дефолтные: у `run_harness` нет `Config` (он
         // получает только адаптер), а пост-гейт обязан быть детерминирован
@@ -695,6 +699,10 @@ async fn run_post_gate(
             .significance
             .limits()
             .unwrap_or((1, 4));
+        let options = crate::gate::GateOptions {
+            agent_range: Some(range_owned),
+            ..crate::gate::GateOptions::default()
+        };
         crate::gate::run_opts(
             &repo_owned,
             None,
@@ -702,7 +710,7 @@ async fn run_post_gate(
             None,
             limits,
             &crate::gate::GateRequirements::default(),
-            &crate::gate::GateOptions::default(),
+            &options,
         )
     });
     match tokio::time::timeout(Duration::from_secs(timeout_secs), gate).await {
@@ -2836,5 +2844,119 @@ mod tests {
             );
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
+    }
+
+    // --- A5: самоодобрение изнутри диапазона прогона (ADR-055) --------------
+
+    /// Заглушка A5: файлы сценария уже разложены в песочнице — исполнитель
+    /// фиксирует их одним коммитом (так работа и попадает в диапазон
+    /// `baseline_commit..HEAD` пост-гейта).
+    fn a5_commit_cfg() -> CodingHarnessConfig {
+        CodingHarnessConfig {
+            binary: "sh".into(),
+            args: vec![
+                "-c".into(),
+                "git add -A; git commit -qm ra7; echo '{\"status\": \"complete\"}'".into(),
+            ],
+            prompt_mode: PromptMode::Stdin,
+            timeout_secs: 30,
+            idle_timeout_secs: 0,
+            ..CodingHarnessConfig::default()
+        }
+    }
+
+    /// Дата override в пределах горизонта (12 мес.): сегодня + 6 месяцев.
+    fn a5_within_horizon() -> String {
+        (chrono::Local::now() + chrono::Duration::days(182))
+            .format("%Y-%m-%d")
+            .to_string()
+    }
+
+    /// A5 (ADR-055), сценарий RA-7 дословно через пост-гейт: исполнитель
+    /// создаёт НАСТОЯЩИЙ Accepted ADR-900, override (горизонт в пределах),
+    /// ослабляет пакетный реестр (error→warn), пишет PAN в код и свою дельту
+    /// `relax3`. Пост-гейт (диапазон `baseline..HEAD`) красный независимо от
+    /// кода возврата исполнителя: `self_approved` + `rule_weakened`; итог —
+    /// ошибка. До фикса тот же сценарий был зелёным (оба канала
+    /// самоодобрения открыты).
+    #[tokio::test]
+    async fn post_gate_self_approved_on_real_adr_and_override_ra7() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        let base = a4_sandbox(&repo, true);
+        write_file(
+            &repo.join("docs/adr/ADR-900-real.md"),
+            "# ADR-900. Настоящее решение\n\n- Status: Accepted\n\n## Context\n\n\
+             создан исполнителем\n",
+        );
+        write_file(
+            &repo.join(".arch-handoff/CONSTRAINTS.yaml"),
+            &format!(
+                "rules:\n  - id: X-1\n    name: no_pan_in_logs\n    type: must_not_contain\n    \
+                 glob: \"src/**/*.rs\"\n    pattern: \"PAN=\"\n    severity: warn\n\
+                 overrides:\n  - rule: X-1\n    adr: ADR-900\n    until: \"{}\"\n",
+                a5_within_horizon()
+            ),
+        );
+        write_file(
+            &repo.join("changes/relax3/DELTA.md"),
+            "# Дельта relax3\n\nПравим .arch-handoff/CONSTRAINTS.yaml: ослабление по ADR-900.\n",
+        );
+        write_file(
+            &repo.join("src/a.rs"),
+            "fn main() { log(\"PAN=4111111111111111\"); }\n",
+        );
+        let cfg = a5_commit_cfg();
+        let run = run_harness("stub", &cfg, &repo, "задача")
+            .await
+            .expect("run");
+        assert_eq!(run.exit_code, Some(0), "исполнитель завершился кодом 0");
+        let pg = run
+            .post_gate
+            .expect("пост-гейт обязан отработать (пакет есть)");
+        assert_eq!(pg.verdict, PostGateVerdict::Fail, "{pg:?}");
+        assert_eq!(pg.base.as_deref(), Some(base.as_str()));
+        let joined = pg.findings.join("\n");
+        assert!(joined.contains("self_approved"), "{joined}");
+        assert!(joined.contains("rule_weakened"), "{joined}");
+        let out = execute_run("stub", &cfg, &repo, "задача", String::new()).await;
+        assert!(out.is_error, "{}", out.content);
+        assert!(out.content.contains("self_approved"), "{}", out.content);
+        println!("RA-7 после фикса:\n{}", out.content);
+    }
+
+    /// A5 (ADR-055), канал дельт: исполнитель правит пакетный реестр после
+    /// выдачи пакета и оформляет правку СВОЕЙ дельтой, упоминающей файл. С
+    /// диапазоном дельта не легализует расхождение контрольной плоскости:
+    /// `control_plane_tampered` + `self_approved` (имя артефакта — дельта).
+    #[tokio::test]
+    async fn post_gate_self_approved_on_delta_ra7() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        a4_sandbox(&repo, true);
+        // Ослабления нет — меняется только запись файла (комментарий): красный
+        // обязан прийти от канала дельт, а не от rule_weakened.
+        write_file(
+            &repo.join(".arch-handoff/CONSTRAINTS.yaml"),
+            "rules:\n  - id: X-1\n    name: no_pan_in_logs\n    type: must_not_contain\n    \
+             glob: \"src/**/*.rs\"\n    pattern: \"PAN=\"\n    severity: error\n\
+             # правка после выдачи пакета\n",
+        );
+        write_file(
+            &repo.join("changes/relax3/DELTA.md"),
+            "# Дельта relax3\n\nПравим .arch-handoff/CONSTRAINTS.yaml: безобидный комментарий.\n",
+        );
+        let cfg = a5_commit_cfg();
+        let run = run_harness("stub", &cfg, &repo, "задача")
+            .await
+            .expect("run");
+        let pg = run
+            .post_gate
+            .expect("пост-гейт обязан отработать (пакет есть)");
+        assert_eq!(pg.verdict, PostGateVerdict::Fail, "{pg:?}");
+        let joined = pg.findings.join("\n");
+        assert!(joined.contains("control_plane_tampered"), "{joined}");
+        assert!(joined.contains("self_approved"), "{joined}");
+        assert!(joined.contains("дельта relax3"), "{joined}");
     }
 }
