@@ -40,6 +40,7 @@ pub mod config;
 pub mod connect;
 pub mod contract_diff;
 pub mod control;
+pub(crate) mod control_plane;
 #[cfg(feature = "harness")]
 pub mod cron;
 pub mod delta;
