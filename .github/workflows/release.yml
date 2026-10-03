@@ -1,5 +1,5 @@
 # Release: бинари arch-be под 4 платформы × 2 редакции (core / full) +
-# SBOM на каждую редакцию + сводный SHA256SUMS.
+# SBOM на каждую редакцию + сводный SHA256SUMS + provenance и подпись.
 # Триггер — тег v* (публикация GitHub Release) или ручной запуск (только
 # сборка + артефакты workflow, релиз не создаётся).
 # Имена артефактов — по README «Шаг 0»: arch-be[-core]-<os>-<arch>[.exe].
@@ -8,6 +8,10 @@
 # в CI; сборка не начинается, пока обязательные джобы ci.yml не `success`.
 # B2 (0.3.12): SBOM (CycloneDX 1.6) собирается в матрице той же сборкой,
 # что и бинарь, и попадает в тот же SHA256SUMS.
+# B3 (0.3.12, ADR-056 вариант (а)): SLSA build provenance
+# (`actions/attest-build-provenance`) для бинарей + keyless `cosign sign-blob`
+# (Sigstore) для SHA256SUMS. ГОСТ-подпись для контура банка — процедура
+# заказчика, не автоматика Spine (честная граница в docs/supply-chain.md).
 name: Release
 
 on:
@@ -167,8 +171,12 @@ jobs:
     needs: build
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
+    # B3: OIDC-аттестация (`id-token`), публикация аттестаций рядом с релизом
+    # (`attestations`), запись релиза (`contents`) — только здесь.
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     steps:
       # Checkout нужен ради CHANGELOG.md: `body_path` читает файл из рабочего
       # каталога, а job публикации ничего не чекаутил — тело релиза молча
@@ -189,6 +197,24 @@ jobs:
           sha256sum arch-be-* sbom-*.cyclonedx.json > SHA256SUMS
           cat SHA256SUMS
 
+      - name: SLSA build provenance для бинарей
+        # B3 (ADR-056, вариант (а)): привязка «коммит → workflow → бинарь».
+        # Проверка у потребителя: `gh attestation verify <file> --repo <owner/repo>`.
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/arch-be-*
+
+      - name: cosign (keyless, Sigstore)
+        uses: sigstore/cosign-installer@v3
+
+      - name: Подпись SHA256SUMS (keyless, Sigstore)
+        # B3: подпись манифеста хэшей. Keyless — OIDC-идентичность джобы,
+        # права/сертификат через Fulcio, прозрачность через Rekor; приватных
+        # ключей в CI нет. При недоступности Sigstore джоба падает (fail-closed).
+        run: |
+          set -euo pipefail
+          cosign sign-blob --yes --bundle dist/SHA256SUMS.sigstore.json dist/SHA256SUMS
+
       - uses: softprops/action-gh-release@v2
         with:
           # Тело релиза — CHANGELOG: раздел «Что может покраснеть после
@@ -202,3 +228,4 @@ jobs:
             dist/arch-be-*
             dist/sbom-*.cyclonedx.json
             dist/SHA256SUMS
+            dist/SHA256SUMS.sigstore.json
