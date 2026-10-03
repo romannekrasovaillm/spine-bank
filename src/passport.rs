@@ -640,6 +640,7 @@ mod tests {
 
 - **fitness** \* — PASS — Правил: 2, нарушений: 0 (error: 0, warn: 0); реестр: 2 правил (error: 2), отпечаток d8fef770 — файл: CONSTRAINTS.yaml
 - **delta_guard** — PASS — изменённых файлов: 0, защищённых среди них: 0
+- **control_plane** — SKIP — нет MANIFEST.json — пинов контрольной плоскости нет
 - **rule_weakened** — PASS — реестр правил не ослаблен относительно HEAD — файл: CONSTRAINTS.yaml
 - **spine_lint** \* — PASS — находок: 0 (error: 0)
 - **trace_check** — SKIP — нет каталога model/
@@ -657,6 +658,7 @@ mod tests {
 
 ## 3. Не проверено
 
+- **control_plane** — нет MANIFEST.json — пинов контрольной плоскости нет (не обязательна для маршрута)
 - **trace_check** — нет каталога model/ (не обязательна для маршрута)
 - **model_validate** — нет каталога model/ (не обязательна для маршрута)
 - **decision_quality** — не включена: добавьте 'decision_quality' в [gate.required] нужного маршрута (не обязательна для маршрута)
@@ -701,6 +703,7 @@ arch-be gate --repo кейс --format json > verdict.json && arch-be gate --repo
 - **fitness** \* — FAIL — Правил: 2, нарушений: 1 (error: 1, warn: 0); реестр: 2 правил (error: 2), отпечаток d8fef770 — файл: CONSTRAINTS.yaml
   находок: error 1, warn 0
 - **delta_guard** — PASS — изменённых файлов: 0, защищённых среди них: 0
+- **control_plane** — SKIP — нет MANIFEST.json — пинов контрольной плоскости нет
 - **rule_weakened** — PASS — реестр правил не ослаблен относительно HEAD — файл: CONSTRAINTS.yaml
 - **spine_lint** \* — PASS — находок: 0 (error: 0)
 - **trace_check** — SKIP — нет каталога model/
@@ -718,6 +721,7 @@ arch-be gate --repo кейс --format json > verdict.json && arch-be gate --repo
 
 ## 3. Не проверено
 
+- **control_plane** — нет MANIFEST.json — пинов контрольной плоскости нет (не обязательна для маршрута)
 - **trace_check** — нет каталога model/ (не обязательна для маршрута)
 - **model_validate** — нет каталога model/ (не обязательна для маршрута)
 - **decision_quality** — не включена: добавьте 'decision_quality' в [gate.required] нужного маршрута (не обязательна для маршрута)
