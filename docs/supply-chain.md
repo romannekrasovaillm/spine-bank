@@ -12,7 +12,7 @@
 | Исходники (репозиторий) | git-история, подписи коммитов (если включены), ADR-дисциплина |
 | Бинарь `arch-be` | `SHA256SUMS.release` из CI-джобы supply-chain + сборка из исходников (ниже); для релизов по тегам `v*` — сводный `SHA256SUMS` на 8 бинарей (linux-x86_64/aarch64, macos-arm64, windows-x86_64 × core/full, workflow release.yml) |
 | Зависимости Rust | `Cargo.lock` + `cargo audit` (CI-джоба audit, ежедневная база RUSTSEC) |
-| Состав поставки (SBOM) | `sbom.cyclonedx.json` (CycloneDX 1.6) из CI-джобы supply-chain |
+| Состав поставки (SBOM) | `sbom-core.cyclonedx.json` / `sbom-full.cyclonedx.json` (CycloneDX 1.6) — приложены к GitHub Release той же сборкой, что и бинари (B2); хэши SBOM — в том же `SHA256SUMS` |
 | Вендоренный JS (`vendor/archify/`) | `SHA256SUMS` в каталоге вендора; целостность гейтится правилом BE-22 (`control check`) |
 | Toolchain | `rust-toolchain.toml` (pinned stable), MSRV 1.85 (CI-джоба msrv) |
 
@@ -71,7 +71,7 @@ protection rules): правило на `v*` ограничивает созда�
 git clone <внутренний-зеркало-репо> && cd spine-bank
 git checkout <тег/коммит поставки>
 cargo build --release --locked          # pinned toolchain из rust-toolchain.toml
-sha256sum target/release/arch-be        # сверка с SHA256SUMS.release поставки
+sha256sum target/release/arch-be        # сверка с SHA256SUMS поставки
 ```
 
 Сборка воспроизводима на уровне исходников и lock-файла: одинаковые
@@ -82,11 +82,21 @@ sha256sum target/release/arch-be        # сверка с SHA256SUMS.release п�
 
 ## Работа со SBOM
 
-`sbom.cyclonedx.json` — перечень всех crate-зависимостей с версиями и
-лицензиями. Типовые проверки ДИТ:
+`sbom-core.cyclonedx.json` / `sbom-full.cyclonedx.json` — перечень всех
+crate-зависимостей с версиями и лицензиями. SBOM собирается в той же
+матричной сборке, что и публикуемый бинарь (B2): тот же коммит и
+`Cargo.lock`, а не отдельная джоба CI. `cargo-sbom` строит SBOM из
+`Cargo.lock` (workspace-wide), поэтому граф зависимостей не зависит от ОС —
+достаточно одной платформы на редакцию. `cargo-sbom` не различает фичи
+сборки, поэтому `sbom-core` и `sbom-full` описывают один и тот же
+lock-файл и могут совпадать по составу: раздельные артефакты привязывают
+SBOM к той же матричной сборке, что и соответствующий бинарь, а не
+утверждают разный граф зависимостей.
+
+Типовые проверки ДИТ:
 
 - соответствие внутреннему списку разрешённых лицензий (проверка:
-  `jq -r '.components[].licenses[].expression' sbom.cyclonedx.json | sort -u`;
+  `jq -r '.components[].licenses[].expression' sbom-full.cyclonedx.json | sort -u`;
   снимок 2026-09-04: 298 компонентов, лицензии пермиссивные —
   MIT/Apache-2.0/BSD/ISC/Zlib/BSL-1.0/Unicode-3.0/Unlicense, плюс
   MPL-2.0 и CDLA-Permissive-2.0 (weak copyleft уровня файла — при

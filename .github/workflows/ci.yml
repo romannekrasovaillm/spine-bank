@@ -135,7 +135,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo install cargo-sbom --locked
-      - run: cargo build --release
+      - run: cargo build --release --locked
       - run: cargo sbom --output-format cyclone_dx_json_1_6 > sbom.cyclonedx.json
       - run: |
           cd target/release && sha256sum arch-be > ../../SHA256SUMS.release && cd ../..

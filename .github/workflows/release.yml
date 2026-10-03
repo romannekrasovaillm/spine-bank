@@ -1,10 +1,13 @@
 # Release: бинари arch-be под 4 платформы × 2 редакции (core / full) +
-# сводный SHA256SUMS. Триггер — тег v* (публикация GitHub Release) или
-# ручной запуск (только сборка + артефакты workflow, релиз не создаётся).
+# SBOM на каждую редакцию + сводный SHA256SUMS.
+# Триггер — тег v* (публикация GitHub Release) или ручной запуск (только
+# сборка + артефакты workflow, релиз не создаётся).
 # Имена артефактов — по README «Шаг 0»: arch-be[-core]-<os>-<arch>[.exe].
 #
 # B1 (0.3.12): первая джоба — fail-closed проверка, что коммит тега зелёный
 # в CI; сборка не начинается, пока обязательные джобы ci.yml не `success`.
+# B2 (0.3.12): SBOM (CycloneDX 1.6) собирается в матрице той же сборкой,
+# что и бинарь, и попадает в тот же SHA256SUMS.
 name: Release
 
 on:
@@ -136,6 +139,21 @@ jobs:
           cp "target/release/arch-be$ext" "dist/$prefix-${{ matrix.platform.name }}$ext"
           "dist/$prefix-${{ matrix.platform.name }}$ext" --version
 
+      - name: SBOM (CycloneDX 1.6) для редакции
+        # B2: SBOM собирается той же сборкой (тот же коммит и Cargo.lock), что
+        # и публикуемый бинарь, — не отдельной джобой CI. Граф зависимостей не
+        # зависит от ОС, поэтому достаточно одной платформы на редакцию: иначе
+        # четыре копии `sbom-<edition>.cyclonedx.json` столкнулись бы при
+        # merge-multiple. `cargo-sbom` строит SBOM из Cargo.lock (workspace-wide).
+        if: matrix.platform.name == 'linux-x86_64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo install cargo-sbom --locked
+          cargo sbom --output-format cyclone_dx_json_1_6 \
+            > "dist/sbom-${{ matrix.edition }}.cyclonedx.json"
+          head -c 120 "dist/sbom-${{ matrix.edition }}.cyclonedx.json"
+
       - uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.platform.name }}-${{ matrix.edition }}
@@ -163,12 +181,12 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - name: SHA256SUMS (все платформы и редакции)
-        # Хэши считаются здесь, а не в матрице: один каноничный файл
-        # (формат sha256sum) на все 8 артефактов, без pwsh/certutil-веток.
+      - name: SHA256SUMS (бинари + SBOM, единый каноничный файл)
+        # B2: один файл (формат sha256sum) на все 8 бинарей и оба SBOM.
         run: |
+          set -euo pipefail
           cd dist
-          sha256sum arch-be-* > SHA256SUMS
+          sha256sum arch-be-* sbom-*.cyclonedx.json > SHA256SUMS
           cat SHA256SUMS
 
       - uses: softprops/action-gh-release@v2
@@ -182,4 +200,5 @@ jobs:
           fail_on_unmatched_files: true
           files: |
             dist/arch-be-*
+            dist/sbom-*.cyclonedx.json
             dist/SHA256SUMS
