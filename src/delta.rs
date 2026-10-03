@@ -398,6 +398,29 @@ fn delta_mentions(body: &str, path: &str) -> Option<String> {
     None
 }
 
+/// Имена АКТИВНЫХ дельт, упоминающих путь (A3): тот же механизм упоминаний,
+/// что в [`guard`] (полный путь / имя файла / стем / id — [`delta_mentions`]),
+/// без дублирования его логики. Заархивированные дельты не считаются: они
+/// описывают влитую истину, а не правку, сделанную после выдачи пакета.
+///
+/// Пустой список — путь не покрыт ни одной активной дельтой.
+#[must_use]
+pub fn mentioning_deltas(repo: &Path, path: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    for d in list(repo) {
+        if d.status != DeltaStatus::Proposed {
+            continue;
+        }
+        let Ok(body) = std::fs::read_to_string(&d.path) else {
+            continue;
+        };
+        if delta_mentions(&body, path).is_some() {
+            names.push(d.name);
+        }
+    }
+    names
+}
+
 /// Первая непустая строка stderr git без префикса «fatal:» — краткая причина
 /// для ошибки команды. Сырой stderr целиком не проксируем (D9): там
 /// многострочная справка использования.

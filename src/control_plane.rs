@@ -74,3 +74,39 @@ pub(crate) fn collect(repo: &Path) -> BTreeMap<String, Option<Pin>> {
     }
     pins
 }
+
+/// Пины контрольной плоскости, прочитанные из `MANIFEST.json`.
+pub(crate) enum Pins {
+    /// Пакета нет, либо в нём нет поля `control_plane` / оно пусто —
+    /// составляющая гейта уходит в честный SKIP (обратная совместимость
+    /// со старыми пакетами и кейсами без handoff-контура).
+    Absent,
+    /// Пины есть.
+    Pinned(BTreeMap<String, Option<Pin>>),
+    /// `MANIFEST.json` есть, но не читается/не парсится — это не «пинов нет»,
+    /// а сломанный вход: молчать нельзя (иначе подмена файла отключала бы
+    /// проверку), поэтому потребитель обязан сказать находкой.
+    Invalid(String),
+}
+
+/// Читает пины контрольной плоскости из `MANIFEST.json` (A3).
+pub(crate) fn read(repo: &Path) -> Pins {
+    #[derive(Deserialize)]
+    struct ManifestPins {
+        #[serde(default)]
+        control_plane: BTreeMap<String, Option<Pin>>,
+    }
+    let path = manifest_path(repo);
+    if !path.is_file() {
+        return Pins::Absent;
+    }
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) => return Pins::Invalid(format!("не читается: {e}")),
+    };
+    match serde_json::from_str::<ManifestPins>(&text) {
+        Ok(m) if m.control_plane.is_empty() => Pins::Absent,
+        Ok(m) => Pins::Pinned(m.control_plane),
+        Err(e) => Pins::Invalid(e.to_string()),
+    }
+}

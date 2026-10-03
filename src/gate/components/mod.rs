@@ -2,6 +2,7 @@
 //! `spine_lint`, `trace_check`, `sensors`, `nfr`, `evidence_verify`,
 //! `model_validate`, `decision_quality`.
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -344,6 +345,99 @@ pub(super) fn component_delta_guard(
         ),
         Err(e) => GateComponent::fail("delta_guard", format!("сбой выполнения: {e}"), Vec::new()),
     }
+}
+
+/// Составляющая `control_plane` (A3): сверка контрольной плоскости с пинами
+/// `MANIFEST.json` пакета.
+///
+/// Контрольная плоскость — файлы, которые решают, **работает ли гейт** и с
+/// какими порогами (Stop-хук `.claude/settings.json`, `arch-harness.toml`,
+/// пакетные `CONSTRAINTS.yaml`/`RUBRIC.yaml`/`TASK.md`/`SPEC.md`, git-хуки и
+/// CI-блоки, `ROLLBACK.yaml`). Перечень и пины — [`crate::handoff`] (единый
+/// источник с генератором пакета).
+///
+/// Severity всегда `error`, конфигурации warn/error НЕ предусмотрено:
+/// компонента активна только внутри handoff-пакета, выданного харнессом, где
+/// «не трогать контрольную плоскость» — контракт выдачи. Кейс без пакета —
+/// честный SKIP (чужой пайплайн не красится); старый пакет без поля
+/// `control_plane` — тоже SKIP (обратная совместимость).
+///
+/// Правка, упомянутая активной дельтой, не блокирует: расхождение
+/// узаконено явным решением, а не спрятано.
+pub(super) fn component_control_plane(repo: &Path) -> GateComponent {
+    match crate::control_plane::read(repo) {
+        crate::control_plane::Pins::Absent => GateComponent::skip(
+            "control_plane",
+            "нет MANIFEST.json — пинов контрольной плоскости нет".to_string(),
+        ),
+        // Бит (невалидный JSON) пакет — не «пинов нет», а сломанный вход:
+        // молчать нельзя, иначе подмена MANIFEST отключала бы проверку.
+        crate::control_plane::Pins::Invalid(reason) => GateComponent::fail(
+            "control_plane",
+            format!("MANIFEST.json не читается: {reason}"),
+            vec![GateFinding::ruled(
+                "error".into(),
+                "control_plane_invalid".into(),
+                format!(
+                    "MANIFEST.json невалиден ({reason}) → восстановите файл пакета \
+                     (пересоздайте пакет handoff_create)"
+                ),
+            )],
+        ),
+        crate::control_plane::Pins::Pinned(pins) => verify_control_plane_pins(repo, &pins),
+    }
+}
+
+/// Сверка пинов: расхождение без активной дельты, упоминающей файл, —
+/// `control_plane_tampered` (error, одна находка на файл); расхождение с
+/// дельтой — PASS с деталью.
+fn verify_control_plane_pins(
+    repo: &Path,
+    pins: &BTreeMap<String, Option<crate::control_plane::Pin>>,
+) -> GateComponent {
+    let total = pins.len();
+    let mut findings = Vec::new();
+    let mut covered_notes = Vec::new();
+    for (file, pin) in pins {
+        let current = crate::hash::sha256_file(&repo.join(file));
+        let diverged = match (pin, &current) {
+            (Some(expected), Some(actual)) => &expected.sha256 != actual,
+            // Пин отсутствия: файл появился после выдачи пакета.
+            (None, Some(_)) | (Some(_), None) => true,
+            (None, None) => false,
+        };
+        if !diverged {
+            continue;
+        }
+        let deltas = delta::mentioning_deltas(repo, file);
+        match deltas.first() {
+            Some(name) => covered_notes.push(format!("{file} изменён по дельте {name}")),
+            None => findings.push(GateFinding::ruled(
+                "error".into(),
+                "control_plane_tampered".into(),
+                format!("{file} изменён после выдачи пакета → вернуть файл или оформить дельту"),
+            )),
+        }
+    }
+    if !findings.is_empty() {
+        return GateComponent::fail(
+            "control_plane",
+            format!(
+                "контрольная плоскость разошлась с пинами MANIFEST: {} из {total}",
+                findings.len()
+            ),
+            findings,
+        );
+    }
+    let detail = if covered_notes.is_empty() {
+        format!("контрольная плоскость соответствует пинам MANIFEST ({total} файлов)")
+    } else {
+        format!(
+            "контрольная плоскость соответствует пинам MANIFEST ({total} файлов): {}",
+            covered_notes.join("; ")
+        )
+    };
+    GateComponent::pass("control_plane", detail)
 }
 
 /// Составляющая `rule_weakened`: анти-ослабление реестра правил относительно

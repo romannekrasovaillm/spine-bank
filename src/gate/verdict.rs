@@ -5,9 +5,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::components::{
-    component_decision_quality, component_delta_guard, component_evidence, component_fitness,
-    component_model_validate, component_nfr, component_rule_weakened, component_sensors,
-    component_spine_lint, component_trace, evidence_bundle_dirs,
+    component_control_plane, component_decision_quality, component_delta_guard, component_evidence,
+    component_fitness, component_model_validate, component_nfr, component_rule_weakened,
+    component_sensors, component_spine_lint, component_trace, evidence_bundle_dirs,
 };
 use super::git::{ConstraintsPath, GitProbe, constraints_label};
 use super::route::{
@@ -154,6 +154,10 @@ pub(super) fn run_inner(
     let mut components = vec![
         component_fitness(repo, &constraints, &options.exec, &options.overrides),
         component_delta_guard(repo, base, &git),
+        // A3: пины контрольной плоскости пакета — правка Stop-хука,
+        // `arch-harness.toml` или порогов рубрики не должна зеленеть молча.
+        // Кейс без MANIFEST.json / старого пакета — SKIP.
+        component_control_plane(repo),
         component_rule_weakened(
             repo,
             &constraints,
