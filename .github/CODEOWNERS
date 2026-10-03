@@ -1,0 +1,30 @@
+# CODEOWNERS — кто обязан одобрить изменения защищённых путей (B5, 0.3.12).
+#
+# Владелец репозитория: @romannekrasovaillm (git remote origin,
+# https://github.com/romannekrasovaillm/spine-bank). Последнее совпавшее
+# правило выигрывает; пути без совпадения — на владельце по умолчанию.
+#
+# Смысл: инварианты контроля и механика допуска не меняются без ведома
+# владельца. CODEOWNERS — процессная защита поверх механической
+# (fitness-правила C-35…C-43 и гейт `control check`); одно другого не
+# заменяет: правило видит содержимое, CODEOWNERS — кто одобрил.
+
+# --- Инварианты архитектуры и реестр правил ------------------------------
+/CONSTRAINTS.yaml                   @romannekrasovaillm
+/ARCHITECTURE-SPINE.md              @romannekrasovaillm
+/ARCHITECTURE-SPINE-BE.md           @romannekrasovaillm
+
+# --- Конвейеры поставки и политика зависимостей --------------------------
+/.github/workflows/                 @romannekrasovaillm
+/.github/CODEOWNERS                 @romannekrasovaillm
+/.github/dependabot.yml             @romannekrasovaillm
+/deny.toml                          @romannekrasovaillm
+
+# --- Механика допуска, политик и доверия к командам ---------------------
+/src/policy.rs                      @romannekrasovaillm
+/src/injection.rs                   @romannekrasovaillm
+/src/cmd_trust.rs                   @romannekrasovaillm
+/src/control/registry.rs            @romannekrasovaillm
+
+# --- Реестр рубрик архитектурного контроля -------------------------------
+/assets/rubrics/                    @romannekrasovaillm

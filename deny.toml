@@ -1,0 +1,55 @@
+# deny.toml — политика зависимостей Spine (B4, 0.3.12).
+#
+# Джоба `deny` в .github/workflows/ci.yml:
+#   cargo deny check licenses bans sources
+#
+# Возврат к отложенному DEF-2 (ARCHITECTURE-SPINE.md): условие возврата —
+# «публикация бинарных артефактов» — наступило (release.yml публикует 8
+# бинарей). Advisories остаются за `cargo audit` (джоба audit) — здесь не
+# дублируются, чтобы уязвимости не проверялись двумя разными базами.
+#
+# Схема: https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+# Единый срез графа: лицензионная политика описывает всю поставку, а не
+# только default-фичи (опциональные TUI/сетевые крейты — тоже часть SBOM).
+all-features = true
+
+[licenses]
+# Разрешённые лицензии — фактический спектр Cargo.lock (снимок 2026-10-03;
+# тот же список в docs/supply-chain.md). Клауза OR проходит, если разрешена
+# хотя бы одна альтернатива; AND требует разрешения всех операндов, поэтому
+# Unicode-3.0 здесь обязателен: (MIT OR Apache-2.0) AND Unicode-3.0.
+confidence-threshold = 0.8
+# Разрешённый, но не встреченный в текущем графе идентификатор (например,
+# BSD-2-Clause как альтернатива в OR-выражении) — не ошибка: список пиннит
+# политику, а не сегодняшний срез зависимостей.
+unused-allowed-license = "allow"
+allow = [
+  "0BSD",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "BSL-1.0",
+  "CDLA-Permissive-2.0",
+  "ISC",
+  "MIT",
+  "MPL-2.0",
+  "Unicode-3.0",
+  "Unlicense",
+  "Zlib",
+]
+
+[bans]
+# Одна версия крейта в графе — наблюдение, не запрет (дубли версий бывают
+# неизбежны у транзитивных зависимостей); wildcard-версии в манифестах —
+# тоже наблюдение (в своём Cargo.toml их нет).
+multiple-versions = "warn"
+wildcards = "warn"
+
+[sources]
+# Все зависимости — с crates.io; неизвестные реестры и git-источники
+# запрещены (в Cargo.lock git-зависимостей нет).
+unknown-registry = "deny"
+unknown-git = "deny"

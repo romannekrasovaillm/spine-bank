@@ -547,3 +547,127 @@ constraints:
     skill: fitness-functions
     owner: "solution-архитектор BE"
     expiry: "2027-09-23"
+
+  # --- B4 (0.3.12): гигиена конвейеров поставки ---------------------------
+  # Пин actions: тег/ветка — изменяемая ссылка (тот же ref завтра указывает
+  # на другой код), поэтому supply-chain-пин — полный 40-hex SHA коммита.
+  # Паттерн намеренно без lookahead (crate `regex` его не поддерживает) и
+  # привязан к `uses:` — версии в комментариях (`# v4`) не считаются.
+  - id: C-35
+    name: github_actions_pinned_by_sha
+    type: must_not_contain
+    glob: ".github/workflows/*.yml"
+    pattern: 'uses:\s*[^@\s]+@(v[0-9]+(\.[0-9]+)*|master|nightly|stable)\b'
+    severity: critical
+    ad: AD-9
+    rationale: >-
+      тег/ветка в `uses:` — изменяемая ссылка: один и тот же ref завтра
+      указывает на другой код; подмена действия проходит мимо ревью и SBOM
+    fix_hint: >-
+      заменить @<тег> на @<40-hex-SHA> с комментарием версии; значения —
+      в .arch-handoff/action-pins.txt (обновления — PR-ами Dependabot)
+    skill: fitness-functions
+    owner: "solution-архитектор BE"
+    expiry: "2027-10-03"
+
+  # Джоба без явного блока наследует права репозитория по умолчанию (в
+  # старых настройках — `contents: write`) — сторонний action получает
+  # токен шире, чем нужно. Явный `permissions:` на уровне файла —
+  # минимальные права. `(?m)` обязателен: regex `^` без него матчит
+  # только начало содержимого файла, а не строку.
+  - id: C-36
+    name: workflow_permissions_declared
+    type: each_file_must_contain
+    glob: ".github/workflows/*.yml"
+    pattern: "(?m)^permissions:"
+    severity: error
+    ad: AD-9
+    rationale: >-
+      без явного блока workflow наследует права репозитория по умолчанию;
+      сторонний action получает токен шире, чем нужно джобе
+    fix_hint: >-
+      добавить `permissions: contents: read` на уровне workflow и повышать
+      права точечно в джобе, которой нужна запись
+    skill: fitness-functions
+    owner: "solution-архитектор BE"
+    expiry: "2027-10-03"
+
+  # B4: лицензионная политика/баны/источники — машинная проверка (deny.toml)
+  # вместо ручного jq по SBOM; адвизории остаются за джобой audit.
+  - id: C-37
+    name: ci_cargo_deny_job
+    type: must_contain
+    glob: ".github/workflows/*.yml"
+    pattern: "cargo deny"
+    severity: critical
+    ad: AD-9
+    rationale: >-
+      ручная проверка лицензий по SBOM не воспроизводима и не блокирует
+      merge; политика зависимостей должна быть джобой CI с deny.toml
+    fix_hint: >-
+      добавить джобу `cargo install cargo-deny --locked` +
+      `cargo deny check licenses bans sources`, конфиг — deny.toml в корне
+    skill: fitness-functions
+    owner: "solution-архитектор BE"
+    expiry: "2027-10-03"
+
+  # --- B5 (0.3.12): CODEOWNERS — процессная защита инвариантов ------------
+  - id: C-38
+    name: codeowners_present
+    type: file_exists
+    path: ".github/CODEOWNERS"
+    severity: error
+    ad: AD-9
+    rationale: >-
+      защищённые пути не меняются без одобрения владельца: CODEOWNERS —
+      процессный слой поверх механических fitness-правил
+    fix_hint: >-
+      создать .github/CODEOWNERS с владельцем репозитория (git remote origin)
+    skill: fitness-functions
+    owner: "solution-архитектор BE"
+    expiry: "2027-10-03"
+
+  - id: C-39
+    name: codeowners_covers_constraints
+    type: must_contain
+    glob: ".github/CODEOWNERS"
+    pattern: "CONSTRAINTS\\.yaml"
+    severity: error
+    owner: "solution-архитектор BE"
+    expiry: "2027-10-03"
+
+  - id: C-40
+    name: codeowners_covers_spine
+    type: must_contain
+    glob: ".github/CODEOWNERS"
+    pattern: "ARCHITECTURE-SPINE\\.md"
+    severity: error
+    owner: "solution-архитектор BE"
+    expiry: "2027-10-03"
+
+  - id: C-41
+    name: codeowners_covers_guard_modules
+    type: must_contain
+    glob: ".github/CODEOWNERS"
+    pattern: "src/(policy|injection|cmd_trust)\\.rs"
+    severity: error
+    owner: "solution-архитектор BE"
+    expiry: "2027-10-03"
+
+  - id: C-42
+    name: codeowners_covers_registry
+    type: must_contain
+    glob: ".github/CODEOWNERS"
+    pattern: "src/control/registry\\.rs"
+    severity: error
+    owner: "solution-архитектор BE"
+    expiry: "2027-10-03"
+
+  - id: C-43
+    name: codeowners_covers_rubrics
+    type: must_contain
+    glob: ".github/CODEOWNERS"
+    pattern: "assets/rubrics/"
+    severity: error
+    owner: "solution-архитектор BE"
+    expiry: "2027-10-03"

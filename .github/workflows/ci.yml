@@ -1,4 +1,4 @@
-# CI: fmt, clippy, тесты, MSRV, аудит зависимостей.
+# CI: fmt, clippy, тесты, MSRV, аудит зависимостей, лицензии/баны/источники.
 # Решения и отложенные пункты — docs/adr/ADR-005-ci-and-cli-tests.md.
 name: CI
 
@@ -8,6 +8,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+# B4: минимум прав на уровне workflow — джобам CI запись в репозиторий не нужна.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -16,8 +20,8 @@ jobs:
     name: rustfmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
@@ -29,24 +33,24 @@ jobs:
     name: clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: cargo clippy --all-targets -- -D warnings
 
   test:
     name: cargo test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       # Каркас `bootstrap` и догфуд-правило C-31 гоняют тесты шаблонов
       # (pytest) — без него шаблонная проверка честно пропускается, а
       # `--require-python` в CI этого не допускает (задание 0.3.5, E2).
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.x'
       - run: python3 -m pip install --quiet pytest
@@ -60,10 +64,10 @@ jobs:
     name: core build (--no-default-features --features core)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.x'
       - run: python3 -m pip install --quiet pytest
@@ -86,8 +90,8 @@ jobs:
       # git нужен и checkout'у, и тестам (init/commit в песочницах); в
       # slim-образе его нет. Python git за собой не тянет — инвариант ниже.
       - run: apt-get update && apt-get install -y --no-install-recommends git
-      - uses: actions/checkout@v7
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       # rust-toolchain.toml пиннит stable — в контейнере rustup скачивал бы
       # второй toolchain поверх нужного 1.85; файл здесь не нужен.
       - run: rm rust-toolchain.toml
@@ -107,41 +111,60 @@ jobs:
       # RUSTUP_TOOLCHAIN имеет приоритет над toolchain-файлом.
       RUSTUP_TOOLCHAIN: "1.85"
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master
         with:
           toolchain: "1.85"
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: cargo check
 
   audit:
     name: cargo audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         # rust-cache кэширует $CARGO_HOME/bin — cargo-audit собирается раз.
       - run: cargo install cargo-audit --locked
       - run: cargo audit
 
+  deny:
+    # B4 (0.3.12): лицензионная политика, баны и источники зависимостей —
+    # машинная проверка вместо ручного `jq` по SBOM (docs/supply-chain.md).
+    # Возврат к отложенному DEF-2 (ARCHITECTURE-SPINE.md): условие возврата —
+    # «публикация бинарных артефактов» — наступило (release.yml).
+    # Конфиг — deny.toml в корне; advisories остаются за джобой audit.
+    name: cargo deny (licenses, bans, sources)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        # rust-cache кэширует $CARGO_HOME/bin — cargo-deny собирается раз.
+      - run: cargo install cargo-deny --locked
+      - run: cargo deny check licenses bans sources
+
   supply-chain:
     # Поставка (ADR-031/T5, GEN-18): SBOM (CycloneDX) + хэши артефактов —
     # ДИТ сверяет поставку по docs/supply-chain.md, не доверяя бинарю на слово.
+    # B2 (0.3.12): сборка — строго `--locked` (как релизная); релизный SBOM
+    # теперь собирается в release.yml той же сборкой, что и публикуемые бинари,
+    # а эта джоба остаётся проверкой собираемости и источником артефакта CI.
     name: supply chain (SBOM + SHA256SUMS)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: cargo install cargo-sbom --locked
-      - run: cargo build --release
+      - run: cargo build --release --locked
       - run: cargo sbom --output-format cyclone_dx_json_1_6 > sbom.cyclonedx.json
       - run: |
           cd target/release && sha256sum arch-be > ../../SHA256SUMS.release && cd ../..
           sha256sum sbom.cyclonedx.json >> SHA256SUMS.release
           cat SHA256SUMS.release
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: supply-chain
           path: |
@@ -157,10 +180,10 @@ jobs:
     name: dogfood (self spine + fitness)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.x'
       - run: python3 -m pip install --quiet pytest
@@ -185,8 +208,8 @@ jobs:
     name: eval suite (agent-config)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: cargo build
       - run: ./target/debug/arch-be eval run

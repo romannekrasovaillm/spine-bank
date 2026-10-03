@@ -1,7 +1,17 @@
 # Release: бинари arch-be под 4 платформы × 2 редакции (core / full) +
-# сводный SHA256SUMS. Триггер — тег v* (публикация GitHub Release) или
-# ручной запуск (только сборка + артефакты workflow, релиз не создаётся).
+# SBOM на каждую редакцию + сводный SHA256SUMS + provenance и подпись.
+# Триггер — тег v* (публикация GitHub Release) или ручной запуск (только
+# сборка + артефакты workflow, релиз не создаётся).
 # Имена артефактов — по README «Шаг 0»: arch-be[-core]-<os>-<arch>[.exe].
+#
+# B1 (0.3.12): первая джоба — fail-closed проверка, что коммит тега зелёный
+# в CI; сборка не начинается, пока обязательные джобы ci.yml не `success`.
+# B2 (0.3.12): SBOM (CycloneDX 1.6) собирается в матрице той же сборкой,
+# что и бинарь, и попадает в тот же SHA256SUMS.
+# B3 (0.3.12, ADR-056 вариант (а)): SLSA build provenance
+# (`actions/attest-build-provenance`) для бинарей + keyless `cosign sign-blob`
+# (Sigstore) для SHA256SUMS. ГОСТ-подпись для контура банка — процедура
+# заказчика, не автоматика Spine (честная граница в docs/supply-chain.md).
 name: Release
 
 on:
@@ -9,11 +19,94 @@ on:
     tags: ["v*"]
   workflow_dispatch:
 
+# B4: минимум прав на уровне workflow; повышение — только в джобе публикации.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  ci-green:
+    # B1: релиз собирается только с зелёного коммита. Fail-closed: нет данных,
+    # незавершённые (`queued`/`in_progress` дольше ожидания) или не-`success`
+    # обязательные джобы → падение ДО сборки бинарей. Список обязательных
+    # джобов — явный (ночные/необязательные релиз не блокируют) и совпадает
+    # с `name:` джобов ci.yml.
+    name: CI зелёный для коммита тега
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: read
+    steps:
+      - name: Обязательные джобы ci.yml завершены успешно
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+          # Ровно `name:` из .github/workflows/ci.yml — сверяются с именами
+          # check-runs, а не с id джоб.
+          REQUIRED: |
+            rustfmt
+            clippy
+            cargo test
+            core build (--no-default-features --features core)
+            hermetic (no python)
+            MSRV 1.85 (cargo check)
+            cargo audit
+            supply chain (SBOM + SHA256SUMS)
+            cargo deny (licenses, bans, sources)
+            dogfood (self spine + fitness)
+            eval suite (agent-config)
+        run: |
+          set -euo pipefail
+          # Разумное ожидание незавершённых джобов: 30 минут. Тег на только что
+          # запушенном коммите застаёт CI в процессе — ждём, но не бесконечно.
+          deadline=$((SECONDS + 1800))
+          while :; do
+            if ! raw=$(gh api --paginate \
+                 "/repos/${GITHUB_REPOSITORY}/commits/${SHA}/check-runs?per_page=100" \
+                 --jq '.check_runs[] | [.name, .status, (.conclusion // "")] | @tsv'); then
+              echo "❌ не удалось получить check-runs для ${SHA} — fail-closed"
+              exit 1
+            fi
+            failed=()
+            pending=()
+            while IFS= read -r name; do
+              [ -n "$name" ] || continue
+              # Последний по времени check-run с таким именем (перезапуски).
+              line=$(printf '%s\n' "$raw" | awk -F'\t' -v n="$name" '$1==n {last=$0} END {if (last != "") print last}')
+              if [ -z "$line" ]; then
+                pending+=("$name — нет данных")
+                continue
+              fi
+              status=$(printf '%s' "$line" | cut -f2)
+              conclusion=$(printf '%s' "$line" | cut -f3)
+              if [ "$status" != "completed" ]; then
+                pending+=("$name — $status")
+              elif [ "$conclusion" != "success" ]; then
+                failed+=("$name — $conclusion")
+              fi
+            done <<< "$REQUIRED"
+            if [ "${#failed[@]}" -gt 0 ]; then
+              echo "❌ обязательные джобы CI не success — релиз не собирается:"
+              printf '  - %s\n' "${failed[@]}"
+              exit 1
+            fi
+            if [ "${#pending[@]}" -eq 0 ]; then
+              echo "✅ все обязательные джобы CI успешны для ${SHA}"
+              exit 0
+            fi
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "❌ джобы не завершились за отведённое время — fail-closed:"
+              printf '  - %s\n' "${pending[@]}"
+              exit 1
+            fi
+            printf '⏳ ждём: %s\n' "${pending[@]}"
+            sleep 30
+          done
+
   build:
+    needs: [ci-green]
     name: ${{ matrix.edition }} / ${{ matrix.platform.name }}
     strategy:
       fail-fast: false
@@ -26,9 +119,9 @@ jobs:
           - { runner: windows-latest, name: windows-x86_64 }
     runs-on: ${{ matrix.platform.runner }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           # Кэш не должен пересекаться между платформами и редакциями.
           shared-key: release-${{ matrix.platform.name }}-${{ matrix.edition }}
@@ -54,7 +147,22 @@ jobs:
           cp "target/release/arch-be$ext" "dist/$prefix-${{ matrix.platform.name }}$ext"
           "dist/$prefix-${{ matrix.platform.name }}$ext" --version
 
-      - uses: actions/upload-artifact@v4
+      - name: SBOM (CycloneDX 1.6) для редакции
+        # B2: SBOM собирается той же сборкой (тот же коммит и Cargo.lock), что
+        # и публикуемый бинарь, — не отдельной джобой CI. Граф зависимостей не
+        # зависит от ОС, поэтому достаточно одной платформы на редакцию: иначе
+        # четыре копии `sbom-<edition>.cyclonedx.json` столкнулись бы при
+        # merge-multiple. `cargo-sbom` строит SBOM из Cargo.lock (workspace-wide).
+        if: matrix.platform.name == 'linux-x86_64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo install cargo-sbom --locked
+          cargo sbom --output-format cyclone_dx_json_1_6 \
+            > "dist/sbom-${{ matrix.edition }}.cyclonedx.json"
+          head -c 120 "dist/sbom-${{ matrix.edition }}.cyclonedx.json"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-${{ matrix.platform.name }}-${{ matrix.edition }}
           path: dist/
@@ -67,29 +175,51 @@ jobs:
     needs: build
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
+    # B3: OIDC-аттестация (`id-token`), публикация аттестаций рядом с релизом
+    # (`attestations`), запись релиза (`contents`) — только здесь.
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     steps:
       # Checkout нужен ради CHANGELOG.md: `body_path` читает файл из рабочего
       # каталога, а job публикации ничего не чекаутил — тело релиза молча
       # оставалось только автосгенерированным списком коммитов.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: release-*
           path: dist
           merge-multiple: true
 
-      - name: SHA256SUMS (все платформы и редакции)
-        # Хэши считаются здесь, а не в матрице: один каноничный файл
-        # (формат sha256sum) на все 8 артефактов, без pwsh/certutil-веток.
+      - name: SHA256SUMS (бинари + SBOM, единый каноничный файл)
+        # B2: один файл (формат sha256sum) на все 8 бинарей и оба SBOM.
         run: |
+          set -euo pipefail
           cd dist
-          sha256sum arch-be-* > SHA256SUMS
+          sha256sum arch-be-* sbom-*.cyclonedx.json > SHA256SUMS
           cat SHA256SUMS
 
-      - uses: softprops/action-gh-release@v2
+      - name: SLSA build provenance для бинарей
+        # B3 (ADR-056, вариант (а)): привязка «коммит → workflow → бинарь».
+        # Проверка у потребителя: `gh attestation verify <file> --repo <owner/repo>`.
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-path: dist/arch-be-*
+
+      - name: cosign (keyless, Sigstore)
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+
+      - name: Подпись SHA256SUMS (keyless, Sigstore)
+        # B3: подпись манифеста хэшей. Keyless — OIDC-идентичность джобы,
+        # права/сертификат через Fulcio, прозрачность через Rekor; приватных
+        # ключей в CI нет. При недоступности Sigstore джоба падает (fail-closed).
+        run: |
+          set -euo pipefail
+          cosign sign-blob --yes --bundle dist/SHA256SUMS.sigstore.json dist/SHA256SUMS
+
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           # Тело релиза — CHANGELOG: раздел «Что может покраснеть после
           # обновления» обязан быть в release notes, а не только в репозитории.
@@ -100,4 +230,6 @@ jobs:
           fail_on_unmatched_files: true
           files: |
             dist/arch-be-*
+            dist/sbom-*.cyclonedx.json
             dist/SHA256SUMS
+            dist/SHA256SUMS.sigstore.json
