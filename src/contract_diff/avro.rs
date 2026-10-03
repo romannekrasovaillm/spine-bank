@@ -422,7 +422,10 @@ mod tests {
             "{findings:?}"
         );
         // Идентичные схемы — ни одной находки (в т.ч. ни одной «добавленной»).
-        assert!(diff(&old, &old).expect("дифф").is_empty());
+        assert_eq!(
+            diff(&old, &old).expect("дифф"),
+            [] as [crate::contract_diff::types::Finding; 0]
+        );
     }
 
     /// Промоушен типа (int → long) — предупреждение, а не ошибка: чтение

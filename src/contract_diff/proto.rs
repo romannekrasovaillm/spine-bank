@@ -505,7 +505,10 @@ mod tests {
             "  optional string currency = 3;\n",
             "  optional string currency = 9;\n",
         );
-        assert!(!diff_proto(PROTO_V1, &new).is_empty());
+        assert_ne!(
+            diff_proto(PROTO_V1, &new),
+            [] as [crate::contract_diff::types::Finding; 0]
+        );
         let findings = diff_proto(PROTO_V1, &renamed_tag);
         assert!(
             !findings

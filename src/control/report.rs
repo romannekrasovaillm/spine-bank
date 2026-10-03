@@ -1236,8 +1236,8 @@ mod tests {
         assert_eq!(report.fail, 0);
         assert_eq!(report.overrides.len(), 1);
         assert_eq!(report.overrides[0].status, "active");
-        assert!(report.expired_rules.is_empty());
-        assert!(report.version_mismatches.is_empty());
+        assert_eq!(report.expired_rules, [] as [std::string::String; 0]);
+        assert_eq!(report.version_mismatches, [] as [std::string::String; 0]);
         assert!(report.passed);
         // JSON-контракт: ключевые поля сериализуются.
         let json = serde_json::to_value(&report).unwrap();

@@ -2809,7 +2809,7 @@ fn redteam_measures_merchant_case_detection_share() {
             .lines()
             .find(|l| l.contains(id) && l.contains("не пойман и не должен"))
             .unwrap_or_else(|| panic!("{id} обязан быть не пойман: {text}"));
-        assert!(!line.is_empty());
+        assert_ne!(line, "");
     }
     // Дефекты, которые обязаны ловиться, названы с инструментом.
     for (id, tool) in [

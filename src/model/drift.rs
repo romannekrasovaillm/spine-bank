@@ -665,7 +665,10 @@ mod tests {
         let v: Value = serde_json::from_str(&out.content).expect("JSON-вердикт");
         assert_eq!(v["tool"], "model_drift");
         assert_eq!(v["passed"], true, "{v}");
-        assert!(v["issues"].as_array().expect("issues").is_empty());
+        assert_eq!(
+            v["issues"].as_array().expect("issues").as_slice(),
+            [] as [Value; 0]
+        );
 
         // Находка попадает в JSON с полями LintIssue (rule/severity/fix_hint).
         write_file(

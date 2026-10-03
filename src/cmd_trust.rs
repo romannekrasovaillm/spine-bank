@@ -400,7 +400,7 @@ mod tests {
         let entry_a = record_allow(&path, &repo_a, "aaa", 2, "CONSTRAINTS.yaml").expect("allow a");
         assert_eq!(entry_a.sha256, "aaa");
         assert_eq!(entry_a.commands, 2);
-        assert!(!entry_a.allowed_at.is_empty());
+        assert_ne!(entry_a.allowed_at, "");
         record_allow(&path, &repo_b, "bbb", 0, ".arch-handoff/CONSTRAINTS.yaml").expect("allow b");
         let file = load_trust_file(&path)
             .expect("читается")

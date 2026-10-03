@@ -245,7 +245,7 @@ mod tests {
             "{:?}",
             report.decision_reasons
         );
-        assert!(report.decision_reasons.is_empty());
+        assert_eq!(report.decision_reasons, [] as [std::string::String; 0]);
         assert_eq!(RubricDecision::Pass.exit_code(), 0);
         assert!(report.to_markdown().contains("**Решение:** годно"));
     }
@@ -369,7 +369,7 @@ mod tests {
             SECOND_JUDGE_TOLERANCE,
         );
         assert!(agree, "решения совпали, итоги внутри допуска: {diffs:?}");
-        assert!(diffs.is_empty());
+        assert_eq!(diffs, [] as [std::string::String; 0]);
         let (agree, diffs) = judges_agree(
             &report(RubricDecision::Pass, 4.0),
             &report(RubricDecision::Pass, 2.5),

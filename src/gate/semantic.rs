@@ -1893,12 +1893,12 @@ mod tests {
         let nfr_only = linked_entities(repo, crate::rubric_pack::PackKind::NfrMechanism);
         assert_eq!(nfr_only, vec!["NFR-001".to_string()], "{nfr_only:?}");
         // Модели нет — пустой список, а не паника.
-        assert!(
+        assert_eq!(
             linked_entities(
                 &repo.join("nope"),
                 crate::rubric_pack::PackKind::CodeVsSpine
-            )
-            .is_empty()
+            ),
+            [] as [std::string::String; 0]
         );
     }
 

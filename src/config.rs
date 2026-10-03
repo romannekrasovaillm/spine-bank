@@ -1804,7 +1804,7 @@ mod tests {
         .expect("deserialize");
         assert!(plain.kind.is_none());
         assert!(plain.command.is_none());
-        assert!(plain.args.is_empty());
+        assert_eq!(plain.args, [] as [std::string::String; 0]);
         assert!(ModelConfig::default().kind.is_none());
     }
 

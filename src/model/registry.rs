@@ -1161,7 +1161,7 @@ mod tests {
         )
         .expect("импорт");
         assert_eq!(report.written.len(), 6, "3 SYS + 3 OWNER: {report:?}");
-        assert!(report.skipped.is_empty());
+        assert_eq!(report.skipped, [] as [std::string::String; 0]);
         assert!(
             report.warnings.iter().all(|w| !w.contains("depends_on")),
             "{:?}",
@@ -1234,7 +1234,7 @@ mod tests {
         )
         .expect("импорт");
         assert_eq!(r.skipped.len(), 1);
-        assert!(r.written.is_empty());
+        assert_eq!(r.written, [] as [std::path::PathBuf; 0]);
         // С force — перезапись НА МЕСТЕ (тот же файл, без дубля с новым slug).
         let r = import_registry(
             &csv,
@@ -1433,7 +1433,7 @@ mod tests {
         )
         .expect("повтор");
         assert_eq!(r2.skipped.len(), 4, "{:?}", r2.skipped);
-        assert!(r2.written.is_empty());
+        assert_eq!(r2.written, [] as [std::path::PathBuf; 0]);
     }
 
     #[test]

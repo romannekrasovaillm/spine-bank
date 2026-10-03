@@ -1574,7 +1574,10 @@ fn mention_rule_notes_counts_text_rules_against_total() {
             "rules:\n  - name: tests_run\n    type: command_succeeds\n    command: 'true'\n    severity: error\n",
         )
         .expect("registry");
-    assert!(mention_rule_notes(&repo, &registry).is_empty());
+    assert_eq!(
+        mention_rule_notes(&repo, &registry),
+        [] as [std::string::String; 0]
+    );
 }
 
 /// Непокрытые инварианты называются поимённо, а сверх потолка имён —

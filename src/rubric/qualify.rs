@@ -662,7 +662,7 @@ mod tests {
             1,
         );
         assert!(report.passed, "{:?}", report.failures);
-        assert!(report.failures.is_empty());
+        assert_eq!(report.failures, [] as [std::string::String; 0]);
         assert!((report.human_share - 0.0).abs() < 1e-9);
         // Судья-«перестраховщик»: всё человеку — не квалифицирован.
         let report = build_report(

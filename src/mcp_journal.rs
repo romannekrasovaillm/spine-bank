@@ -258,7 +258,7 @@ mod tests {
         assert_eq!(e.verdict, "fail");
         assert_eq!(e.duration_ms, 42);
         assert_eq!(e.rules, vec!["no-pan"]);
-        assert!(!e.ts.is_empty());
+        assert_ne!(e.ts, "");
         // Вторая запись — append, а не перезапись.
         append(
             tmp.path(),
@@ -328,6 +328,9 @@ mod tests {
             ]
         });
         assert_eq!(failed_rule_names(&verdict), vec!["no-pan", "msrv_pinned"]);
-        assert!(failed_rule_names(&serde_json::json!({"passed": true})).is_empty());
+        assert_eq!(
+            failed_rule_names(&serde_json::json!({"passed": true})),
+            [] as [std::string::String; 0]
+        );
     }
 }

@@ -530,7 +530,7 @@ mod tests {
             .await
             .expect("complete");
         assert_eq!(msg.content, "ok");
-        assert!(msg.tool_calls.is_empty());
+        assert_eq!(msg.tool_calls, [] as [crate::llm::ToolCall; 0]);
     }
 
     #[tokio::test]

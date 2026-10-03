@@ -2846,12 +2846,18 @@ mod tests {
             &one_sample(),
         )
         .expect("отчёт");
-        assert!(report.input_injections.is_empty());
+        assert_eq!(
+            report.input_injections,
+            [] as [crate::rubric::report::InputInjection; 0]
+        );
         assert!(!report.to_markdown().contains("prompt-инъекций"));
         let json = serde_json::to_string(&report).expect("json");
         assert!(!json.contains("input_injections"), "{json}");
         // Отчёт без поля (записанный до E2) читается: поле аддитивное.
         let legacy: RubricReport = serde_json::from_str(&json).expect("старый отчёт");
-        assert!(legacy.input_injections.is_empty());
+        assert_eq!(
+            legacy.input_injections,
+            [] as [crate::rubric::report::InputInjection; 0]
+        );
     }
 }

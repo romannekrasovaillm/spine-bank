@@ -1145,7 +1145,7 @@ mod tests {
         assert_eq!(run.harness, "test-cat");
         assert_eq!(run.exit_code, Some(0));
         assert_eq!(run.stdout, "привет, харнесс");
-        assert!(run.stderr.is_empty());
+        assert_eq!(run.stderr, "");
         assert!(run.duration_secs >= 0.0);
         assert_eq!(run.termination, Termination::Completed);
     }
@@ -1352,7 +1352,7 @@ mod tests {
             ac.message
                 .starts_with("harness(dirty): реализовать модуль amount")
         );
-        assert!(!ac.hash.is_empty());
+        assert_ne!(ac.hash, "");
         // В истории — baseline + авто-коммит с кодом; физически в дереве
         // остаются лишь некоммитимые служебные/мусорные каталоги.
         let status = git_out(&repo, &["status", "--porcelain"]).expect("status");

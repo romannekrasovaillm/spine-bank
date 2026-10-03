@@ -1744,7 +1744,7 @@ data: [DONE]\n\n";
         );
         let msg = acc.finish();
         assert_eq!(msg.content, "Hello");
-        assert!(msg.tool_calls.is_empty());
+        assert_eq!(msg.tool_calls, [] as [crate::llm::ToolCall; 0]);
     }
 
     #[test]
@@ -1970,7 +1970,7 @@ data: [DONE]\n\n";
             .expect("stream");
         server.await.expect("join");
         assert_eq!(msg.content, "Привет");
-        assert!(msg.tool_calls.is_empty());
+        assert_eq!(msg.tool_calls, [] as [crate::llm::ToolCall; 0]);
         // tx дропнут при выходе из stream(): recv дочитает буфер и вернёт None.
         let mut events = Vec::new();
         while let Some(ev) = rx.recv().await {
@@ -2132,6 +2132,6 @@ data: [DONE]\n\n";
             )]))
             .await
             .expect("complete");
-        assert!(!msg.content.is_empty());
+        assert_ne!(msg.content, "");
     }
 }

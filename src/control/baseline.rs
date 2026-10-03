@@ -774,7 +774,7 @@ mod tests {
         assert_eq!(c.debt[0].baseline_count, 2);
         assert_eq!(c.new_issues.len(), 1);
         assert_eq!(c.new_issues[0].file, PathBuf::from("src/c.py"));
-        assert!(c.closed.is_empty());
+        assert_eq!(c.closed, [] as [crate::control::baseline::ClosedFinding; 0]);
         assert_eq!(
             c.grown,
             vec![GrownRule {
@@ -791,7 +791,7 @@ mod tests {
 
         // Без отслеживания закрытия (режим среза) закрытые не считаются.
         let c = classify(&[], &baseline, false);
-        assert!(c.closed.is_empty());
+        assert_eq!(c.closed, [] as [crate::control::baseline::ClosedFinding; 0]);
     }
 
     #[test]
