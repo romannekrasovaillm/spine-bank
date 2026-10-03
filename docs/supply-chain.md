@@ -12,10 +12,11 @@
 | Исходники (репозиторий) | git-история, подписи коммитов (если включены), ADR-дисциплина |
 | Бинарь `arch-be` | сводный `SHA256SUMS` на 8 бинарей (linux-x86_64/aarch64, macos-arm64, windows-x86_64 × core/full, workflow `release.yml`); происхождение — `gh attestation verify`; независимая альтернатива — сборка из исходников (ниже) |
 | Подлинность релиза | SLSA build provenance (`actions/attest-build-provenance`, ADR-056) на каждый бинарь + keyless-подпись `SHA256SUMS` (`cosign sign-blob`, Sigstore) — проверка ниже |
-| Зависимости Rust | `Cargo.lock` + `cargo audit` (CI-джоба audit, ежедневная база RUSTSEC) |
+| Зависимости Rust | `Cargo.lock` + `cargo audit` (CI-джоба audit, база RUSTSEC) + `cargo deny check licenses bans sources` (CI-джоба deny, конфиг `deny.toml`) |
 | Состав поставки (SBOM) | `sbom-core.cyclonedx.json` / `sbom-full.cyclonedx.json` (CycloneDX 1.6) — приложены к GitHub Release той же сборкой, что и бинари (B2); хэши SBOM — в том же `SHA256SUMS` |
 | Вендоренный JS (`vendor/archify/`) | `SHA256SUMS` в каталоге вендора; целостность гейтится правилом BE-22 (`control check`) |
 | Toolchain | `rust-toolchain.toml` (pinned stable), MSRV 1.85 (CI-джоба msrv) |
+| Действия CI (`uses:`) | полный 40-hex SHA + комментарий версии (правило C-35, `github_actions_pinned_by_sha`); обновления приходят PR-ами Dependabot (`.github/dependabot.yml`) |
 
 ## Релиз выходит только с зелёного коммита (B1)
 
@@ -145,12 +146,13 @@ SBOM к той же матричной сборке, что и соответс�
 
 Типовые проверки ДИТ:
 
-- соответствие внутреннему списку разрешённых лицензий (проверка:
+- соответствие внутреннему списку разрешённых лицензий — **автоматизировано**
+  CI-джобой `cargo deny` (проверка `licenses`) по `deny.toml`; разрешённый
+  список — фактический спектр на 2026-10-03: MIT, Apache-2.0, BSD-2/3-Clause,
+  0BSD, ISC, Zlib, BSL-1.0, Unicode-3.0, Unlicense, MPL-2.0,
+  CDLA-Permissive-2.0 (при внутреннем запрете copyleft смотреть MPL-2.0
+  точечно); разовая ручная проверка конкретной поставки:
   `jq -r '.components[].licenses[].expression' sbom-full.cyclonedx.json | sort -u`;
-  снимок 2026-09-04: 298 компонентов, лицензии пермиссивные —
-  MIT/Apache-2.0/BSD/ISC/Zlib/BSL-1.0/Unicode-3.0/Unlicense, плюс
-  MPL-2.0 и CDLA-Permissive-2.0 (weak copyleft уровня файла — при
-  внутреннем запрете copyleft смотреть компоненты точечно));
 - сверка состава с предыдущей поставкой (diff по `components[]."bom-ref"`);
 - сопоставление с внутренней базой уязвимостей (дополнение к RUSTSEC из
   `cargo audit`).

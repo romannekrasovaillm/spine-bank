@@ -1,0 +1,14 @@
+# Dependabot: обновления actions приходят PR-ами — SHA-пины не гниют (B4).
+# Обновляется только экосистема github-actions: Rust-зависимости ведёт
+# `Cargo.lock` + `cargo audit`/`cargo deny` (джобы CI), дублировать не нужно.
+# PR Dependabot меняет SHA-пин и комментарий версии — тот же формат, что
+# требует фитнес-правило github_actions_pinned_by_sha (CONSTRAINTS.yaml).
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"

@@ -17,6 +17,10 @@ on:
     - cron: "17 2 * * *"
   workflow_dispatch:
 
+# B4: минимум прав на уровне workflow — джобам ночного прогона запись не нужна.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -28,12 +32,12 @@ jobs:
     # прогона + запас на установку cargo-fuzz.
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@0e28dd9a7764e5f83064112bb1f24025a14c313c # nightly
         with:
           # rust-src нужен -Zbuild-std санитайзера libFuzzer.
           components: rust-src
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           # Ночной toolchain и кэш основного workspace не смешиваем.
           key: nightly-fuzz
@@ -51,7 +55,7 @@ jobs:
             echo "=== $t ==="
             cargo +nightly fuzz run "$t" -- -max_total_time=300 -timeout=25 -max_len=65536
           done
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: fuzz-corpus-crashes
@@ -83,9 +87,9 @@ jobs:
       matrix:
         shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: nightly-mutants
       # rust-cache кэширует $CARGO_HOME/bin — cargo-mutants собирается раз.
@@ -93,7 +97,7 @@ jobs:
       # -j 2: на 4-ядерном раннере два параллельных сценария; shuffle выкл.,
       # чтобы состав шарда был воспроизводим между ночами.
       - run: cargo mutants --shard ${{ matrix.shard }}/12 -j 2 --no-shuffle
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: mutants-out-shard-${{ matrix.shard }}
@@ -108,11 +112,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           components: llvm-tools-preview
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: nightly-coverage
       # rust-cache кэширует $CARGO_HOME/bin — cargo-llvm-cov собирается раз.
@@ -127,7 +131,7 @@ jobs:
             cargo llvm-cov report --summary-only
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: coverage-lcov
           path: lcov.info

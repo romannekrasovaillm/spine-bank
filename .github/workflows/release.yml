@@ -19,6 +19,10 @@ on:
     tags: ["v*"]
   workflow_dispatch:
 
+# B4: минимум прав на уровне workflow; повышение — только в джобе публикации.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -115,9 +119,9 @@ jobs:
           - { runner: windows-latest, name: windows-x86_64 }
     runs-on: ${{ matrix.platform.runner }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           # Кэш не должен пересекаться между платформами и редакциями.
           shared-key: release-${{ matrix.platform.name }}-${{ matrix.edition }}
@@ -158,7 +162,7 @@ jobs:
             > "dist/sbom-${{ matrix.edition }}.cyclonedx.json"
           head -c 120 "dist/sbom-${{ matrix.edition }}.cyclonedx.json"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-${{ matrix.platform.name }}-${{ matrix.edition }}
           path: dist/
@@ -181,9 +185,9 @@ jobs:
       # Checkout нужен ради CHANGELOG.md: `body_path` читает файл из рабочего
       # каталога, а job публикации ничего не чекаутил — тело релиза молча
       # оставалось только автосгенерированным списком коммитов.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: release-*
           path: dist
@@ -200,12 +204,12 @@ jobs:
       - name: SLSA build provenance для бинарей
         # B3 (ADR-056, вариант (а)): привязка «коммит → workflow → бинарь».
         # Проверка у потребителя: `gh attestation verify <file> --repo <owner/repo>`.
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
         with:
           subject-path: dist/arch-be-*
 
       - name: cosign (keyless, Sigstore)
-        uses: sigstore/cosign-installer@v3
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
 
       - name: Подпись SHA256SUMS (keyless, Sigstore)
         # B3: подпись манифеста хэшей. Keyless — OIDC-идентичность джобы,
@@ -215,7 +219,7 @@ jobs:
           set -euo pipefail
           cosign sign-blob --yes --bundle dist/SHA256SUMS.sigstore.json dist/SHA256SUMS
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           # Тело релиза — CHANGELOG: раздел «Что может покраснеть после
           # обновления» обязан быть в release notes, а не только в репозитории.
