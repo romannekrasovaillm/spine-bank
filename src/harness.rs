@@ -77,6 +77,167 @@ pub struct HarnessRun {
     /// Механически разобранный JSON-контракт результата из stdout
     /// (валидация схемы — [`parse_result_contract`]).
     pub contract: ContractParse,
+    /// Пост-гейт (A4): собственный прогон `arch-be gate` харнессом по
+    /// рабочему дереву прогона с базой `baseline_commit` из `MANIFEST.json` —
+    /// вне окружения исполнителя. `None` — пост-гейт отключён адаптером
+    /// (`post_gate = false`) либо прогон прерван (судить нечего).
+    pub post_gate: Option<PostGate>,
+}
+
+/// Вердикт пост-гейта прогона (A4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PostGateVerdict {
+    /// Гейт пройден: все обязательные для маршрута составляющие PASS.
+    Pass,
+    /// Гейт провален (есть FAIL-составляющая).
+    Fail,
+    /// FAIL нет, но обязательная составляющая без входа (SKIP): «зелёный»
+    /// не полон — для прогона с пакетом контур обязан быть полным.
+    Incomplete,
+    /// Гейт не завершился за `post_gate_timeout_secs` — результат не проверен.
+    Timeout,
+    /// Пост-гейт не запускался: нет handoff-пакета или в нём нет
+    /// `baseline_commit` (кейс вне handoff-дисциплины — ложных красных нет).
+    Skipped,
+    /// Сбой запуска/выполнения гейта в процессе харнесса.
+    Error,
+}
+
+impl PostGateVerdict {
+    /// Метка вердикта для вывода/журнала.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Pass => "PASS",
+            Self::Fail => "FAIL",
+            Self::Incomplete => "INCOMPLETE",
+            Self::Timeout => "TIMEOUT",
+            Self::Skipped => "SKIP",
+            Self::Error => "ERROR",
+        }
+    }
+
+    /// Красный вердикт: результат исполнителя не принят. `Pass` — принят,
+    /// `Skipped` — пост-гейт не запускался (кейс вне handoff-дисциплины или
+    /// явное отключение адаптером), красных не плодим.
+    #[must_use]
+    pub fn is_red(self) -> bool {
+        !matches!(self, Self::Pass | Self::Skipped)
+    }
+}
+
+/// Итог пост-гейта прогона (A4): вердикт, код выхода гейта, база сверки,
+/// краткая сводка и главные находки (до [`POST_GATE_MAX_FINDINGS`] строк).
+#[derive(Debug, Clone)]
+pub struct PostGate {
+    /// Вердикт.
+    pub verdict: PostGateVerdict,
+    /// Exit-код гейта (0/1/3) — только когда гейт отработал; `None` для
+    /// SKIP/TIMEOUT/ERROR.
+    pub exit_code: Option<i32>,
+    /// База сверки — `baseline_commit` из `MANIFEST.json` пакета.
+    pub base: Option<String>,
+    /// Краткая сводка вердикта одной строкой.
+    pub summary: String,
+    /// Главные находки (error-строки составляющих, до 10).
+    pub findings: Vec<String>,
+}
+
+impl PostGate {
+    /// Пост-гейт пропущен (нет пакета / нет `baseline_commit`).
+    fn skipped(summary: impl Into<String>) -> Self {
+        Self {
+            verdict: PostGateVerdict::Skipped,
+            exit_code: None,
+            base: None,
+            summary: summary.into(),
+            findings: Vec::new(),
+        }
+    }
+
+    /// Пост-гейт не завершился за отведённый таймаут.
+    fn timeout(base: String, timeout_secs: u64) -> Self {
+        Self {
+            verdict: PostGateVerdict::Timeout,
+            exit_code: None,
+            base: Some(base),
+            summary: format!(
+                "гейт не завершился за {timeout_secs} с — результат исполнителя не проверен"
+            ),
+            findings: Vec::new(),
+        }
+    }
+
+    /// Сбой запуска/выполнения гейта.
+    fn error(base: Option<String>, reason: impl std::fmt::Display) -> Self {
+        Self {
+            verdict: PostGateVerdict::Error,
+            exit_code: None,
+            base,
+            summary: format!("гейт не отработал: {reason}"),
+            findings: Vec::new(),
+        }
+    }
+
+    /// Сборка итога из отчёта гейта: вердикт, exit-код, сводка, находки.
+    fn from_report(report: &crate::gate::GateReport, base: String) -> Self {
+        use crate::gate::GateOutcome;
+        let verdict = match report.outcome {
+            GateOutcome::Pass => PostGateVerdict::Pass,
+            GateOutcome::Fail => PostGateVerdict::Fail,
+            GateOutcome::Incomplete => PostGateVerdict::Incomplete,
+        };
+        let failed: Vec<&str> = report
+            .components
+            .iter()
+            .filter(|c| c.status == crate::gate::GateStatus::Fail)
+            .map(|c| c.name)
+            .collect();
+        let summary = match report.outcome {
+            GateOutcome::Pass => format!("гейт пройден (маршрут {})", report.route),
+            GateOutcome::Fail => format!(
+                "провалено составляющих: {} ({})",
+                failed.len(),
+                failed.join(", ")
+            ),
+            GateOutcome::Incomplete => format!(
+                "обязательные составляющие без входа: {}",
+                report.not_checked.join(", ")
+            ),
+        };
+        Self {
+            verdict,
+            exit_code: Some(report.outcome.exit_code()),
+            base: Some(base),
+            summary,
+            findings: collect_post_gate_findings(report),
+        }
+    }
+}
+
+/// Максимум находок пост-гейта, выносимых в итог прогона (полный список —
+/// у команд составляющих; карточке фонового задания и ответу MCP хватает
+/// главных строк).
+const POST_GATE_MAX_FINDINGS: usize = 10;
+
+/// Главные находки пост-гейта: error-строки FAIL-составляющих в порядке
+/// прогона; если error-строк нет (FAIL по сбою выполнения), берём остальные.
+fn collect_post_gate_findings(report: &crate::gate::GateReport) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for c in &report.components {
+        for f in c.findings.iter().filter(|f| f.severity == "error") {
+            out.push(format!("[{}] {f}", c.name));
+        }
+    }
+    if out.is_empty() {
+        for c in &report.components {
+            for f in &c.findings {
+                out.push(format!("[{}] {f}", c.name));
+            }
+        }
+    }
+    out.truncate(POST_GATE_MAX_FINDINGS);
+    out
 }
 
 /// Итог авто-коммита оставшихся после исполнителя правок.
@@ -341,6 +502,15 @@ pub async fn run_harness(
     } else {
         None
     };
+    // A4: пост-гейт — собственная проверка результата харнессом, вне
+    // окружения исполнителя (Stop-хук живёт ВНУТРИ песочницы и fail-soft).
+    // Только по завершённому прогону: прерванный уже красный по termination,
+    // судить промежуточное дерево нечем.
+    let post_gate = if termination == Termination::Completed {
+        run_post_gate(repo, cfg).await
+    } else {
+        None
+    };
     let stdout = take(&stdout_buf);
     let stderr = take(&stderr_buf);
     // Контракт разбирается один раз на стороне запуска — механически,
@@ -355,7 +525,112 @@ pub async fn run_harness(
         termination,
         auto_commit,
         contract,
+        post_gate,
     })
+}
+
+/// База пост-гейта из `MANIFEST.json` пакета (A4): отсутствие пакета,
+/// отсутствие `baseline_commit` (пакет старого формата) и битый манифест —
+/// разные причины пропуска с разной пометкой.
+#[derive(Debug)]
+enum PostGateBase {
+    /// `.arch-handoff/MANIFEST.json` нет — кейс вне handoff-дисциплины.
+    Absent,
+    /// Манифест есть, но не читается/не парсится.
+    Invalid(String),
+    /// Манифест есть, а `baseline_commit` отсутствует или пуст.
+    NoBaseline,
+    /// База сверки.
+    Commit(String),
+}
+
+/// Читает `baseline_commit` из `MANIFEST.json` (единственное условие запуска
+/// пост-гейта: без базы сверять результат не с чем).
+fn post_gate_base(repo: &Path) -> PostGateBase {
+    #[derive(serde::Deserialize)]
+    struct ManifestBase {
+        #[serde(default)]
+        baseline_commit: Option<String>,
+    }
+    let path = repo.join(HANDOFF_DIR).join("MANIFEST.json");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return PostGateBase::Absent;
+    };
+    let Ok(m) = serde_json::from_str::<ManifestBase>(&text) else {
+        return PostGateBase::Invalid("невалидный JSON".to_string());
+    };
+    match m
+        .baseline_commit
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        Some(commit) => PostGateBase::Commit(commit),
+        None => PostGateBase::NoBaseline,
+    }
+}
+
+/// Пост-гейт прогона (A4): гейт по рабочему дереву прогона с базой
+/// `baseline_commit`, В ПРОЦЕССЕ харнесса (не через `arch-be` в PATH —
+/// окружение исполнителя может быть почищено). Гейт синхронный — уходит в
+/// blocking-пул; таймаут `post_gate_timeout_secs` превращает незавершившийся
+/// прогон в вердикт [`PostGateVerdict::Timeout`] (RA-5: `dependency_direction`
+/// на больших реестрах патологически дорог).
+///
+/// `None` — пост-гейт отключён адаптером (`post_gate = false`); предупреждение
+/// печатает [`execute_run`].
+async fn run_post_gate(repo: &Path, cfg: &CodingHarnessConfig) -> Option<PostGate> {
+    if !cfg.post_gate {
+        return None;
+    }
+    let base = match post_gate_base(repo) {
+        PostGateBase::Absent => {
+            return Some(PostGate::skipped("нет handoff-пакета — пост-гейт пропущен"));
+        }
+        PostGateBase::Invalid(reason) => {
+            return Some(PostGate::skipped(format!(
+                "MANIFEST.json не читается ({reason}) — пост-гейт пропущен"
+            )));
+        }
+        PostGateBase::NoBaseline => {
+            return Some(PostGate::skipped(
+                "в MANIFEST.json нет baseline_commit (пакет старого формата) — \
+                 пост-гейт пропущен",
+            ));
+        }
+        PostGateBase::Commit(commit) => commit,
+    };
+    let timeout_secs = cfg.post_gate_timeout_secs.max(1);
+    // База сверки — из манифеста, а не «HEAD»: гейт судит, что исполнитель
+    // изменил ОТНОСИТЕЛЬНО выдачи пакета.
+    let repo_owned = repo.to_path_buf();
+    let base_owned = base.clone();
+    let gate = tokio::task::spawn_blocking(move || {
+        // Пороги маршрутов — дефолтные: у `run_harness` нет `Config` (он
+        // получает только адаптер), а пост-гейт обязан быть детерминирован
+        // и не зависеть от машины (AD-7).
+        let limits = crate::config::Config::default()
+            .significance
+            .limits()
+            .unwrap_or((1, 4));
+        crate::gate::run_opts(
+            &repo_owned,
+            None,
+            Some(&base_owned),
+            None,
+            limits,
+            &crate::gate::GateRequirements::default(),
+            &crate::gate::GateOptions::default(),
+        )
+    });
+    match tokio::time::timeout(Duration::from_secs(timeout_secs), gate).await {
+        Ok(Ok(Ok(report))) => Some(PostGate::from_report(&report, base)),
+        Ok(Ok(Err(e))) => Some(PostGate::error(Some(base), e)),
+        Ok(Err(join)) => Some(PostGate::error(
+            Some(base),
+            format!("сбой потока гейта: {join}"),
+        )),
+        Err(_) => Some(PostGate::timeout(base, timeout_secs)),
+    }
 }
 
 /// Коммитит незакоммиченные правки исполнителя (кроме `.arch-handoff/` и
@@ -810,7 +1085,13 @@ impl Tool for HarnessRunTool {
                 background=true — прогон в фоне: инструмент возвращается сразу (id задачи \
                 hr-*), агент остаётся доступным пользователю; статус — subagent_list, \
                 результат — subagent_result(id). Используй background для длинных прогонов \
-                и когда пользователь продолжает диалог во время работы харнесса."
+                и когда пользователь продолжает диалог во время работы харнесса. \
+                ПОСТ-ГЕЙТ: после авто-коммита харнесс сам прогоняет гейт по рабочему дереву \
+                с базой baseline_commit из .arch-handoff/MANIFEST.json (вне окружения \
+                исполнителя) — «код 0 у исполнителя» ещё не значит «результат прошёл гейт». \
+                Вердикт пост-гейта виден в итоге; FAIL/INCOMPLETE/TIMEOUT делают прогон \
+                ошибкой (is_error). Отключается только флагом адаптера post_gate = false \
+                (с предупреждением в выводе)."
                 .into(),
             parameters: json!({
                 "type": "object",
@@ -967,11 +1248,17 @@ async fn execute_run(
             let mut content = note;
             match run.termination {
                 Termination::Completed => {
-                    let _ = writeln!(
+                    let _ = write!(
                         content,
                         "Харнесс '{name}' завершился: код {code}, {:.1} с.",
                         run.duration_secs
                     );
+                    // A4.2: вердикт пост-гейта — в ПЕРВОЙ строке итога, чтобы
+                    // красный прогон был виден без чтения всего вывода.
+                    if let Some(pg) = &run.post_gate {
+                        let _ = write!(content, " Пост-гейт: {}.", pg.verdict.label());
+                    }
+                    content.push('\n');
                 }
                 Termination::AbsoluteTimeout => {
                     let _ = writeln!(
@@ -1008,6 +1295,42 @@ async fn execute_run(
                          исполнителя; при повторении проверьте задачу/доступ к git.",
                     ac.files, ac.hash, ac.message
                 );
+            }
+            // A4.2: блок пост-гейта — вердикт, база, сводка, главные находки.
+            // Красный вердикт виден и в первой строке итога (выше), и здесь —
+            // с адресами находок для разбора.
+            match &run.post_gate {
+                Some(pg) => {
+                    let _ = writeln!(content, "Пост-гейт: {}", pg.verdict.label());
+                    let _ = writeln!(content, "  Сводка: {}.", pg.summary);
+                    if let Some(base) = &pg.base {
+                        let _ = writeln!(content, "  База: {base}");
+                    }
+                    if let Some(code) = pg.exit_code {
+                        let _ = writeln!(content, "  Exit-код гейта: {code}");
+                    }
+                    if !pg.findings.is_empty() {
+                        content.push_str("  Находки:\n");
+                        for f in &pg.findings {
+                            let _ = writeln!(content, "    {f}");
+                        }
+                    }
+                    if pg.verdict.is_red() {
+                        content.push_str(
+                            "ИТОГ ПРОГОНА КРАСНЫЙ: результат исполнителя не принят пост-гейтом \
+                             — разберите находки или оформите расхождение с пакетом.\n",
+                        );
+                    }
+                }
+                // Явное отключение — не молчаливый пропуск: предупреждение
+                // обязано доехать и до вывода, и до журнала фонового прогона.
+                None if !hcfg.post_gate => {
+                    content.push_str(
+                        "ПРЕДУПРЕЖДЕНИЕ: пост-гейт отключён адаптером post_gate = false — \
+                         результат исполнителя не перепроверяется гейтом.\n",
+                    );
+                }
+                None => {}
             }
             match &run.contract {
                 ContractParse::Valid(c) => {
@@ -1063,7 +1386,10 @@ async fn execute_run(
                 content.push_str("\n--- stderr ---\n");
                 content.push_str(run.stderr.trim_end());
             }
-            let is_error = run.exit_code != Some(0) || run.termination != Termination::Completed;
+            let post_gate_red = run.post_gate.as_ref().is_some_and(|pg| pg.verdict.is_red());
+            let is_error = run.exit_code != Some(0)
+                || run.termination != Termination::Completed
+                || post_gate_red;
             ToolOutput {
                 content,
                 is_error,
@@ -1415,6 +1741,7 @@ mod tests {
             env: [("EXTRA".to_string(), "yes".to_string())]
                 .into_iter()
                 .collect(),
+            ..CodingHarnessConfig::default()
         };
         // Наследование по умолчанию: HOME и PATH видны, EXTRA из env — тоже.
         let run = run_harness("probe", &probe(vec![]), &repo, "задача")
@@ -1914,5 +2241,382 @@ mod tests {
         let infos = crate::worktree::list(&repo).await.expect("list");
         assert_eq!(infos.len(), 1, "{infos:?}");
         assert!(infos[0].path.join("feature.txt").is_file());
+    }
+
+    // --- A4: пост-гейт прогона ---------------------------------------------
+
+    /// git-команда в песочнице с фиксированной идентичностью коммиттера
+    /// (на CI/в контейнерах user.name/user.email может не быть).
+    fn git_sandbox(dir: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .expect("git");
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// Песочница A4 (сценарий RA-6): git-репо с handoff-пакетом — реестром
+    /// `no_pan_in_logs`, Stop-хуком в `.claude/settings.json`, спайном и
+    /// `MANIFEST.json` с пинами контрольной плоскости и `baseline_commit`.
+    ///
+    /// `spine_tracked = false` — спайн создан ПОСЛЕ базового коммита
+    /// (untracked): удаление такого файла исполнителем не попадает в
+    /// git-diff и не валит `delta_guard` — красный обязан прийти именно от
+    /// `spine_lint` (INCOMPLETE), как в тесте «удаление спайна».
+    ///
+    /// Возвращает sha baseline-коммита (базу пост-гейта).
+    fn a4_sandbox(repo: &Path, spine_tracked: bool) -> String {
+        write_file(&repo.join("src/a.rs"), "fn main() {}\n");
+        write_file(
+            &repo.join(".claude/settings.json"),
+            "{\"hooks\":{\"Stop\":[{\"hooks\":[{\"type\":\"command\",\
+             \"command\":\"arch-be gate --base HEAD\"}]}]}}\n",
+        );
+        write_file(
+            &repo.join(".arch-handoff/CONSTRAINTS.yaml"),
+            "rules:\n  - id: X-1\n    name: no_pan_in_logs\n    type: must_not_contain\n    \
+             glob: \"src/**/*.rs\"\n    pattern: \"PAN=\"\n    severity: error\n",
+        );
+        if spine_tracked {
+            write_file(&repo.join("ARCHITECTURE-SPINE.md"), "# Spine\n");
+        }
+        git_sandbox(repo, &["init", "-q"]);
+        git_sandbox(repo, &["config", "user.name", "t"]);
+        git_sandbox(repo, &["config", "user.email", "t@t"]);
+        git_sandbox(repo, &["add", "."]);
+        git_sandbox(repo, &["commit", "-q", "-m", "baseline"]);
+        let sha = git_out(repo, &["rev-parse", "HEAD"])
+            .expect("rev-parse")
+            .trim()
+            .to_string();
+        if !spine_tracked {
+            write_file(&repo.join("ARCHITECTURE-SPINE.md"), "# Spine\n");
+        }
+        // Пины снимаются ПОСЛЕ всех файлов пакета — иначе пакет сам себе
+        // вечное расхождение (тот же порядок, что у handoff_create).
+        let pins = crate::control_plane::collect(repo);
+        let manifest = serde_json::json!({
+            "baseline_commit": sha,
+            "model": "stub-model",
+            "control_plane": pins,
+        });
+        write_file(
+            &repo.join(".arch-handoff/MANIFEST.json"),
+            &serde_json::to_string_pretty(&manifest).expect("manifest json"),
+        );
+        sha
+    }
+
+    /// Заглушка-исполнитель RA-6: удаляет Stop-хук, пишет PAN в код, коммитит.
+    fn a4_toxic_cfg() -> CodingHarnessConfig {
+        CodingHarnessConfig {
+            binary: "sh".into(),
+            args: vec![
+                "-c".into(),
+                "printf '{}' > .claude/settings.json; \
+                 echo 'log(\"PAN=4111111111111111\")' > src/a.rs; \
+                 git add -A; git commit -qm toxic; \
+                 echo '{\"status\": \"complete\"}'"
+                    .into(),
+            ],
+            prompt_mode: PromptMode::Stdin,
+            timeout_secs: 30,
+            idle_timeout_secs: 0,
+            ..CodingHarnessConfig::default()
+        }
+    }
+
+    /// Заглушка-исполнитель чистого прогона: коммитит безобидный файл.
+    fn a4_clean_cfg() -> CodingHarnessConfig {
+        CodingHarnessConfig {
+            binary: "sh".into(),
+            args: vec![
+                "-c".into(),
+                "echo feature > feature.txt; git add -A; git commit -qm feature; \
+                 echo '{\"status\": \"complete\"}'"
+                    .into(),
+            ],
+            prompt_mode: PromptMode::Stdin,
+            timeout_secs: 30,
+            idle_timeout_secs: 0,
+            ..CodingHarnessConfig::default()
+        }
+    }
+
+    /// Заглушка-исполнитель: удаляет спайн (untracked) и коммитит безобидное.
+    fn a4_drop_spine_cfg() -> CodingHarnessConfig {
+        CodingHarnessConfig {
+            binary: "sh".into(),
+            args: vec![
+                "-c".into(),
+                "rm ARCHITECTURE-SPINE.md; echo ok > notes.md; git add -A; \
+                 git commit -qm notes; echo '{\"status\": \"complete\"}'"
+                    .into(),
+            ],
+            prompt_mode: PromptMode::Stdin,
+            timeout_secs: 30,
+            idle_timeout_secs: 0,
+            ..CodingHarnessConfig::default()
+        }
+    }
+
+    /// RA-6 после фикса: заглушка удаляет Stop-хук и пишет PAN — пост-гейт
+    /// красный (`control_plane_tampered` + `no_pan_in_logs`), итог прогона
+    /// ошибка, хотя исполнитель вернул код 0 / `status=complete`.
+    #[tokio::test]
+    async fn post_gate_red_on_toxic_run_ra6() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        let base = a4_sandbox(&repo, true);
+        let cfg = a4_toxic_cfg();
+        let run = run_harness("stub", &cfg, &repo, "задача")
+            .await
+            .expect("run");
+        assert_eq!(run.exit_code, Some(0), "исполнитель завершился кодом 0");
+        let pg = run
+            .post_gate
+            .expect("пост-гейт обязан отработать (пакет есть)");
+        assert_eq!(pg.verdict, PostGateVerdict::Fail, "{pg:?}");
+        assert_eq!(pg.exit_code, Some(1), "exit-код гейта: {pg:?}");
+        assert_eq!(pg.base.as_deref(), Some(base.as_str()));
+        let joined = pg.findings.join("\n");
+        assert!(joined.contains("control_plane_tampered"), "{joined}");
+        assert!(joined.contains("no_pan_in_logs"), "{joined}");
+        // Итог для оркестратора — ошибка, хотя исполнитель «успешен».
+        let out = execute_run("stub", &cfg, &repo, "задача", String::new()).await;
+        assert!(out.is_error, "{}", out.content);
+        assert!(out.content.contains("Пост-гейт: FAIL"), "{}", out.content);
+        assert!(
+            out.content.contains("control_plane_tampered"),
+            "{}",
+            out.content
+        );
+        println!("RA-6 после фикса:\n{}", out.content);
+    }
+
+    /// Чистый прогон: пост-гейт PASS, ошибка — только по коду исполнителя.
+    #[tokio::test]
+    async fn post_gate_passes_on_clean_run() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        a4_sandbox(&repo, true);
+        let cfg = a4_clean_cfg();
+        let run = run_harness("stub", &cfg, &repo, "задача")
+            .await
+            .expect("run");
+        let pg = run.post_gate.expect("пост-гейт отработал");
+        assert_eq!(pg.verdict, PostGateVerdict::Pass, "{pg:?}");
+        assert_eq!(pg.exit_code, Some(0), "{pg:?}");
+        assert!(pg.findings.is_empty(), "{:?}", pg.findings);
+        assert!(!pg.verdict.is_red());
+        let out = execute_run("stub", &cfg, &repo, "задача", String::new()).await;
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.contains("Пост-гейт: PASS"), "{}", out.content);
+    }
+
+    /// Отключение адаптером: вердикта нет (None), предупреждение — в выводе.
+    #[tokio::test]
+    async fn post_gate_disabled_by_adapter_warns() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        a4_sandbox(&repo, true);
+        let cfg = CodingHarnessConfig {
+            post_gate: false,
+            ..a4_clean_cfg()
+        };
+        let run = run_harness("stub", &cfg, &repo, "задача")
+            .await
+            .expect("run");
+        assert!(run.post_gate.is_none(), "отключён — вердикта нет");
+        let out = execute_run("stub", &cfg, &repo, "задача", String::new()).await;
+        assert!(!out.is_error, "{}", out.content);
+        assert!(
+            out.content
+                .contains("пост-гейт отключён адаптером post_gate = false"),
+            "{}",
+            out.content
+        );
+    }
+
+    /// Нет handoff-пакета: пост-гейт SKIP с пометкой, не ошибка.
+    #[tokio::test]
+    async fn post_gate_skips_without_package() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        a4_sandbox(&repo, true);
+        std::fs::remove_file(repo.join(".arch-handoff/MANIFEST.json")).expect("rm manifest");
+        let cfg = a4_clean_cfg();
+        let run = run_harness("stub", &cfg, &repo, "задача")
+            .await
+            .expect("run");
+        let pg = run.post_gate.expect("вердикт с пометкой SKIP");
+        assert_eq!(pg.verdict, PostGateVerdict::Skipped, "{pg:?}");
+        assert!(pg.summary.contains("нет handoff-пакета"), "{}", pg.summary);
+        assert!(!pg.verdict.is_red());
+        let out = execute_run("stub", &cfg, &repo, "задача", String::new()).await;
+        assert!(!out.is_error, "{}", out.content);
+    }
+
+    /// Пакет старого формата (нет `baseline_commit`): SKIP с пометкой.
+    #[tokio::test]
+    async fn post_gate_skips_old_manifest_without_baseline() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        a4_sandbox(&repo, true);
+        write_file(
+            &repo.join(".arch-handoff/MANIFEST.json"),
+            "{\"model\": \"stub-model\"}\n",
+        );
+        let cfg = a4_clean_cfg();
+        let run = run_harness("stub", &cfg, &repo, "задача")
+            .await
+            .expect("run");
+        let pg = run.post_gate.expect("вердикт с пометкой SKIP");
+        assert_eq!(pg.verdict, PostGateVerdict::Skipped, "{pg:?}");
+        assert!(pg.summary.contains("baseline_commit"), "{}", pg.summary);
+        assert!(!pg.verdict.is_red());
+    }
+
+    /// Удаление спайна заглушкой: `spine_lint` без входа → INCOMPLETE →
+    /// красный итог для прогона с пакетом (обязательная составляющая SKIP).
+    #[tokio::test]
+    async fn post_gate_red_when_spine_removed_incomplete() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        a4_sandbox(&repo, false);
+        let cfg = a4_drop_spine_cfg();
+        let run = run_harness("stub", &cfg, &repo, "задача")
+            .await
+            .expect("run");
+        let pg = run.post_gate.expect("пост-гейт отработал");
+        assert_eq!(pg.verdict, PostGateVerdict::Incomplete, "{pg:?}");
+        assert!(pg.summary.contains("spine_lint"), "{}", pg.summary);
+        assert!(pg.verdict.is_red());
+        let out = execute_run("stub", &cfg, &repo, "задача", String::new()).await;
+        assert!(out.is_error, "{}", out.content);
+    }
+
+    /// Таймаут пост-гейта: медленный реестр (`command_succeeds: sleep`) не
+    /// укладывается в 1 с — вердикт TIMEOUT, итог красный (RA-5).
+    #[tokio::test]
+    async fn post_gate_timeout_is_red() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        a4_sandbox(&repo, true);
+        write_file(
+            &repo.join(".arch-handoff/CONSTRAINTS.yaml"),
+            "rules:\n  - id: X-1\n    name: no_pan_in_logs\n    type: must_not_contain\n    \
+             glob: \"src/**/*.rs\"\n    pattern: \"PAN=\"\n    severity: error\n  \
+             - id: X-2\n    name: slow\n    type: command_succeeds\n    command: \"sleep 5\"\n    \
+             severity: error\n",
+        );
+        let cfg = CodingHarnessConfig {
+            post_gate_timeout_secs: 1,
+            ..a4_clean_cfg()
+        };
+        let run = run_harness("stub", &cfg, &repo, "задача")
+            .await
+            .expect("run");
+        let pg = run.post_gate.expect("пост-гейт отработал");
+        assert_eq!(pg.verdict, PostGateVerdict::Timeout, "{pg:?}");
+        assert!(pg.verdict.is_red());
+        let out = execute_run("stub", &cfg, &repo, "задача", String::new()).await;
+        assert!(out.is_error, "{}", out.content);
+        assert!(
+            out.content.contains("Пост-гейт: TIMEOUT"),
+            "{}",
+            out.content
+        );
+    }
+
+    /// Тот же красный прогон через инструмент `harness_run` (путь MCP):
+    /// вывод инструмента обязан нести вердикт и находки, а `is_error` — быть
+    /// истинным одинаково в синхронном и фоновом каналах.
+    #[tokio::test]
+    async fn post_gate_red_visible_through_harness_run_tool() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        a4_sandbox(&repo, true);
+        let mut cfg = cfg_in(tmp.path());
+        cfg.harnesses.insert("stub".into(), a4_toxic_cfg());
+        let tool = HarnessRunTool { cfg: cfg.clone() };
+        let ctx = ToolContext::new(tmp.path().to_path_buf(), Arc::new(cfg));
+        let out = tool
+            .call(
+                json!({"harness": "stub", "path": "repo", "task": "задача"}),
+                &ctx,
+            )
+            .await
+            .expect("call");
+        assert!(out.is_error, "{}", out.content);
+        assert!(out.content.contains("Пост-гейт: FAIL"), "{}", out.content);
+        assert!(
+            out.content.contains("control_plane_tampered"),
+            "{}",
+            out.content
+        );
+        assert!(out.content.contains("no_pan_in_logs"), "{}", out.content);
+    }
+
+    /// Фоновый прогон: карточка задачи `hr-*` показывает тот же вывод —
+    /// статус Failed и отчёт с вердиктом пост-гейта (отдельного TUI-кода не
+    /// нужно: карточка рендерит `content` инструмента).
+    #[tokio::test]
+    async fn post_gate_red_marks_background_task_failed() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path().join("repo");
+        a4_sandbox(&repo, true);
+        let mut cfg = cfg_in(tmp.path());
+        cfg.paths.reports_dir = tmp.path().join("reports");
+        cfg.harnesses.insert("stub".into(), a4_toxic_cfg());
+        let tool = HarnessRunTool { cfg: cfg.clone() };
+        let registry = crate::subagent::SubagentRegistry::new();
+        let ctx = ToolContext::new(tmp.path().to_path_buf(), Arc::new(cfg))
+            .with_subagents(registry.clone());
+        let out = tool
+            .call(
+                json!({"harness": "stub", "path": "repo", "task": "задача", "background": true}),
+                &ctx,
+            )
+            .await
+            .expect("call");
+        assert!(!out.is_error, "{}", out.content);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let task = registry
+                .list()
+                .into_iter()
+                .find(|t| t.id.starts_with("hr-"))
+                .expect("задача hr-* в реестре");
+            if task.status != crate::subagent::TaskStatus::Running {
+                assert_eq!(
+                    task.status,
+                    crate::subagent::TaskStatus::Failed,
+                    "отчёт: {}",
+                    task.report
+                );
+                assert!(
+                    task.report.contains("Пост-гейт: FAIL"),
+                    "отчёт: {}",
+                    task.report
+                );
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "фоновый прогон не завершился за 30 с"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
     }
 }
