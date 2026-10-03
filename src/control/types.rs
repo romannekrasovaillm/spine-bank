@@ -4,6 +4,7 @@
 //! [`UntrustedSkippedRule`], [`SkippedUnknownRule`]), карточка правила
 //! ([`RuleCard`]) и общая нормализация severity ([`normalize_severity`]).
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
@@ -506,6 +507,68 @@ impl FitnessRule {
         if let Some(rationale) = &self.rationale {
             let _ = writeln!(out, "Зачем: {rationale}"); // игнорируется: записи в String не падают
         }
+        out
+    }
+
+    /// Поля ТЕЛА правила для анти-ослабления (A1): всё, что определяет
+    /// проверку, кроме карточки (`rationale`/`fix_hint`/`skill`/`ad`),
+    /// `severity` и `exclude_glob`.
+    ///
+    /// Последние два сравниваются отдельными нормализованными правилами
+    /// (`SeverityLowered`/`ExcludeWidened`): их присутствие в теле дало бы
+    /// двойную находку, а сырой `severity` — ложное «ослабление» на
+    /// эквивалентах (`critical` ≡ `error`).
+    ///
+    /// Ключи отсортированы (`BTreeMap`) — каноническая сериализация: хэш
+    /// набора не зависит от порядка полей в YAML. Списки сортируются и
+    /// соединяются разделителем `\u{1f}`; отсутствие значения — пустая строка
+    /// (`None` и пустая строка неразличимы намеренно: «добавили пустое поле» —
+    /// не изменение проверки).
+    #[must_use]
+    pub(crate) fn body_fields(&self) -> BTreeMap<&'static str, String> {
+        fn list(values: &[String]) -> String {
+            let mut refs: Vec<&str> = values.iter().map(String::as_str).collect();
+            refs.sort_unstable();
+            refs.join("\u{1f}")
+        }
+        fn opt_list(values: &Option<Vec<String>>) -> String {
+            values.as_deref().map_or(String::new(), list)
+        }
+        fn opt(value: &Option<String>) -> String {
+            value.clone().unwrap_or_default()
+        }
+        fn num<T: ToString>(value: Option<T>) -> String {
+            value.map_or(String::new(), |v| v.to_string())
+        }
+        fn flag(value: bool) -> String {
+            if value { "true".into() } else { String::new() }
+        }
+        let mut out = BTreeMap::new();
+        out.insert("id", opt(&self.id));
+        out.insert("kind", self.kind.as_str().to_string());
+        out.insert("glob", list(&self.glob));
+        out.insert("pattern", opt(&self.pattern));
+        out.insert("path", opt(&self.path));
+        out.insert("max_age_days", num(self.max_age_days));
+        out.insert("command", opt(&self.command));
+        out.insert("forbid", opt_list(&self.forbid));
+        out.insert("allow", opt_list(&self.allow));
+        out.insert("model_dir", opt(&self.model_dir));
+        out.insert("classes_dir", opt(&self.classes_dir));
+        out.insert("jar_dir", opt(&self.jar_dir));
+        out.insert("deny", list(&self.deny));
+        out.insert("manifests", list(&self.manifests));
+        out.insert("reference", opt(&self.reference));
+        out.insert("timeout_secs", num(self.timeout_secs));
+        out.insert("unverifiable", flag(self.unverifiable));
+        out.insert("adr", opt(&self.adr));
+        out.insert("owner", opt(&self.owner));
+        out.insert("expiry", opt(&self.expiry));
+        out.insert("effort_hours", num(self.effort_hours));
+        out.insert("trigger", opt(&self.trigger));
+        out.insert("evidence", opt(&self.evidence));
+        out.insert("reversibility", opt(&self.reversibility));
+        out.insert("covers", list(&self.covers));
         out
     }
 }

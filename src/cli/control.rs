@@ -203,6 +203,12 @@ pub(crate) fn cmd_control(cfg: &arch_harness::config::Config, cmd: ControlCmd) -
                 // A3: политика исполнения команд реестра — флаг + ARCH_NO_EXEC
                 // + allow-файл (CLI-край вычисляет, библиотека получает снимок).
                 exec: arch_harness::cmd_trust::ExecPolicy::cli(no_exec),
+                // A2: override узаконивает ослабление только настоящим
+                // принятым ADR — каталог ADR и горизонт берём из конфига.
+                overrides: arch_harness::control::baseline::OverrideSettings {
+                    adr_dir: cfg.gate.overrides.adr_dir.clone(),
+                    max_horizon_months: cfg.gate.overrides.max_horizon_months,
+                },
             };
             // П5: сверка состава правил с git-базой — «правило выполняется»
             // плюс «правило ещё существует» в любом канале, не только в gate.

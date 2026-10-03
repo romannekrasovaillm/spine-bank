@@ -69,6 +69,32 @@ pub const DEFAULT_BASELINE_PATH: &str = ".arch-handoff/baseline.json";
 /// занимает десятки килобайт.
 const MAX_BASELINE_FILE_BYTES: u64 = 8 * 1024 * 1024;
 
+/// Максимальный горизонт `until` override по умолчанию, месяцев (A2): override
+/// — исключение на срок, а не вечное отключение правила.
+pub const DEFAULT_MAX_HORIZON_MONTHS: u32 = 12;
+
+/// Политика проверки overrides (A2) для [`super::check_with_options`]:
+/// каталог ADR кейса и горизонт `until`. Пути/сроки — сырые (из конфига):
+/// `adr_dir` относительный разрешается от корня репозитория, значение
+/// `max_horizon_months == 0` означает дефолт.
+#[derive(Debug, Clone)]
+pub struct OverrideSettings {
+    /// Каталог ADR кейса (относительный — от корня репозитория; `None` —
+    /// `<repo>/docs/adr`).
+    pub adr_dir: Option<String>,
+    /// Максимальный горизонт `until`, месяцев (0 — [`DEFAULT_MAX_HORIZON_MONTHS`]).
+    pub max_horizon_months: u32,
+}
+
+impl Default for OverrideSettings {
+    fn default() -> Self {
+        Self {
+            adr_dir: None,
+            max_horizon_months: DEFAULT_MAX_HORIZON_MONTHS,
+        }
+    }
+}
+
 /// Потолок длины текста находки, хранимой в baseline (читаемость файла; на
 /// отпечаток не влияет — он считается от полного текста находки).
 const MAX_BASELINE_MESSAGE_LEN: usize = 240;
@@ -90,6 +116,9 @@ pub struct CheckOptions {
     /// детерминированный legacy-режим (исполнять, allow-файл не
     /// консультируется): библиотека без края не зависит от машины (AD-7).
     pub exec: crate::cmd_trust::ExecPolicy,
+    /// Политика overrides по ADR (A2): где искать ADR и какой горизонт
+    /// `until` допустим. `Default` — `<repo>/docs/adr` и 12 месяцев.
+    pub overrides: OverrideSettings,
 }
 
 /// Baseline-файл долга: снимок error-находок `control check`, которые гейт

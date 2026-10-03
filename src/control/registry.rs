@@ -306,21 +306,194 @@ pub fn expiry_is_past(raw: &str) -> bool {
     parse_until(raw.trim()).is_some_and(|(y, m, d)| until_expired(y, m, d))
 }
 
+/// Каталог ADR по умолчанию относительно репозитория/реестра.
+pub const DEFAULT_ADR_DIR: &str = "docs/adr";
+
+/// Политика проверки overrides по ADR (A2): где лежат ADR кейса и насколько
+/// далеко допустим горизонт `until`. Override узаконивает ослабление, только
+/// если ADR с его номером существует и принят, а срок не уходит за горизонт.
+#[derive(Debug, Clone)]
+pub struct AdrPolicy {
+    /// Каталог ADR кейса.
+    pub adr_dir: PathBuf,
+    /// Максимальный горизонт `until` в месяцах от сегодня.
+    pub max_horizon_months: u32,
+}
+
+impl AdrPolicy {
+    /// Политика по репозиторию: `adr_dir` из конфига (относительный путь —
+    /// от корня репозитория), иначе `<repo>/docs/adr`.
+    #[must_use]
+    pub fn resolve(repo: &Path, adr_dir: Option<&str>, max_horizon_months: u32) -> Self {
+        let dir = match adr_dir.map(str::trim).filter(|d| !d.is_empty()) {
+            Some(rel) => {
+                let path = Path::new(rel);
+                if path.is_absolute() {
+                    path.to_path_buf()
+                } else {
+                    repo.join(path)
+                }
+            }
+            None => repo.join(DEFAULT_ADR_DIR),
+        };
+        let max_horizon_months = if max_horizon_months == 0 {
+            baseline::DEFAULT_MAX_HORIZON_MONTHS
+        } else {
+            max_horizon_months
+        };
+        Self {
+            adr_dir: dir,
+            max_horizon_months,
+        }
+    }
+
+    /// Политика по файлу реестра без репозитория (библиотечный вызов
+    /// [`rule_weakened`]): ADR лежат рядом с реестром, в `docs/adr`.
+    #[must_use]
+    pub fn for_file(file: &Path) -> Self {
+        let base = file.parent().unwrap_or_else(|| Path::new("."));
+        Self {
+            adr_dir: base.join(DEFAULT_ADR_DIR),
+            max_horizon_months: baseline::DEFAULT_MAX_HORIZON_MONTHS,
+        }
+    }
+}
+
+/// Номер ADR из ссылки override (`ADR-042`, `adr-42`, `42`) — первая
+/// последовательность цифр. `None` — цифр нет, номер не назван.
+fn adr_number(raw: &str) -> Option<u32> {
+    let digits: String = raw
+        .trim()
+        .chars()
+        .skip_while(|c| !c.is_ascii_digit())
+        .take_while(char::is_ascii_digit)
+        .collect();
+    if digits.is_empty() {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+/// Статус ADR из шапки файла (A2): строка `Status:`/`Статус:` (с `**`/`-`/`#`)
+/// со значением, начинающимся на `accepted`/`принят` — регистр не важен.
+///
+/// Значение читается после слова статуса и обязано НАЧИНАТЬСЯ с него:
+/// `Proposed (принято агентом …)` принятым не считается (иначе забытая
+/// пометка «принято» в чужом статусе узаконила бы ослабление).
+#[must_use]
+pub fn adr_status_accepted(text: &str) -> bool {
+    text.lines().take(40).any(|line| {
+        let trimmed = line.trim().trim_start_matches(['-', '*', '#', ' ']).trim();
+        let lowered = trimmed.to_lowercase();
+        let Some(rest) = lowered
+            .strip_prefix("status")
+            .or_else(|| lowered.strip_prefix("статус"))
+        else {
+            return false;
+        };
+        let value = rest.trim_start_matches(['*', ':', ' ']);
+        value.starts_with("accepted") || value.starts_with("принят")
+    })
+}
+
+/// Находит файл ADR с номером `n` в каталоге и говорит, принят ли он.
+/// `None` — файла нет; `Some(false)` — файл есть, но статус не `accepted`.
+fn adr_accepted_in(dir: &Path, n: u32) -> Option<bool> {
+    let read_dir = std::fs::read_dir(dir).ok()?;
+    for entry in read_dir.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.to_lowercase().ends_with(".md") || adr_number(&name) != Some(n) {
+            continue;
+        }
+        let text = std::fs::read_to_string(entry.path()).unwrap_or_default();
+        return Some(adr_status_accepted(&text));
+    }
+    None
+}
+
+/// Ушёл ли `until` за горизонт `max_months` от сегодня (сравнение по
+/// месяцу — день на горизонт не влияет).
+fn horizon_exceeded(until: (i32, u32, u32), max_months: u32) -> bool {
+    use chrono::Datelike as _;
+    let today = chrono::Local::now().date_naive();
+    let (y, m, _) = until;
+    let diff = (i64::from(y) * 12 + i64::from(m))
+        - (i64::from(today.year()) * 12 + i64::from(today.month()));
+    diff > i64::from(max_months)
+}
+
+/// Почему override НЕ узаконивает ослабление (A2): полный и неистёкший
+/// override всё ещё обязан ссылаться на существующий принятый ADR и держать
+/// `until` в горизонте. `None` — узаконивает; иначе `(код находки, текст)`.
+fn adr_rejection(
+    adr: &str,
+    until: (i32, u32, u32),
+    policy: &AdrPolicy,
+) -> Option<(String, String)> {
+    let dir = policy.adr_dir.display();
+    match adr_number(adr) {
+        None => {
+            return Some((
+                "override_adr_missing".to_string(),
+                format!(
+                    "номер ADR не распознан в '{adr}' — ослабление не узаконено \
+                     → укажите `adr: ADR-<номер>`"
+                ),
+            ));
+        }
+        Some(n) => match adr_accepted_in(&policy.adr_dir, n) {
+            None => {
+                return Some((
+                    "override_adr_missing".to_string(),
+                    format!(
+                        "ADR-{n:03} не найден в {dir} — ослабление не узаконено \
+                         → создайте ADR со статусом Accepted либо снимите override"
+                    ),
+                ));
+            }
+            Some(false) => {
+                return Some((
+                    "override_adr_not_accepted".to_string(),
+                    format!(
+                        "ADR-{n:03} не принят (нужен `Status: Accepted` / `Статус: принято`) \
+                         — ослабление не узаконено → переведите ADR в Accepted или снимите override"
+                    ),
+                ));
+            }
+            Some(true) => {}
+        },
+    }
+    if horizon_exceeded(until, policy.max_horizon_months) {
+        let (y, m, _) = until;
+        return Some((
+            "override_horizon_exceeded".to_string(),
+            format!(
+                "until '{y:04}-{m:02}' дальше горизонта {} мес. — ослабление не узаконено \
+                 → сократите срок или оформите новый ADR",
+                policy.max_horizon_months
+            ),
+        ));
+    }
+    None
+}
+
 /// Оценивает overrides против итогового набора правил: статусы для отчёта,
 /// находки (неполный override — error; просроченный или на несуществующее
-/// правило — warn) и множество отключённых активными overrides имён правил.
+/// правило — warn; не узаконенный ADR/горизонт — error, A2) и множество
+/// отключённых активными overrides имён правил.
 pub(super) fn evaluate_overrides(
     overrides: &[OverrideEntry],
     rules: &[FitnessRule],
     file: &Path,
+    adr_policy: &AdrPolicy,
 ) -> (Vec<OverrideInfo>, Vec<LintIssue>, BTreeSet<String>) {
     let mut infos = Vec::new();
     let mut findings = Vec::new();
     let mut disabled = BTreeSet::new();
-    let finding = |severity: &str, message: String| LintIssue {
+    let finding = |severity: &str, code: &str, message: String| LintIssue {
         file: file.to_path_buf(),
         line: 0,
-        rule: "override".to_string(),
+        rule: code.to_string(),
         message,
         severity: severity.to_string(),
         ..LintIssue::default()
@@ -349,6 +522,7 @@ pub(super) fn evaluate_overrides(
             info.note = format!("неполный override (нет {})", missing.join(", "));
             findings.push(finding(
                 "error",
+                "override",
                 format!(
                     "override: неполная запись для '{rule}' — требуются rule+adr+until ({})",
                     info.note
@@ -359,7 +533,11 @@ pub(super) fn evaluate_overrides(
         }
         let Some((y, m, d)) = parse_until(until) else {
             info.note = format!("некорректный until '{until}' (ожидается YYYY-MM или YYYY-MM-DD)");
-            findings.push(finding("error", format!("override {rule}: {}", info.note)));
+            findings.push(finding(
+                "error",
+                "override",
+                format!("override {rule}: {}", info.note),
+            ));
             infos.push(info);
             continue;
         };
@@ -371,6 +549,7 @@ pub(super) fn evaluate_overrides(
             info.note = format!("правило '{rule}' не найдено (ни id, ни name)");
             findings.push(finding(
                 "warn",
+                "override",
                 format!("override на несуществующее правило '{rule}' (adr {adr}) — игнорируется"),
             ));
             infos.push(info);
@@ -381,7 +560,24 @@ pub(super) fn evaluate_overrides(
             info.note = format!("override истёк {until} — правило снова действует");
             findings.push(finding(
                 "warn",
+                "override",
                 format!("override '{rule}' (adr {adr}) истёк {until} — правило снова действует"),
+            ));
+            infos.push(info);
+            continue;
+        }
+        // A2: override узаконивает ослабление только настоящим принятым ADR
+        // в пределах горизонта. Иначе — error-находка, и правило ОСТАЁТСЯ в
+        // силе: фиктивный override не должен отключать проверку.
+        if let Some((code, note)) = adr_rejection(adr, (y, m, d), adr_policy) {
+            info.status = "unlegalized".to_string();
+            // Код находки — в примечании: блок overrides `control report`
+            // обязан называть механику, а не только человеческий текст.
+            info.note = format!("{code}: {note}");
+            findings.push(finding(
+                "error",
+                &code,
+                format!("override '{rule}' (adr {adr}) — {note}"),
             ));
             infos.push(info);
             continue;
@@ -463,8 +659,27 @@ fn git_toplevel(repo: &Path) -> Option<PathBuf> {
 /// Сверка состава правил с git-базой (П5, Д4): анти-ослабление доступно не
 /// только составному гейту. Никогда не падает: недоступность базы — честный
 /// `note`, а не молчаливый PASS.
+///
+/// Политика overrides — по умолчанию (ADR в `<repo>/docs/adr`, тело — warn);
+/// канал с конфигом проекта — [`rule_anchor_opts`].
 #[must_use]
 pub fn rule_anchor(repo: &Path, constraints: &Path, base: Option<&str>) -> RuleAnchor {
+    rule_anchor_opts(
+        repo,
+        constraints,
+        base,
+        &baseline::OverrideSettings::default(),
+    )
+}
+
+/// [`rule_anchor`] с политикой overrides из `[gate.overrides]` (A2).
+#[must_use]
+pub fn rule_anchor_opts(
+    repo: &Path,
+    constraints: &Path,
+    base: Option<&str>,
+    overrides: &baseline::OverrideSettings,
+) -> RuleAnchor {
     let Some(rev) = base
         .map(str::to_string)
         .or_else(|| default_anchor_base(repo))
@@ -536,7 +751,12 @@ pub fn rule_anchor(repo: &Path, constraints: &Path, base: Option<&str>) -> RuleA
                     };
                 }
             };
-            match rule_weakened(&current_src, &base_src, constraints) {
+            let adr_policy = AdrPolicy::resolve(
+                repo,
+                overrides.adr_dir.as_deref(),
+                overrides.max_horizon_months,
+            );
+            match rule_weakened_with(&current_src, &base_src, constraints, "warn", &adr_policy) {
                 Ok(issues) => RuleAnchor {
                     base: Some(rev),
                     checked: true,
@@ -576,7 +796,7 @@ pub fn check_anchored(
     base: Option<&str>,
 ) -> Result<FitnessReport> {
     let mut report = check_with_options(repo, constraints, options)?;
-    let anchor = rule_anchor(repo, constraints, base);
+    let anchor = rule_anchor_opts(repo, constraints, base, &options.overrides);
     if anchor.checked {
         if anchor.issues.is_empty() {
             let _ = write!(
@@ -620,6 +840,12 @@ enum WeakenedKind {
     /// Severity понижен (нормализованное error → warn; сами нормализованные
     /// значения сравниваются — `critical`/`high`/`block` ≡ error).
     SeverityLowered,
+    /// Изменилось ТЕЛО правила (A1): любое поле, определяющее проверку, кроме
+    /// карточки, `severity` и `exclude_glob` — замена `command`, сужение
+    /// `glob`, правка `pattern`, рост `timeout_secs`. Формальной семантики
+    /// «ужесточения» у `glob`/`pattern` нет, поэтому любое изменение — находка
+    /// (ложная тревога лучше тихого ослабления).
+    BodyChanged,
 }
 
 impl WeakenedKind {
@@ -629,15 +855,17 @@ impl WeakenedKind {
             Self::Removed => "удалено из реестра",
             Self::ExcludeWidened => "появился/расширился exclude_glob",
             Self::SeverityLowered => "severity понижен",
+            Self::BodyChanged => "изменено тело правила",
         }
     }
 }
 
 /// Имена/идентификаторы правил с АКТИВНЫМИ overrides (`rule`+`adr`+`until`,
-/// дата корректна и не просрочена — та же логика, что у
-/// [`evaluate_overrides`]). Активный override узаконивает ослабление своего
-/// правила: находка `rule_weakened` по нему подавляется.
-fn active_override_keys(overrides: &[OverrideEntry]) -> BTreeSet<String> {
+/// дата корректна и не просрочена, ADR существует и принят, срок в горизонте
+/// — та же логика, что у [`evaluate_overrides`]). Активный override
+/// узаконивает ослабление своего правила: находка `rule_weakened` по нему
+/// подавляется.
+fn active_override_keys(overrides: &[OverrideEntry], adr_policy: &AdrPolicy) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     for entry in overrides {
         let (Some(rule), Some(adr), Some(until)) = (&entry.rule, &entry.adr, &entry.until) else {
@@ -653,14 +881,17 @@ fn active_override_keys(overrides: &[OverrideEntry]) -> BTreeSet<String> {
         if until_expired(y, m, d) {
             continue;
         }
+        if adr_rejection(adr.trim(), (y, m, d), adr_policy).is_some() {
+            continue; // A2: нет принятого ADR или срок за горизонтом
+        }
         out.insert(rule.to_string());
     }
     out
 }
 
-/// Снимок правила для сравнения версий: `exclude_glob` и нормализованный
-/// severity (id — для матчинга overrides, которые могут ссылаться на правило
-/// по id).
+/// Снимок правила для сравнения версий: `exclude_glob`, нормализованный
+/// severity и нормализованное тело (A1; id — для матчинга overrides, которые
+/// могут ссылаться на правило по id).
 struct RuleSnapshot {
     /// Идентификатор правила (`id: C-NNN`), если задан.
     id: Option<String>,
@@ -668,6 +899,29 @@ struct RuleSnapshot {
     excludes: BTreeSet<String>,
     /// Нормализованный severity (`error`/`warn`).
     severity: &'static str,
+    /// Канонический набор полей тела правила (A1): ключи отсортированы,
+    /// значения нормализованы — сравнение не зависит от порядка полей YAML.
+    body: BTreeMap<&'static str, String>,
+}
+
+impl RuleSnapshot {
+    /// Поля тела, значение которых отличается от `other` (по объединению
+    /// ключей; отсутствие поля и пустое значение неразличимы — так их
+    /// нормализует [`FitnessRule::body_fields`]). Пустой список — тело то же.
+    fn changed_fields(&self, other: &Self) -> Vec<&'static str> {
+        let mut keys: BTreeSet<&'static str> = BTreeSet::new();
+        for (key, value) in &self.body {
+            if other.body.get(key) != Some(value) {
+                keys.insert(key);
+            }
+        }
+        for (key, value) in &other.body {
+            if self.body.get(key) != Some(value) {
+                keys.insert(key);
+            }
+        }
+        keys.into_iter().collect()
+    }
 }
 
 /// Строит карту «имя правила → снимок» из разобранного constraint-файла.
@@ -681,6 +935,7 @@ fn rules_snapshot(parsed: &ConstraintsFile) -> Result<BTreeMap<String, RuleSnaps
                 id: rule.id.clone(),
                 excludes: rule.exclude_glob.iter().cloned().collect(),
                 severity: normalize_severity(&rule.severity, &rule.name)?,
+                body: rule.body_fields(),
             },
         );
     }
@@ -694,7 +949,9 @@ fn rules_snapshot(parsed: &ConstraintsFile) -> Result<BTreeMap<String, RuleSnaps
 ///
 /// - правило из базы исчезло из текущего файла (по именам);
 /// - у правила появился/расширился `exclude_glob` (новые glob'ы исключений);
-/// - severity понижен (error → warn, нормализация [`normalize_severity`]).
+/// - severity понижен (error → warn, нормализация [`normalize_severity`]);
+/// - изменилось тело правила — `WeakenedKind::BodyChanged` (A1; severity
+///   находки — параметр [`rule_weakened_with`], по умолчанию `warn`).
 ///
 /// Ослабление УЗАКОНЕНО (находки нет), если в текущем файле есть активный
 /// override на это правило (по имени или id) с ADR — гейт «только через ADR»
@@ -707,6 +964,34 @@ fn rules_snapshot(parsed: &ConstraintsFile) -> Result<BTreeMap<String, RuleSnaps
 /// # Errors
 /// YAML любой из версий невалиден, severity правила вне допустимых значений.
 pub fn rule_weakened(current_src: &str, base_src: &str, file: &Path) -> Result<Vec<LintIssue>> {
+    rule_weakened_with(
+        current_src,
+        base_src,
+        file,
+        "warn",
+        &AdrPolicy::for_file(file),
+    )
+}
+
+/// [`rule_weakened`] с настраиваемой severity находки `BodyChanged` (A1) и
+/// политикой overrides по ADR (A2): по умолчанию (в трёхаргументной обёртке)
+/// тело — `warn`, ADR — рядом с реестром. Край гейта передаёт сюда
+/// `[gate.rule_weakened] body` и `[gate.overrides]`.
+///
+/// # Errors
+/// Те же, что у [`rule_weakened`].
+pub fn rule_weakened_with(
+    current_src: &str,
+    base_src: &str,
+    file: &Path,
+    body_severity: &str,
+    adr_policy: &AdrPolicy,
+) -> Result<Vec<LintIssue>> {
+    let body_severity = if body_severity.eq_ignore_ascii_case("error") {
+        "error"
+    } else {
+        "warn"
+    };
     // Толерантный разбор (E8): записи с неизвестными типами в сравнении не
     // участвуют (сравнивать не с чем — они не из нашего словаря); их
     // warn-пропуск покажет `check`.
@@ -714,10 +999,11 @@ pub fn rule_weakened(current_src: &str, base_src: &str, file: &Path) -> Result<V
     let (base, _) = parse_constraints_file(base_src, file)?;
     let current_rules = rules_snapshot(&current)?;
     let base_rules = rules_snapshot(&base)?;
-    let legalized = active_override_keys(&current.overrides);
+    let legalized = active_override_keys(&current.overrides, adr_policy);
 
     let mut issues = Vec::new();
     let push = |kind: WeakenedKind,
+                severity: &str,
                 name: &str,
                 id: Option<&str>,
                 detail: String,
@@ -735,7 +1021,7 @@ pub fn rule_weakened(current_src: &str, base_src: &str, file: &Path) -> Result<V
                  с ADR (overrides: rule+adr+until)",
                 kind.label()
             ),
-            severity: "error".to_string(),
+            severity: severity.to_string(),
             ..LintIssue::default()
         });
     };
@@ -744,6 +1030,7 @@ pub fn rule_weakened(current_src: &str, base_src: &str, file: &Path) -> Result<V
         let Some(current_rule) = current_rules.get(name) else {
             push(
                 WeakenedKind::Removed,
+                "error",
                 name,
                 base_rule.id.as_deref(),
                 "правило присутствовало в базовой версии и удалено".to_string(),
@@ -759,6 +1046,7 @@ pub fn rule_weakened(current_src: &str, base_src: &str, file: &Path) -> Result<V
         if !added.is_empty() {
             push(
                 WeakenedKind::ExcludeWidened,
+                "error",
                 name,
                 current_rule.id.as_deref(),
                 format!("новые исключения: {}", added.join(", ")),
@@ -768,9 +1056,21 @@ pub fn rule_weakened(current_src: &str, base_src: &str, file: &Path) -> Result<V
         if base_rule.severity == "error" && current_rule.severity == "warn" {
             push(
                 WeakenedKind::SeverityLowered,
+                "error",
                 name,
                 current_rule.id.as_deref(),
                 "error → warn".to_string(),
+                &mut issues,
+            );
+        }
+        let changed = base_rule.changed_fields(current_rule);
+        if !changed.is_empty() {
+            push(
+                WeakenedKind::BodyChanged,
+                body_severity,
+                name,
+                current_rule.id.as_deref(),
+                format!("изменены поля: {}", changed.join(", ")),
                 &mut issues,
             );
         }
@@ -791,6 +1091,25 @@ mod tests {
         }
         std::fs::write(&p, content).unwrap();
         p
+    }
+
+    /// Дата в пределах горизонта override (A2): сегодня + 6 месяцев.
+    fn within_horizon() -> String {
+        (chrono::Local::now() + chrono::Duration::days(182))
+            .format("%Y-%m-%d")
+            .to_string()
+    }
+
+    /// Пишет фикстуру ADR в `<dir>/docs/adr` со статусом из шапки.
+    fn write_adr(dir: &Path, name: &str, status: &str) {
+        write_file(
+            dir,
+            &format!("docs/adr/{name}-fixture.md"),
+            &format!(
+                "# {name}. Тестовая фикстура\n\n- Date: 2026-01-01\n- Status: {status}\n\n\
+                 ## Context\n\nфикстура для проверки узаконивания override\n"
+            ),
+        );
     }
     // --- Анти-ослабление гейта (rule_weakened) ------------------------------
 
@@ -898,6 +1217,91 @@ mod tests {
         assert!(issues.is_empty(), "{issues:?}");
     }
 
+    /// База для A1: правило с `command` и правило с `glob`/`pattern`/карточкой.
+    const BODY_BASE: &str = "rules:\n\
+         - name: build-green\n  \
+         id: C-10\n  \
+         type: command_succeeds\n  \
+         command: \"pytest -q\"\n  \
+         severity: error\n\
+         - name: no-pan\n  \
+         type: must_not_contain\n  \
+         glob: \"src/**\"\n  \
+         pattern: 'PAN'\n  \
+         severity: error\n";
+
+    /// A1: замена `command` на заведомо успешную (`true`) — находка
+    /// `BodyChanged` с именем изменённого поля (по умолчанию warn).
+    #[test]
+    fn rule_weakened_flags_body_command_change() {
+        let current = BODY_BASE.replace("\"pytest -q\"", "\"true\"");
+        assert_ne!(current, BODY_BASE, "подстановка сработала");
+        let issues =
+            rule_weakened(&current, BODY_BASE, Path::new("CONSTRAINTS.yaml")).expect("сравнение");
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        let i = &issues[0];
+        assert_eq!(i.severity, "warn", "дефолт BodyChanged — warn: {i:?}");
+        assert!(i.message.contains("build-green"), "{}", i.message);
+        assert!(i.message.contains("изменено тело правила"), "{}", i.message);
+        assert!(i.message.contains("command"), "{}", i.message);
+    }
+
+    /// A1: сужение `glob` (`src/**` → `src/none/**`) — находка `BodyChanged`.
+    #[test]
+    fn rule_weakened_flags_body_glob_narrowing() {
+        let current = BODY_BASE.replace("glob: \"src/**\"", "glob: \"src/none/**\"");
+        assert_ne!(current, BODY_BASE, "подстановка сработала");
+        let issues =
+            rule_weakened(&current, BODY_BASE, Path::new("CONSTRAINTS.yaml")).expect("сравнение");
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert!(
+            issues[0].message.contains("no-pan") && issues[0].message.contains("glob"),
+            "{}",
+            issues[0].message
+        );
+    }
+
+    /// A1: правка `pattern` на никогда не срабатывающий — находка
+    /// `BodyChanged`; по флагу `[gate.rule_weakened] body = "error"` она
+    /// повышается до error.
+    #[test]
+    fn rule_weakened_flags_body_pattern_change() {
+        let current = BODY_BASE.replace("pattern: 'PAN'", "pattern: 'x^'");
+        assert_ne!(current, BODY_BASE, "подстановка сработала");
+        let path = Path::new("CONSTRAINTS.yaml");
+        let issues = rule_weakened(&current, BODY_BASE, path).expect("сравнение");
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert!(
+            issues[0].message.contains("pattern"),
+            "{}",
+            issues[0].message
+        );
+        // Флаг проекта: тело — error.
+        let strict = rule_weakened_with(
+            &current,
+            BODY_BASE,
+            path,
+            "error",
+            &AdrPolicy::for_file(path),
+        )
+        .expect("сравнение");
+        assert_eq!(strict.len(), 1, "{strict:?}");
+        assert_eq!(strict[0].severity, "error", "{:?}", strict[0]);
+    }
+
+    /// A1: правка ТОЛЬКО карточки (`rationale`) — не изменение тела: чисто.
+    #[test]
+    fn rule_weakened_clean_when_only_rationale_changed() {
+        let current = BODY_BASE.replace(
+            "pattern: 'PAN'",
+            "pattern: 'PAN'\n  rationale: 'почему правило существует'",
+        );
+        assert_ne!(current, BODY_BASE, "подстановка сработала");
+        let issues =
+            rule_weakened(&current, BODY_BASE, Path::new("CONSTRAINTS.yaml")).expect("сравнение");
+        assert!(issues.is_empty(), "{issues:?}");
+    }
+
     /// Удаление правила (агент «позеленил» гейт) — error-находка с именем.
     #[test]
     fn rule_weakened_flags_removed_rule() {
@@ -965,32 +1369,41 @@ mod tests {
         assert!(issues.is_empty(), "{issues:?}");
     }
 
-    /// Ослабление с АКТИВНЫМ override (rule+adr+until в будущем) — узаконено:
-    /// находок нет; просроченный override ослабление не легализует.
+    /// Ослабление с АКТИВНЫМ override (rule+adr+until) — узаконено ТОЛЬКО
+    /// настоящим принятым ADR (A2): с принятым ADR находок нет; выдуманный
+    /// ADR, непринятый ADR и просроченный override ослабление не легализуют.
     #[test]
     fn rule_weakened_active_override_legalizes_weakening() {
+        let dir = tempfile::tempdir().unwrap();
+        write_adr(dir.path(), "ADR-042", "Accepted");
+        let file = dir.path().join("CONSTRAINTS.yaml");
+        let until = within_horizon();
         // Удаление no-pan + активный override по id правила (C-01).
-        let legal = "rules:\n\
-             - name: spine-present\n  \
-             type: file_exists\n  \
-             path: \"ARCHITECTURE-SPINE.md\"\n  \
-             severity: error\n\
-             overrides:\n\
-             - rule: C-01\n  \
-             adr: ADR-042\n  \
-             until: \"2999-01\"\n";
-        let issues =
-            rule_weakened(legal, WEAK_BASE, Path::new("CONSTRAINTS.yaml")).expect("сравнение");
+        let legal = format!(
+            "rules:\n  - name: spine-present\n    type: file_exists\n    \
+             path: \"ARCHITECTURE-SPINE.md\"\n    severity: error\noverrides:\n  \
+             - rule: C-01\n    adr: ADR-042\n    until: \"{until}\"\n"
+        );
+        let issues = rule_weakened(&legal, WEAK_BASE, &file).expect("сравнение");
         assert!(
             issues.is_empty(),
-            "активный override узаконивает: {issues:?}"
+            "активный override с принятым ADR узаконивает: {issues:?}"
         );
 
         // Тот же override, но просроченный, — ослабление снова находка.
-        let expired = legal.replace("2999-01", "2001-01");
-        let issues =
-            rule_weakened(&expired, WEAK_BASE, Path::new("CONSTRAINTS.yaml")).expect("сравнение");
+        let expired = legal.replace(&until, "2001-01");
+        let issues = rule_weakened(&expired, WEAK_BASE, &file).expect("сравнение");
         assert_eq!(issues.len(), 1, "{issues:?}");
+        assert!(
+            issues[0].message.contains("no-pan"),
+            "{}",
+            issues[0].message
+        );
+
+        // Выдуманный ADR (файла нет) — ослабление не узаконено (A2).
+        let fake = legal.replace("adr: ADR-042", "adr: ADR-999");
+        let issues = rule_weakened(&fake, WEAK_BASE, &file).expect("сравнение");
+        assert_eq!(issues.len(), 1, "выдуманный ADR не легализует: {issues:?}");
         assert!(
             issues[0].message.contains("no-pan"),
             "{}",
@@ -999,9 +1412,100 @@ mod tests {
 
         // Override на ДРУГОЕ правило ослабление no-pan не легализует.
         let alien = legal.replace("rule: C-01", "rule: spine-present");
-        let issues =
-            rule_weakened(&alien, WEAK_BASE, Path::new("CONSTRAINTS.yaml")).expect("сравнение");
+        let issues = rule_weakened(&alien, WEAK_BASE, &file).expect("сравнение");
         assert_eq!(issues.len(), 1, "{issues:?}");
+    }
+
+    /// Фикстура A2: репозиторий с правилом `no_pan` и override на него.
+    /// Возвращает (tempdir, путь реестра, путь репозитория).
+    fn override_repo(adr: &str, until: &str) -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        write_file(&repo, "src/a.rs", "let pan = \"PAN=4111\";\n");
+        let constraints = write_file(
+            &repo,
+            "CONSTRAINTS.yaml",
+            &format!(
+                "rules:\n  - id: X-1\n    name: no_pan\n    type: must_not_contain\n    \
+                 glob: \"src/**\"\n    pattern: \"PAN=\"\n    severity: error\n\
+                 overrides:\n  - rule: X-1\n    adr: {adr}\n    until: \"{until}\"\n"
+            ),
+        );
+        (dir, constraints, repo)
+    }
+
+    /// A2: override на выдуманный ADR не узаконивает ослабление — error-находка
+    /// `override_adr_missing`, правило ОСТАЁТСЯ в силе (нарушение найдено).
+    #[test]
+    fn override_fake_adr_does_not_legalize_and_rule_stays() {
+        let (_dir, constraints, repo) = override_repo("ADR-999", &within_horizon());
+        let report = check(&repo, &constraints).unwrap();
+        assert!(!report.passed, "{}", report.summary);
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|i| i.rule == "override_adr_missing" && i.severity == "error"),
+            "{:?}",
+            report.issues
+        );
+        assert_eq!(report.overrides[0].status, "unlegalized");
+        assert!(
+            report.issues.iter().any(|i| i.rule == "no_pan"),
+            "правило осталось в силе: {:?}",
+            report.issues
+        );
+    }
+
+    /// A2: настоящий принятый ADR узаконивает override — правило отключено,
+    /// гейт зелёный.
+    #[test]
+    fn override_accepted_adr_legalizes() {
+        let (_dir, constraints, repo) = override_repo("ADR-042", &within_horizon());
+        write_adr(&repo, "ADR-042", "Accepted");
+        let report = check(&repo, &constraints).unwrap();
+        assert!(report.passed, "{}", report.summary);
+        assert_eq!(report.overrides[0].status, "active");
+        assert!(!report.issues.iter().any(|i| i.rule == "no_pan"));
+    }
+
+    /// A2: ADR в статусе Proposed не узаконивает — `override_adr_not_accepted`.
+    #[test]
+    fn override_unaccepted_adr_does_not_legalize() {
+        let (_dir, constraints, repo) = override_repo("ADR-042", &within_horizon());
+        write_adr(&repo, "ADR-042", "Proposed");
+        let report = check(&repo, &constraints).unwrap();
+        assert!(!report.passed, "{}", report.summary);
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|i| i.rule == "override_adr_not_accepted" && i.severity == "error"),
+            "{:?}",
+            report.issues
+        );
+        assert_eq!(report.overrides[0].status, "unlegalized");
+        assert!(report.issues.iter().any(|i| i.rule == "no_pan"));
+    }
+
+    /// A2: горизонт `until` ограничен — override за горизонтом не узаконивает
+    /// (`override_horizon_exceeded`), правило остаётся в силе.
+    #[test]
+    fn override_horizon_exceeded_does_not_legalize() {
+        let (_dir, constraints, repo) = override_repo("ADR-042", "2099-12");
+        write_adr(&repo, "ADR-042", "Accepted");
+        let report = check(&repo, &constraints).unwrap();
+        assert!(!report.passed, "{}", report.summary);
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|i| i.rule == "override_horizon_exceeded" && i.severity == "error"),
+            "{:?}",
+            report.issues
+        );
+        assert_eq!(report.overrides[0].status, "unlegalized");
+        assert!(report.issues.iter().any(|i| i.rule == "no_pan"));
     }
 
     /// Невалидный YAML любой из версий — ошибка разбора, не паника.
@@ -1222,9 +1726,13 @@ mod tests {
 
     #[test]
     fn override_active_disables_rule() {
-        // Cargo.toml содержит deny-пакет, но правило отключено активным override.
-        let (dir, product) =
-            override_fixture("  - rule: C-CORP-001\n    adr: ADR-041\n    until: \"2999-01\"\n");
+        // Cargo.toml содержит deny-пакет, но правило отключено активным override
+        // (A2: ADR существует и принят, срок в горизонте).
+        let (dir, product) = override_fixture(&format!(
+            "  - rule: C-CORP-001\n    adr: ADR-041\n    until: \"{}\"\n",
+            within_horizon()
+        ));
+        write_adr(&dir.path().join("product"), "ADR-041", "Accepted");
         write_file(
             dir.path(),
             "product/Cargo.toml",

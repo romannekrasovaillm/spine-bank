@@ -135,8 +135,19 @@ pub fn check_with_options(
             types.into_iter().collect::<Vec<_>>().join(", ")
         )));
     }
-    let (override_infos, override_findings, disabled) =
-        evaluate_overrides(&resolved.overrides, &resolved.rules, constraints);
+    // A2: override узаконивает ослабление только настоящим принятым ADR в
+    // пределах горизонта — политика (каталог ADR, срок) приходит из опций.
+    let adr_policy = crate::control::registry::AdrPolicy::resolve(
+        repo,
+        options.overrides.adr_dir.as_deref(),
+        options.overrides.max_horizon_months,
+    );
+    let (override_infos, override_findings, disabled) = evaluate_overrides(
+        &resolved.overrides,
+        &resolved.rules,
+        constraints,
+        &adr_policy,
+    );
 
     // П5: отпечаток состава реестра — до перемещения правил.
     let fingerprint = Some(rules_fingerprint_of(&resolved.rules));

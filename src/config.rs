@@ -909,6 +909,10 @@ impl SignificanceConfig {
 pub struct GateConfig {
     /// Обязательные составляющие по маршрутам.
     pub required: RequiredRules,
+    /// Анти-ослабление реестра (A1): severity находки `BodyChanged`.
+    pub rule_weakened: RuleWeakenedConfig,
+    /// Override по настоящему принятому ADR (A2): каталог ADR и горизонт.
+    pub overrides: OverridesConfig,
     /// Составляющая `decision_quality` (Н7 волны B 0.3.4, ADR-042): качество
     /// архитектурных решений по отчёту рубрики-судьи.
     pub decision_quality: DecisionQualityConfig,
@@ -918,6 +922,67 @@ pub struct GateConfig {
     pub semantic_quality: SemanticQualityConfig,
     /// Что делать с решением рубрики `human` на каждом маршруте (E4.2).
     pub decision_policy: DecisionPolicyConfig,
+}
+
+/// Severity находки `BodyChanged` анти-ослабления реестра (A1).
+///
+/// `warn` по умолчанию: изменение тела правила — сигнал, а не приговор
+/// (у `glob`/`pattern` нет формальной семантики «ужесточения», поэтому любое
+/// изменение — находка, и краснить ею чужой пайплайн без явного решения
+/// нельзя). Проект, готовый к строгому режиму, ставит
+/// `[gate.rule_weakened] body = "error"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BodySeverity {
+    /// Предупреждение (дефолт): находка видна, вердикт не меняется.
+    #[default]
+    Warn,
+    /// Блок: изменение тела правила валит составляющую `rule_weakened`.
+    Error,
+}
+
+impl BodySeverity {
+    /// Нормализованная метка severity (`warn`/`error`).
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Warn => "warn",
+            Self::Error => "error",
+        }
+    }
+}
+
+/// Настройки анти-ослабления реестра (A1): секция `[gate.rule_weakened]`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RuleWeakenedConfig {
+    /// Severity находки `BodyChanged` (дефолт `warn`).
+    pub body: BodySeverity,
+}
+
+/// Настройки проверки overrides (A2): секция `[gate.overrides]`.
+///
+/// Override узаконивает ослабление правила только тогда, когда ADR с его
+/// номером существует и принят, а срок `until` не уходит за горизонт. Так
+/// «override на выдуманный ADR-999 с until 2099» перестаёт зеленеть гейт.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OverridesConfig {
+    /// Каталог ADR кейса: относительный — от корня репозитория, абсолютный —
+    /// как есть. `None` — `docs/adr`.
+    pub adr_dir: Option<String>,
+    /// Максимальный горизонт `until`, месяцев (дефолт 12): override — срочное
+    /// исключение, а не вечное отключение правила.
+    pub max_horizon_months: u32,
+}
+
+impl Default for OverridesConfig {
+    fn default() -> Self {
+        Self {
+            adr_dir: None,
+            max_horizon_months: crate::control::baseline::DEFAULT_MAX_HORIZON_MONTHS,
+        }
+    }
 }
 
 /// Что делает гейт с решением рубрики `human` (E4.2).

@@ -845,6 +845,13 @@ mod tests {
         std::fs::write(&p, content).unwrap();
         p
     }
+    /// Дата в пределах горизонта override (A2): сегодня + 6 месяцев.
+    fn within_horizon() -> String {
+        (chrono::Local::now() + chrono::Duration::days(182))
+            .format("%Y-%m-%d")
+            .to_string()
+    }
+
     /// Корп-родитель для фикстур наследования (docs/corp-spine.md).
     const CORP_YAML: &str = "version: \"2026.3\"\n\
         rules:\n\
@@ -1223,8 +1230,16 @@ mod tests {
 
     #[test]
     fn control_report_json_shape_corp_level() {
-        let (dir, product) =
-            override_fixture("  - rule: C-CORP-001\n    adr: ADR-041\n    until: \"2999-01\"\n");
+        let (dir, product) = override_fixture(&format!(
+            "  - rule: C-CORP-001\n    adr: ADR-041\n    until: \"{}\"\n",
+            within_horizon()
+        ));
+        // A2: override узаконивает только настоящий принятый ADR.
+        write_file(
+            &dir.path().join("product"),
+            "docs/adr/ADR-041-fixture.md",
+            "# ADR-041. Фикстура\n\n- Date: 2026-01-01\n- Status: Accepted\n\n## Context\n\nтест\n",
+        );
         let product_dir = dir.path().join("product");
         let report = control_report(&product_dir, &product, "corp").unwrap();
         assert_eq!(report.rules_total, 2, "только унаследованные");

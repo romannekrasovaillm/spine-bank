@@ -1244,17 +1244,27 @@ fn gate_fails_when_agent_removes_rule_to_pass() {
         .stdout(contains("Итог: FAIL"));
 }
 
-/// Ослабление, узаконенное активным override (ADR + срок), гейт пропускает;
-/// дельта покрывает правку для delta guard.
+/// Ослабление, узаконенное активным override с настоящим принятым ADR
+/// (A2: ADR существует, принят, срок в горизонте), гейт пропускает; дельта
+/// покрывает правку для delta guard.
 #[test]
 fn gate_override_legalizes_weakening_exits_0() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let repo = gate_repo(tmp.path());
+    let until = (chrono::Local::now() + chrono::Duration::days(182))
+        .format("%Y-%m-%d")
+        .to_string();
     std::fs::write(
         repo.join(".arch-handoff/CONSTRAINTS.yaml"),
-        "rules:\n  - name: spine_present\n    type: file_exists\n    path: \"ARCHITECTURE-SPINE.md\"\n    severity: error\noverrides:\n  - rule: no_pan\n    adr: ADR-007\n    until: \"2999-01\"\n",
+        format!("rules:\n  - name: spine_present\n    type: file_exists\n    path: \"ARCHITECTURE-SPINE.md\"\n    severity: error\noverrides:\n  - rule: no_pan\n    adr: ADR-007\n    until: \"{until}\"\n"),
     )
     .expect("CONSTRAINTS.yaml с override");
+    std::fs::create_dir_all(repo.join("docs/adr")).expect("mkdir adr");
+    std::fs::write(
+        repo.join("docs/adr/ADR-007-fixture.md"),
+        "# ADR-007. Фикстура\n\n- Date: 2026-01-01\n- Status: Accepted\n\n## Context\n\nтест\n",
+    )
+    .expect("ADR-007");
     let delta = repo.join("changes/drop-pan");
     std::fs::create_dir_all(&delta).expect("mkdir delta");
     std::fs::write(
