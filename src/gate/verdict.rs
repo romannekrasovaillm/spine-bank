@@ -154,7 +154,13 @@ pub(super) fn run_inner(
     let mut components = vec![
         component_fitness(repo, &constraints, &options.exec),
         component_delta_guard(repo, base, &git),
-        component_rule_weakened(repo, &constraints, base.unwrap_or("HEAD"), &git),
+        component_rule_weakened(
+            repo,
+            &constraints,
+            base.unwrap_or("HEAD"),
+            &git,
+            options.rule_weakened.body.as_str(),
+        ),
         component_spine_lint(repo),
         component_trace(repo, options),
         // Н2: целостность модели — часть гейта на ЛЮБОМ маршруте (SKIP без

@@ -356,6 +356,7 @@ pub(super) fn component_rule_weakened(
     constraints: &ConstraintsPath,
     base: &str,
     git: &GitProbe,
+    body_severity: &str,
 ) -> GateComponent {
     if !git.repo {
         return GateComponent::skip(
@@ -439,7 +440,7 @@ pub(super) fn component_rule_weakened(
             );
         }
     };
-    match control::rule_weakened(&current_src, &base_src, &constraints.path) {
+    match control::rule_weakened_with(&current_src, &base_src, &constraints.path, body_severity) {
         Ok(issues) if issues.is_empty() => GateComponent::pass(
             "rule_weakened",
             format!("реестр правил не ослаблен относительно {rev} — файл: {rel}"),

@@ -620,6 +620,12 @@ enum WeakenedKind {
     /// Severity понижен (нормализованное error → warn; сами нормализованные
     /// значения сравниваются — `critical`/`high`/`block` ≡ error).
     SeverityLowered,
+    /// Изменилось ТЕЛО правила (A1): любое поле, определяющее проверку, кроме
+    /// карточки, `severity` и `exclude_glob` — замена `command`, сужение
+    /// `glob`, правка `pattern`, рост `timeout_secs`. Формальной семантики
+    /// «ужесточения» у `glob`/`pattern` нет, поэтому любое изменение — находка
+    /// (ложная тревога лучше тихого ослабления).
+    BodyChanged,
 }
 
 impl WeakenedKind {
@@ -629,6 +635,7 @@ impl WeakenedKind {
             Self::Removed => "удалено из реестра",
             Self::ExcludeWidened => "появился/расширился exclude_glob",
             Self::SeverityLowered => "severity понижен",
+            Self::BodyChanged => "изменено тело правила",
         }
     }
 }
@@ -658,9 +665,9 @@ fn active_override_keys(overrides: &[OverrideEntry]) -> BTreeSet<String> {
     out
 }
 
-/// Снимок правила для сравнения версий: `exclude_glob` и нормализованный
-/// severity (id — для матчинга overrides, которые могут ссылаться на правило
-/// по id).
+/// Снимок правила для сравнения версий: `exclude_glob`, нормализованный
+/// severity и нормализованное тело (A1; id — для матчинга overrides, которые
+/// могут ссылаться на правило по id).
 struct RuleSnapshot {
     /// Идентификатор правила (`id: C-NNN`), если задан.
     id: Option<String>,
@@ -668,6 +675,29 @@ struct RuleSnapshot {
     excludes: BTreeSet<String>,
     /// Нормализованный severity (`error`/`warn`).
     severity: &'static str,
+    /// Канонический набор полей тела правила (A1): ключи отсортированы,
+    /// значения нормализованы — сравнение не зависит от порядка полей YAML.
+    body: BTreeMap<&'static str, String>,
+}
+
+impl RuleSnapshot {
+    /// Поля тела, значение которых отличается от `other` (по объединению
+    /// ключей; отсутствие поля и пустое значение неразличимы — так их
+    /// нормализует [`FitnessRule::body_fields`]). Пустой список — тело то же.
+    fn changed_fields(&self, other: &Self) -> Vec<&'static str> {
+        let mut keys: BTreeSet<&'static str> = BTreeSet::new();
+        for (key, value) in &self.body {
+            if other.body.get(key) != Some(value) {
+                keys.insert(key);
+            }
+        }
+        for (key, value) in &other.body {
+            if self.body.get(key) != Some(value) {
+                keys.insert(key);
+            }
+        }
+        keys.into_iter().collect()
+    }
 }
 
 /// Строит карту «имя правила → снимок» из разобранного constraint-файла.
@@ -681,6 +711,7 @@ fn rules_snapshot(parsed: &ConstraintsFile) -> Result<BTreeMap<String, RuleSnaps
                 id: rule.id.clone(),
                 excludes: rule.exclude_glob.iter().cloned().collect(),
                 severity: normalize_severity(&rule.severity, &rule.name)?,
+                body: rule.body_fields(),
             },
         );
     }
@@ -694,7 +725,9 @@ fn rules_snapshot(parsed: &ConstraintsFile) -> Result<BTreeMap<String, RuleSnaps
 ///
 /// - правило из базы исчезло из текущего файла (по именам);
 /// - у правила появился/расширился `exclude_glob` (новые glob'ы исключений);
-/// - severity понижен (error → warn, нормализация [`normalize_severity`]).
+/// - severity понижен (error → warn, нормализация [`normalize_severity`]);
+/// - изменилось тело правила — `WeakenedKind::BodyChanged` (A1; severity
+///   находки — параметр [`rule_weakened_with`], по умолчанию `warn`).
 ///
 /// Ослабление УЗАКОНЕНО (находки нет), если в текущем файле есть активный
 /// override на это правило (по имени или id) с ADR — гейт «только через ADR»
@@ -707,6 +740,27 @@ fn rules_snapshot(parsed: &ConstraintsFile) -> Result<BTreeMap<String, RuleSnaps
 /// # Errors
 /// YAML любой из версий невалиден, severity правила вне допустимых значений.
 pub fn rule_weakened(current_src: &str, base_src: &str, file: &Path) -> Result<Vec<LintIssue>> {
+    rule_weakened_with(current_src, base_src, file, "warn")
+}
+
+/// [`rule_weakened`] с настраиваемой severity находки `BodyChanged` (A1):
+/// по умолчанию (в двухаргументной обёртке) — `warn`, чтобы ужесточение не
+/// краснило чужой пайплайн без явного решения проекта
+/// (`[gate.rule_weakened] body = "error"`).
+///
+/// # Errors
+/// Те же, что у [`rule_weakened`].
+pub fn rule_weakened_with(
+    current_src: &str,
+    base_src: &str,
+    file: &Path,
+    body_severity: &str,
+) -> Result<Vec<LintIssue>> {
+    let body_severity = if body_severity.eq_ignore_ascii_case("error") {
+        "error"
+    } else {
+        "warn"
+    };
     // Толерантный разбор (E8): записи с неизвестными типами в сравнении не
     // участвуют (сравнивать не с чем — они не из нашего словаря); их
     // warn-пропуск покажет `check`.
@@ -718,6 +772,7 @@ pub fn rule_weakened(current_src: &str, base_src: &str, file: &Path) -> Result<V
 
     let mut issues = Vec::new();
     let push = |kind: WeakenedKind,
+                severity: &str,
                 name: &str,
                 id: Option<&str>,
                 detail: String,
@@ -735,7 +790,7 @@ pub fn rule_weakened(current_src: &str, base_src: &str, file: &Path) -> Result<V
                  с ADR (overrides: rule+adr+until)",
                 kind.label()
             ),
-            severity: "error".to_string(),
+            severity: severity.to_string(),
             ..LintIssue::default()
         });
     };
@@ -744,6 +799,7 @@ pub fn rule_weakened(current_src: &str, base_src: &str, file: &Path) -> Result<V
         let Some(current_rule) = current_rules.get(name) else {
             push(
                 WeakenedKind::Removed,
+                "error",
                 name,
                 base_rule.id.as_deref(),
                 "правило присутствовало в базовой версии и удалено".to_string(),
@@ -759,6 +815,7 @@ pub fn rule_weakened(current_src: &str, base_src: &str, file: &Path) -> Result<V
         if !added.is_empty() {
             push(
                 WeakenedKind::ExcludeWidened,
+                "error",
                 name,
                 current_rule.id.as_deref(),
                 format!("новые исключения: {}", added.join(", ")),
@@ -768,9 +825,21 @@ pub fn rule_weakened(current_src: &str, base_src: &str, file: &Path) -> Result<V
         if base_rule.severity == "error" && current_rule.severity == "warn" {
             push(
                 WeakenedKind::SeverityLowered,
+                "error",
                 name,
                 current_rule.id.as_deref(),
                 "error → warn".to_string(),
+                &mut issues,
+            );
+        }
+        let changed = base_rule.changed_fields(current_rule);
+        if !changed.is_empty() {
+            push(
+                WeakenedKind::BodyChanged,
+                body_severity,
+                name,
+                current_rule.id.as_deref(),
+                format!("изменены поля: {}", changed.join(", ")),
                 &mut issues,
             );
         }
@@ -895,6 +964,84 @@ mod tests {
              pattern: 'dbg!'\n  \
              severity: warn\n";
         let issues = rule_weakened(stronger, WEAK_BASE, file).expect("сравнение");
+        assert!(issues.is_empty(), "{issues:?}");
+    }
+
+    /// База для A1: правило с `command` и правило с `glob`/`pattern`/карточкой.
+    const BODY_BASE: &str = "rules:\n\
+         - name: build-green\n  \
+         id: C-10\n  \
+         type: command_succeeds\n  \
+         command: \"pytest -q\"\n  \
+         severity: error\n\
+         - name: no-pan\n  \
+         type: must_not_contain\n  \
+         glob: \"src/**\"\n  \
+         pattern: 'PAN'\n  \
+         severity: error\n";
+
+    /// A1: замена `command` на заведомо успешную (`true`) — находка
+    /// `BodyChanged` с именем изменённого поля (по умолчанию warn).
+    #[test]
+    fn rule_weakened_flags_body_command_change() {
+        let current = BODY_BASE.replace("\"pytest -q\"", "\"true\"");
+        assert_ne!(current, BODY_BASE, "подстановка сработала");
+        let issues =
+            rule_weakened(&current, BODY_BASE, Path::new("CONSTRAINTS.yaml")).expect("сравнение");
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        let i = &issues[0];
+        assert_eq!(i.severity, "warn", "дефолт BodyChanged — warn: {i:?}");
+        assert!(i.message.contains("build-green"), "{}", i.message);
+        assert!(i.message.contains("изменено тело правила"), "{}", i.message);
+        assert!(i.message.contains("command"), "{}", i.message);
+    }
+
+    /// A1: сужение `glob` (`src/**` → `src/none/**`) — находка `BodyChanged`.
+    #[test]
+    fn rule_weakened_flags_body_glob_narrowing() {
+        let current = BODY_BASE.replace("glob: \"src/**\"", "glob: \"src/none/**\"");
+        assert_ne!(current, BODY_BASE, "подстановка сработала");
+        let issues =
+            rule_weakened(&current, BODY_BASE, Path::new("CONSTRAINTS.yaml")).expect("сравнение");
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert!(
+            issues[0].message.contains("no-pan") && issues[0].message.contains("glob"),
+            "{}",
+            issues[0].message
+        );
+    }
+
+    /// A1: правка `pattern` на никогда не срабатывающий — находка
+    /// `BodyChanged`; по флагу `[gate.rule_weakened] body = "error"` она
+    /// повышается до error.
+    #[test]
+    fn rule_weakened_flags_body_pattern_change() {
+        let current = BODY_BASE.replace("pattern: 'PAN'", "pattern: 'x^'");
+        assert_ne!(current, BODY_BASE, "подстановка сработала");
+        let path = Path::new("CONSTRAINTS.yaml");
+        let issues = rule_weakened(&current, BODY_BASE, path).expect("сравнение");
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert!(
+            issues[0].message.contains("pattern"),
+            "{}",
+            issues[0].message
+        );
+        // Флаг проекта: тело — error.
+        let strict = rule_weakened_with(&current, BODY_BASE, path, "error").expect("сравнение");
+        assert_eq!(strict.len(), 1, "{strict:?}");
+        assert_eq!(strict[0].severity, "error", "{:?}", strict[0]);
+    }
+
+    /// A1: правка ТОЛЬКО карточки (`rationale`) — не изменение тела: чисто.
+    #[test]
+    fn rule_weakened_clean_when_only_rationale_changed() {
+        let current = BODY_BASE.replace(
+            "pattern: 'PAN'",
+            "pattern: 'PAN'\n  rationale: 'почему правило существует'",
+        );
+        assert_ne!(current, BODY_BASE, "подстановка сработала");
+        let issues =
+            rule_weakened(&current, BODY_BASE, Path::new("CONSTRAINTS.yaml")).expect("сравнение");
         assert!(issues.is_empty(), "{issues:?}");
     }
 

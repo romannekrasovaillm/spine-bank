@@ -75,6 +75,7 @@ pub use exec::{check, check_with_options, command_strings};
 pub use registry::{
     CONSTRAINTS_REGISTRY_ENV, ResolvedConstraints, ResolvedParent, RuleAnchor, check_anchored,
     default_anchor_base, expiry_is_past, load_constraints_resolved, rule_anchor, rule_weakened,
+    rule_weakened_with,
 };
 pub use report::{
     ControlReport, OverrideReportEntry, REQUIRED_SECTIONS, SensorResult, control_report,

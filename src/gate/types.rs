@@ -355,6 +355,9 @@ pub struct GateOptions {
     /// Составляющая `semantic_quality` (ADR-052): какие смысловые рубрики
     /// обязательны и на какой области субъектов.
     pub semantic_quality: crate::config::SemanticQualityConfig,
+    /// Анти-ослабление реестра (A1): severity находки `BodyChanged`
+    /// (секция `[gate.rule_weakened]`; дефолт `warn`).
+    pub rule_weakened: crate::config::RuleWeakenedConfig,
     /// Модель доверия `command_succeeds` (A3, ADR-053): снимок решения
     /// «исполнять ли команды реестра» для составляющей `fitness`. `Default` —
     /// детерминированный legacy-режим (исполнять, allow-файл не
@@ -383,6 +386,7 @@ impl GateOptions {
             rubrics_dir: cfg.paths.rubrics_dir(),
             executable_required: cfg.trace.executable_required,
             semantic_quality: cfg.gate.semantic_quality.clone(),
+            rule_weakened: cfg.gate.rule_weakened.clone(),
             decision_policy: cfg.gate.decision_policy.clone(),
             exec: crate::cmd_trust::ExecPolicy::default(),
             route: None,
