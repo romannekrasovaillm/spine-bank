@@ -152,7 +152,7 @@ pub(super) fn run_inner(
     let git = GitProbe::probe(repo);
 
     let mut components = vec![
-        component_fitness(repo, &constraints, &options.exec),
+        component_fitness(repo, &constraints, &options.exec, &options.overrides),
         component_delta_guard(repo, base, &git),
         component_rule_weakened(
             repo,
@@ -160,6 +160,7 @@ pub(super) fn run_inner(
             base.unwrap_or("HEAD"),
             &git,
             options.rule_weakened.body.as_str(),
+            &options.overrides,
         ),
         component_spine_lint(repo),
         component_trace(repo, options),

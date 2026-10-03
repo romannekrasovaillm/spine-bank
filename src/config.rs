@@ -911,6 +911,8 @@ pub struct GateConfig {
     pub required: RequiredRules,
     /// Анти-ослабление реестра (A1): severity находки `BodyChanged`.
     pub rule_weakened: RuleWeakenedConfig,
+    /// Override по настоящему принятому ADR (A2): каталог ADR и горизонт.
+    pub overrides: OverridesConfig,
     /// Составляющая `decision_quality` (Н7 волны B 0.3.4, ADR-042): качество
     /// архитектурных решений по отчёту рубрики-судьи.
     pub decision_quality: DecisionQualityConfig,
@@ -956,6 +958,31 @@ impl BodySeverity {
 pub struct RuleWeakenedConfig {
     /// Severity находки `BodyChanged` (дефолт `warn`).
     pub body: BodySeverity,
+}
+
+/// Настройки проверки overrides (A2): секция `[gate.overrides]`.
+///
+/// Override узаконивает ослабление правила только тогда, когда ADR с его
+/// номером существует и принят, а срок `until` не уходит за горизонт. Так
+/// «override на выдуманный ADR-999 с until 2099» перестаёт зеленеть гейт.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OverridesConfig {
+    /// Каталог ADR кейса: относительный — от корня репозитория, абсолютный —
+    /// как есть. `None` — `docs/adr`.
+    pub adr_dir: Option<String>,
+    /// Максимальный горизонт `until`, месяцев (дефолт 12): override — срочное
+    /// исключение, а не вечное отключение правила.
+    pub max_horizon_months: u32,
+}
+
+impl Default for OverridesConfig {
+    fn default() -> Self {
+        Self {
+            adr_dir: None,
+            max_horizon_months: crate::control::baseline::DEFAULT_MAX_HORIZON_MONTHS,
+        }
+    }
 }
 
 /// Что делает гейт с решением рубрики `human` (E4.2).

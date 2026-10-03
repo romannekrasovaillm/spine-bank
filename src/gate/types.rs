@@ -358,6 +358,9 @@ pub struct GateOptions {
     /// Анти-ослабление реестра (A1): severity находки `BodyChanged`
     /// (секция `[gate.rule_weakened]`; дефолт `warn`).
     pub rule_weakened: crate::config::RuleWeakenedConfig,
+    /// Override по настоящему принятому ADR (A2): каталог ADR и горизонт
+    /// `until` (секция `[gate.overrides]`).
+    pub overrides: crate::config::OverridesConfig,
     /// Модель доверия `command_succeeds` (A3, ADR-053): снимок решения
     /// «исполнять ли команды реестра» для составляющей `fitness`. `Default` —
     /// детерминированный legacy-режим (исполнять, allow-файл не
@@ -387,6 +390,7 @@ impl GateOptions {
             executable_required: cfg.trace.executable_required,
             semantic_quality: cfg.gate.semantic_quality.clone(),
             rule_weakened: cfg.gate.rule_weakened.clone(),
+            overrides: cfg.gate.overrides.clone(),
             decision_policy: cfg.gate.decision_policy.clone(),
             exec: crate::cmd_trust::ExecPolicy::default(),
             route: None,

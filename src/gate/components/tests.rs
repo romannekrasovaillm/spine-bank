@@ -418,12 +418,22 @@ fn gate_active_override_legalizes_rule_removal() {
     std::fs::create_dir_all(&repo).expect("mkdir");
     make_gate_repo(&repo);
     // Дельта покрывает правку CONSTRAINTS.yaml, override узаконивает
-    // удаление правила (гейт «только через ADR»).
+    // удаление правила (гейт «только через ADR»). A2: ADR существует,
+    // принят, срок в горизонте.
+    let until = (chrono::Local::now() + chrono::Duration::days(182))
+        .format("%Y-%m-%d")
+        .to_string();
     std::fs::write(
             repo.join(".arch-handoff/CONSTRAINTS.yaml"),
-            "rules:\n  - name: spine_present\n    type: file_exists\n    path: \"ARCHITECTURE-SPINE.md\"\n    severity: error\noverrides:\n  - rule: no_pan\n    adr: ADR-007\n    until: \"2999-01\"\n",
+            format!("rules:\n  - name: spine_present\n    type: file_exists\n    path: \"ARCHITECTURE-SPINE.md\"\n    severity: error\noverrides:\n  - rule: no_pan\n    adr: ADR-007\n    until: \"{until}\"\n"),
         )
         .expect("constraints с override");
+    std::fs::create_dir_all(repo.join("docs/adr")).expect("mkdir adr");
+    std::fs::write(
+        repo.join("docs/adr/ADR-007-fixture.md"),
+        "# ADR-007. Фикстура\n\n- Date: 2026-01-01\n- Status: Accepted\n\n## Context\n\nтест\n",
+    )
+    .expect("ADR-007");
     let delta_dir = repo.join("changes/drop-pan");
     std::fs::create_dir_all(&delta_dir).expect("mkdir delta");
     std::fs::write(
@@ -1526,7 +1536,12 @@ fn fitness_message_distinguishes_absent_contour_from_wrong_path() {
         explicit: false,
         drift: None,
     };
-    let component = component_fitness(&repo, &implicit, &exec);
+    let component = component_fitness(
+        &repo,
+        &implicit,
+        &exec,
+        &crate::config::OverridesConfig::default(),
+    );
     assert_eq!(component.status, GateStatus::Skip);
     assert!(
         component.detail.contains("создайте каркас"),
@@ -1538,7 +1553,12 @@ fn fitness_message_distinguishes_absent_contour_from_wrong_path() {
         explicit: true,
         drift: None,
     };
-    let component = component_fitness(&repo, &explicit, &exec);
+    let component = component_fitness(
+        &repo,
+        &explicit,
+        &exec,
+        &crate::config::OverridesConfig::default(),
+    );
     assert_eq!(component.status, GateStatus::Skip);
     assert!(
         component.detail.contains("нечего прогонять"),

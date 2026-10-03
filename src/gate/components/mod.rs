@@ -23,6 +23,7 @@ pub(super) fn component_fitness(
     repo: &Path,
     constraints: &ConstraintsPath,
     exec: &crate::cmd_trust::ExecPolicy,
+    overrides: &crate::config::OverridesConfig,
 ) -> GateComponent {
     if !constraints.path.is_file() {
         // T-01: реестра нет НИГДЕ (резолвер пробует корень, затем
@@ -58,6 +59,10 @@ pub(super) fn component_fitness(
     // выставил; библиотечный дефолт — legacy, AD-7).
     let check_options = control::baseline::CheckOptions {
         exec: exec.clone(),
+        overrides: control::baseline::OverrideSettings {
+            adr_dir: overrides.adr_dir.clone(),
+            max_horizon_months: overrides.max_horizon_months,
+        },
         ..control::baseline::CheckOptions::default()
     };
     let detail = |summary: &str| {
@@ -357,6 +362,7 @@ pub(super) fn component_rule_weakened(
     base: &str,
     git: &GitProbe,
     body_severity: &str,
+    overrides: &crate::config::OverridesConfig,
 ) -> GateComponent {
     if !git.repo {
         return GateComponent::skip(
@@ -440,7 +446,19 @@ pub(super) fn component_rule_weakened(
             );
         }
     };
-    match control::rule_weakened_with(&current_src, &base_src, &constraints.path, body_severity) {
+    // A2: политика overrides — из конфига проекта (`[gate.overrides]`).
+    let adr_policy = control::AdrPolicy::resolve(
+        repo,
+        overrides.adr_dir.as_deref(),
+        overrides.max_horizon_months,
+    );
+    match control::rule_weakened_with(
+        &current_src,
+        &base_src,
+        &constraints.path,
+        body_severity,
+        &adr_policy,
+    ) {
         Ok(issues) if issues.is_empty() => GateComponent::pass(
             "rule_weakened",
             format!("реестр правил не ослаблен относительно {rev} — файл: {rel}"),
@@ -871,12 +889,7 @@ pub(super) fn component_model_validate(repo: &Path, route: Route) -> GateCompone
 /// `pub(crate)`: тем же признаком паспорт вердикта (W1) отличает решения,
 /// о которых вердикт вообще ничего не говорит.
 pub(crate) fn adr_is_accepted(text: &str) -> bool {
-    text.lines().take(40).any(|l| {
-        let t = l.trim().trim_start_matches(['-', '*', '#', ' ']).trim();
-        let lowered = t.to_lowercase();
-        (lowered.starts_with("status") || lowered.starts_with("статус"))
-            && lowered.contains("accepted")
-    })
+    control::adr_status_accepted(text)
 }
 
 /// Составляющая `decision_quality` (Н7 волны B 0.3.4, ADR-042): качество
