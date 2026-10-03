@@ -2,6 +2,9 @@
 # сводный SHA256SUMS. Триггер — тег v* (публикация GitHub Release) или
 # ручной запуск (только сборка + артефакты workflow, релиз не создаётся).
 # Имена артефактов — по README «Шаг 0»: arch-be[-core]-<os>-<arch>[.exe].
+#
+# B1 (0.3.12): первая джоба — fail-closed проверка, что коммит тега зелёный
+# в CI; сборка не начинается, пока обязательные джобы ci.yml не `success`.
 name: Release
 
 on:
@@ -13,7 +16,86 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  ci-green:
+    # B1: релиз собирается только с зелёного коммита. Fail-closed: нет данных,
+    # незавершённые (`queued`/`in_progress` дольше ожидания) или не-`success`
+    # обязательные джобы → падение ДО сборки бинарей. Список обязательных
+    # джобов — явный (ночные/необязательные релиз не блокируют) и совпадает
+    # с `name:` джобов ci.yml.
+    name: CI зелёный для коммита тега
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: read
+    steps:
+      - name: Обязательные джобы ci.yml завершены успешно
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+          # Ровно `name:` из .github/workflows/ci.yml — сверяются с именами
+          # check-runs, а не с id джоб.
+          REQUIRED: |
+            rustfmt
+            clippy
+            cargo test
+            core build (--no-default-features --features core)
+            hermetic (no python)
+            MSRV 1.85 (cargo check)
+            cargo audit
+            supply chain (SBOM + SHA256SUMS)
+            cargo deny (licenses, bans, sources)
+            dogfood (self spine + fitness)
+            eval suite (agent-config)
+        run: |
+          set -euo pipefail
+          # Разумное ожидание незавершённых джобов: 30 минут. Тег на только что
+          # запушенном коммите застаёт CI в процессе — ждём, но не бесконечно.
+          deadline=$((SECONDS + 1800))
+          while :; do
+            if ! raw=$(gh api --paginate \
+                 "/repos/${GITHUB_REPOSITORY}/commits/${SHA}/check-runs?per_page=100" \
+                 --jq '.check_runs[] | [.name, .status, (.conclusion // "")] | @tsv'); then
+              echo "❌ не удалось получить check-runs для ${SHA} — fail-closed"
+              exit 1
+            fi
+            failed=()
+            pending=()
+            while IFS= read -r name; do
+              [ -n "$name" ] || continue
+              # Последний по времени check-run с таким именем (перезапуски).
+              line=$(printf '%s\n' "$raw" | awk -F'\t' -v n="$name" '$1==n {last=$0} END {if (last != "") print last}')
+              if [ -z "$line" ]; then
+                pending+=("$name — нет данных")
+                continue
+              fi
+              status=$(printf '%s' "$line" | cut -f2)
+              conclusion=$(printf '%s' "$line" | cut -f3)
+              if [ "$status" != "completed" ]; then
+                pending+=("$name — $status")
+              elif [ "$conclusion" != "success" ]; then
+                failed+=("$name — $conclusion")
+              fi
+            done <<< "$REQUIRED"
+            if [ "${#failed[@]}" -gt 0 ]; then
+              echo "❌ обязательные джобы CI не success — релиз не собирается:"
+              printf '  - %s\n' "${failed[@]}"
+              exit 1
+            fi
+            if [ "${#pending[@]}" -eq 0 ]; then
+              echo "✅ все обязательные джобы CI успешны для ${SHA}"
+              exit 0
+            fi
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "❌ джобы не завершились за отведённое время — fail-closed:"
+              printf '  - %s\n' "${pending[@]}"
+              exit 1
+            fi
+            printf '⏳ ждём: %s\n' "${pending[@]}"
+            sleep 30
+          done
+
   build:
+    needs: [ci-green]
     name: ${{ matrix.edition }} / ${{ matrix.platform.name }}
     strategy:
       fail-fast: false
