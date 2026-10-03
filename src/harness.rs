@@ -821,7 +821,7 @@ impl Tool for HarnessRunTool {
                     },
                     "path": {
                         "type": "string",
-                        "description": "Корень репозитория (относительно cwd или абсолютный)"
+                        "description": "Корень репозитория (относительно cwd или абсолютный); историческое имя `repo` принимается"
                     },
                     "task": {
                         "type": "string",
@@ -838,7 +838,7 @@ impl Tool for HarnessRunTool {
                         "description": "true — прогон в фоне (немедленный возврат, задача hr-* в реестре фоновых задач; результат забирается через subagent_result). false/отсутствует — синхронно: ход агента ждёт завершения прогона"
                     }
                 },
-                "required": ["harness", "repo"]
+                "required": ["harness", "path"]
             }),
         }
     }
@@ -864,9 +864,13 @@ impl Tool for HarnessRunTool {
                 "harness_run: обязательный аргумент 'harness' (string) отсутствует",
             ));
         };
-        let Some(repo) = args.get("repo").and_then(Value::as_str) else {
+        let Some(repo) = args
+            .get("path")
+            .and_then(Value::as_str)
+            .or_else(|| args.get("repo").and_then(Value::as_str))
+        else {
             return Ok(ToolOutput::err(
-                "harness_run: обязательный аргумент 'repo' (string) отсутствует",
+                "harness_run: обязательный аргумент 'path' (string; историческое имя 'repo') отсутствует",
             ));
         };
         // Адаптеры читаем из ЖИВОГО конфига: правки config.toml в ходе
@@ -1545,6 +1549,21 @@ mod tests {
         assert!(
             out.is_error && out.content.contains("'harness'"),
             "{}",
+            out.content
+        );
+
+        // path — имя из схемы; repo — исторический алиас. До фикса обработчик
+        // читал только `repo`, а required ссылался на несуществующее свойство:
+        // агент, передающий path по схеме, получал ложный отказ (инцидент
+        // «обязательный аргумент 'repo' отсутствует» при корректном вызове).
+        let out = tool
+            .call(json!({"harness": "nope", "path": "."}), &ctx)
+            .await
+            .expect("call");
+        assert!(out.is_error, "{}", out.content);
+        assert!(
+            out.content.contains("не настроен"),
+            "path резолвится как repo: {}",
             out.content
         );
 
