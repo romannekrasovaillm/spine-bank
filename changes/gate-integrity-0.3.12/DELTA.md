@@ -77,15 +77,23 @@ warn-по-умолчанию либо за флагом, краснить чуж
 
 ## Критерии приёмки
 
-- [ ] RA-1 из fork-repro-0.3.12.md даёт `exit 1` с `override_adr_missing`
-      (сквозной критерий успеха задания).
-- [ ] A1: `command → true`, `src/** → src/none/**`, `pattern → x^` дают
+- [x] RA-1 из fork-repro-0.3.12.md даёт `exit 1` с `override_adr_missing`
+      (сквозной критерий успеха задания). — A2, подтверждено независимо
+      (fork-repro-0.3.12.md, «RA-1 после A1+A2: приёмка — ЗАКРЫТО»).
+- [x] A1: `command → true`, `src/** → src/none/**`, `pattern → x^` дают
       `BodyChanged`; правка только rationale — чисто; ужесточения чистые.
-- [ ] A2: существующий тест rule_weakened_active_override_legalizes_weakening
-      переписан на реальный файл ADR и зелёный.
-- [ ] A3: аудит control-plane-0.3.12.md написан; удаление Stop-хука → exit 1.
-- [ ] A4: прогон с заглушкой-исполнителем, удаляющей Stop-хук и пишущей
-      нарушающий код, — красный итог с control_plane_tampered.
+      — коммит `60988e7`, тесты `rule_weakened` 10/10.
+- [x] A2: существующий тест rule_weakened_active_override_legalizes_weakening
+      переписан на реальный файл ADR и зелёный. — коммит `fe92ec4`,
+      `override` 15/15.
+- [x] A3: аудит control-plane-0.3.12.md написан; удаление Stop-хука → exit 1.
+      — коммиты `30b90f8` (пины MANIFEST) + `2fb8791` (составляющая
+      `control_plane`); RA-4/RA-4b/RA-4c воспроизведены, после A3 → exit 1
+      `control_plane_tampered`.
+- [x] A4: прогон с заглушкой-исполнителем, удаляющей Stop-хук и пишущей
+      нарушающий код, — красный итог с control_plane_tampered. — A4 + A4.1b
+      (пин MANIFEST на входе): `runner.rs` пост-гейт, `manifest_tampered`;
+      RA-6 воспроизведён (до — код 0 при нарушении, после — красный).
 - [ ] B1: тестовый тег на коммите с красной джобой не создаёт GitHub Release.
 - [ ] B2: sbom-<edition>.cyclonedx.json и SHA256SUMS приложены к релизу
       и соответствуют опубликованным бинарям.
