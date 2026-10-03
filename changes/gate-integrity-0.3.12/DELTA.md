@@ -58,7 +58,17 @@ docs/experiments/fork-repro-0.3.12.md, RA-1: exit 0 при PAN в коде,
   повышение severity) ослаблением не считается.
 - `run_harness`: итог прогона дополняется вердиктом пост-гейта.
 - `docs/supply-chain.md`, `docs/threat-model.md` §5: статусы GAP
-  обновляются по мере закрытия.
+  обновляются по мере закрытия; инструкция проверки provenance/подписи — B3.
+- Волна B (файлы): `.github/workflows/release.yml` (B1 — проверка зелёного
+  CI перед публикацией; B2 — `cargo sbom` по редакциям, `SHA256SUMS` с
+  хэшами SBOM; B3 — `attest-build-provenance` + `cosign sign-blob`,
+  ADR-056 вариант (а)), `.github/workflows/ci.yml` и `nightly.yml` (B4 —
+  `uses:` по полному SHA, `permissions: contents: read`, джоба `cargo deny`),
+  `.github/CODEOWNERS` (B5, новый), `deny.toml` (B4, новый), корневой
+  `CONSTRAINTS.yaml` (фитнес-правила B4/B5; ужесточение — новое правило,
+  расширение glob, повышение severity ослаблением не считается).
+- `.arch-handoff/action-pins.txt` (B4/B3): снимок SHA-пинов используемых
+  actions на дату выпуска пакета — данные для правки `uses:`, не код.
 
 ## REMOVED
 
