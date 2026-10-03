@@ -610,3 +610,64 @@ constraints:
     skill: fitness-functions
     owner: "solution-архитектор BE"
     expiry: "2027-10-03"
+
+  # --- B5 (0.3.12): CODEOWNERS — процессная защита инвариантов ------------
+  - id: C-38
+    name: codeowners_present
+    type: file_exists
+    path: ".github/CODEOWNERS"
+    severity: error
+    ad: AD-9
+    rationale: >-
+      защищённые пути не меняются без одобрения владельца: CODEOWNERS —
+      процессный слой поверх механических fitness-правил
+    fix_hint: >-
+      создать .github/CODEOWNERS с владельцем репозитория (git remote origin)
+    skill: fitness-functions
+    owner: "solution-архитектор BE"
+    expiry: "2027-10-03"
+
+  - id: C-39
+    name: codeowners_covers_constraints
+    type: must_contain
+    glob: ".github/CODEOWNERS"
+    pattern: "CONSTRAINTS\\.yaml"
+    severity: error
+    owner: "solution-архитектор BE"
+    expiry: "2027-10-03"
+
+  - id: C-40
+    name: codeowners_covers_spine
+    type: must_contain
+    glob: ".github/CODEOWNERS"
+    pattern: "ARCHITECTURE-SPINE\\.md"
+    severity: error
+    owner: "solution-архитектор BE"
+    expiry: "2027-10-03"
+
+  - id: C-41
+    name: codeowners_covers_guard_modules
+    type: must_contain
+    glob: ".github/CODEOWNERS"
+    pattern: "src/(policy|injection|cmd_trust)\\.rs"
+    severity: error
+    owner: "solution-архитектор BE"
+    expiry: "2027-10-03"
+
+  - id: C-42
+    name: codeowners_covers_registry
+    type: must_contain
+    glob: ".github/CODEOWNERS"
+    pattern: "src/control/registry\\.rs"
+    severity: error
+    owner: "solution-архитектор BE"
+    expiry: "2027-10-03"
+
+  - id: C-43
+    name: codeowners_covers_rubrics
+    type: must_contain
+    glob: ".github/CODEOWNERS"
+    pattern: "assets/rubrics/"
+    severity: error
+    owner: "solution-архитектор BE"
+    expiry: "2027-10-03"

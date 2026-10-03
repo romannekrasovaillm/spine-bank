@@ -9,7 +9,7 @@
 
 | Артефакт | Чем проверяется |
 |---|---|
-| Исходники (репозиторий) | git-история, подписи коммитов (если включены), ADR-дисциплина |
+| Исходники (репозиторий) | git-история, подписи коммитов (если включены), ADR-дисциплина; защищённые пути закреплены `.github/CODEOWNERS` |
 | Бинарь `arch-be` | сводный `SHA256SUMS` на 8 бинарей (linux-x86_64/aarch64, macos-arm64, windows-x86_64 × core/full, workflow `release.yml`); происхождение — `gh attestation verify`; независимая альтернатива — сборка из исходников (ниже) |
 | Подлинность релиза | SLSA build provenance (`actions/attest-build-provenance`, ADR-056) на каждый бинарь + keyless-подпись `SHA256SUMS` (`cosign sign-blob`, Sigstore) — проверка ниже |
 | Зависимости Rust | `Cargo.lock` + `cargo audit` (CI-джоба audit, база RUSTSEC) + `cargo deny check licenses bans sources` (CI-джоба deny, конфиг `deny.toml`) |
