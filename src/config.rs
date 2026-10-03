@@ -516,6 +516,18 @@ pub struct CodingHarnessConfig {
     /// и мусора вида `__pycache__/`). Работа исполнителя всегда оказывается
     /// в git — это точка интеграции параллельных прогонов.
     pub auto_commit: bool,
+    /// Пост-гейт (A4): после авто-коммита `run_harness` сам прогоняет
+    /// `arch-be gate` по рабочему дереву прогона с базой `baseline_commit`
+    /// из `.arch-handoff/MANIFEST.json` — вне окружения исполнителя. Красный
+    /// вердикт (FAIL/INCOMPLETE/TIMEOUT) делает итог прогона ошибкой для
+    /// оркестратора. `false` — выключен явным решением адаптера
+    /// (предупреждение в выводе и журнале остаётся).
+    pub post_gate: bool,
+    /// Таймаут пост-гейта, секунды (дефолт 600). Гейт не завершился —
+    /// вердикт TIMEOUT, итог красный: непроверенный результат не выдаётся
+    /// за принятый (RA-5: `dependency_direction` на больших реестрах
+    /// патологически дорог — это сигнал, а не блокер механизма).
+    pub post_gate_timeout_secs: u64,
 }
 
 impl Default for CodingHarnessConfig {
@@ -529,6 +541,8 @@ impl Default for CodingHarnessConfig {
             timeout_secs: 1800,
             idle_timeout_secs: 600,
             auto_commit: true,
+            post_gate: true,
+            post_gate_timeout_secs: 600,
         }
     }
 }
