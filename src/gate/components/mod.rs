@@ -363,8 +363,13 @@ pub(super) fn component_delta_guard(
 /// `control_plane` — тоже SKIP (обратная совместимость).
 ///
 /// Правка, упомянутая активной дельтой, не блокирует: расхождение
-/// узаконено явным решением, а не спрятано.
-pub(super) fn component_control_plane(repo: &Path) -> GateComponent {
+/// узаконено явным решением, а не спрятано. С диапазоном прогона (A5) дельта,
+/// появившаяся или изменённая в нём, не узаконивает — см.
+/// [`verify_control_plane_pins`].
+pub(super) fn component_control_plane(
+    repo: &Path,
+    agent_range: Option<&crate::control::AgentRange>,
+) -> GateComponent {
     match crate::control_plane::read(repo) {
         crate::control_plane::Pins::Absent => GateComponent::skip(
             "control_plane",
@@ -384,16 +389,39 @@ pub(super) fn component_control_plane(repo: &Path) -> GateComponent {
                 ),
             )],
         ),
-        crate::control_plane::Pins::Pinned(pins) => verify_control_plane_pins(repo, &pins),
+        crate::control_plane::Pins::Pinned(pins) => {
+            verify_control_plane_pins(repo, &pins, agent_range)
+        }
     }
 }
 
-/// Сверка пинов: расхождение без активной дельты, упоминающей файл, —
-/// `control_plane_tampered` (error, одна находка на файл); расхождение с
-/// дельтой — PASS с деталью.
+/// Находка `self_approved` (A5, ADR-055): одобрение ослабления возникло
+/// ВНУТРИ диапазона прогона исполнителя — по построению изоляции это работа
+/// исполнителя, а не решение владельца; легитимный путь — перенести одобрение
+/// в основной репозиторий после merge.
+fn self_approved_finding(artifact: &str, base: &str) -> GateFinding {
+    GateFinding::ruled(
+        "error".into(),
+        "self_approved".into(),
+        format!(
+            "{artifact} возник в диапазоне прогона исполнителя ({base}..HEAD) → \
+             перенесите одобрение в основной репозиторий решением владельца"
+        ),
+    )
+}
+
+/// Сверка пинов: расхождение без активной ВЛАДЕЛЬЧЕСКОЙ дельты, упоминающей
+/// файл, — `control_plane_tampered` (error, одна находка на файл); расхождение
+/// с дельтой — PASS с деталью.
+///
+/// С диапазоном прогона (A5, ADR-055) дельта, `DELTA.md` которой добавлен или
+/// изменён в диапазоне, легализовать не может: она написана исполнителем.
+/// Если покрытие есть, но всё «из диапазона», — `control_plane_tampered` плюс
+/// `self_approved` с именем дельты.
 fn verify_control_plane_pins(
     repo: &Path,
     pins: &BTreeMap<String, Option<crate::control_plane::Pin>>,
+    agent_range: Option<&crate::control::AgentRange>,
 ) -> GateComponent {
     let total = pins.len();
     let mut findings = Vec::new();
@@ -409,14 +437,28 @@ fn verify_control_plane_pins(
         if !diverged {
             continue;
         }
-        let deltas = delta::mentioning_deltas(repo, file);
-        match deltas.first() {
-            Some(name) => covered_notes.push(format!("{file} изменён по дельте {name}")),
-            None => findings.push(GateFinding::ruled(
-                "error".into(),
-                "control_plane_tampered".into(),
-                format!("{file} изменён после выдачи пакета → вернуть файл или оформить дельту"),
-            )),
+        let deltas = delta::mentioning_delta_paths(repo, file);
+        // Владельческая дельта — та, чей DELTA.md НЕ появился/не менялся в
+        // диапазоне прогона исполнителя.
+        if let Some((name, _)) = deltas
+            .iter()
+            .find(|(_, path)| !agent_range.is_some_and(|r| r.contains_file(path)))
+        {
+            covered_notes.push(format!("{file} изменён по дельте {name}"));
+            continue;
+        }
+        findings.push(GateFinding::ruled(
+            "error".into(),
+            "control_plane_tampered".into(),
+            format!("{file} изменён после выдачи пакета → вернуть файл или оформить дельту"),
+        ));
+        // Покрытие было, но всё из диапазона прогона: правка не «не оформлена»,
+        // а оформлена дельтой исполнителя — самоодобрение (A5).
+        if let (Some((name, _)), Some(range)) = (deltas.first(), agent_range) {
+            findings.push(self_approved_finding(
+                &format!("дельта {name}"),
+                range.base(),
+            ));
         }
     }
     if !findings.is_empty() {
@@ -457,6 +499,7 @@ pub(super) fn component_rule_weakened(
     git: &GitProbe,
     body_severity: &str,
     overrides: &crate::config::OverridesConfig,
+    agent_range: Option<&crate::control::AgentRange>,
 ) -> GateComponent {
     if !git.repo {
         return GateComponent::skip(
@@ -546,25 +589,42 @@ pub(super) fn component_rule_weakened(
         overrides.adr_dir.as_deref(),
         overrides.max_horizon_months,
     );
-    match control::rule_weakened_with(
+    match control::rule_weakened_scoped(
         &current_src,
         &base_src,
         &constraints.path,
         body_severity,
         &adr_policy,
+        agent_range,
     ) {
-        Ok(issues) if issues.is_empty() => GateComponent::pass(
-            "rule_weakened",
-            format!("реестр правил не ослаблен относительно {rev} — файл: {rel}"),
-        ),
-        Ok(issues) => GateComponent::fail(
-            "rule_weakened",
-            format!(
-                "ослаблений правил относительно {rev}: {} — файл: {rel}",
-                issues.len()
-            ),
-            issues.iter().map(GateFinding::lint).collect(),
-        ),
+        Ok(outcome) if outcome.issues.is_empty() && outcome.self_approved.is_empty() => {
+            GateComponent::pass(
+                "rule_weakened",
+                format!("реестр правил не ослаблен относительно {rev} — файл: {rel}"),
+            )
+        }
+        Ok(outcome) => {
+            // A5: `self_approved` — аддитивная error-находка к `rule_weakened`
+            // (или отдельно, если ослабление подавлено и не возвращено).
+            let mut findings: Vec<GateFinding> =
+                outcome.issues.iter().map(GateFinding::lint).collect();
+            if let Some(range) = agent_range {
+                findings.extend(
+                    outcome
+                        .self_approved
+                        .iter()
+                        .map(|s| self_approved_finding(&s.artifact, range.base())),
+                );
+            }
+            GateComponent::fail(
+                "rule_weakened",
+                format!(
+                    "ослаблений правил относительно {rev}: {} — файл: {rel}",
+                    outcome.issues.len()
+                ),
+                findings,
+            )
+        }
         Err(e) => GateComponent::fail("rule_weakened", format!("сбой сравнения: {e}"), Vec::new()),
     }
 }

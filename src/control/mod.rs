@@ -73,9 +73,10 @@ pub use diff_triggers::{
 pub(crate) use exec::glob_matches;
 pub use exec::{check, check_with_options, command_strings};
 pub use registry::{
-    AdrPolicy, CONSTRAINTS_REGISTRY_ENV, DEFAULT_ADR_DIR, ResolvedConstraints, ResolvedParent,
-    RuleAnchor, adr_status_accepted, check_anchored, default_anchor_base, expiry_is_past,
-    load_constraints_resolved, rule_anchor, rule_anchor_opts, rule_weakened, rule_weakened_with,
+    AdrPolicy, AgentRange, CONSTRAINTS_REGISTRY_ENV, DEFAULT_ADR_DIR, ResolvedConstraints,
+    ResolvedParent, RuleAnchor, RuleWeakenedOutcome, SelfApproved, adr_status_accepted,
+    check_anchored, default_anchor_base, expiry_is_past, load_constraints_resolved, rule_anchor,
+    rule_anchor_opts, rule_weakened, rule_weakened_scoped, rule_weakened_with,
 };
 pub use report::{
     ControlReport, OverrideReportEntry, REQUIRED_SECTIONS, SensorResult, control_report,

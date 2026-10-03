@@ -150,6 +150,13 @@ pub(super) fn run_inner(
         }
     };
     let git = GitProbe::probe(repo);
+    // A5 (ADR-055): диапазон прогона исполнителя — снимается только когда
+    // вызывающий его задал (пост-гейт). Обычный гейт оставляет `None`, и
+    // поведение A1–A4 не меняется.
+    let agent_range = options
+        .agent_range
+        .as_deref()
+        .and_then(|base| control::AgentRange::probe(repo, base));
 
     let mut components = vec![
         component_fitness(repo, &constraints, &options.exec, &options.overrides),
@@ -157,7 +164,7 @@ pub(super) fn run_inner(
         // A3: пины контрольной плоскости пакета — правка Stop-хука,
         // `arch-harness.toml` или порогов рубрики не должна зеленеть молча.
         // Кейс без MANIFEST.json / старого пакета — SKIP.
-        component_control_plane(repo),
+        component_control_plane(repo, agent_range.as_ref()),
         component_rule_weakened(
             repo,
             &constraints,
@@ -165,6 +172,7 @@ pub(super) fn run_inner(
             &git,
             options.rule_weakened.body.as_str(),
             &options.overrides,
+            agent_range.as_ref(),
         ),
         component_spine_lint(repo),
         component_trace(repo, options),

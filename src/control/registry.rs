@@ -396,19 +396,31 @@ pub fn adr_status_accepted(text: &str) -> bool {
     })
 }
 
-/// Находит файл ADR с номером `n` в каталоге и говорит, принят ли он.
-/// `None` — файла нет; `Some(false)` — файл есть, но статус не `accepted`.
-fn adr_accepted_in(dir: &Path, n: u32) -> Option<bool> {
+/// Путь файла ADR с номером `n` в каталоге (`None` — файла нет). При
+/// нескольких кандидатах (дубли номеров — риск теоретический, конвенция
+/// `ADR-NNN` уникальна) берётся минимальный путь: вердикт детерминирован.
+fn adr_file_in(dir: &Path, n: u32) -> Option<PathBuf> {
     let read_dir = std::fs::read_dir(dir).ok()?;
+    let mut found: Option<PathBuf> = None;
     for entry in read_dir.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
         if !name.to_lowercase().ends_with(".md") || adr_number(&name) != Some(n) {
             continue;
         }
-        let text = std::fs::read_to_string(entry.path()).unwrap_or_default();
-        return Some(adr_status_accepted(&text));
+        let path = entry.path();
+        if found.as_ref().is_none_or(|f| path < *f) {
+            found = Some(path);
+        }
     }
-    None
+    found
+}
+
+/// Находит файл ADR с номером `n` в каталоге и говорит, принят ли он.
+/// `None` — файла нет; `Some(false)` — файл есть, но статус не `accepted`.
+fn adr_accepted_in(dir: &Path, n: u32) -> Option<bool> {
+    let path = adr_file_in(dir, n)?;
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    Some(adr_status_accepted(&text))
 }
 
 /// Ушёл ли `until` за горизонт `max_months` от сегодня (сравнение по
@@ -656,6 +668,92 @@ fn git_toplevel(repo: &Path) -> Option<PathBuf> {
     PathBuf::from(text.trim()).canonicalize().ok()
 }
 
+/// Диапазон прогона исполнителя (A5, ADR-055): `base..HEAD` изолированного
+/// worktree. Артефакты одобрения (ADR, override, дельта), впервые появившиеся
+/// ИЛИ изменённые в этом диапазоне, не узаконивают ослабления: по построению
+/// контура изоляции это работа исполнителя, а не решение владельца.
+#[derive(Debug, Clone)]
+pub struct AgentRange {
+    /// База диапазона — как передана вызывающим (для текста находки).
+    base: String,
+    /// Корень git-репозитория (канонизированный): пути `git diff` — от него.
+    top: PathBuf,
+    /// Изменённые пути (`git diff --name-only <base>..HEAD`), от корня git.
+    changed: BTreeSet<String>,
+}
+
+impl AgentRange {
+    /// Снимает диапазон из git: `git diff --name-only <base>..HEAD` (добавленные
+    /// И модифицированные пути). `None` — не git-репозиторий, база не резолвится
+    /// или git недоступен: вызывающий работает без диапазона, как до A5
+    /// (fail-soft — не выдумывает самоодобрение на сломанном входе).
+    #[must_use]
+    pub fn probe(repo: &Path, base: &str) -> Option<Self> {
+        let top = git_toplevel(repo)?;
+        let rev = super::base_rev(base);
+        let out = Command::new("git")
+            // Имена сущностей русские: без `core.quotepath=false` git отдаёт
+            // пути экранированными и они не совпадут с путями файлов.
+            .args(["-c", "core.quotepath=false"])
+            .arg("-C")
+            .arg(repo)
+            .args(["diff", "--name-only", &format!("{rev}..HEAD")])
+            .stdin(Stdio::null())
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let changed: BTreeSet<String> = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_owned)
+            .collect();
+        Some(Self {
+            base: base.to_string(),
+            top,
+            changed,
+        })
+    }
+
+    /// Диапазон из явного набора изменённых путей (тесты): пути — относительно
+    /// корня `top` (как их отдаёт `git diff --name-only`).
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn from_paths(
+        base: impl Into<String>,
+        top: impl Into<PathBuf>,
+        changed: impl IntoIterator<Item = String>,
+    ) -> Self {
+        Self {
+            base: base.into(),
+            top: top.into(),
+            changed: changed.into_iter().collect(),
+        }
+    }
+
+    /// База диапазона — для текста находки `self_approved`.
+    #[must_use]
+    pub fn base(&self) -> &str {
+        &self.base
+    }
+
+    /// Лежит ли файл среди изменённых в диапазоне. `false` — файла нет, он вне
+    /// корня git или не менялся.
+    #[must_use]
+    pub fn contains_file(&self, file: &Path) -> bool {
+        let Ok(abs) = file.canonicalize() else {
+            return false;
+        };
+        let Ok(rel) = abs.strip_prefix(&self.top) else {
+            return false;
+        };
+        self.changed
+            .contains(&rel.to_string_lossy().replace('\\', "/"))
+    }
+}
+
 /// Сверка состава правил с git-базой (П5, Д4): анти-ослабление доступно не
 /// только составному гейту. Никогда не падает: недоступность базы — честный
 /// `note`, а не молчаливый PASS.
@@ -860,19 +958,57 @@ impl WeakenedKind {
     }
 }
 
-/// Имена/идентификаторы правил с АКТИВНЫМИ overrides (`rule`+`adr`+`until`,
-/// дата корректна и не просрочена, ADR существует и принят, срок в горизонте
-/// — та же логика, что у [`evaluate_overrides`]). Активный override
-/// узаконивает ослабление своего правила: находка `rule_weakened` по нему
-/// подавляется.
-fn active_override_keys(overrides: &[OverrideEntry], adr_policy: &AdrPolicy) -> BTreeSet<String> {
-    let mut out = BTreeSet::new();
-    for entry in overrides {
+/// Ключ override, приведённый к имени правила: override ссылается на правило
+/// по имени ИЛИ id — для сравнения «был ли override в базе» оба вида сводятся
+/// к каноничному имени (иначе смена ссылки имя↔id выглядела бы новым
+/// override). Не найдено в снимке (правило удалено) — ключ отдаётся как есть.
+fn normalize_override_key(key: &str, rules: &BTreeMap<String, RuleSnapshot>) -> String {
+    rules
+        .iter()
+        .find(|(name, snap)| name.as_str() == key || snap.id.as_deref() == Some(key))
+        .map_or_else(|| key.to_string(), |(name, _)| name.clone())
+}
+
+/// Карта узаконивания overrides (A2 + A5). Возвращает:
+///
+/// 1. множество «ключей» (каноничных имён правил), узаконенных владельческим
+///    approval — override существует с базы и его ADR вне диапазона прогона;
+/// 2. карту «ключ → артефакты самоодобрения» (`override '<rule>'`, `ADR-NNN`)
+///    для override, который узаконил бы ослабление, но возник или чей ADR
+///    изменился в диапазоне прогона исполнителя ([`AgentRange`], ADR-055).
+///
+/// Активность override — та же, что у [`evaluate_overrides`]: `rule`+`adr`+
+/// `until`, дата корректна и не просрочена, ADR существует и принят, срок в
+/// горизонте. Без диапазона (`None`) второй канал пуст — поведение A2.
+fn legalization(
+    current: &[OverrideEntry],
+    base: &[OverrideEntry],
+    current_rules: &BTreeMap<String, RuleSnapshot>,
+    base_rules: &BTreeMap<String, RuleSnapshot>,
+    adr_policy: &AdrPolicy,
+    agent_range: Option<&AgentRange>,
+) -> (BTreeSet<String>, BTreeMap<String, Vec<String>>) {
+    let base_keys: BTreeSet<String> = base
+        .iter()
+        .filter_map(|e| e.rule.as_deref())
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+        .map(|k| normalize_override_key(k, base_rules))
+        .collect();
+    let mut legal: BTreeSet<String> = BTreeSet::new();
+    let mut self_by_key: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for entry in current {
         let (Some(rule), Some(adr), Some(until)) = (&entry.rule, &entry.adr, &entry.until) else {
             continue; // неполный override — не активен (отдельная error-находка `check`)
         };
         let rule = rule.trim();
         if rule.is_empty() || adr.trim().is_empty() {
+            continue;
+        }
+        let key = normalize_override_key(rule, current_rules);
+        // Первое решение по ключу окончательно (в текущем файле порядок
+        // записей произволен: вердикт не должен зависеть от него).
+        if legal.contains(&key) || self_by_key.contains_key(&key) {
             continue;
         }
         let Some((y, m, d)) = parse_until(until.trim()) else {
@@ -884,9 +1020,28 @@ fn active_override_keys(overrides: &[OverrideEntry], adr_policy: &AdrPolicy) -> 
         if adr_rejection(adr.trim(), (y, m, d), adr_policy).is_some() {
             continue; // A2: нет принятого ADR или срок за горизонтом
         }
-        out.insert(rule.to_string());
+        // Активный override — кандидат; проверяем ПРОИСХОЖДЕНИЕ (A5). Без
+        // диапазона происхождение не проверяется вовсе — поведение A2.
+        let mut artifacts: Vec<String> = Vec::new();
+        if let Some(range) = agent_range {
+            if !base_keys.contains(&key) {
+                artifacts.push(format!("override '{key}'"));
+            }
+            if let Some(n) = adr_number(adr.trim()) {
+                if let Some(path) = adr_file_in(&adr_policy.adr_dir, n) {
+                    if range.contains_file(&path) {
+                        artifacts.push(format!("ADR-{n:03}"));
+                    }
+                }
+            }
+        }
+        if artifacts.is_empty() {
+            legal.insert(key);
+        } else {
+            self_by_key.insert(key, artifacts);
+        }
     }
-    out
+    (legal, self_by_key)
 }
 
 /// Снимок правила для сравнения версий: `exclude_glob`, нормализованный
@@ -976,7 +1131,8 @@ pub fn rule_weakened(current_src: &str, base_src: &str, file: &Path) -> Result<V
 /// [`rule_weakened`] с настраиваемой severity находки `BodyChanged` (A1) и
 /// политикой overrides по ADR (A2): по умолчанию (в трёхаргументной обёртке)
 /// тело — `warn`, ADR — рядом с реестром. Край гейта передаёт сюда
-/// `[gate.rule_weakened] body` и `[gate.overrides]`.
+/// `[gate.rule_weakened] body` и `[gate.overrides]`. Без диапазона прогона
+/// (A5): [`rule_weakened_scoped`] с `agent_range = None`.
 ///
 /// # Errors
 /// Те же, что у [`rule_weakened`].
@@ -987,6 +1143,45 @@ pub fn rule_weakened_with(
     body_severity: &str,
     adr_policy: &AdrPolicy,
 ) -> Result<Vec<LintIssue>> {
+    Ok(rule_weakened_scoped(current_src, base_src, file, body_severity, adr_policy, None)?.issues)
+}
+
+/// Артефакт, которым ослабление узаконено «изнутри» диапазона прогона
+/// исполнителя (A5, ADR-055): `override '<rule>'` или `ADR-NNN`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SelfApproved {
+    /// Ключ правила (каноничное имя), чьё ослабление прикрыто артефактом.
+    pub rule: String,
+    /// Текст артефакта для находки `self_approved`.
+    pub artifact: String,
+}
+
+/// Итог анти-ослабления с учётом диапазона прогона (A5): находки
+/// `rule_weakened` и артефакты самоодобрения, из-за которых они не подавлены.
+#[derive(Debug, Clone, Default)]
+pub struct RuleWeakenedOutcome {
+    /// Находки `rule_weakened`.
+    pub issues: Vec<LintIssue>,
+    /// Артефакты самоодобрения (по одному на подавленное ослабление).
+    pub self_approved: Vec<SelfApproved>,
+}
+
+/// [`rule_weakened_with`] с диапазоном прогона исполнителя (A5, ADR-055):
+/// override, впервые появившийся ИЛИ чей ADR добавлен/изменён в
+/// `agent_range`, ослабление НЕ узаконивает — вместо подавления находка
+/// `rule_weakened` возвращается, а в [`RuleWeakenedOutcome::self_approved`]
+/// попадает артефакт одобрения. `None` — поведение A2 без изменений.
+///
+/// # Errors
+/// Те же, что у [`rule_weakened`].
+pub fn rule_weakened_scoped(
+    current_src: &str,
+    base_src: &str,
+    file: &Path,
+    body_severity: &str,
+    adr_policy: &AdrPolicy,
+    agent_range: Option<&AgentRange>,
+) -> Result<RuleWeakenedOutcome> {
     let body_severity = if body_severity.eq_ignore_ascii_case("error") {
         "error"
     } else {
@@ -999,16 +1194,27 @@ pub fn rule_weakened_with(
     let (base, _) = parse_constraints_file(base_src, file)?;
     let current_rules = rules_snapshot(&current)?;
     let base_rules = rules_snapshot(&base)?;
-    let legalized = active_override_keys(&current.overrides, adr_policy);
+    let (legalized, self_by_key) = legalization(
+        &current.overrides,
+        &base.overrides,
+        &current_rules,
+        &base_rules,
+        adr_policy,
+        agent_range,
+    );
 
     let mut issues = Vec::new();
+    // Ключи правил, чьё ослабление оказалось подавлено ТОЛЬКО самоодобрением:
+    // self_approved появляется лишь там, где реально было что подавлять.
+    let mut self_hits: BTreeSet<String> = BTreeSet::new();
     let push = |kind: WeakenedKind,
                 severity: &str,
                 name: &str,
                 id: Option<&str>,
                 detail: String,
-                issues: &mut Vec<LintIssue>| {
-        // Активный override по имени или id правила узаконивает ослабление.
+                issues: &mut Vec<LintIssue>,
+                self_hits: &mut BTreeSet<String>| {
+        // Активный владельческий override по имени или id узаконивает ослабление.
         if legalized.contains(name) || id.is_some_and(|i| legalized.contains(i)) {
             return;
         }
@@ -1024,6 +1230,12 @@ pub fn rule_weakened_with(
             severity: severity.to_string(),
             ..LintIssue::default()
         });
+        if let Some(key) = std::iter::once(name)
+            .chain(id)
+            .find(|k| self_by_key.contains_key(*k))
+        {
+            self_hits.insert(key.to_string());
+        }
     };
 
     for (name, base_rule) in &base_rules {
@@ -1035,6 +1247,7 @@ pub fn rule_weakened_with(
                 base_rule.id.as_deref(),
                 "правило присутствовало в базовой версии и удалено".to_string(),
                 &mut issues,
+                &mut self_hits,
             );
             continue;
         };
@@ -1051,6 +1264,7 @@ pub fn rule_weakened_with(
                 current_rule.id.as_deref(),
                 format!("новые исключения: {}", added.join(", ")),
                 &mut issues,
+                &mut self_hits,
             );
         }
         if base_rule.severity == "error" && current_rule.severity == "warn" {
@@ -1061,6 +1275,7 @@ pub fn rule_weakened_with(
                 current_rule.id.as_deref(),
                 "error → warn".to_string(),
                 &mut issues,
+                &mut self_hits,
             );
         }
         let changed = base_rule.changed_fields(current_rule);
@@ -1072,10 +1287,28 @@ pub fn rule_weakened_with(
                 current_rule.id.as_deref(),
                 format!("изменены поля: {}", changed.join(", ")),
                 &mut issues,
+                &mut self_hits,
             );
         }
     }
-    Ok(issues)
+
+    let mut self_approved: Vec<SelfApproved> = Vec::new();
+    for key in &self_hits {
+        if let Some(artifacts) = self_by_key.get(key) {
+            for artifact in artifacts {
+                self_approved.push(SelfApproved {
+                    rule: key.clone(),
+                    artifact: artifact.clone(),
+                });
+            }
+        }
+    }
+    self_approved.sort();
+    self_approved.dedup();
+    Ok(RuleWeakenedOutcome {
+        issues,
+        self_approved,
+    })
 }
 
 #[cfg(test)]
@@ -1879,6 +2112,149 @@ mod tests {
             report.issues.iter().any(|i| i.rule == "rule_weakened"),
             "находки: {:?}",
             report.issues.iter().map(|i| &i.rule).collect::<Vec<_>>()
+        );
+    }
+
+    // --- A5: диапазон прогона исполнителя (ADR-055) -------------------------
+
+    /// Реестр A5: правило `no-pan` (id C-01) с заданным severity и опциональным
+    /// override на само себя (через id — узаконивание идёт по ключу).
+    fn range_registry(severity: &str, override_adr: Option<&str>) -> String {
+        use std::fmt::Write as _;
+        let mut text = format!(
+            "rules:\n  - name: no-pan\n    id: C-01\n    type: must_not_contain\n    \
+             glob: \"src/**\"\n    pattern: 'PAN'\n    severity: {severity}\n"
+        );
+        if let Some(adr) = override_adr {
+            let _ = write!(
+                text,
+                "overrides:\n  - rule: C-01\n    adr: {adr}\n    until: \"{}\"\n",
+                within_horizon()
+            );
+        }
+        text
+    }
+
+    /// Диапазон с явным набором изменённых путей (без git): пути — от корня
+    /// репозитория, как их отдаёт `git diff --name-only`.
+    fn agent_range(paths: &[&str], repo: &Path) -> AgentRange {
+        AgentRange::from_paths(
+            "base",
+            repo.canonicalize().expect("canonicalize repo"),
+            paths.iter().map(|p| (*p).to_string()).collect::<Vec<_>>(),
+        )
+    }
+
+    /// A5: override, впервые появившийся в диапазоне прогона, не узаконивает
+    /// ослабление — `rule_weakened` возвращается плюс артефакт самоодобрения
+    /// `override '<rule>'`.
+    #[test]
+    fn range_marks_new_override_as_self_approved() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        write_adr(repo, "ADR-900", "Accepted");
+        let policy = AdrPolicy::resolve(repo, None, 0);
+        let file = repo.join("CONSTRAINTS.yaml");
+        let base = range_registry("error", None);
+        let current = range_registry("warn", Some("ADR-900"));
+        let rng = agent_range(&["src/a.rs"], repo);
+        let out = rule_weakened_scoped(&current, &base, &file, "warn", &policy, Some(&rng))
+            .expect("сравнение");
+        assert!(
+            out.issues.iter().any(|i| i.rule == "rule_weakened"),
+            "новый override не узаконивает: {:?}",
+            out.issues
+        );
+        assert!(
+            out.self_approved
+                .iter()
+                .any(|s| s.artifact.contains("override")),
+            "артефакт — новый override: {:?}",
+            out.self_approved
+        );
+    }
+
+    /// A5: override существовал и в базе, но исполнитель в диапазоне правит
+    /// ADR `Proposed` → `Accepted` — узаконивание самоодобрено артефактом
+    /// `ADR-NNN` (ловится правка существующего ADR, не только создание нового).
+    #[test]
+    fn range_marks_edited_adr_as_self_approved() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        write_adr(repo, "ADR-900", "Accepted");
+        let policy = AdrPolicy::resolve(repo, None, 0);
+        let file = repo.join("CONSTRAINTS.yaml");
+        let base = range_registry("error", Some("ADR-900"));
+        let current = range_registry("warn", Some("ADR-900"));
+        let rng = agent_range(&["docs/adr/ADR-900-fixture.md"], repo);
+        let out = rule_weakened_scoped(&current, &base, &file, "warn", &policy, Some(&rng))
+            .expect("сравнение");
+        assert!(
+            out.issues.iter().any(|i| i.rule == "rule_weakened"),
+            "правка ADR в диапазоне не узаконивает: {:?}",
+            out.issues
+        );
+        assert!(
+            out.self_approved
+                .iter()
+                .any(|s| s.artifact.contains("ADR-900")),
+            "артефакт — правленый ADR: {:?}",
+            out.self_approved
+        );
+        assert!(
+            !out.self_approved
+                .iter()
+                .any(|s| s.artifact.contains("override")),
+            "override не новый — его в списке быть не должно: {:?}",
+            out.self_approved
+        );
+    }
+
+    /// A5: владельческий override из базы (ADR вне диапазона) узаконивает как
+    /// прежде — ложных срабатываний нет.
+    #[test]
+    fn range_keeps_owner_override_legalizing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        write_adr(repo, "ADR-900", "Accepted");
+        let policy = AdrPolicy::resolve(repo, None, 0);
+        let file = repo.join("CONSTRAINTS.yaml");
+        let base = range_registry("error", Some("ADR-900"));
+        let current = range_registry("warn", Some("ADR-900"));
+        let rng = agent_range(&["src/a.rs"], repo);
+        let out = rule_weakened_scoped(&current, &base, &file, "warn", &policy, Some(&rng))
+            .expect("сравнение");
+        assert!(
+            out.issues.is_empty(),
+            "владельческий override узаконивает: {:?}",
+            out.issues
+        );
+        assert!(
+            out.self_approved.is_empty(),
+            "самоодобрения нет: {:?}",
+            out.self_approved
+        );
+    }
+
+    /// A5: самоодобрение без подавленного ослабления не выдумывается — новый
+    /// override при отсутствии ослабления находок и артефактов не даёт.
+    #[test]
+    fn range_no_self_approved_without_suppressed_weakening() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        write_adr(repo, "ADR-900", "Accepted");
+        let policy = AdrPolicy::resolve(repo, None, 0);
+        let file = repo.join("CONSTRAINTS.yaml");
+        let base = range_registry("warn", None);
+        let current = range_registry("warn", Some("ADR-900"));
+        let rng = agent_range(&["docs/adr/ADR-900-fixture.md"], repo);
+        let out = rule_weakened_scoped(&current, &base, &file, "warn", &policy, Some(&rng))
+            .expect("сравнение");
+        assert!(out.issues.is_empty(), "ослабления нет: {:?}", out.issues);
+        assert!(
+            out.self_approved.is_empty(),
+            "нечего было подавлять: {:?}",
+            out.self_approved
         );
     }
 }
