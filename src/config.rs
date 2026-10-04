@@ -488,6 +488,50 @@ pub enum PromptMode {
 /// входят: на Critical/bank-profile они не наследуются по умолчанию.
 pub const DEFAULT_ENV_ALLOW: [&str; 5] = ["PATH", "HOME", "LANG", "TERM", "TMPDIR"];
 
+/// Режим вызова кодового агента (ADR-057, вариант (а) «конфиг + auto + fallback»).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AcpMode {
+    /// Умный выбор (дефолт): секция `[harnesses.<имя>.acp]` задекларирована →
+    /// ACP; не задекларирована → headless. Провал инициализации ACP (таймаут
+    /// `initialize`, ошибка протокола, ранний exit) — откат на headless с
+    /// предупреждением в итоге прогона.
+    #[default]
+    Auto,
+    /// ACP обязателен: провал инициализации — ошибка прогона БЕЗ отката.
+    Acp,
+    /// Принудительный headless (поведение до ADR-057) — для прогонов, где ACP
+    /// не нужен даже при задекларированной секции.
+    Prompt,
+}
+
+/// Секция `[harnesses.<имя>.acp]` (C1, ADR-057): команда ACP-сервера и таймауты
+/// протокола. Наличие секции — единственный признак «ACP задекларирован».
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AcpConfig {
+    /// Имя бинаря ACP-адаптера в PATH (например, `claude-code-acp`).
+    pub binary: String,
+    /// Аргументы ACP-сервера (например, `["--acp"]` для `qwen --acp`).
+    pub args: Vec<String>,
+    /// Таймаут ответа на `initialize`, секунды (0 — без таймаута).
+    pub init_timeout_secs: u64,
+    /// Окно graceful-остановки после `session/cancel`, секунды, до SIGKILL
+    /// процессной группы (последний рубеж — существующая механика).
+    pub cancel_grace_secs: u64,
+}
+
+impl Default for AcpConfig {
+    fn default() -> Self {
+        Self {
+            binary: String::new(),
+            args: Vec::new(),
+            init_timeout_secs: 30,
+            cancel_grace_secs: 10,
+        }
+    }
+}
+
 /// Адаптер кодового харнесса (Claude Code, Qwen Code, `OpenClaw`, Hermes, Theseus, `CodeWhale`, Kimi Code).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -549,6 +593,15 @@ pub struct CodingHarnessConfig {
     /// за принятый (RA-5: `dependency_direction` на больших реестрах
     /// патологически дорог — это сигнал, а не блокер механизма).
     pub post_gate_timeout_secs: u64,
+    /// Режим вызова агента (C1, ADR-057): `auto` (дефолт) | `acp` | `prompt`.
+    /// Аддитивно: старые конфиги без поля работают как `auto`, а без секции
+    /// `acp` — как headless (поведение до ADR-057).
+    #[serde(default)]
+    pub mode: AcpMode,
+    /// Секция `[harnesses.<имя>.acp]` — ACP-команда адаптера. `None` — ACP не
+    /// задекларирован: при `mode = "auto"` прогон идёт headless.
+    #[serde(default)]
+    pub acp: Option<AcpConfig>,
 }
 
 impl Default for CodingHarnessConfig {
@@ -566,6 +619,8 @@ impl Default for CodingHarnessConfig {
             auto_commit: true,
             post_gate: true,
             post_gate_timeout_secs: 600,
+            mode: AcpMode::Auto,
+            acp: None,
         }
     }
 }
@@ -2137,5 +2192,61 @@ mod tests {
         let mut cfg = Config::default();
         cfg.paths.reports_dir = PathBuf::from("/tmp/x/reports");
         assert_eq!(cfg.paths.evals_dir(), PathBuf::from("/tmp/x/evals"));
+    }
+
+    /// C1 (ADR-057): секция `[harnesses.<имя>.acp]` парсится, таймауты — дефолтные.
+    #[test]
+    fn acp_section_is_parsed() {
+        let c: CodingHarnessConfig = toml::from_str(
+            "binary = 'claude-code-acp'\nprompt_mode = 'stdin'\n\
+             [acp]\nbinary = 'claude-code-acp'\nargs = ['--acp']\n",
+        )
+        .expect("CONFIG");
+        assert_eq!(c.mode, AcpMode::Auto, "дефолт режима — auto");
+        let acp = c.acp.expect("секция acp");
+        assert_eq!(acp.binary, "claude-code-acp");
+        assert_eq!(acp.args, vec!["--acp".to_string()]);
+        assert_eq!(acp.init_timeout_secs, 30, "дефолт init_timeout_secs");
+        assert_eq!(acp.cancel_grace_secs, 10, "дефолт cancel_grace_secs");
+
+        // Явные значения перекрывают дефолты.
+        let c: CodingHarnessConfig = toml::from_str(
+            "binary = 'x'\nmode = 'acp'\n\
+             [acp]\nbinary = 'x'\ninit_timeout_secs = 5\ncancel_grace_secs = 2\n",
+        )
+        .expect("CONFIG");
+        assert_eq!(c.mode, AcpMode::Acp);
+        let acp = c.acp.expect("секция acp");
+        assert_eq!(acp.init_timeout_secs, 5);
+        assert_eq!(acp.cancel_grace_secs, 2);
+    }
+
+    /// C1: старый конфиг без `mode`/`acp` работает как headless (аддитивность).
+    #[test]
+    fn legacy_harness_config_without_acp_still_loads() {
+        let c: CodingHarnessConfig =
+            toml::from_str("binary = 'claude'\nargs = ['-p']\nprompt_mode = 'stdin'\n")
+                .expect("CONFIG");
+        assert_eq!(c.mode, AcpMode::Auto, "старый конфиг читается как auto");
+        assert!(c.acp.is_none(), "ACP не задекларирован → headless");
+        assert_eq!(c.binary, "claude");
+        assert_eq!(c.prompt_mode, PromptMode::Stdin);
+    }
+
+    /// C1: `mode` принимает auto|acp|prompt; неизвестное значение — ошибка.
+    #[test]
+    fn acp_mode_parses_three_values() {
+        let mode = |m: &str| -> AcpMode {
+            toml::from_str::<CodingHarnessConfig>(&format!("binary = 'x'\nmode = '{m}'\n"))
+                .expect("CONFIG")
+                .mode
+        };
+        assert_eq!(mode("auto"), AcpMode::Auto);
+        assert_eq!(mode("acp"), AcpMode::Acp);
+        assert_eq!(mode("prompt"), AcpMode::Prompt);
+        assert!(
+            toml::from_str::<CodingHarnessConfig>("binary = 'x'\nmode = 'yolo'\n").is_err(),
+            "неизвестный режим обязан падать, а не молча дефолтиться"
+        );
     }
 }

@@ -850,6 +850,42 @@ fn harness_run_complete_exits_0() {
         .stdout(contains("status=complete"));
 }
 
+/// ADR-057 (C5): `harness-run` в ACP-режиме сообщает режим и версию
+/// адаптера, а JSON-контракт берётся из финального текста ACP-сессии.
+/// Фикстура — self-contained python-скрипт, сети не требует.
+#[test]
+#[cfg(feature = "harness")]
+fn harness_run_acp_mode_reports_mode_and_adapter() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let home = tmp.path();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/acp_agent.py");
+    let config = home.join("config.toml");
+    let text = format!(
+        "[harnesses.fake]\nbinary = 'cat'\nprompt_mode = 'stdin'\n\
+         timeout_secs = 30\nidle_timeout_secs = 0\nauto_commit = false\n\
+         [harnesses.fake.acp]\nbinary = 'python3'\nargs = ['{}', 'ok']\n\
+         init_timeout_secs = 5\ncancel_grace_secs = 1\n",
+        fixture.display()
+    );
+    std::fs::write(&config, text).expect("запись config.toml");
+    let repo = home.join("repo");
+    std::fs::create_dir_all(&repo).expect("mkdir repo");
+    let mut cmd = arch_cmd(home);
+    cmd.arg("--config")
+        .arg(config.as_os_str())
+        .arg("harness-run")
+        .arg("fake")
+        .arg("--repo")
+        .arg(repo.as_os_str())
+        .arg("--task")
+        .arg("тестовая задача");
+    cmd.assert()
+        .success()
+        .stdout(contains("режим: acp"))
+        .stdout(contains("fixture-agent 0.0.1"))
+        .stdout(contains("status=complete"));
+}
+
 /// C2 (RA-9): на маршруте Critical из пакета процесс исполнителя получает
 /// только whitelist окружения — секретоподобная переменная сервера в него не
 /// протекает. `env_inherit = true` возвращает полное наследование, но с

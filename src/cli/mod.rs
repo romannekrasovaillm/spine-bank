@@ -817,6 +817,20 @@ pub(crate) async fn run() -> Result<()> {
             }
             let run = arch_harness::harness::run_harness(&harness, &hcfg_owned, &repo, &task_text)
                 .await?;
+            // C5 (ADR-057): режим прогона виден в выводе — включая откат
+            // ACP → headless (иначе деградация ACP осталась бы незамеченной).
+            println!("режим: {}", run.mode.label());
+            if let Some(info) = &run.acp {
+                println!(
+                    "ACP-адаптер: {}; request_permission (авто-allow, эквивалент \
+                     skip-permissions): {}",
+                    info.adapter.as_deref().unwrap_or("версия не сообщена"),
+                    info.permissions
+                );
+            }
+            if let Some(note) = &run.mode_note {
+                eprintln!("⚠ {note}");
+            }
             if let Some(ac) = &run.auto_commit {
                 println!(
                     "⚑ авто-коммит: исполнитель не зафиксировал результат — {} путей → {} «{}»",

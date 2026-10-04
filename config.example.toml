@@ -416,9 +416,25 @@ timeout_secs = 120                  # потолок одного вызова C
 # ошибкой — «код 0 у исполнителя» больше не единственное свидетельство успеха.
 # post_gate = false отключает проверку (с предупреждением в выводе и журнале);
 # post_gate_timeout_secs — потолок прогона гейта (дефолт 600).
+#
+# РЕЖИМ ВЫЗОВА (ADR-057): mode = "auto" (дефолт) — если у адаптера
+# задекларирована секция [harnesses.<имя>.acp], прогон идёт по ACP
+# (JSON-RPC 2.0 поверх stdio: initialize → session/new → session/prompt +
+# стрим session/update); иначе — headless. Провал ACP-инициализации при
+# auto откатывает на headless с предупреждением в итоге (деградация видна,
+# но не блокирует); mode = "acp" — ACP обязателен (провал = ошибка прогона);
+# mode = "prompt" — принудительный headless. Финальный текст ACP-ответа
+# (агрегат agent_message_chunk после последнего tool_call) подаётся как
+# stdout для разбора JSON-контракта; изоляция (worktree, env-политика,
+# пост-гейт, авто-коммит) едина для обоих режимов.
+# session/request_permission в ACP-режиме авто-allow (первая allow-опция)
+# с журналированием — это СЕГОДНЯШНИЕ skip-permissions, не улучшение
+# security boundary. init_timeout_secs — таймаут ответа на initialize;
+# cancel_grace_secs — окно graceful-остановки после session/cancel.
 # -----------------------------------------------------------------------------
 [harnesses.claude-code]
 binary = "claude"
+mode = "auto"
 # --dangerously-skip-permissions обязателен для headless: иначе `claude -p`
 # встаёт на permission-промпте файловых операций и висит до таймаута.
 # Уберите флаг, если прогоны интерактивные.
@@ -442,6 +458,14 @@ post_gate_timeout_secs = 600
 # env_inherit = false    # true — осознанный возврат к полному наследованию
 #                        # (предупреждение в итоге прогона)
 
+# ACP-режим (ADR-057): сторонний адаптер Zed поверх Claude Code SDK — своя
+# версия и свои релизы; версия адаптера (agentInfo) попадает в журнал прогона.
+[harnesses.claude-code.acp]
+binary = "claude-code-acp"
+args = []
+init_timeout_secs = 30
+cancel_grace_secs = 10
+
 [harnesses.qwen-code]
 binary = "qwen"
 args = []
@@ -449,6 +473,13 @@ prompt_mode = "stdin"
 timeout_secs = 1800
 idle_timeout_secs = 600
 auto_commit = true
+
+# ACP нативный (--acp).
+[harnesses.qwen-code.acp]
+binary = "qwen"
+args = ["--acp"]
+init_timeout_secs = 30
+cancel_grace_secs = 10
 
 [harnesses.openclaw]
 binary = "openclaw"
@@ -459,6 +490,13 @@ timeout_secs = 1800
 idle_timeout_secs = 600
 auto_commit = true
 
+# ACP через bridge поверх Gateway.
+[harnesses.openclaw.acp]
+binary = "openclaw"
+args = ["acp"]
+init_timeout_secs = 30
+cancel_grace_secs = 10
+
 [harnesses.hermes]
 binary = "hermes"
 # hermes: задача передаётся флагом -z PROMPT; stdin-режима нет (код 2 на -p).
@@ -468,9 +506,17 @@ timeout_secs = 1800
 idle_timeout_secs = 600
 auto_commit = true
 
+# ACP нативный.
+[harnesses.hermes.acp]
+binary = "hermes"
+args = ["acp"]
+init_timeout_secs = 30
+cancel_grace_secs = 10
+
 [harnesses.theseus]
 binary = "theseus"
 # theseus: -p PROMPT (flag-режим); "run --task" устарело — код 2.
+# ACP НЕ поддержан (проверено --help 2026-10-03) — только headless-путь.
 args = ["-p", "{prompt}"]
 prompt_mode = "flag"
 timeout_secs = 1800
@@ -480,6 +526,7 @@ auto_commit = true
 [harnesses.codewhale]
 binary = "codewhale"
 # codewhale: -p PROMPT (flag-режим); задача в stdin не принимается.
+# ACP НЕ поддержан (проверено --help 2026-10-03) — только headless-путь.
 args = ["-p", "{prompt}"]
 prompt_mode = "flag"
 timeout_secs = 1800
@@ -497,6 +544,13 @@ prompt_mode = "flag"
 timeout_secs = 1800
 idle_timeout_secs = 600
 auto_commit = true
+
+# ACP подкомандой (`kimi acp` — «ACP server over stdio»).
+[harnesses.kimi-code.acp]
+binary = "kimi"
+args = ["acp"]
+init_timeout_secs = 30
+cancel_grace_secs = 10
 
 # -----------------------------------------------------------------------------
 # MCP: файл серверов в формате Claude Code (см. examples/mcp.example.json).
