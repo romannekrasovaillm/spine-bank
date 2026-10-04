@@ -3,9 +3,10 @@
 //! Единый протокол вместо зоопарка флагов: `initialize` (capabilities
 //! `fs = false`, `terminal = false`, `elicitation = false`) → `session/new`
 //! (`cwd` = каталог прогона) → `session/prompt` → чтение стрима
-//! `session/update`. Финальный текст ответа — агрегат `agent_message_chunk`
-//! после последнего `tool_call` — подаётся потребителем как «stdout» для
-//! разбора JSON-контракта результата.
+//! `session/update`. Финальный текст ответа — ПОСЛЕДНЕЕ агентское сообщение
+//! (агрегат по `messageId`; без id — эвристика «чанки после последнего
+//! `tool_call`») — подаётся потребителем как «stdout» для разбора
+//! JSON-контракта результата.
 //!
 //! Границы (честные, ADR-057):
 //! - `session/request_permission` — авто-выбор первой allow-опции с
@@ -40,6 +41,9 @@ const ACP_PROTOCOL_VERSION: u64 = 1;
 const OUTPUT_CAP: usize = 256 * 1024;
 /// Дефолтное окно graceful-остановки после `session/cancel`, секунды.
 const CANCEL_GRACE_DEFAULT_SECS: u64 = 10;
+/// Короткое окно ожидания ответа на `session/close` (F5): финальный аккорд
+/// прогона, не критерий — молчание не удлиняет завершение.
+const SESSION_CLOSE_TIMEOUT_SECS: u64 = 2;
 /// Потолок журнала событий протокола (длинные прогоны не растят память).
 const MAX_JOURNAL: usize = 200;
 /// Шаг опроса очереди сообщений, миллисекунды (мелкий — чтобы дедлайны
@@ -158,7 +162,8 @@ impl std::error::Error for AcpError {}
 /// метаданные журнала (C5).
 #[derive(Debug, Clone)]
 pub struct AcpSession {
-    /// Агрегат `agent_message_chunk` (после последнего `tool_call`).
+    /// Финальный текст агента: последнее сообщение по `messageId`, иначе —
+    /// агрегат чанков после последнего `tool_call`.
     pub text: String,
     /// stderr ACP-процесса (при прерывании — частичный).
     pub stderr: String,
@@ -221,9 +226,27 @@ pub async fn run_session(
     match session.pump_until_response(id, init_deadline).await? {
         Wait::Response(res) => {
             session.adapter = adapter_label(&res);
+            // Capability `session/close` (F5): без неё метод не зовётся.
+            session.session_close_cap = res
+                .pointer("/agentCapabilities/sessionCapabilities/close")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             let negotiated = res.get("protocolVersion").and_then(Value::as_u64);
             if let Some(v) = negotiated {
                 session.journal(format!("initialize: protocolVersion={v}"));
+            }
+            // F2: непустые `authMethods` — агент требует аутентификацию, которой
+            // клиент не поддерживает. Честный отказ (auto → fallback, acp → ошибка),
+            // а не «сессия вроде работает».
+            if res
+                .get("authMethods")
+                .and_then(Value::as_array)
+                .is_some_and(|methods| !methods.is_empty())
+            {
+                session.shutdown().await;
+                return Err(AcpError::init(
+                    "агент требует аутентификацию (authMethods), клиент её не поддерживает",
+                ));
             }
         }
         Wait::Error(err) => {
@@ -372,8 +395,24 @@ struct Session {
     adapter: Option<String>,
     /// Полный агрегат `agent_message_chunk`.
     all_text: String,
-    /// Агрегат `agent_message_chunk` после последнего `tool_call` — финальный ответ.
+    /// Агрегат `agent_message_chunk` после последнего `tool_call` — фолбэк
+    /// финального ответа, когда `messageId` в чанках нет (F1).
     post_tool_text: String,
+    /// Агрегат чанков ТЕКУЩЕГО сообщения по `messageId` (F1): смена id —
+    /// новое сообщение, финальный ответ — последнее из них.
+    coded_text: String,
+    /// `messageId` текущего сообщения (F1).
+    message_id: Option<String>,
+    /// Пришли ли хоть раз чанки с `messageId` (F1): переключает финальный
+    /// ответ с эвристики «после последнего `tool_call`» на агрегат по id.
+    saw_message_id: bool,
+    /// `stopReason` ответа на `session/prompt` (F5) — `end_turn` и др.
+    stop_reason: Option<String>,
+    /// Capability `sessionCapabilities.close` из `initialize` (F5).
+    session_close_cap: bool,
+    /// Прогон в фазе отмены (F4): запросы допуска отвечаются `cancelled`,
+    /// а не авто-allow — агент не должен получить разрешение на работе.
+    cancelling: bool,
     permissions: usize,
     journal: Vec<String>,
     activity: Arc<Mutex<Instant>>,
@@ -478,6 +517,12 @@ impl Session {
             adapter: None,
             all_text: String::new(),
             post_tool_text: String::new(),
+            coded_text: String::new(),
+            message_id: None,
+            saw_message_id: false,
+            stop_reason: None,
+            session_close_cap: false,
+            cancelling: false,
             permissions: 0,
             journal: Vec::new(),
             activity,
@@ -671,6 +716,7 @@ impl Session {
                                 .get("result")
                                 .and_then(|r| r.get("stopReason"))
                                 .and_then(Value::as_str);
+                            self.stop_reason = stop.map(str::to_string);
                             self.journal(format!(
                                 "session/prompt: stopReason={}",
                                 stop.unwrap_or("?")
@@ -698,6 +744,11 @@ impl Session {
     /// Мягкая отмена текущего хода: `session/cancel` + окно graceful, затем
     /// SIGKILL процессной группы (существующий последний рубеж).
     async fn cancel_and_grace(&mut self, cfg: &CodingHarnessConfig) {
+        // F4: прогон отменяется — агент не должен получить допуск на работе.
+        // Висящий `session/request_permission` закрывается `outcome=cancelled`
+        // ДО `session/cancel`, чтобы агент не остался ждать ответа.
+        self.cancelling = true;
+        self.drain_pending_requests().await;
         let sid = self.session_id.clone().unwrap_or_default();
         if let Err(e) = self
             .notify("session/cancel", json!({"sessionId": sid}))
@@ -735,6 +786,18 @@ impl Session {
         self.journal(format!("session/cancel: graceful-окно {grace_secs} с"));
     }
 
+    /// Дочитывает УЖЕ пришедшие кадры перед `session/cancel` (F4): запрос
+    /// допуска, застрявший в очереди к моменту отмены, получает
+    /// `outcome=cancelled`, а не авто-allow.
+    async fn drain_pending_requests(&mut self) {
+        while let Ok(v) = self.rx.try_recv() {
+            self.touch();
+            if v.get("method").is_some() {
+                let _ = self.handle_incoming(&v).await;
+            }
+        }
+    }
+
     /// Обрабатывает нотификацию `session/update` или запрос агента к клиенту.
     async fn handle_incoming(&mut self, v: &Value) -> Result<(), AcpError> {
         let Some(method) = v.get("method").and_then(Value::as_str) else {
@@ -750,6 +813,10 @@ impl Session {
             return Ok(());
         };
         match method {
+            // F4: в фазе отмены допуск не выдаём — отвечаем `cancelled`.
+            "session/request_permission" if self.cancelling => {
+                self.deny_permission_on_cancel(id).await
+            }
             "session/request_permission" => self.auto_allow(id, v.get("params")).await,
             m if is_capability_method(m) => {
                 self.respond_error(
@@ -783,10 +850,12 @@ impl Session {
                 {
                     self.all_text.push_str(text);
                     self.post_tool_text.push_str(text);
+                    self.apply_chunk_text(update, text);
                 }
             }
             Some("tool_call") => {
-                // Финальный ответ — только текст ПОСЛЕ последнего tool_call.
+                // Фолбэк-эвристика: текст ПОСЛЕ последнего tool_call. При
+                // агрегации по `messageId` (F1) tool_call сообщение не режет.
                 self.post_tool_text.clear();
                 let title = update
                     .get("title")
@@ -796,8 +865,48 @@ impl Session {
             }
             Some("tool_call_update") => self.journal(String::from("tool_call_update")),
             Some("plan") => self.journal(String::from("plan")),
-            _ => {}
+            // F3: расширяемость протокола — незнакомый `sessionUpdate`
+            // журналируется и игнорируется, прогон не рушится.
+            other => self.journal(format!(
+                "session/update: неизвестный вариант {} — игнор",
+                other.unwrap_or("(отсутствует)")
+            )),
         }
+    }
+
+    /// Агрегация чанков по `messageId` (F1): смена id или первое появление —
+    /// новое сообщение; тот же id — дописывание. `messageId` читается из
+    /// `update.content.messageId` (а также `update.messageId` — толерантно).
+    /// Без id во ВСЕХ чанках режим не включается — работает фолбэк `post_tool_text`.
+    fn apply_chunk_text(&mut self, update: &Value, text: &str) {
+        let id = update
+            .get("messageId")
+            .or_else(|| update.get("content").and_then(|c| c.get("messageId")))
+            .and_then(Value::as_str);
+        match id {
+            Some(id) => {
+                if !self.saw_message_id || self.message_id.as_deref() != Some(id) {
+                    self.coded_text.clear();
+                }
+                self.saw_message_id = true;
+                self.message_id = Some(id.to_string());
+                self.coded_text.push_str(text);
+            }
+            // Чанк без id при активном id-режиме — продолжение текущего сообщения.
+            None if self.saw_message_id => self.coded_text.push_str(text),
+            None => {}
+        }
+    }
+
+    /// Отказ в допуске при отмене прогона (F4): `outcome=cancelled`, чтобы
+    /// агент не остался ждать ответа и не принял допуск за состоявшееся решение.
+    async fn deny_permission_on_cancel(&mut self, id: &Value) -> Result<(), AcpError> {
+        self.permissions += 1;
+        self.journal(String::from(
+            "request_permission: прогон отменён → outcome=cancelled",
+        ));
+        self.respond_result(id, json!({"outcome": {"outcome": "cancelled"}}))
+            .await
     }
 
     /// `session/request_permission`: авто-выбор первой allow-опции + журнал.
@@ -848,9 +957,14 @@ impl Session {
         }
     }
 
-    /// Финальный текст: агрегат чанков после последнего `tool_call`; если
-    /// после инструментов текста не было — общий агрегат.
+    /// Финальный текст: при наличии `messageId` — ПОСЛЕДНЕЕ агентское
+    /// сообщение (агрегат последнего id, F1); иначе фолбэк — агрегат чанков
+    /// после последнего `tool_call`, а если после инструментов текста не было —
+    /// общий агрегат.
     fn final_text(&self) -> String {
+        if self.saw_message_id {
+            return self.coded_text.clone();
+        }
         if self.post_tool_text.trim().is_empty() {
             self.all_text.clone()
         } else {
@@ -861,6 +975,15 @@ impl Session {
     /// Завершает сессию: закрывает stdin (EOF для агента), ждёт короткое окно,
     /// затем завершает процессную группу.
     async fn finish(&mut self, termination: Termination) -> Result<(), AcpError> {
+        // F5: ход завершён `end_turn` и агент заявил cap `session/close` —
+        // освобождаем ресурсы сессии до закрытия транспорта. Без cap или не
+        // по `end_turn` — как раньше.
+        if termination == Termination::Completed
+            && self.session_close_cap
+            && self.stop_reason.as_deref() == Some("end_turn")
+        {
+            self.close_session().await;
+        }
         if termination == Termination::Completed {
             let _ = self.stdin.shutdown().await;
             let deadline = Instant::now() + Duration::from_secs(2);
@@ -877,6 +1000,33 @@ impl Session {
         let _ = tokio::time::timeout(Duration::from_secs(2), &mut self.stdout_reader).await;
         let _ = tokio::time::timeout(Duration::from_secs(2), &mut self.stderr_reader).await;
         Ok(())
+    }
+
+    /// `session/close` по capability (F5): освобождение ресурсов сессии после
+    /// `end_turn`. Ответ ждём в коротком окне; сбой или молчание — запись в
+    /// журнал, но не провал прогона (финальный аккорд, не критерий приёмки).
+    async fn close_session(&mut self) {
+        let sid = self.session_id.clone().unwrap_or_default();
+        let id = match self
+            .send_request("session/close", json!({"sessionId": sid}))
+            .await
+        {
+            Ok(id) => id,
+            Err(e) => {
+                self.journal(format!("session/close: не отправлен ({e})"));
+                return;
+            }
+        };
+        let deadline = Instant::now() + Duration::from_secs(SESSION_CLOSE_TIMEOUT_SECS);
+        let note = match self.pump_until_response(id, deadline).await {
+            Ok(Wait::Response(_)) => String::from("session/close: подтверждён"),
+            Ok(Wait::Timeout) => String::from("session/close: без ответа в окне"),
+            Ok(Wait::Closed | Wait::Error(_)) => {
+                String::from("session/close: завершён без подтверждения")
+            }
+            Err(e) => format!("session/close: сбой ({e})"),
+        };
+        self.journal(note);
     }
 
     /// Аварийное завершение до установления сессии (провал инициализации).
@@ -1126,6 +1276,125 @@ mod tests {
             "секрет окружения не должен наследоваться: {}",
             s.text
         );
+    }
+
+    /// F1: два агентских сообщения с разными `messageId` и `tool_call` между
+    /// ними — финальный ответ = ПОСЛЕДНЕЕ сообщение, не «текст после `tool_call`».
+    #[tokio::test]
+    async fn final_text_is_last_message_by_message_id() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let s = run_session(&session("multi-message"), tmp.path(), "задача")
+            .await
+            .expect("ACP-сессия");
+        assert_eq!(s.termination, Termination::Completed);
+        assert!(s.text.contains("второе сообщение"), "{}", s.text);
+        assert!(
+            !s.text.contains("первое сообщение"),
+            "финал — только последнее сообщение: {}",
+            s.text
+        );
+        assert!(
+            s.text.contains("\"status\": \"complete\""),
+            "финальный текст несёт JSON-контракт: {}",
+            s.text
+        );
+    }
+
+    /// F2: непустые `authMethods` — честный отказ инициализации.
+    #[tokio::test]
+    async fn auth_methods_is_init_error() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let err = run_session(&session("auth"), tmp.path(), "задача")
+            .await
+            .expect_err("authMethods — клиент не поддерживает аутентификацию");
+        assert!(err.is_init(), "{err}");
+        assert!(err.message().contains("authMethods"), "{err}");
+    }
+
+    /// F3: незнакомый `sessionUpdate` журналируется, но не рушит прогон.
+    #[tokio::test]
+    async fn unknown_session_update_is_journaled_not_fatal() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let s = run_session(&session("unknown-update"), tmp.path(), "задача")
+            .await
+            .expect("ACP-сессия");
+        assert_eq!(s.termination, Termination::Completed);
+        assert!(
+            s.text.contains("\"status\": \"complete\""),
+            "прогон продолжился после незнакомого события: {}",
+            s.text
+        );
+        assert!(
+            s.journal.iter().any(|j| j.contains("custom_update")),
+            "незнакомый вариант в журнале: {:?}",
+            s.journal
+        );
+    }
+
+    /// F4: висящий запрос допуска при отмене получает `outcome=cancelled`,
+    /// прогон завершается отменой (не зависанием).
+    #[tokio::test]
+    async fn pending_permission_denied_on_cancel() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let mut c = session("perm-cancel");
+        c.timeout_secs = 2;
+        let s = run_session(&c, tmp.path(), "задача")
+            .await
+            .expect("ACP-сессия");
+        assert_eq!(s.termination, Termination::AbsoluteTimeout);
+        assert!(
+            tmp.path().join("cancel-received").is_file(),
+            "агент обязан получить session/cancel"
+        );
+        let outcome = std::fs::read_to_string(tmp.path().join("perm-outcome"))
+            .expect("агент записал исход допуска");
+        assert!(
+            outcome.contains("cancelled"),
+            "при отмене допуск не выдаётся: {outcome}"
+        );
+        assert!(
+            s.journal
+                .iter()
+                .any(|j| j.contains("request_permission") && j.contains("cancelled")),
+            "{:?}",
+            s.journal
+        );
+    }
+
+    /// F5: при cap `sessionCapabilities.close` и `end_turn` клиент зовёт
+    /// `session/close`; агент отвечает и фиксирует факт.
+    #[tokio::test]
+    async fn session_close_sent_when_capability_declared() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let s = run_session(&session("close"), tmp.path(), "задача")
+            .await
+            .expect("ACP-сессия");
+        assert_eq!(s.termination, Termination::Completed);
+        assert!(
+            tmp.path().join("session-closed").is_file(),
+            "агент обязан получить session/close"
+        );
+        assert!(
+            s.journal.iter().any(|j| j.contains("session/close")),
+            "{:?}",
+            s.journal
+        );
+        assert!(s.text.contains("\"status\": \"complete\""), "{}", s.text);
+    }
+
+    /// F5 (негатив): без cap `session/close` метод не зовётся.
+    #[tokio::test]
+    async fn session_close_not_called_without_capability() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let s = run_session(&session("ok"), tmp.path(), "задача")
+            .await
+            .expect("ACP-сессия");
+        assert!(
+            s.journal.iter().all(|j| !j.contains("session/close")),
+            "без cap метод не зовётся: {:?}",
+            s.journal
+        );
+        assert!(!tmp.path().join("session-closed").is_file());
     }
 
     /// Абсолютный путь к python3 (whitelist может не содержать PATH).

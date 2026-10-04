@@ -10,6 +10,16 @@ newline-delimited JSON-RPC 2.0 на stdin/stdout. Поведение выбир�
   plain       то же, но без tool_call (весь текст — финальный);
   permission  session/request_permission (allow_once + reject_once) и эхо
               выбранной опции в финальный текст;
+  multi-message два агентских сообщения с РАЗНЫМИ messageId и tool_call
+              между ними — финал = второе сообщение (F1);
+  auth        initialize с непустым authMethods — клиент обязан отказаться
+              от сессии (F2);
+  unknown-update session/update с выдуманным sessionUpdate — прогон жив, в
+              журнале запись (F3);
+  perm-cancel ждёт допуск и молчит; по session/cancel просит допуск ещё раз
+              — клиент в фазе отмены обязан ответить cancelled (F4);
+  close       initialize с cap sessionCapabilities.close; после end_turn
+              отвечает на session/close и пишет маркер (F5);
   fs          клиентский метод fs/read_text_file — эхо кода ошибки;
   env         эхо наличия переменной ARCH_ACP_LEAK (проверка env-политики);
   cancel      после промпта ждёт session/cancel, пишет маркер и отвечает
@@ -63,7 +73,10 @@ def await_request(method):
             return msg
 
 
-def chunk(text):
+def chunk(text, message_id=None):
+    content = {"type": "text", "text": text}
+    if message_id is not None:
+        content["messageId"] = message_id
     send(
         {
             "jsonrpc": "2.0",
@@ -72,8 +85,22 @@ def chunk(text):
                 "sessionId": "s1",
                 "update": {
                     "sessionUpdate": "agent_message_chunk",
-                    "content": {"type": "text", "text": text},
+                    "content": content,
                 },
+            },
+        }
+    )
+
+
+def unknown_update(kind):
+    """session/update с незнакомым клиенту sessionUpdate (F3)."""
+    send(
+        {
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "s1",
+                "update": {"sessionUpdate": kind},
             },
         }
     )
@@ -152,6 +179,34 @@ def wait_for_cancel(marker):
             return True
 
 
+def permission_after_cancel():
+    """После session/cancel просит допуск и возвращает outcome ответа клиента.
+
+    Прогон уже отменяется — клиент обязан ответить `cancelled` (F4), а не
+    выдать допуск: иначе агент считает, что разрешение состоялось.
+    """
+    send(
+        {
+            "jsonrpc": "2.0",
+            "id": 902,
+            "method": "session/request_permission",
+            "params": {
+                "sessionId": "s1",
+                "toolCall": {"toolCallId": "t9", "title": "Write file"},
+                "options": [
+                    {"optionId": "allow-once-9", "name": "Allow once", "kind": "allow_once"}
+                ],
+            },
+        }
+    )
+    while True:
+        msg = read_msg()
+        if msg is None:
+            return None
+        if msg.get("id") == 902 and "method" not in msg:
+            return (msg.get("result") or {}).get("outcome", {}).get("outcome")
+
+
 def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "ok"
 
@@ -165,15 +220,26 @@ def main():
     init = await_request("initialize")
     if init is None:
         return
+    capabilities = {"loadSession": False}
+    if mode == "close":
+        # F5: агент заявляет cap session/close — клиент обязан закрыть сессию.
+        capabilities["sessionCapabilities"] = {"close": True}
+    auth_methods = (
+        [{"kind": "oauth", "name": "OAuth"}] if mode == "auth" else []
+    )
     response(
         init["id"],
         {
             "protocolVersion": 1,
-            "agentCapabilities": {"loadSession": False},
+            "agentCapabilities": capabilities,
             "agentInfo": {"name": "fixture-agent", "version": "0.0.1"},
-            "authMethods": [],
+            "authMethods": auth_methods,
         },
     )
+    if mode == "auth":
+        # Клиент обязан отказаться от сессии (аутентификацию не поддерживает).
+        time.sleep(30)
+        sys.exit(0)
 
     new = await_request("session/new")
     if new is None:
@@ -202,6 +268,37 @@ def main():
         chunk("chosen=%s\n" % chosen)
         chunk("готово\n" + CONTRACT + "\n")
         finish()
+    elif mode == "multi-message":
+        # F1: два агентских сообщения с разными messageId и tool_call между
+        # ними — финальный ответ = второе сообщение (а не «после tool_call»).
+        chunk("первое сообщение\n", "m1")
+        tool_call("t1", "Read")
+        chunk("второе сообщение\n" + CONTRACT + "\n", "m2")
+        finish()
+    elif mode == "unknown-update":
+        # F3: незнакомый sessionUpdate — клиент журналирует и продолжает.
+        unknown_update("custom_update")
+        chunk("незнакомое событие пережито\n" + CONTRACT + "\n")
+        finish()
+    elif mode == "perm-cancel":
+        # F4: агент просит допуск и молчит; клиент по таймауту отменяет
+        # прогон и на висящий при отмене запрос отвечает cancelled.
+        chunk("жду допуск\n")
+        if wait_for_cancel("cancel-received"):
+            outcome = permission_after_cancel()
+            with open("perm-outcome", "w", encoding="utf-8") as fh:
+                fh.write("%s\n" % outcome)
+        sys.exit(0)
+    elif mode == "close":
+        # F5: end_turn, затем клиент при cap session/close зовёт session/close.
+        chunk("готово\n" + CONTRACT + "\n")
+        finish()
+        close = await_request("session/close")
+        if close is not None:
+            response(close["id"], {})
+            with open("session-closed", "w", encoding="utf-8") as fh:
+                fh.write("closed\n")
+        sys.exit(0)
     elif mode == "fs":
         code = client_request()
         chunk("fs_error=%s\n" % code + CONTRACT + "\n")
