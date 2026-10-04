@@ -512,7 +512,7 @@ mod tests {
     #[test]
     fn templates_pass_a_bare_base_revision() {
         // Хуки-shim'ы: базы в shell нет — она в бинаре; двойного `...HEAD`
-        /// быть не может по построению.
+        // быть не может по построению.
         for (name, block) in [
             ("stop-хук", stop_hook_command()),
             ("post-tool-use", post_tool_use_hook_command()),

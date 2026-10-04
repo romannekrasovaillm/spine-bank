@@ -317,7 +317,8 @@ pub(super) fn draw(f: &mut Frame, app: &App) {
     }
 }
 
-/// Фаза сплэша: логотип открывается построчно, затем издание и подпись.
+/// Фаза сплэша: логотип открывается построчно, издание и версия — под лого
+/// с первого кадра, подпись — в финале фазы.
 fn draw_splash(f: &mut Frame, area: Rect, theme: &Theme, ticks: u32) {
     let logo: Vec<&str> = assets::BANNER.lines().collect();
     // Первые две строки логотипа видны сразу (кадр не открывается пустым),
@@ -329,19 +330,18 @@ fn draw_splash(f: &mut Frame, area: Rect, theme: &Theme, ticks: u32) {
         .iter()
         .map(|l| Line::from(Span::styled((*l).to_string(), theme.heading())))
         .collect();
-    if ticks >= SPLASH_TICKS.saturating_sub(2) {
-        lines.push(Line::default());
-        lines.push(Line::from(Span::styled(
-            "B A N K I N G   E D I T I O N".to_string(),
-            theme.accent(),
-        )));
-        // Номер версии — на стартовом экране с первых кадров: компакт-сплэш
-        // при каждом запуске показывает только эту фазу.
-        lines.push(Line::from(Span::styled(
-            concat!("v", env!("CARGO_PKG_VERSION")).to_string(),
-            theme.muted(),
-        )));
-    }
+    // Издание и номер версии — под лого с ПЕРВОГО кадра (каскад раскрывается
+    // над ними): при хвостовой задержке на компакт-сплэше (~2 с при каждом
+    // запуске) версия была видна доли секунды и терялась.
+    lines.push(Line::default());
+    lines.push(Line::from(Span::styled(
+        "B A N K I N G   E D I T I O N".to_string(),
+        theme.accent(),
+    )));
+    lines.push(Line::from(Span::styled(
+        concat!("Spine-BE v", env!("CARGO_PKG_VERSION")).to_string(),
+        theme.muted(),
+    )));
     if ticks >= SPLASH_TICKS {
         lines.push(Line::from(Span::styled(
             "solution-архитектор банка · ADR · spine · handoff".to_string(),
@@ -611,15 +611,24 @@ mod tests {
     fn splash_shows_version_from_first_frames() {
         let mut app = test_app();
         app.start_intro();
+        let mut terminal = Terminal::new(TestBackend::new(140, 44)).expect("terminal");
+        // Первый же кадр: «Spine-BE vX.Y.Z» под лого — каскад раскрывается
+        // над строкой, а не откладывает её на финал фазы.
+        terminal.draw(|f| app.render(f)).expect("draw first");
+        let first = buffer_text(&terminal);
+        assert!(
+            first.contains(concat!("Spine-BE v", env!("CARGO_PKG_VERSION"))),
+            "стартовый сплэш без номера версии с первого кадра:\n{first}"
+        );
+        // И в конце фазы сплэша версия на месте.
         for _ in 0..SPLASH_TICKS {
             app.tick();
         }
-        let mut terminal = Terminal::new(TestBackend::new(140, 44)).expect("terminal");
         terminal.draw(|f| app.render(f)).expect("draw splash");
         let splash = buffer_text(&terminal);
         assert!(
-            splash.contains(concat!("v", env!("CARGO_PKG_VERSION"))),
-            "стартовый сплэш без номера версии:\n{splash}"
+            splash.contains(concat!("Spine-BE v", env!("CARGO_PKG_VERSION"))),
+            "финал сплэша без номера версии:\n{splash}"
         );
     }
 
