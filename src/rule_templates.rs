@@ -2148,7 +2148,10 @@ mod tests {
         assert!(t.manifest.executable, "шаблон обязан быть исполняемым");
         assert_eq!(t.manifest.rule.name, "secret_literal");
         assert_eq!(t.manifest.rule.kind, "command_succeeds");
-        assert!(!t.manifest.violating.is_empty(), "нужна нарушающая реализация");
+        assert!(
+            !t.manifest.violating.is_empty(),
+            "нужна нарушающая реализация"
+        );
         let files = t.files_for(Lang::Python);
         assert!(files.len() >= 2, "файлы шаблона: {files:?}");
     }
