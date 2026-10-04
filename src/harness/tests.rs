@@ -1476,6 +1476,14 @@ fn acp_fixture(mode: &str) -> crate::config::AcpConfig {
     }
 }
 
+/// Есть ли `python3` в PATH: без него фикстуру не запустить, тесты
+/// скипаются (инвариант A2 — герметичный прогон без внешних зависимостей).
+#[cfg(feature = "harness")]
+fn python3_available() -> bool {
+    std::env::var_os("PATH")
+        .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join("python3").is_file()))
+}
+
 /// C3: `mode = "auto"` без acp-секции — headless (поведение до ADR-057).
 #[tokio::test]
 async fn auto_without_acp_section_runs_headless() {
@@ -1498,6 +1506,10 @@ async fn auto_without_acp_section_runs_headless() {
 /// C3: `mode = "prompt"` принудительно игнорирует задекларированную acp-секцию.
 #[tokio::test]
 async fn explicit_prompt_ignores_acp_section() {
+    if !python3_available() {
+        eprintln!("skipped: no python3");
+        return;
+    }
     let tmp = tempfile::tempdir().expect("tmp");
     let cfg = CodingHarnessConfig {
         binary: "cat".into(),
@@ -1523,6 +1535,10 @@ async fn explicit_prompt_ignores_acp_section() {
 /// с предупреждением в итоге.
 #[tokio::test]
 async fn auto_falls_back_to_headless_on_acp_init_failure() {
+    if !python3_available() {
+        eprintln!("skipped: no python3");
+        return;
+    }
     let tmp = tempfile::tempdir().expect("tmp");
     let cfg = CodingHarnessConfig {
         binary: "cat".into(),
@@ -1546,6 +1562,10 @@ async fn auto_falls_back_to_headless_on_acp_init_failure() {
 /// ACP-сессия продолжается (без отката на headless), журнал информационный.
 #[tokio::test]
 async fn auto_keeps_acp_when_auth_methods_informational() {
+    if !python3_available() {
+        eprintln!("skipped: no python3");
+        return;
+    }
     let tmp = tempfile::tempdir().expect("tmp");
     let cfg = CodingHarnessConfig {
         binary: "cat".into(),
@@ -1582,6 +1602,10 @@ async fn auto_keeps_acp_when_auth_methods_informational() {
 /// откат на headless с честной причиной (клиент аутентификацию не поддерживает).
 #[tokio::test]
 async fn auto_falls_back_on_required_auth() {
+    if !python3_available() {
+        eprintln!("skipped: no python3");
+        return;
+    }
     let tmp = tempfile::tempdir().expect("tmp");
     let cfg = CodingHarnessConfig {
         binary: "cat".into(),
@@ -1604,6 +1628,10 @@ async fn auto_falls_back_on_required_auth() {
 /// ошибка прогона без отката.
 #[tokio::test]
 async fn explicit_acp_errors_on_required_auth() {
+    if !python3_available() {
+        eprintln!("skipped: no python3");
+        return;
+    }
     let tmp = tempfile::tempdir().expect("tmp");
     let cfg = CodingHarnessConfig {
         binary: "cat".into(),
@@ -1623,6 +1651,10 @@ async fn explicit_acp_errors_on_required_auth() {
 /// C3: `mode = "acp"` — провал инициализации БЕЗ отката (ошибка прогона).
 #[tokio::test]
 async fn explicit_acp_does_not_fall_back() {
+    if !python3_available() {
+        eprintln!("skipped: no python3");
+        return;
+    }
     let tmp = tempfile::tempdir().expect("tmp");
     let cfg = CodingHarnessConfig {
         binary: "cat".into(),
@@ -1643,6 +1675,10 @@ async fn explicit_acp_does_not_fall_back() {
 /// с честной причиной «версия протокола не согласована».
 #[tokio::test]
 async fn auto_falls_back_on_version_mismatch() {
+    if !python3_available() {
+        eprintln!("skipped: no python3");
+        return;
+    }
     let tmp = tempfile::tempdir().expect("tmp");
     let cfg = CodingHarnessConfig {
         binary: "cat".into(),
@@ -1664,6 +1700,10 @@ async fn auto_falls_back_on_version_mismatch() {
 /// S3: `mode = "acp"` + чужой MAJOR протокола — ошибка прогона без отката.
 #[tokio::test]
 async fn explicit_acp_errors_on_version_mismatch() {
+    if !python3_available() {
+        eprintln!("skipped: no python3");
+        return;
+    }
     let tmp = tempfile::tempdir().expect("tmp");
     let cfg = CodingHarnessConfig {
         binary: "cat".into(),
@@ -1683,6 +1723,10 @@ async fn explicit_acp_errors_on_version_mismatch() {
 /// C3/C5: `auto` + рабочий ACP-агент → режим `acp`, метаданные адаптера.
 #[tokio::test]
 async fn auto_uses_acp_when_declared_and_working() {
+    if !python3_available() {
+        eprintln!("skipped: no python3");
+        return;
+    }
     let tmp = tempfile::tempdir().expect("tmp");
     let cfg = CodingHarnessConfig {
         binary: "cat".into(),
@@ -1715,6 +1759,10 @@ async fn auto_uses_acp_when_declared_and_working() {
 /// `Completed`, итог — предупреждение (не ошибка исполнения).
 #[tokio::test]
 async fn acp_turn_limit_keeps_partial_contract_and_runs_post_gate() {
+    if !python3_available() {
+        eprintln!("skipped: no python3");
+        return;
+    }
     let tmp = tempfile::tempdir().expect("tmp");
     let repo = tmp.path().join("repo");
     a4_sandbox(&repo, true);
@@ -1761,6 +1809,10 @@ async fn acp_turn_limit_keeps_partial_contract_and_runs_post_gate() {
 /// `Cancelled`: итог «прерван», не ошибка прогона.
 #[tokio::test]
 async fn acp_cancelled_after_cancel_is_soft_not_error() {
+    if !python3_available() {
+        eprintln!("skipped: no python3");
+        return;
+    }
     let tmp = tempfile::tempdir().expect("tmp");
     let cfg = CodingHarnessConfig {
         binary: "cat".into(),
@@ -1783,6 +1835,10 @@ async fn acp_cancelled_after_cancel_is_soft_not_error() {
 /// Отказ агента (`refusal`) — ошибка прогона; текст отказа сохранён в выводе.
 #[tokio::test]
 async fn acp_refusal_is_run_error() {
+    if !python3_available() {
+        eprintln!("skipped: no python3");
+        return;
+    }
     let tmp = tempfile::tempdir().expect("tmp");
     let cfg = CodingHarnessConfig {
         binary: "cat".into(),

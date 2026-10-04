@@ -34,6 +34,13 @@ fn python() -> String {
     String::from("python3")
 }
 
+/// Есть ли `python3` в PATH: без него фикстуру не запустить, тесты
+/// скипаются (инвариант A2 — герметичный прогон без внешних зависимостей).
+fn python3_available() -> bool {
+    std::env::var_os("PATH")
+        .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join("python3").is_file()))
+}
+
 fn fixture_path() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/acp_agent.py")
 }
@@ -144,6 +151,10 @@ impl Drop for Fixture {
 /// рабочей — прогон доходит до `end_turn`.
 #[test]
 fn unknown_method_gets_method_not_found_error() {
+    if !python3_available() {
+        eprintln!("skipped: no python3");
+        return;
+    }
     let mut fx = Fixture::start("ok");
     fx.initialize();
     let session = fx.open_session(2);
@@ -181,6 +192,10 @@ fn unknown_method_gets_method_not_found_error() {
 /// получает ДРУГОЙ `sessionId`; активной становится последняя сессия.
 #[test]
 fn every_session_new_gets_unique_id() {
+    if !python3_available() {
+        eprintln!("skipped: no python3");
+        return;
+    }
     let mut fx = Fixture::start("ok");
     fx.initialize();
 
