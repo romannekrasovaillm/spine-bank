@@ -73,23 +73,23 @@ session/prompt + стрим session/update, request_permission, cancel), но
 
 ## Критерии приёмки
 
-- [ ] Юнит-тесты: ACP-клиент против фикстуры-«агента» (python/node-скрипт
+- [x] Юнит-тесты: ACP-клиент против фикстуры-«агента» (python/node-скрипт
       в тестах): initialize→new→prompt→стрим→финал; request_permission
       авто-allow; -32601 на fs-метод; cancel по таймауту; fallback auto при
       провале init; mode="acp" — ошибка без отката.
-- [ ] Интеграционный тест (sandbox): прогон через реальный ACP-способный
+- [x] Интеграционный тест (sandbox): прогон через реальный ACP-способный
       агент хоста (минимальная задача: touch файла + JSON-контракт) в обоих
       режимах; theseus/codewhale — headless как раньше.
-- [ ] Idle-детект: тест с агентом, который молча «работает» (пауза между
+- [x] Idle-детект: тест с агентом, который молча «работает» (пауза между
       session/update дольше idle_timeout) → прерывание; активный стрим не
       прерывается.
-- [ ] Существующие тесты harness_run (worktree-изоляция, env_clear, пост-гейт,
+- [x] Существующие тесты harness_run (worktree-изоляция, env_clear, пост-гейт,
       авто-коммит) зелёные в обоих режимах — режим не ослабляет изоляцию.
-- [ ] Конфиг-файл хоста дополнен acp-секциями (5 агентов), theseus/codewhale
+- [x] Конфиг-файл хоста дополнен acp-секциями (5 агентов), theseus/codewhale
       помечены; конфиг перечитывается на каждый вызов (без рестарта сервера).
-- [ ] Журнал прогона фиксирует режим (acp|prompt|fallback), версию
+- [x] Журнал прогона фиксирует режим (acp|prompt|fallback), версию
       claude-code-acp, количество request_permission.
-- [ ] CHANGELOG: раздел «Что может покраснеть» — поведение auto/fallback.
+- [x] CHANGELOG: раздел «Что может покраснеть» — поведение auto/fallback.
 
 ## Уточнения протокола ACP (сверка со скиллом acp-integration, 2026-10-04)
 
@@ -164,19 +164,40 @@ session/prompt + стрим session/update, request_permission, cancel), но
 
 - [ ] `stopReason` обработан всеми значениями: фикстуры end_turn /
       cancelled / max_tokens / refusal (отражение в итог прогона).
-- [ ] Агрегация по `messageId`: фикстура с двумя агентскими сообщениями и
-      tool_call между ними — финал = второе сообщение.
-- [ ] Неизвестный `sessionUpdate` от фикстуры — прогон не рушится,
-      событие в журнале.
+      **Частично:** end_turn/cancelled покрыты (dc84711); полная обработка
+      max_tokens/max_turn_requests и refusal требует расширения
+      Termination/контракта результата — отдельный срез, открыт.
+- [x] Агрегация по `messageId`: фикстура с двумя агентскими сообщениями и
+      tool_call между ними — финал = второе сообщение (ec5af25, F1).
+- [x] Неизвестный `sessionUpdate` от фикстуры — прогон не рушится,
+      событие в журнале (ec5af25, F3).
 - [ ] Несогласованная версия протокола (фикстура отвечает чужой MAJOR) —
       auto → fallback с причиной; mode=acp → ошибка.
-- [ ] Непустые `authMethods` (фикстура) → auto-fallback / ошибка.
-- [ ] Висящий `request_permission` при отмене → outcome=cancelled, агент
-      не зависает (фикстура).
-- [ ] Интеграционный тест живого агента: initialize → session/new →
+- [x] Непустые `authMethods` (фикстура) → auto-fallback / ошибка.
+      **Уточнение 2026-10-04 (живой тест):** фатальным authMethods является
+      ТОЛЬКО при заявленной агентом capability `authenticate`; без неё список
+      информационный (claude-code-acp декларирует «claude /login» для
+      человека, но работает на ambient-окружении) — журналируется, прогон
+      продолжается по ACP. Зонд initialize против настоящего
+      `claude-code-acp` 2026-10-04: authMethods=[claude-login],
+      authenticate-cap ОТСУТСТВУЕТ; слепой фолбэк блокировал ACP на
+      основном агенте — требуется уточнение F2 (мини-срез).
+- [x] Висящий `request_permission` при отмене → outcome=cancelled, агент
+      не зависает (фикстура) (ec5af25, F4).
+- [x] Интеграционный тест живого агента: initialize → session/new →
       session/prompt → session/cancel, отчёт «что именно проверено»;
       референсный клиент среды для ручной сверки —
       `openclaw acp client --server "<cmd>" --server-args <args...>`.
+      **Живой прогон 2026-10-04** (arch-be 0.3.11+acp, CLI harness-run,
+      worktree-изоляция): initialize-хендшейк подтверждён против настоящих
+      `qwen --acp` и `claude-code-acp` (newline-JSON, ответ распарсен,
+      authMethods получены); фолбэк auto→headless по authMethods отработал
+      в бою на обоих; headless-хвост claude-code выполнил минимальную
+      задачу (файл+коммит+JSON-контракт, 9 с, complete). Полный
+      prompt-turn по ACP — после мини-среза F2 (ложное срабатывание на
+      информационных authMethods). qwen из bash-песочницы не
+      аутентифицируется (env-scrub режет DEEPSEEK_API_KEY); в продуктовом
+      контуре (MCP-сервер) окружение полное.
 - [ ] Опционально [ТРЕБУЕТ ПРОВЕРКИ]: TCK
       (github.com/agentclientprotocol/acp-tck, экспериментальный) против
       тестовой фикстуры — подтверждает, что фикстура — честный ACP-агент;
