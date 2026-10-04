@@ -162,6 +162,53 @@ argparse):
 интерактивных промптов), а `--yolo`/`--auto` с `--prompt` несовместимы
 (запуск отклоняется). Модель исполнителя — `-m <alias>` в `args`.
 
+### Режимы вызова: headless и ACP (ADR-057)
+
+Второй способ вызова агента — Agent Client Protocol: JSON-RPC 2.0 поверх
+stdio (`initialize` → `session/new` → `session/prompt` + стрим
+`session/update`). Секция `[harnesses.<имя>.acp]` объявляет ACP-команду:
+
+```toml
+[harnesses.claude-code]
+binary = "claude"
+args = ["-p", "--dangerously-skip-permissions"]
+prompt_mode = "stdin"
+mode = "auto"                     # auto (дефолт) | acp | prompt
+
+[harnesses.claude-code.acp]       # наличие секции = «ACP задекларирован»
+binary = "claude-code-acp"        # адаптер Zed поверх Claude Code SDK
+args = []
+init_timeout_secs = 30            # таймаут ответа на initialize
+cancel_grace_secs = 10            # окно graceful после session/cancel
+```
+
+Умный выбор режима:
+
+- `mode = "auto"` — acp-секция есть → ACP; нет → headless. Провал
+  **инициализации** ACP (таймаут `initialize`, ошибка протокола, ранний
+  exit) → откат на headless с предупреждением в итоге прогона (виден и сам
+  факт деградации, и какое исключение);
+- `mode = "acp"` — ACP обязателен: провал = ошибка прогона без отката;
+- `mode = "prompt"` — принудительный headless (поведение до ADR-057).
+
+В ACP-режиме финальный текст ответа — агрегат `agent_message_chunk` **после
+последнего `tool_call`** — подаётся потребителю как `stdout` для разбора
+JSON-контракта. Активность idle-детекта — события протокола
+(`session/update`) наравне с файловой системой. `session/request_permission`
+— авто-выбор первой allow-опции с журналированием (это **сегодняшние**
+skip-permissions, security boundary не улучшается); вызовы `fs/*`,
+`terminal/*`, `elicitation/*` агентом получают JSON-RPC error `-32601`
+(capabilities объявлены `false`). Изоляция прогона (worktree, env-политика
+волны C, пост-гейт A4, авто-коммит) — общая для обоих режимов; ACP-процесс
+наследует тот же `cwd`/env-план. Итог прогона (`arch-be harness-run`) несёт
+режим (`prompt` | `acp` | `fallback`), версию ACP-адаптера из `initialize`
+и число `request_permission`.
+
+Развёртка на агентов хоста (образцы — `config.example.toml`): claude-code
+(`claude-code-acp`), qwen-code (`qwen --acp`), kimi-code (`kimi acp`),
+openclaw (`openclaw acp`), hermes (`hermes acp`); theseus и codewhale ACP
+не поддержан (проверено `--help` 2026-10-03) — только headless.
+
 **Горячее перечитывание.** Инструмент `harness_run` перечитывает файл
 конфига (тот путь, из которого он был загружен) при каждом вызове: правки
 `[harnesses.*]` в ходе сессии применяются немедленно, перезапуск агента не
