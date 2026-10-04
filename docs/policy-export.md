@@ -20,6 +20,7 @@ deployment:
   images:
     registry: "registry.example.com/bank"
     signed: true
+    public_key: "k8s://arch-be/image-signing-key"
   security:
     run_as_non_root: true
   resources:
@@ -46,6 +47,7 @@ arch-be policy export rego --repo . --output archbe/deployment.rego
 |---|---|---|
 | `deployment.images.registry` | строка | Разрешённый префикс реестра (`registry.example.com/bank`). Образы контейнеров обязаны с него начинаться. |
 | `deployment.images.signed` | bool | `true` — подпись образа обязательна (Kyverno `verifyImages`). `false` — ограничение снято. |
+| `deployment.images.public_key` | строка | Ссылка на публичный ключ/секрет проверки подписи (`k8s://arch-be/image-signing-key`). Действует при `signed: true`: подставляется в `verifyImages` вместо плейсхолдера. Без поля — прежний плейсхолдер с напоминанием заменить его. |
 | `deployment.security.run_as_non_root` | bool | `true` — `securityContext.runAsNonRoot` обязателен у всех контейнеров Pod. |
 | `deployment.resources.max_cpu` | строка (k8s-квантор) | Потолок `limits.cpu` (`500m`, `2`). |
 | `deployment.resources.max_memory` | строка (k8s-квантор) | Потолок `limits.memory` (`512Mi`, `1Gi`). |
@@ -108,9 +110,10 @@ arch-be policy export <kyverno|rego> [--repo <dir>] [--constraints <file>] [--ou
   отдаёт Kyverno `verifyImages`; в Rego удерживается её следствие —
   адресация по дайджесту (`image@sha256:…`). Это осознанная граница, а не
   полная эквивалентность.
-- **Ключ проверки подписи.** В `verifyImages` генерируется ключ-заглушка
-  `k8s://arch-be/image-signing-key` с комментарием — перед применением
-  замените на реальный публичный ключ (cosign).
+- **Ключ проверки подписи.** Заданный `images.public_key` подставляется в
+  `verifyImages` как есть (ref на секрет/ключ). Без поля генерируется
+  ключ-заглушка `k8s://arch-be/image-signing-key` с комментарием — перед
+  применением замените на реальный публичный ключ (cosign).
 - **`kyverno.io/v1`** в Kyverno 1.19 помечен deprecated в пользу CEL-политик
   (`policies.kyverno.io`); генератор намеренно держится выбранного формата
   `ClusterPolicy` из ADR-059 §D3.

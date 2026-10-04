@@ -36,8 +36,7 @@ spec:
           attestors:
             - entries:
                 - keys:
-                    publicKeys: "k8s://arch-be/image-signing-key"
-                    # замените на реальный публичный ключ проверки подписи (cosign)
+                    publicKeys: "k8s://arch-be/image-signing-key-prod"
 ---
 apiVersion: kyverno.io/v1
 kind: ClusterPolicy

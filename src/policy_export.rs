@@ -24,6 +24,7 @@
 //!   images:
 //!     registry: "registry.example.com/bank"  # разрешённый префикс реестра
 //!     signed: true                            # подпись образа обязательна
+//!     public_key: "k8s://arch-be/image-signing-key-prod"  # ключ для verifyImages
 //!   security:
 //!     run_as_non_root: true                   # securityContext.runAsNonRoot
 //!   resources:
@@ -78,6 +79,12 @@ pub struct ImagesPolicy {
     /// Подпись образа обязательна.
     #[serde(default)]
     pub signed: Option<bool>,
+    /// Ссылка на публичный ключ/секрет проверки подписи (например
+    /// `k8s://arch-be/image-signing-key`). Действует только при
+    /// `signed: true`: подставляется в Kyverno `verifyImages` вместо
+    /// плейсхолдера; без поля — прежний плейсхолдер с напоминанием.
+    #[serde(default)]
+    pub public_key: Option<String>,
 }
 
 /// Инварианты безопасности контейнера.
@@ -238,6 +245,12 @@ fn kyverno_images(policy: &DeploymentPolicy) -> Option<String> {
     }
     if signed {
         let refs = registry.map_or_else(|| "*".to_string(), |reg| format!("{reg}/*"));
+        // Ключ проверки подписи: явный `public_key`, иначе плейсхолдер с
+        // напоминанием заменить его (без поля вывод прежний, байт-в-байт).
+        let (public_key, placeholder) = match policy.images.public_key.as_deref() {
+            Some(key) => (key, false),
+            None => ("k8s://arch-be/image-signing-key", true),
+        };
         let _ = writeln!(out, "    - name: verify-image-signature");
         kyverno_match(&mut out, "      ");
         let _ = writeln!(out, "      verifyImages:");
@@ -246,14 +259,13 @@ fn kyverno_images(policy: &DeploymentPolicy) -> Option<String> {
         let _ = writeln!(out, "          attestors:");
         let _ = writeln!(out, "            - entries:");
         let _ = writeln!(out, "                - keys:");
-        let _ = writeln!(
-            out,
-            "                    publicKeys: \"k8s://arch-be/image-signing-key\""
-        );
-        let _ = writeln!(
-            out,
-            "                    # замените на реальный публичный ключ проверки подписи (cosign)"
-        );
+        let _ = writeln!(out, "                    publicKeys: \"{public_key}\"");
+        if placeholder {
+            let _ = writeln!(
+                out,
+                "                    # замените на реальный публичный ключ проверки подписи (cosign)"
+            );
+        }
     }
     Some(out)
 }
@@ -673,6 +685,67 @@ deployment:
             export(&policy, ExportFormat::Rego),
             include_str!("../tests/fixtures/policy-export/expected.rego")
         );
+    }
+
+    /// `images.public_key` подставляется в `verifyImages` вместо плейсхолдера;
+    /// напоминание-комментарий тогда не печатается.
+    #[test]
+    fn kyverno_public_key_overrides_placeholder() {
+        let policy = parse(
+            "deployment:\n  images:\n    signed: true\n    public_key: \"k8s://bank/image-signing-key\"\n",
+        )
+        .expect("разбор")
+        .expect("секция");
+        let kyverno = export(&policy, ExportFormat::Kyverno);
+        assert!(
+            kyverno.contains("publicKeys: \"k8s://bank/image-signing-key\""),
+            "{kyverno}"
+        );
+        assert!(
+            !kyverno.contains("k8s://arch-be/image-signing-key"),
+            "плейсхолдер не должен остаться: {kyverno}"
+        );
+        assert!(
+            !kyverno.contains("замените на реальный публичный ключ"),
+            "при заданном ключе напоминание лишнее: {kyverno}"
+        );
+    }
+
+    /// Без `public_key` `verifyImages` остаётся прежним, байт-в-байт
+    /// (плейсхолдер + напоминание) — дефолт не меняется.
+    #[test]
+    fn kyverno_without_public_key_keeps_previous_output() {
+        const EXPECTED: &str = "\
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: archbe-deploy-images
+  annotations:
+    arch-be.spine/source: CONSTRAINTS.yaml
+    arch-be.spine/group: images
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: verify-image-signature
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      verifyImages:
+        - imageReferences:
+            - \"*\"
+          attestors:
+            - entries:
+                - keys:
+                    publicKeys: \"k8s://arch-be/image-signing-key\"
+                    # замените на реальный публичный ключ проверки подписи (cosign)
+";
+        let policy = parse("deployment:\n  images:\n    signed: true\n")
+            .expect("разбор")
+            .expect("секция");
+        assert_eq!(export(&policy, ExportFormat::Kyverno), EXPECTED);
     }
 
     #[test]

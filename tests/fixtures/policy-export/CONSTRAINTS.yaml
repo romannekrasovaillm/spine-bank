@@ -7,6 +7,7 @@ deployment:
   images:
     registry: "registry.example.com/bank"
     signed: true
+    public_key: "k8s://arch-be/image-signing-key-prod"
   security:
     run_as_non_root: true
   resources:

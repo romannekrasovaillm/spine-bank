@@ -39,6 +39,13 @@ newline-delimited JSON-RPC 2.0 на stdin/stdout. Поведение выбир�
 
 Маркер отмены пишется в CWD процесса — каталог прогона, который назначает
 клиент (`session/new.cwd`).
+
+Конформность (TCK v1, провалы фикстуры ACP-EXT-001 / ACP-SESSION-002 /
+ACP-ERROR-001): фикстура не молчит на «лишние» запросы — request с
+неизвестным методом получает JSON-RPC error `-32601` с непустым
+однострочным message, а каждый `session/new` — свежий уникальный
+`sessionId` (последний выданный становится активным). Уведомления без id
+(в т.ч. `session/cancel`) ответа не получают.
 """
 
 import json
@@ -72,14 +79,63 @@ def response(rid, result):
     send({"jsonrpc": "2.0", "id": rid, "result": result})
 
 
+def error_response(rid, code, message):
+    send({"jsonrpc": "2.0", "id": rid, "error": {"code": code, "message": message}})
+
+
+def method_not_found_message(method):
+    """Непустое однострочное message для ошибки -32601 (ACP-ERROR-001)."""
+    name = str(method).replace("\r", " ").replace("\n", " ").strip()
+    return "method not found: %s" % (name or "<unknown>")
+
+
+# Уникальность sessionId и активная сессия (ACP-SESSION-002): первый
+# session/new получает "s1" — как раньше, каждый следующий — свежий.
+SESSION_SEQ = 0
+ACTIVE_SESSION = "s1"
+
+
+def open_session(msg):
+    """Отвечает на session/new свежим уникальным sessionId.
+
+    Последний выданный id становится активным: существующие односессионные
+    режимы видят в session/update ровно его же ("s1").
+    """
+    global SESSION_SEQ, ACTIVE_SESSION
+    SESSION_SEQ += 1
+    ACTIVE_SESSION = "s%d" % SESSION_SEQ
+    response(msg["id"], {"sessionId": ACTIVE_SESSION})
+    return ACTIVE_SESSION
+
+
+def dispatch_stray(msg):
+    """Отвечает на «лишний» request, пришедший вместо ожидаемого метода.
+
+    Повторный session/new получает свежий sessionId (ACP-SESSION-002),
+    прочие неизвестные методы — ошибку -32601 (ACP-EXT-001/ACP-ERROR-001).
+    """
+    if msg.get("method") == "session/new":
+        open_session(msg)
+    else:
+        error_response(msg["id"], -32601, method_not_found_message(msg.get("method")))
+
+
 def await_request(method):
-    """Читает сообщения, пока не придёт запрос с данным методом."""
+    """Читает сообщения, пока не придёт запрос с данным методом.
+
+    «Лишние» запросы (с id) не игнорируются: повторный session/new получает
+    свежий sessionId, неизвестный метод — ошибку -32601. Уведомления без id
+    (в т.ч. session/cancel) ответа не получают и пропускаются.
+    """
     while True:
         msg = read_msg()
         if msg is None:
             return None
-        if msg.get("method") == method:
+        incoming = msg.get("method")
+        if incoming == method:
             return msg
+        if incoming is not None and msg.get("id") is not None:
+            dispatch_stray(msg)
 
 
 def chunk(text, message_id=None):
@@ -91,7 +147,7 @@ def chunk(text, message_id=None):
             "jsonrpc": "2.0",
             "method": "session/update",
             "params": {
-                "sessionId": "s1",
+                "sessionId": ACTIVE_SESSION,
                 "update": {
                     "sessionUpdate": "agent_message_chunk",
                     "content": content,
@@ -108,7 +164,7 @@ def unknown_update(kind):
             "jsonrpc": "2.0",
             "method": "session/update",
             "params": {
-                "sessionId": "s1",
+                "sessionId": ACTIVE_SESSION,
                 "update": {"sessionUpdate": kind},
             },
         }
@@ -121,7 +177,7 @@ def tool_call(tool_id, title):
             "jsonrpc": "2.0",
             "method": "session/update",
             "params": {
-                "sessionId": "s1",
+                "sessionId": ACTIVE_SESSION,
                 "update": {"sessionUpdate": "tool_call", "toolCallId": tool_id, "title": title},
             },
         }
@@ -141,7 +197,7 @@ def request_permission():
             "id": 900,
             "method": "session/request_permission",
             "params": {
-                "sessionId": "s1",
+                "sessionId": ACTIVE_SESSION,
                 "toolCall": {"toolCallId": "t1", "title": "Write file"},
                 "options": [
                     {"optionId": "allow-once-1", "name": "Allow once", "kind": "allow_once"},
@@ -166,7 +222,7 @@ def client_request():
             "jsonrpc": "2.0",
             "id": 901,
             "method": "fs/read_text_file",
-            "params": {"sessionId": "s1", "path": "/etc/hostname"},
+            "params": {"sessionId": ACTIVE_SESSION, "path": "/etc/hostname"},
         }
     )
     while True:
@@ -178,7 +234,10 @@ def client_request():
 
 
 def wait_for_cancel(marker):
-    """Ждёт session/cancel, пишет маркер в CWD процесса."""
+    """Ждёт session/cancel, пишет маркер в CWD процесса.
+
+    «Лишние» запросы обрабатываются как в `await_request`: не молчим.
+    """
     while True:
         msg = read_msg()
         if msg is None:
@@ -187,6 +246,8 @@ def wait_for_cancel(marker):
             with open(marker, "w", encoding="utf-8") as fh:
                 fh.write("cancel\n")
             return True
+        if msg.get("method") is not None and msg.get("id") is not None:
+            dispatch_stray(msg)
 
 
 def permission_after_cancel():
@@ -201,7 +262,7 @@ def permission_after_cancel():
             "id": 902,
             "method": "session/request_permission",
             "params": {
-                "sessionId": "s1",
+                "sessionId": ACTIVE_SESSION,
                 "toolCall": {"toolCallId": "t9", "title": "Write file"},
                 "options": [
                     {"optionId": "allow-once-9", "name": "Allow once", "kind": "allow_once"}
@@ -259,7 +320,7 @@ def main():
     new = await_request("session/new")
     if new is None:
         return
-    response(new["id"], {"sessionId": "s1"})
+    open_session(new)
 
     prompt = await_request("session/prompt")
     if prompt is None:
