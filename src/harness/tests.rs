@@ -1542,10 +1542,10 @@ async fn auto_falls_back_to_headless_on_acp_init_failure() {
     assert!(note.contains("initialize"), "{note}");
 }
 
-/// F2: `auto` + агент требует аутентификацию (`authMethods`) → откат на
-/// headless с честной причиной (клиент аутентификацию не поддерживает).
+/// F2: `auto` + `authMethods` БЕЗ authenticate-cap — информационный список,
+/// ACP-сессия продолжается (без отката на headless), журнал информационный.
 #[tokio::test]
-async fn auto_falls_back_on_auth_methods() {
+async fn auto_keeps_acp_when_auth_methods_informational() {
     let tmp = tempfile::tempdir().expect("tmp");
     let cfg = CodingHarnessConfig {
         binary: "cat".into(),
@@ -1557,6 +1557,42 @@ async fn auto_falls_back_on_auth_methods() {
     };
     let run = run_harness("fake", &cfg, tmp.path(), "задача")
         .await
+        .expect("ACP-сессия");
+    assert_eq!(
+        run.mode,
+        HarnessMode::Acp,
+        "authMethods без cap не фатальны"
+    );
+    assert!(
+        run.stdout.contains("\"status\": \"complete\""),
+        "сессия дошла до end_turn: {}",
+        run.stdout
+    );
+    let info = run.acp.expect("ACP-метаданные");
+    assert!(
+        info.journal
+            .iter()
+            .any(|j| j.contains("authMethods") && j.contains("информационно")),
+        "информационная запись в журнале: {:?}",
+        info.journal
+    );
+}
+
+/// F2: `auto` + агент заявил authenticate-cap при непустых `authMethods` →
+/// откат на headless с честной причиной (клиент аутентификацию не поддерживает).
+#[tokio::test]
+async fn auto_falls_back_on_required_auth() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let cfg = CodingHarnessConfig {
+        binary: "cat".into(),
+        prompt_mode: PromptMode::Stdin,
+        timeout_secs: 30,
+        idle_timeout_secs: 0,
+        acp: Some(acp_fixture("auth-required")),
+        ..CodingHarnessConfig::default()
+    };
+    let run = run_harness("fake", &cfg, tmp.path(), "задача")
+        .await
         .expect("откат — не ошибка");
     assert_eq!(run.mode, HarnessMode::Fallback);
     assert_eq!(run.stdout, "задача", "откат выполнил headless-путь");
@@ -1564,9 +1600,10 @@ async fn auto_falls_back_on_auth_methods() {
     assert!(note.contains("authMethods"), "{note}");
 }
 
-/// F2: `mode = "acp"` + `authMethods` — ошибка прогона без отката.
+/// F2: `mode = "acp"` + authenticate-cap при непустых `authMethods` —
+/// ошибка прогона без отката.
 #[tokio::test]
-async fn explicit_acp_errors_on_auth_methods() {
+async fn explicit_acp_errors_on_required_auth() {
     let tmp = tempfile::tempdir().expect("tmp");
     let cfg = CodingHarnessConfig {
         binary: "cat".into(),
@@ -1574,12 +1611,12 @@ async fn explicit_acp_errors_on_auth_methods() {
         timeout_secs: 30,
         idle_timeout_secs: 0,
         mode: AcpMode::Acp,
-        acp: Some(acp_fixture("auth")),
+        acp: Some(acp_fixture("auth-required")),
         ..CodingHarnessConfig::default()
     };
     let err = run_harness("fake", &cfg, tmp.path(), "задача")
         .await
-        .expect_err("mode=acp: authMethods = ошибка без отката");
+        .expect_err("mode=acp: authenticate-cap + authMethods = ошибка без отката");
     assert!(err.to_string().contains("authMethods"), "{err}");
 }
 

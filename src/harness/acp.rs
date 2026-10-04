@@ -235,17 +235,30 @@ pub async fn run_session(
             if let Some(v) = negotiated {
                 session.journal(format!("initialize: protocolVersion={v}"));
             }
-            // F2: непустые `authMethods` — агент требует аутентификацию, которой
-            // клиент не поддерживает. Честный отказ (auto → fallback, acp → ошибка),
-            // а не «сессия вроде работает».
-            if res
+            // F2: непустые `authMethods` фатальны ТОЛЬКО при заявленной
+            // capability `agentCapabilities.authenticate` — тогда клиентская
+            // аутентификация действительно требуется, а клиент её не
+            // поддерживает (auto → fallback, acp → ошибка). Без неё
+            // `authMethods` — информационный список (агент работает на
+            // ambient-окружении) — журналируем и продолжаем сессию.
+            if let Some(methods) = res
                 .get("authMethods")
                 .and_then(Value::as_array)
-                .is_some_and(|methods| !methods.is_empty())
+                .filter(|methods| !methods.is_empty())
             {
-                session.shutdown().await;
-                return Err(AcpError::init(
-                    "агент требует аутентификацию (authMethods), клиент её не поддерживает",
+                let authenticate = res
+                    .pointer("/agentCapabilities/authenticate")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                if authenticate {
+                    session.shutdown().await;
+                    return Err(AcpError::init(
+                        "агент требует аутентификацию (authMethods + agentCapabilities.authenticate), клиент её не поддерживает",
+                    ));
+                }
+                session.journal(format!(
+                    "initialize: authMethods заявлены информационно (authenticate cap нет) — продолжаем: {}",
+                    auth_method_labels(methods)
                 ));
             }
         }
@@ -360,6 +373,25 @@ fn adapter_label(res: &Value) -> Option<String> {
     } else {
         format!("{name} {version}")
     })
+}
+
+/// Метки `authMethods` из `initialize` для журнала: `id (name)`, только `id`,
+/// только `name` — что заполнено; без обоих — `?`.
+fn auth_method_labels(methods: &[Value]) -> String {
+    methods
+        .iter()
+        .map(|m| {
+            let id = m.get("id").and_then(Value::as_str).unwrap_or("");
+            let name = m.get("name").and_then(Value::as_str).unwrap_or("");
+            match (id.is_empty(), name.is_empty()) {
+                (false, false) => format!("{id} ({name})"),
+                (false, true) => id.to_string(),
+                (true, false) => name.to_string(),
+                (true, true) => "?".to_string(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Исход ожидания ответа JSON-RPC.
@@ -1300,15 +1332,54 @@ mod tests {
         );
     }
 
-    /// F2: непустые `authMethods` — честный отказ инициализации.
+    /// F2: непустые `authMethods` БЕЗ capability `authenticate` —
+    /// информационный список: сессия продолжается, в журнале запись.
     #[tokio::test]
-    async fn auth_methods_is_init_error() {
+    async fn auth_methods_without_cap_is_informational() {
         let tmp = tempfile::tempdir().expect("tmp");
-        let err = run_session(&session("auth"), tmp.path(), "задача")
+        let s = run_session(&session("auth"), tmp.path(), "задача")
             .await
-            .expect_err("authMethods — клиент не поддерживает аутентификацию");
+            .expect("authMethods без authenticate-cap не фатальны");
+        assert_eq!(s.termination, Termination::Completed);
+        assert!(
+            s.text.contains("\"status\": \"complete\""),
+            "прогон дошёл до end_turn: {}",
+            s.text
+        );
+        assert!(
+            s.journal
+                .iter()
+                .any(|j| j.contains("authMethods") && j.contains("информационно")),
+            "информационная запись в журнале: {:?}",
+            s.journal
+        );
+    }
+
+    /// F2: непустые `authMethods` С capability `authenticate` — честный
+    /// отказ инициализации (клиент аутентификацию не поддерживает).
+    #[tokio::test]
+    async fn auth_methods_with_cap_is_init_error() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let err = run_session(&session("auth-required"), tmp.path(), "задача")
+            .await
+            .expect_err("authMethods + authenticate-cap — отказ");
         assert!(err.is_init(), "{err}");
         assert!(err.message().contains("authMethods"), "{err}");
+    }
+
+    /// F2: пустой `authMethods` без cap — чисто, без записей об аутентификации.
+    #[tokio::test]
+    async fn empty_auth_methods_is_clean() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let s = run_session(&session("ok"), tmp.path(), "задача")
+            .await
+            .expect("ACP-сессия");
+        assert_eq!(s.termination, Termination::Completed);
+        assert!(
+            !s.journal.iter().any(|j| j.contains("authMethods")),
+            "нет записей об authMethods: {:?}",
+            s.journal
+        );
     }
 
     /// F3: незнакомый `sessionUpdate` журналируется, но не рушит прогон.
