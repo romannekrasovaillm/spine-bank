@@ -1175,6 +1175,51 @@ fn nfr_budget_exceeded_exits_1_with_guilty_hops() {
         .stdout(contains("Итог: FAIL"));
 }
 
+/// D4 (ADR-059): `nfr verify --metrics` — расхождение p99/доступности с
+/// бюджетами модели → находки с виновным hop и exit 1; совпадение — PASS.
+#[test]
+fn nfr_verify_metrics_reports_discrepancy_then_pass() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let case = nfr_budget_case(tmp.path(), 2000, Some(800));
+    std::fs::write(
+        case.join("model/NFR-004-sla.md"),
+        "---\nid: NFR-004\ntype: nfr\ntitle: SLA\nstatus: accepted\nverification: v\n\
+         availability_target: 0.9995\naffects: [INT-001]\n---\n",
+    )
+    .expect("write NFR-004");
+    let metrics = case.join("metrics.json");
+    std::fs::write(
+        &metrics,
+        r#"{"operations":[{"id":"INT-001","p99_ms":1200}],"availability":0.997}"#,
+    )
+    .expect("metrics");
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("nfr")
+        .arg("verify")
+        .arg(case.as_os_str())
+        .arg("--metrics")
+        .arg(metrics.as_os_str());
+    cmd.assert()
+        .code(1)
+        .stdout(contains("runtime-latency-exceeded"))
+        .stdout(contains("INT-001"))
+        .stdout(contains("runtime-availability-below-sla"));
+
+    // Метрики в пределах бюджетов и SLA — PASS (exit 0).
+    std::fs::write(
+        &metrics,
+        r#"{"operations":[{"id":"INT-001","p99_ms":700}],"availability":0.9999,"error_rate":0.0001}"#,
+    )
+    .expect("metrics");
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("nfr")
+        .arg("verify")
+        .arg(case.as_os_str())
+        .arg("--metrics")
+        .arg(metrics.as_os_str());
+    cmd.assert().success().stdout(contains("Итог: PASS"));
+}
+
 /// `arch-be nfr budget`: hop без заявленного бюджета → error, exit 1.
 #[test]
 fn nfr_budget_missing_hop_budget_exits_1() {
@@ -1392,6 +1437,128 @@ fn gate_clean_repo_exits_0() {
         .stdout(contains("[PASS] rule_weakened"))
         .stdout(contains("[SKIP] trace_check"))
         .stdout(contains("Итог: PASS"));
+}
+
+/// D2 (ADR-059): `gate --shadow-constraints` добавляет теневой блок —
+/// новые находки по правилам-кандидатам, — не меняя основной вердикт и
+/// exit-код; без флага блока нет, а отчёт прогона сохраняется для флота.
+#[test]
+fn gate_shadow_constraints_is_additive_and_saved() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = gate_repo(tmp.path());
+    std::fs::create_dir_all(repo.join("src")).expect("mkdir src");
+    // Размеченная метка, которой нет в текущем реестре: основной вердикт
+    // по ней зелёный (правила нет), теневой — красный (правило появится).
+    std::fs::write(repo.join("src/a.py"), "SECRET=42\n").expect("write py");
+
+    // Без флага — теневого блока нет.
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("gate").arg("--repo").arg(repo.as_os_str());
+    cmd.assert()
+        .success()
+        .stdout(contains("Итог: PASS"))
+        .stdout(predicates::str::contains("Теневой гейт").not());
+
+    // Реестр-кандидат: тот же + новое error-правило X-2 по SECRET.
+    let shadow = tmp.path().join("shadow-constraints.yaml");
+    std::fs::write(
+        &shadow,
+        "rules:\n\
+         \x20 - name: spine_present\n    type: file_exists\n    path: \"ARCHITECTURE-SPINE.md\"\n    severity: error\n\
+         \x20 - name: no_pan\n    type: must_not_contain\n    glob: \"**/*.py\"\n    pattern: 'PAN'\n    severity: error\n\
+         \x20 - name: X-2\n    type: must_not_contain\n    glob: \"**/*.py\"\n    pattern: 'SECRET'\n    severity: error\n",
+    )
+    .expect("shadow constraints");
+
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("gate")
+        .arg("--repo")
+        .arg(repo.as_os_str())
+        .arg("--shadow-constraints")
+        .arg(shadow.as_os_str());
+    cmd.assert()
+        .success()
+        .stdout(contains("Итог: PASS"))
+        .stdout(contains("Теневой гейт"))
+        .stdout(contains("X-2"))
+        .stdout(contains("основной вердикт не изменён"));
+    // Отчёт прогона — для флотового среза (`control report --level corp`).
+    assert!(
+        repo.join(".arch-handoff/shadow.json").exists(),
+        "shadow-отчёт сохранён"
+    );
+    // JSON-конверт: аддитивный ключ shadow, схема вердикта не меняется.
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("gate")
+        .arg("--repo")
+        .arg(repo.as_os_str())
+        .arg("--shadow-constraints")
+        .arg(shadow.as_os_str())
+        .arg("--format")
+        .arg("json");
+    cmd.assert()
+        .success()
+        .stdout(contains("arch-be/gate-verdict/v1"))
+        .stdout(contains("\"shadow\""))
+        .stdout(contains("\"X-2\""));
+}
+
+/// D1 (ADR-059): `gate --format bitbucket-insights` — валидный JSON-отчёт
+/// Code Insights (key/title/result) в stdout; exit-код вердикта не меняется.
+#[test]
+fn gate_format_bitbucket_insights_is_machine_json() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = gate_repo(tmp.path());
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("gate")
+        .arg("--repo")
+        .arg(repo.as_os_str())
+        .arg("--format")
+        .arg("bitbucket-insights");
+    cmd.assert()
+        .success()
+        .stdout(contains("\"key\": \"spine-gate\""))
+        .stdout(contains("\"result\": \"PASS\""));
+}
+
+/// D1 (ADR-059): `connect ci --provider bitbucket` пишет Jenkinsfile-блок с
+/// маркерами и curl в Code Insights/build-status; повтор идемпотентен.
+#[test]
+fn connect_ci_bitbucket_writes_insights_jenkinsfile() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path().join("proj");
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("connect")
+        .arg("ci")
+        .arg("--provider")
+        .arg("bitbucket")
+        .arg("--dir")
+        .arg(dir.as_os_str());
+    cmd.assert()
+        .success()
+        .stdout(contains("Jenkinsfile"))
+        .stdout(contains("bitbucket"));
+    let text = std::fs::read_to_string(dir.join("Jenkinsfile")).expect("read");
+    assert!(text.contains("spine-connect:begin"), "{text}");
+    assert!(text.contains("--format bitbucket-insights"), "{text}");
+    assert!(text.contains("/rest/insights/1.0"), "{text}");
+    assert!(text.contains("build-status/1.0/commits"), "{text}");
+    assert!(text.contains("[ТРЕБУЕТ ПРОВЕРКИ"), "{text}");
+    // Повтор — без изменений.
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("connect")
+        .arg("ci")
+        .arg("--provider")
+        .arg("bitbucket")
+        .arg("--dir")
+        .arg(dir.as_os_str());
+    cmd.assert().success().stdout(contains("Без изменений"));
+    assert_eq!(
+        std::fs::read_to_string(dir.join("Jenkinsfile")).expect("read"),
+        text,
+        "повтор изменил файл"
+    );
 }
 
 /// Анти-ослабление: агент удалил правило `no_pan`, чтобы пройти гейт —
@@ -2672,6 +2839,7 @@ fn connect_ci_dry_run_for_all_providers() {
         ("gitlab", ".gitlab-ci.yml"),
         ("github", ".github/workflows/spine-gate.yml"),
         ("jenkins", "Jenkinsfile"),
+        ("bitbucket", "Jenkinsfile"),
     ] {
         let mut cmd = arch_cmd(tmp.path());
         cmd.arg("connect")

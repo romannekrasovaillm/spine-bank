@@ -169,6 +169,19 @@ pub(crate) enum NfrCmd {
         /// Корень кейса (каталог с model/).
         dir: PathBuf,
     },
+    /// Runtime fitness (волна D, D4; ADR-059): сверка фактических метрик из
+    /// JSON-файла (p99 по операциям, availability, error rate) с бюджетами и
+    /// SLA модели; расхождение — error-находка с виновным hop/звеном (exit 1).
+    /// Без сети: источник — файл (экспорт Prometheus — будущая работа).
+    Verify {
+        /// Корень кейса (каталог с model/; по умолчанию — текущий).
+        #[arg(default_value = ".")]
+        dir: PathBuf,
+        /// JSON-файл метрик: `operations[].p99_ms`, `availability`,
+        /// `error_rate`, опц. `error_rate_target`.
+        #[arg(long, value_name = "FILE")]
+        metrics: PathBuf,
+    },
 }
 
 /// `arch-be model`: типизированная модель архитектуры (ADR-003).
@@ -449,6 +462,19 @@ pub(crate) fn cmd_nfr(cmd: NfrCmd) -> Result<()> {
         NfrCmd::Cost { dir } => {
             let report = arch_harness::nfr::cost_check(&dir)
                 .with_context(|| format!("расчёт стоимости кейса {}", dir.display()))?;
+            print!("{}", report.render());
+            if report.has_errors() {
+                std::process::exit(1);
+            }
+        }
+        NfrCmd::Verify { dir, metrics } => {
+            let report = arch_harness::nfr::metrics_verify(&dir, &metrics).with_context(|| {
+                format!(
+                    "runtime fitness кейса {} по метрикам {}",
+                    dir.display(),
+                    metrics.display()
+                )
+            })?;
             print!("{}", report.render());
             if report.has_errors() {
                 std::process::exit(1);

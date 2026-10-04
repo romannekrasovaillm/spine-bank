@@ -59,6 +59,7 @@ mod exec;
 mod registry;
 pub(crate) mod report;
 mod rules;
+mod shadow;
 mod templates;
 mod tools;
 mod types;
@@ -86,6 +87,11 @@ pub use rules::{
     ConstraintsPathResolution, HANDOFF_CONSTRAINTS_PATH, ROOT_CONSTRAINTS_PATH,
     constraints_drift_note, load_fitness_rules, load_fitness_rules_with_skips,
     resolve_constraints_path, resolve_constraints_path_detailed, rule_cards,
+};
+pub use shadow::{
+    SHADOW_RECORD_PATH, SHADOW_RECORD_SCHEMA, ShadowChange, ShadowFleet, ShadowFleetChange,
+    ShadowFleetRule, ShadowRecord, aggregate_shadow, save_shadow_record, shadow_fleet,
+    shadow_records,
 };
 pub(crate) use templates::kebab_slug;
 pub use templates::{adr_new, adr_new_with_author};

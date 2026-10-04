@@ -1022,6 +1022,320 @@ pub fn cost_check(case: &Path) -> Result<CostReport> {
 }
 
 // ---------------------------------------------------------------------------
+// Runtime fitness: сверка фактических метрик с бюджетами/SLA модели (D4)
+// ---------------------------------------------------------------------------
+
+/// Операция из файла метрик (p99, мс).
+#[derive(Debug, Deserialize)]
+struct OperationMetric {
+    /// Id операции (обычно id hop'а `INT-*`).
+    #[serde(default)]
+    id: Option<String>,
+    /// Или название hop'а (альтернатива id).
+    #[serde(default)]
+    name: Option<String>,
+    /// Измеренный p99, мс.
+    p99_ms: f64,
+}
+
+/// Файл фактических метрик (JSON; D4, ADR-059): p99 по операциям, общая
+/// доступность и частота ошибок. Источник — файл (экспорт Prometheus — будущая
+/// работа), сеть в ядре не используется (Core-граница C-34).
+#[derive(Debug, Deserialize)]
+struct MetricsFile {
+    /// Окно измерения (метка, свободный текст).
+    #[serde(default)]
+    window: Option<String>,
+    /// Метрики по операциям.
+    #[serde(default)]
+    operations: Vec<OperationMetric>,
+    /// Измеренная доступность (доля).
+    #[serde(default)]
+    availability: Option<f64>,
+    /// Измеренная частота ошибок (доля).
+    #[serde(default)]
+    error_rate: Option<f64>,
+    /// Явный бюджет частоты ошибок (иначе — из SLA: `1 − SLA`).
+    #[serde(default)]
+    error_rate_target: Option<f64>,
+}
+
+/// Строка сверки одной метрики с бюджетом/целью модели.
+#[derive(Debug)]
+pub struct MetricComparison {
+    /// Субъект сверки (id hop'а `INT-*` либо `availability`/`error_rate`).
+    pub subject: String,
+    /// Что измерено.
+    pub measured: f64,
+    /// Бюджет/цель из модели (`None` — сверять не с чем).
+    pub budget: Option<f64>,
+    /// В пределах бюджета (или бюджета нет — не сравнивалось).
+    pub within: bool,
+}
+
+/// Отчёт `arch-be nfr verify --metrics <файл>` (D4, ADR-059).
+#[derive(Debug)]
+pub struct MetricsReport {
+    /// Корень кейса.
+    pub case: PathBuf,
+    /// Файл метрик.
+    pub metrics: PathBuf,
+    /// Окно измерения (метка).
+    pub window: Option<String>,
+    /// Строки сверки.
+    pub comparisons: Vec<MetricComparison>,
+    /// Находки.
+    pub issues: Vec<NfrIssue>,
+}
+
+impl MetricsReport {
+    /// Есть ли блокирующие находки (exit code 1).
+    #[must_use]
+    pub fn has_errors(&self) -> bool {
+        any_errors(&self.issues)
+    }
+
+    /// Markdown-отчёт: таблица сверки, находки, итог.
+    #[must_use]
+    pub fn render(&self) -> String {
+        let mut s = String::new();
+        let _ = writeln!(s, "# Runtime fitness: {}", self.case.display());
+        let _ = writeln!(s, "\nМетрики: {}", self.metrics.display());
+        if let Some(w) = &self.window {
+            let _ = writeln!(s, "Окно: {w}");
+        }
+        if self.comparisons.is_empty() {
+            let _ = writeln!(s, "\nСверок нет (нет операций/метрик или целей в модели).");
+        } else {
+            let _ = writeln!(s, "\n| Субъект | Измерено | Бюджет/цель | Статус |");
+            let _ = writeln!(s, "|---------|---------:|------------:|--------|");
+            for c in &self.comparisons {
+                let budget = c.budget.map_or_else(|| "—".into(), |b| format!("{b:.6}"));
+                let status = match (c.within, c.budget.is_some()) {
+                    (_, false) => "нет цели",
+                    (true, _) => "OK",
+                    (false, _) => "РАСХОЖДЕНИЕ",
+                };
+                let _ = writeln!(
+                    s,
+                    "| {} | {:.6} | {} | {status} |",
+                    c.subject, c.measured, budget
+                );
+            }
+        }
+        render_issues(
+            &mut s,
+            &self.issues,
+            &format!("сверок: {}", self.comparisons.len()),
+        );
+        s
+    }
+}
+
+/// Разрешает hop по id или названию (только `INT-*` — носители
+/// `latency_budget_ms`).
+fn resolve_hop<'m>(model: &'m Model, key: &str) -> Option<&'m Entity> {
+    model
+        .entities
+        .iter()
+        .find(|e| e.kind == EntityKind::Int && (e.id == key || e.title == key))
+}
+
+/// Проверяет конечность/неотрицательность метрики (иначе — `bad-value`).
+fn metric_value(name: &str, v: f64, source: &Path, issues: &mut Vec<NfrIssue>) -> Option<f64> {
+    if v.is_finite() && v >= 0.0 {
+        return Some(v);
+    }
+    issue(
+        issues,
+        Severity::Error,
+        "bad-value",
+        format!(
+            "{}: метрика `{name}` = {v} — ожидается конечное неотрицательное число",
+            source.display()
+        ),
+    );
+    None
+}
+
+/// Сверка фактических метрик (файл JSON) с бюджетами/SLA модели: p99 операций
+/// против `latency_budget_ms` hop'ов `INT-*`, доступность против минимума
+/// `availability_target` из NFR, частота ошибок против явного
+/// `error_rate_target` или бюджета `1 − SLA`. Расхождение — `error`-находка с
+/// виновным hop/звеном; сети нет (источник — файл).
+///
+/// # Errors
+/// Каталог `<case>/model` отсутствует/не разбирается; файл метрик не читается
+/// или не является валидным JSON.
+pub fn metrics_verify(case: &Path, metrics: &Path) -> Result<MetricsReport> {
+    let model = load_case_model(case)?;
+    let text = std::fs::read_to_string(metrics).map_err(|e| HarnessError::io(metrics, e))?;
+    let file: MetricsFile = serde_json::from_str(&text).map_err(|e| {
+        HarnessError::Config(format!(
+            "метрики {}: невалидный JSON: {e}",
+            metrics.display()
+        ))
+    })?;
+    let mut issues = Vec::new();
+    push_load_skip_note(&model, &mut issues);
+    let mut comparisons = Vec::new();
+
+    // p99 по операциям: сверять нечего без бюджета hop'а — warn, не error.
+    for op in &file.operations {
+        let key = op
+            .id
+            .clone()
+            .or_else(|| op.name.clone())
+            .unwrap_or_default();
+        let Some(measured) = metric_value("p99_ms", op.p99_ms, metrics, &mut issues) else {
+            continue;
+        };
+        let Some(hop) = resolve_hop(&model, &key) else {
+            issue(
+                &mut issues,
+                Severity::Warn,
+                "runtime-unknown-operation",
+                format!("операция '{key}' не найдена среди INT-* модели — сверка p99 пропущена"),
+            );
+            continue;
+        };
+        let budget = hop
+            .latency_budget_ms
+            .and_then(|b| checked(hop, "latency_budget_ms", b, &mut issues));
+        if budget.is_none() {
+            issue(
+                &mut issues,
+                Severity::Warn,
+                "runtime-no-budget",
+                format!(
+                    "{} ({}) без заявленного бюджета (latency_budget_ms) — p99 {measured:.0} мс не с чем сверять",
+                    hop.id, hop.title
+                ),
+            );
+        }
+        let within = budget.is_none_or(|b| measured <= b);
+        if let Some(b) = budget {
+            if measured > b {
+                issue(
+                    &mut issues,
+                    Severity::Error,
+                    "runtime-latency-exceeded",
+                    format!(
+                        "{} ({}) — фактический p99 {measured:.0} мс превышает бюджет {b:.0} мс",
+                        hop.id, hop.title
+                    ),
+                );
+            }
+        }
+        comparisons.push(MetricComparison {
+            subject: hop.id.clone(),
+            measured,
+            budget,
+            within,
+        });
+    }
+
+    // Доступность: строжайший SLA из NFR (минимум availability_target).
+    let sla = model
+        .entities
+        .iter()
+        .filter(|e| e.kind == EntityKind::Nfr)
+        .filter_map(|e| {
+            e.availability_target
+                .and_then(|a| checked_fraction(e, "availability_target", a, &mut issues))
+                .map(|a| (e.id.clone(), a))
+        })
+        .min_by(|a, b| a.1.total_cmp(&b.1));
+    if let Some(measured) = file.availability {
+        if let Some(measured) = metric_value("availability", measured, metrics, &mut issues) {
+            if let Some((nfr_id, target)) = &sla {
+                let within = measured >= *target;
+                if !within {
+                    issue(
+                        &mut issues,
+                        Severity::Error,
+                        "runtime-availability-below-sla",
+                        format!(
+                            "фактическая доступность {measured:.6} ниже SLA {target:.6} ({nfr_id})"
+                        ),
+                    );
+                }
+                comparisons.push(MetricComparison {
+                    subject: "availability".to_string(),
+                    measured,
+                    budget: Some(*target),
+                    within,
+                });
+            } else {
+                issue(
+                    &mut issues,
+                    Severity::Warn,
+                    "runtime-no-sla",
+                    "измерена доступность, но в модели нет цели (availability_target у NFR)".into(),
+                );
+                comparisons.push(MetricComparison {
+                    subject: "availability".to_string(),
+                    measured,
+                    budget: None,
+                    within: true,
+                });
+            }
+        }
+    }
+
+    // Частота ошибок: явный бюджет или дополнение SLA.
+    if let Some(measured) = file.error_rate {
+        if let Some(measured) = metric_value("error_rate", measured, metrics, &mut issues) {
+            let allowed = file
+                .error_rate_target
+                .and_then(|t| metric_value("error_rate_target", t, metrics, &mut issues))
+                .or_else(|| sla.as_ref().map(|(_, target)| 1.0 - target));
+            if let Some(allowed) = allowed {
+                let within = measured <= allowed;
+                if !within {
+                    issue(
+                        &mut issues,
+                        Severity::Error,
+                        "runtime-error-rate-exceeded",
+                        format!(
+                            "фактическая частота ошибок {measured:.6} превышает бюджет {allowed:.6}"
+                        ),
+                    );
+                }
+                comparisons.push(MetricComparison {
+                    subject: "error_rate".to_string(),
+                    measured,
+                    budget: Some(allowed),
+                    within,
+                });
+            } else {
+                issue(
+                    &mut issues,
+                    Severity::Warn,
+                    "runtime-no-error-budget",
+                    "измерена частота ошибок, но нет ни error_rate_target, ни SLA для бюджета"
+                        .into(),
+                );
+                comparisons.push(MetricComparison {
+                    subject: "error_rate".to_string(),
+                    measured,
+                    budget: None,
+                    within: true,
+                });
+            }
+        }
+    }
+
+    Ok(MetricsReport {
+        case: case.to_path_buf(),
+        metrics: metrics.to_path_buf(),
+        window: file.window.clone(),
+        comparisons,
+        issues,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Агентный инструмент `nfr_check` (мост в MCP, транш 1 инверсии)
 // ---------------------------------------------------------------------------
 
@@ -1710,5 +2024,97 @@ mod tests {
             .expect("вызов");
         assert!(out.is_error, "{}", out.content);
         assert!(out.content.contains("model"), "{}", out.content);
+    }
+
+    // --- runtime fitness: nfr verify --metrics (D4, ADR-059) ---------------
+
+    /// Пишет JSON-файл метрик в кейс.
+    fn metrics_file(case: &Path, json: &str) -> PathBuf {
+        let p = case.join("metrics.json");
+        std::fs::write(&p, json).expect("metrics");
+        p
+    }
+
+    /// Расхождение p99 и доступности → error-находки с виновным hop/звеном.
+    #[test]
+    fn metrics_verify_flags_latency_and_availability_with_guilty_hop() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let case = tmp.path();
+        int(case, 1, Some(800.0));
+        nfr(case, 4, "availability_target: 0.9995\n", "");
+        let metrics = metrics_file(
+            case,
+            r#"{"operations": [{"id": "INT-001", "p99_ms": 1200}], "availability": 0.997}"#,
+        );
+        let report = metrics_verify(case, &metrics).expect("отчёт");
+        assert!(report.has_errors(), "{:?}", report.issues);
+        let lat = report
+            .issues
+            .iter()
+            .find(|i| i.rule == "runtime-latency-exceeded")
+            .expect("latency");
+        assert!(lat.message.contains("INT-001"), "{}", lat.message);
+        let av = report
+            .issues
+            .iter()
+            .find(|i| i.rule == "runtime-availability-below-sla")
+            .expect("availability");
+        assert!(av.message.contains("NFR-004"), "{}", av.message);
+        assert!(report.render().contains("Итог: FAIL"));
+    }
+
+    /// Метрики в пределах бюджетов/SLA — PASS, сверки перечислены.
+    #[test]
+    fn metrics_verify_passes_when_metrics_within_budgets() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let case = tmp.path();
+        int(case, 1, Some(1500.0));
+        nfr(case, 4, "availability_target: 0.999\n", "");
+        let metrics = metrics_file(
+            case,
+            r#"{
+                "window": "2026-10-04T00:00:00Z/PT1H",
+                "operations": [{"id": "INT-001", "p99_ms": 1200}],
+                "availability": 0.9995,
+                "error_rate": 0.0001
+            }"#,
+        );
+        let report = metrics_verify(case, &metrics).expect("отчёт");
+        assert!(!report.has_errors(), "{:?}", report.issues);
+        assert_eq!(report.comparisons.len(), 3, "{:?}", report.comparisons);
+        assert!(report.render().contains("Итог: PASS"));
+        assert_eq!(report.window.as_deref(), Some("2026-10-04T00:00:00Z/PT1H"));
+    }
+
+    /// Операция, которой нет в модели, — warn (не блокирует сверку остальных).
+    #[test]
+    fn metrics_verify_unknown_operation_is_warn() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let case = tmp.path();
+        int(case, 1, Some(800.0));
+        let metrics = metrics_file(
+            case,
+            r#"{"operations": [{"id": "INT-999", "p99_ms": 100}]}"#,
+        );
+        let report = metrics_verify(case, &metrics).expect("отчёт");
+        assert!(!report.has_errors(), "{:?}", report.issues);
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|i| i.rule == "runtime-unknown-operation" && i.severity == Severity::Warn),
+            "{:?}",
+            report.issues
+        );
+    }
+
+    /// Битый JSON метрик — ошибка чтения, не молчаливый PASS.
+    #[test]
+    fn metrics_verify_bad_json_is_error() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let case = tmp.path();
+        int(case, 1, Some(800.0));
+        let metrics = metrics_file(case, "{ not json");
+        assert!(metrics_verify(case, &metrics).is_err());
     }
 }

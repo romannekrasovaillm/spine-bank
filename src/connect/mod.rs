@@ -62,7 +62,7 @@
 //! Особые значения host — не агенты, а гейты, не зависящие от хоста
 //! (бэклог волны 2, п.8: хуки ненадёжны — у qwen headless-файринг не
 //! подтверждён, у Codex lifecycle-хуков нет):
-//! - `ci` (`--provider gitlab|github|jenkins`): готовая джоба архитектурного
+//! - `ci` (`--provider gitlab|github|jenkins|bitbucket`): готовая джоба архитектурного
 //!   гейта — `.gitlab-ci.yml` (мердж-блок между маркерами
 //!   `# spine-connect:begin/end`, чужое не затирается; нарушения видны в
 //!   интерфейсе merge request из артефакта `reports.codequality`),

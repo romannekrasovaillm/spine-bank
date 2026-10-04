@@ -233,9 +233,10 @@ enum Cmd {
         #[arg(long)]
         constraints: Option<PathBuf>,
         /// Формат вывода: text (дефолт) | json (конверт вердикта с
-        /// аттестацией) | sarif | junit | gitlab-codequality | markdown.
-        /// Машинные форматы — строго в stdout (артефакт CI), exit-код не
-        /// меняется (красный гейт — данные отчёта: 1; INCOMPLETE: 3).
+        /// аттестацией) | sarif | junit | gitlab-codequality |
+        /// bitbucket-insights | markdown. Машинные форматы — строго в stdout
+        /// (артефакт CI), exit-код не меняется (красный гейт — данные отчёта:
+        /// 1; INCOMPLETE: 3).
         #[arg(long, default_value = "text", value_name = "FORMAT")]
         format: String,
         /// Сверить ранее сохранённый конверт вердикта с текущим состоянием
@@ -255,6 +256,14 @@ enum Cmd {
         /// `ARCH_NO_EXEC=1`; приоритет над allow-файлом `rules allow`.
         #[arg(long)]
         no_exec: bool,
+        /// Теневой реестр правил (волна D, D2; ADR-059): второй прогон того
+        /// же конвейера по файлу-кандидату CONSTRAINTS.yaml — в отчёт
+        /// добавляется блок shadow «что покраснеет при переходе» (новые
+        /// находки / исчезнувшие / смена severity по id правила). Решающий
+        /// вердикт и exit-код не меняются; результат прогона сохраняется в
+        /// `<repo>/.arch-handoff/shadow.json` для `control report --level corp`.
+        #[arg(long, value_name = "FILE")]
+        shadow_constraints: Option<PathBuf>,
     },
     /// Метрика доверия к контуру (W4): положение на шкале 1–5 с ЯКОРЯМИ и
     /// ДОКАЗАТЕЛЬСТВАМИ — какие якоря выполнены, какие нет и почему. Источники:
@@ -551,14 +560,15 @@ enum Cmd {
     /// Подключить Spine к внешнему CLI-агенту (MCP-сервер + скиллы + хуки):
     /// claude | qwen | gigacode | codex | kimi | omp | generic. Особые значения —
     /// гейты, не зависящие от хоста: `ci` (джоба архитектурного гейта под
-    /// `--provider gitlab|github|jenkins`) и `git-hooks` (pre-commit + pre-push).
+    /// `--provider gitlab|github|jenkins|bitbucket`) и `git-hooks` (pre-commit + pre-push).
     /// (Инверсия харнесса, шаг 3; называется `connect`, т.к. `export` занят
     /// экспортом журнала.)
     Connect {
         /// Хост: claude | qwen | gigacode | codex | kimi | omp | generic |
         /// ci | git-hooks.
         host: String,
-        /// CI-провайдер (только для `connect ci`): gitlab | github | jenkins.
+        /// CI-провайдер (только для `connect ci`): gitlab | github | jenkins |
+        /// bitbucket (Bitbucket Data Center — блок Jenkinsfile + Code Insights).
         #[arg(long, value_name = "PROVIDER")]
         provider: Option<String>,
         /// Каталог проекта (по умолчанию — текущий).
@@ -919,6 +929,7 @@ pub(crate) async fn run() -> Result<()> {
             verify_envelope,
             explain,
             no_exec,
+            shadow_constraints,
         }) => {
             let repo = repo.unwrap_or_else(|| PathBuf::from("."));
             // Режим сверки конверта: пересчитывает входы на текущем дереве и
@@ -983,15 +994,39 @@ pub(crate) async fn run() -> Result<()> {
                 exec: arch_harness::cmd_trust::ExecPolicy::cli(no_exec),
                 ..arch_harness::gate::GateOptions::from_config(&cfg)
             };
+            let requirements = arch_harness::gate::GateRequirements::from_config(&cfg.gate);
             let report = arch_harness::gate::run_opts(
                 &repo,
                 route,
                 base.as_deref(),
                 constraints.as_deref(),
                 limits,
-                &arch_harness::gate::GateRequirements::from_config(&cfg.gate),
+                &requirements,
                 &gate_options,
             )?;
+            // D2 (ADR-059): теневой прогон по файлу-кандидату — ДОПОЛНИТЕЛЬНЫЙ
+            // блок; решающий вердикт, exit-код и аттестация не меняются.
+            let shadow = match shadow_constraints.as_deref() {
+                Some(path) => {
+                    let shadow = arch_harness::gate::shadow::evaluate(
+                        &repo,
+                        constraints.as_deref(),
+                        &gate_options,
+                        path,
+                    )?;
+                    // Отчёт прогона для флотового среза (`control report`):
+                    // артефакт, не состояние; сбой записи не валит гейт.
+                    if shadow.invalid.is_none() {
+                        if let Err(e) =
+                            arch_harness::control::save_shadow_record(&repo, &shadow.to_record())
+                        {
+                            tracing::warn!("shadow-отчёт не сохранён: {e}");
+                        }
+                    }
+                    Some(shadow)
+                }
+                None => None,
+            };
             // Паспорт вердикта (W1): строится ДО печати, но вердикт не
             // меняет — страница описывает тот же прогон, а не второй.
             let passport = explain.then(|| arch_harness::passport::Passport::build(&report, &repo));
@@ -1001,6 +1036,11 @@ pub(crate) async fn run() -> Result<()> {
                     // Аддитивный ключ: контракт `gate-verdict/v1` не ломается.
                     envelope["passport"] = passport.to_json();
                 }
+                if let Some(shadow) = &shadow {
+                    // Аддитивный ключ: shadow не входит в свёртку аттестации.
+                    envelope["shadow"] =
+                        serde_json::to_value(shadow.to_record()).unwrap_or(serde_json::Value::Null);
+                }
                 let text = serde_json::to_string_pretty(&envelope)
                     .unwrap_or_else(|_| envelope.to_string());
                 println!("{text}");
@@ -1008,14 +1048,21 @@ pub(crate) async fn run() -> Result<()> {
                 // Одна страница вместо отчёта: паспорт — надмножество
                 // (блок 1 несёт те же составляющие с теми же числами).
                 print!("{}", passport.render());
+                if let Some(shadow) = &shadow {
+                    print!("{}", arch_harness::gate::shadow::render(shadow));
+                }
             } else {
                 match format {
                     arch_harness::report_fmt::ReportFormat::Text => {
                         print!("{}", arch_harness::gate::render(&report));
+                        if let Some(shadow) = &shadow {
+                            print!("{}", arch_harness::gate::shadow::render(shadow));
+                        }
                     }
                     machine => {
                         // Машинные форматы — строго в stdout (артефакт CI);
-                        // exit-код тот же, что у текста.
+                        // exit-код тот же, что у текста. Shadow-блок в них не
+                        // входит: он не часть решающего вердикта.
                         print!(
                             "{}",
                             arch_harness::report_fmt::render(
@@ -1453,7 +1500,9 @@ pub(crate) async fn run() -> Result<()> {
                 }
                 if special == "ci" {
                     let raw = provider.as_deref().ok_or_else(|| {
-                        anyhow::anyhow!("connect ci: укажите --provider gitlab|github|jenkins")
+                        anyhow::anyhow!(
+                            "connect ci: укажите --provider gitlab|github|jenkins|bitbucket"
+                        )
                     })?;
                     let provider = arch_harness::connect::CiProvider::parse(raw)
                         .map_err(anyhow::Error::msg)?;

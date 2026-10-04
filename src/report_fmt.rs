@@ -63,13 +63,17 @@ pub enum ReportFormat {
     Junit,
     /// `GitLab` Code Quality (JSON-массив).
     GitlabCodeQuality,
+    /// Bitbucket Code Insights (JSON-отчёт `key`/`title`/`result`/`data[]`) —
+    /// D1, ADR-059.
+    BitbucketInsights,
     /// Markdown-таблица + сводка.
     Markdown,
 }
 
 impl ReportFormat {
     /// Разбор значения CLI: `text` | `sarif` | `junit` | `gitlab-codequality`
-    /// (алиасы `gitlab`, `codequality`) | `markdown` (алиас `md`).
+    /// (алиасы `gitlab`, `codequality`) | `bitbucket-insights` | `markdown`
+    /// (алиас `md`).
     ///
     /// # Errors
     /// Неизвестный формат — сообщение со списком допустимых.
@@ -79,9 +83,11 @@ impl ReportFormat {
             "sarif" => Ok(Self::Sarif),
             "junit" => Ok(Self::Junit),
             "gitlab-codequality" | "gitlab" | "codequality" => Ok(Self::GitlabCodeQuality),
+            "bitbucket-insights" | "bitbucket" => Ok(Self::BitbucketInsights),
             "markdown" | "md" => Ok(Self::Markdown),
             other => Err(format!(
-                "неизвестный формат '{other}' (допустимы: text, sarif, junit, gitlab-codequality, markdown)"
+                "неизвестный формат '{other}' (допустимы: text, sarif, junit, \
+                 gitlab-codequality, bitbucket-insights, markdown)"
             )),
         }
     }
@@ -400,6 +406,7 @@ pub fn render(format: ReportFormat, report: &FmtReport) -> String {
         ReportFormat::Sarif => render_sarif(report),
         ReportFormat::Junit => render_junit(report),
         ReportFormat::GitlabCodeQuality => render_gitlab_code_quality(report),
+        ReportFormat::BitbucketInsights => render_bitbucket_insights(report),
         ReportFormat::Text | ReportFormat::Markdown => render_markdown(report),
     }
 }
@@ -707,6 +714,54 @@ fn render_gitlab_code_quality(report: &FmtReport) -> String {
     }
 }
 
+/// Bitbucket Code Insights: JSON-отчёт `key`/`title`/`result` PASS|FAIL /
+/// `description`/`details` и находки как `data[]`-аннотации (с `path`/`line`,
+/// где находка их несёт). Общеизвестная форма; точные поля и enum'ы
+/// [ТРЕБУЕТ ПРОВЕРКИ по документации Atlassian] — публикует отчёт CI-скрипт
+/// (curl), не ядро (Core-граница C-34). INCOMPLETE (не PASS) даёт `FAIL`.
+fn render_bitbucket_insights(report: &FmtReport) -> String {
+    let findings = all_findings(report);
+    let data: Vec<serde_json::Value> = findings
+        .iter()
+        .map(|f| {
+            let mut entry = serde_json::json!({
+                "title": f.rule,
+                "type": "CODE_SMELL",
+                "severity": match f.severity {
+                    Severity::Error => "HIGH",
+                    Severity::Warn => "LOW",
+                },
+                "message": f.message,
+            });
+            if let Some(file) = &f.file {
+                entry["path"] = serde_json::json!(file);
+                entry["line"] = serde_json::json!(f.line.unwrap_or(1));
+            }
+            entry
+        })
+        .collect();
+    let errors = findings
+        .iter()
+        .filter(|f| f.severity == Severity::Error)
+        .count();
+    let doc = serde_json::json!({
+        "key": "spine-gate",
+        "title": format!("{} — архитектурный гейт Spine", report.tool),
+        "result": if report.passed { "PASS" } else { "FAIL" },
+        "description": report.summary,
+        "details": format!(
+            "{}: {} находок (error: {errors})",
+            report.tool,
+            findings.len()
+        ),
+        "data": data,
+    });
+    match serde_json::to_string_pretty(&doc) {
+        Ok(text) => format!("{text}\n"),
+        Err(_) => format!("{doc}\n"),
+    }
+}
+
 /// Markdown: сводка + таблица находок + статусы групп без находок
 /// (для job summary GitHub/GitLab и комментариев к MR).
 fn render_markdown(report: &FmtReport) -> String {
@@ -843,6 +898,40 @@ mod tests {
             "{:?}",
             group.findings[0]
         );
+    }
+
+    /// D1 (ADR-059): bitbucket-insights — валидный JSON с result=FAIL и
+    /// аннотациями (path/line) у адресных находок.
+    #[test]
+    fn bitbucket_insights_json_has_result_and_annotations() {
+        let norm = FmtReport::from_gate(&gate_report());
+        let text = render(ReportFormat::BitbucketInsights, &norm);
+        let doc: serde_json::Value = serde_json::from_str(&text).expect("валидный JSON");
+        assert_eq!(doc["key"], "spine-gate");
+        assert!(doc.get("title").is_some(), "{doc}");
+        assert_eq!(doc["result"], "FAIL", "{doc}");
+        let data = doc["data"].as_array().expect("data");
+        let ann = data
+            .iter()
+            .find(|a| a["title"] == "no_pan")
+            .expect("аннотация no_pan");
+        assert_eq!(ann["path"], "src/hotfix.py");
+        assert_eq!(ann["line"], 3);
+    }
+
+    /// PASS-вердикт без находок — result=PASS и пустые data.
+    #[test]
+    fn bitbucket_insights_pass_without_findings() {
+        let norm = FmtReport {
+            tool: "arch-be gate",
+            summary: "Гейт: чисто".to_string(),
+            passed: true,
+            groups: Vec::new(),
+        };
+        let text = render(ReportFormat::BitbucketInsights, &norm);
+        let doc: serde_json::Value = serde_json::from_str(&text).expect("валидный JSON");
+        assert_eq!(doc["result"], "PASS", "{doc}");
+        assert_eq!(doc["data"].as_array().map(Vec::len), Some(0), "{doc}");
     }
 
     /// SARIF: валидный JSON, версия 2.1.0, rules+results, level, locations,
@@ -1062,6 +1151,10 @@ mod tests {
         assert_eq!(
             ReportFormat::parse("gitlab"),
             Ok(ReportFormat::GitlabCodeQuality)
+        );
+        assert_eq!(
+            ReportFormat::parse("bitbucket-insights"),
+            Ok(ReportFormat::BitbucketInsights)
         );
         assert_eq!(ReportFormat::parse("markdown"), Ok(ReportFormat::Markdown));
         let err = ReportFormat::parse("pdf").expect_err("неизвестный формат");
