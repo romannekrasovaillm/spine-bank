@@ -58,8 +58,10 @@ const NETWORK_MARKERS: &[&str] = &[
     "connection refused",
     "dns",
     "eof",
-    // Русские формулировки собственных ошибок харнесса (post_once и пр.).
+    // Русские формулировки собственных ошибок харнесса (post_once,
+    // send_phase_error, stream_break_error).
     "таймаут",
+    "сброшено",
 ];
 /// Маркеры переполнения контекста.
 const CONTEXT_MARKERS: &[&str] = &[
@@ -125,6 +127,18 @@ pub fn classify(status: Option<u16>, err_text: &str) -> ErrorKind {
 pub fn is_context_overflow(status: Option<u16>, err_text: &str) -> bool {
     classify(status, err_text) == ErrorKind::ContextOverflow
 }
+
+/// Политика «длинного терпения» агента на транспортных окнах (DPI/VPN
+/// падают пачками по несколько минут, а быстрая Network-политика провайдера
+/// выдыхается за десятки секунд). Итератор задержек используется лениво —
+/// реальный стоп не число попыток, а стенной бюджет агента (`[agent]
+/// network_retry_budget_secs`).
+pub const NETWORK_PATIENCE: RetryPolicy = RetryPolicy {
+    max_attempts: 1_000,
+    base_ms: 5_000,
+    max_ms: 30_000,
+    jitter_pct: 20,
+};
 
 /// Политика повторов для класса ошибки.
 ///
@@ -295,6 +309,14 @@ mod tests {
             ErrorKind::Network
         );
         assert_eq!(classify(None, "operation timed out"), ErrorKind::Network);
+        assert_eq!(
+            classify(
+                None,
+                "glm-5.3: не удалось отправить запрос: соединение сброшено сетью/DPI"
+            ),
+            ErrorKind::Network,
+            "собственная русская формулировка send/stream-ошибок — тоже Network"
+        );
         assert_eq!(classify(None, "что-то непонятное"), ErrorKind::Unknown);
     }
 

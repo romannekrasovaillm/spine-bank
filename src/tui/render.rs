@@ -1134,6 +1134,14 @@ fn draw_status(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
             Style::default().fg(theme.orange).bg(theme.bg),
         ));
     }
+    // Индикатор сети: активное «длинное терпение» или недавний сбой —
+    // отличает «модель молчит» от «сеть/DPI режет вызовы».
+    if let Some(net) = app.net_status_text() {
+        spans.push(Span::styled(
+            format!("  · ⚠ {net}"),
+            Style::default().fg(theme.red).bg(theme.bg),
+        ));
+    }
     // Фоновые субагенты/ralph-циклы: индикатор со спиннером и счётчиком.
     let running = app.subagents_running();
     if running > 0 {

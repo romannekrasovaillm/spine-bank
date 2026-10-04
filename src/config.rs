@@ -235,6 +235,12 @@ pub struct AgentConfig {
     /// Режим памяти сбоев инструментов (правило «ошибся дважды → урок»,
     /// см. модуль [`crate::failure_memory`]).
     pub failure_memory: FailureMemoryMode,
+    /// Стенной бюджет «длинного терпения» на транспортные сбои модели,
+    /// секунд: короткие ретраи провайдера (десятки секунд) не переживают
+    /// минутные окна DPI/VPN, поэтому сетевую ошибку агент пережидает,
+    /// повторяя вызов модели целиком, пока не выйдет этот бюджет. 0 —
+    /// выключено (поведение ≤0.3.12: ход падает сразу).
+    pub network_retry_budget_secs: u64,
 }
 
 /// Режим памяти сбоев инструментов (`[agent] failure_memory`).
@@ -272,6 +278,7 @@ impl Default for AgentConfig {
             compact_l1_pct: 70,
             compact_l3_pct: 95,
             failure_memory: FailureMemoryMode::Propose,
+            network_retry_budget_secs: 180,
         }
     }
 }

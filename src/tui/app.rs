@@ -302,6 +302,14 @@ pub(crate) struct App {
     /// Токен отмены текущего хода (Esc — прервать, Alt+Enter — прервать и
     /// вклинить набранное). None, пока ход не запущен или идёт слэш-команда.
     turn_cancel: Option<CancellationToken>,
+    /// Активно «длинное терпение» сети (агент пережидает окно DPI/VPN):
+    /// индикатор в статус-баре. Ставится по заметке агента
+    /// [`crate::agent::NET_WAIT_NOTE_PREFIX`], снимается по
+    /// [`crate::agent::NET_BACK_NOTE_PREFIX`] и в конце хода.
+    net_retry_active: bool,
+    /// Последняя сетевая ошибка хода (время + краткий текст) — индикатор
+    /// в статус-баре, пока не пройдёт TTL или не придёт успешный ход.
+    last_net_error: Option<(std::time::Instant, String)>,
     /// Очередь сообщений, набранных во время хода агента (FIFO;
     /// срочные — в начало через Alt+Enter или префикс «!!»; Alt+Enter также
     /// прерывает текущий ход, чтобы срочное стартовало немедленно).
@@ -437,6 +445,8 @@ impl App {
             status_extra,
             thinking: false,
             turn_cancel: None,
+            net_retry_active: false,
+            last_net_error: None,
             queue: VecDeque::new(),
             spinner: 0,
             pending_slash: None,
@@ -536,6 +546,23 @@ impl App {
     /// Доп. сообщение статус-бара (ошибки MCP и т.п.).
     pub(crate) fn status_extra(&self) -> Option<&str> {
         self.status_extra.as_deref()
+    }
+
+    /// Сколько показывать последнюю сетевую ошибку в статус-баре.
+    const NET_ERROR_TTL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+    /// Индикатор сети для статус-бара: активное «длинное терпение» —
+    /// «повтор…»; недавняя сетевая ошибка — «сбой Nм назад» (с TTL).
+    pub(crate) fn net_status_text(&self) -> Option<String> {
+        if self.net_retry_active {
+            return Some("сеть: повтор…".to_string());
+        }
+        let (at, _short) = self.last_net_error.as_ref()?;
+        let secs = at.elapsed().as_secs();
+        if secs >= Self::NET_ERROR_TTL.as_secs() {
+            return None;
+        }
+        Some(format!("сеть: сбой {}м назад", secs / 60))
     }
 
     /// Тик таймера: кадр спиннера. Счётчик не ограничен — анимации берут
@@ -1292,14 +1319,26 @@ impl App {
                 self.turn_cancel = None;
                 self.assistant_open = false;
                 self.on_session_back(session);
+                self.net_retry_active = false;
                 match result {
                     Ok(text) => {
+                        // Успешный ход — сетевой индикатор снимается.
+                        self.last_net_error = None;
                         // Без стриминга дельт не было — показываем финальный текст.
                         if !self.turn_got_output && !text.trim().is_empty() {
                             self.push_block(ChatBlock::Assistant(text));
                         }
                     }
                     Err(e) => {
+                        // Сетевая ошибка — индикатор в статус-баре (с TTL):
+                        // пользователь видит, что модель не просто «молчит».
+                        let err_text = e.to_string();
+                        if crate::retry::classify(None, &err_text)
+                            == crate::retry::ErrorKind::Network
+                        {
+                            let short: String = err_text.chars().take(80).collect();
+                            self.last_net_error = Some((std::time::Instant::now(), short));
+                        }
                         self.push_block(ChatBlock::Error(format!("ход завершился ошибкой: {e}")));
                     }
                 }
@@ -1399,6 +1438,13 @@ impl App {
             }
             AgentEvent::Note(text) => {
                 self.assistant_open = false;
+                // Индикатор «длинного терпения» сети в статус-баре: префиксы
+                // заметок — константы агента, связка зафиксирована тестом.
+                if text.starts_with(crate::agent::NET_WAIT_NOTE_PREFIX) {
+                    self.net_retry_active = true;
+                } else if text.starts_with(crate::agent::NET_BACK_NOTE_PREFIX) {
+                    self.net_retry_active = false;
+                }
                 self.push_block(ChatBlock::System {
                     command: "детектор".into(),
                     text,
@@ -2776,5 +2822,41 @@ mod tests {
         assert_eq!(v.scroll_y, 3, "колесо — вертикаль просмотрщика");
         assert_eq!(v.scroll_x, 8, "Shift+колесо — горизонталь");
         assert_eq!(app.scroll, 0, "скролл чата не тронут");
+    }
+
+    #[test]
+    fn net_indicator_follows_agent_notes_and_turn_outcome() {
+        let mut app = test_app();
+        assert_eq!(app.net_status_text(), None, "изначально индикатора нет");
+        // Агент пережидает окно DPI — индикатор «повтор…».
+        app.handle_agent_event(AgentEvent::Note(format!(
+            "{} — повторяю в фоне: попытка 2, пауза 5с",
+            crate::agent::NET_WAIT_NOTE_PREFIX
+        )));
+        assert_eq!(app.net_status_text().as_deref(), Some("сеть: повтор…"));
+        // Модель поднялась — индикатор снят заметкой.
+        app.handle_agent_event(AgentEvent::Note(format!(
+            "{} — продолжаю (попытка 2)",
+            crate::agent::NET_BACK_NOTE_PREFIX
+        )));
+        assert_eq!(app.net_status_text(), None);
+        // Ход упал по сети — индикатор последней ошибки (с TTL).
+        let cfg = Arc::new(crate::config::Config::default());
+        let s1 = stub_session(&cfg);
+        app.handle_message(AppMessage::TurnFinished {
+            session: s1,
+            result: Err(HarnessError::Llm(
+                "glm-5.3: не удалось отправить запрос: operation timed out".into(),
+            )),
+        });
+        let shown = app.net_status_text().expect("индикатор сбоя виден");
+        assert!(shown.contains("сбой"), "текст индикатора: {shown}");
+        // Успешный ход — индикатор снят.
+        let s2 = stub_session(&cfg);
+        app.handle_message(AppMessage::TurnFinished {
+            session: s2,
+            result: Ok("готово".into()),
+        });
+        assert_eq!(app.net_status_text(), None, "после успеха индикатора нет");
     }
 }
