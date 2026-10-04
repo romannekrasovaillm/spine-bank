@@ -559,14 +559,15 @@ enum Cmd {
     /// Подключить Spine к внешнему CLI-агенту (MCP-сервер + скиллы + хуки):
     /// claude | qwen | gigacode | codex | kimi | omp | generic. Особые значения —
     /// гейты, не зависящие от хоста: `ci` (джоба архитектурного гейта под
-    /// `--provider gitlab|github|jenkins`) и `git-hooks` (pre-commit + pre-push).
+    /// `--provider gitlab|github|jenkins|bitbucket`) и `git-hooks` (pre-commit + pre-push).
     /// (Инверсия харнесса, шаг 3; называется `connect`, т.к. `export` занят
     /// экспортом журнала.)
     Connect {
         /// Хост: claude | qwen | gigacode | codex | kimi | omp | generic |
         /// ci | git-hooks.
         host: String,
-        /// CI-провайдер (только для `connect ci`): gitlab | github | jenkins.
+        /// CI-провайдер (только для `connect ci`): gitlab | github | jenkins |
+        /// bitbucket (Bitbucket Data Center — блок Jenkinsfile + Code Insights).
         #[arg(long, value_name = "PROVIDER")]
         provider: Option<String>,
         /// Каталог проекта (по умолчанию — текущий).
@@ -1498,7 +1499,9 @@ pub(crate) async fn run() -> Result<()> {
                 }
                 if special == "ci" {
                     let raw = provider.as_deref().ok_or_else(|| {
-                        anyhow::anyhow!("connect ci: укажите --provider gitlab|github|jenkins")
+                        anyhow::anyhow!(
+                            "connect ci: укажите --provider gitlab|github|jenkins|bitbucket"
+                        )
                     })?;
                     let provider = arch_harness::connect::CiProvider::parse(raw)
                         .map_err(anyhow::Error::msg)?;

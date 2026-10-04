@@ -1458,6 +1458,64 @@ fn gate_shadow_constraints_is_additive_and_saved() {
         .stdout(contains("\"X-2\""));
 }
 
+/// D1 (ADR-059): `gate --format bitbucket-insights` — валидный JSON-отчёт
+/// Code Insights (key/title/result) в stdout; exit-код вердикта не меняется.
+#[test]
+fn gate_format_bitbucket_insights_is_machine_json() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = gate_repo(tmp.path());
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("gate")
+        .arg("--repo")
+        .arg(repo.as_os_str())
+        .arg("--format")
+        .arg("bitbucket-insights");
+    cmd.assert()
+        .success()
+        .stdout(contains("\"key\": \"spine-gate\""))
+        .stdout(contains("\"result\": \"PASS\""));
+}
+
+/// D1 (ADR-059): `connect ci --provider bitbucket` пишет Jenkinsfile-блок с
+/// маркерами и curl в Code Insights/build-status; повтор идемпотентен.
+#[test]
+fn connect_ci_bitbucket_writes_insights_jenkinsfile() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path().join("proj");
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("connect")
+        .arg("ci")
+        .arg("--provider")
+        .arg("bitbucket")
+        .arg("--dir")
+        .arg(dir.as_os_str());
+    cmd.assert()
+        .success()
+        .stdout(contains("Jenkinsfile"))
+        .stdout(contains("bitbucket"));
+    let text = std::fs::read_to_string(dir.join("Jenkinsfile")).expect("read");
+    assert!(text.contains("spine-connect:begin"), "{text}");
+    assert!(text.contains("--format bitbucket-insights"), "{text}");
+    assert!(text.contains("/rest/insights/1.0"), "{text}");
+    assert!(text.contains("build-status/1.0/commits"), "{text}");
+    assert!(text.contains("[ТРЕБУЕТ ПРОВЕРКИ"), "{text}");
+    // Повтор — без изменений.
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("connect")
+        .arg("ci")
+        .arg("--provider")
+        .arg("bitbucket")
+        .arg("--dir")
+        .arg(dir.as_os_str());
+    cmd.assert().success().stdout(contains("Без изменений"));
+    assert_eq!(
+        std::fs::read_to_string(dir.join("Jenkinsfile")).expect("read"),
+        text,
+        "повтор изменил файл"
+    );
+}
+
 /// Анти-ослабление: агент удалил правило `no_pan`, чтобы пройти гейт —
 /// `arch-be gate` падает exit 1 с находкой `rule_weakened` (бэклог п.4:
 /// детекция по коду возврата, не по строкам).
@@ -2736,6 +2794,7 @@ fn connect_ci_dry_run_for_all_providers() {
         ("gitlab", ".gitlab-ci.yml"),
         ("github", ".github/workflows/spine-gate.yml"),
         ("jenkins", "Jenkinsfile"),
+        ("bitbucket", "Jenkinsfile"),
     ] {
         let mut cmd = arch_cmd(tmp.path());
         cmd.arg("connect")

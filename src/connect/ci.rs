@@ -23,10 +23,14 @@ pub enum CiProvider {
     GitHub,
     /// Jenkins: мердж-блок в `Jenkinsfile`, публикация `junit(...)`.
     Jenkins,
+    /// Bitbucket Data Center (D1, ADR-059): мердж-блок в `Jenkinsfile` —
+    /// вердикт публикуется в Code Insights (build-status API и отчёт) под
+    /// merge checks «Required builds» и «Code Insights».
+    Bitbucket,
 }
 
 impl CiProvider {
-    /// Разбор значения CLI: `gitlab` | `github` | `jenkins`.
+    /// Разбор значения CLI: `gitlab` | `github` | `jenkins` | `bitbucket`.
     ///
     /// # Errors
     /// Неизвестный провайдер — сообщение со списком допустимых.
@@ -35,8 +39,10 @@ impl CiProvider {
             "gitlab" | "git-lab" => Ok(Self::GitLab),
             "github" | "git-hub" => Ok(Self::GitHub),
             "jenkins" => Ok(Self::Jenkins),
+            "bitbucket" | "bitbucket-dc" | "bitbucket-data-center" => Ok(Self::Bitbucket),
             other => Err(format!(
-                "неизвестный CI-провайдер '{other}' (допустимы: gitlab, github, jenkins)"
+                "неизвестный CI-провайдер '{other}' \
+                 (допустимы: gitlab, github, jenkins, bitbucket)"
             )),
         }
     }
@@ -48,6 +54,7 @@ impl CiProvider {
             Self::GitLab => "gitlab",
             Self::GitHub => "github",
             Self::Jenkins => "jenkins",
+            Self::Bitbucket => "bitbucket",
         }
     }
 
@@ -56,7 +63,9 @@ impl CiProvider {
         match self {
             Self::GitLab => dir.join(".gitlab-ci.yml"),
             Self::GitHub => dir.join(".github/workflows/spine-gate.yml"),
-            Self::Jenkins => dir.join("Jenkinsfile"),
+            // Bitbucket DC ходит через Jenkins — блок живёт в том же
+            // Jenkinsfile, что у Jenkins-провайдера (маркерный сплайс).
+            Self::Jenkins | Self::Bitbucket => dir.join("Jenkinsfile"),
         }
     }
 
@@ -66,6 +75,7 @@ impl CiProvider {
             Self::GitLab => gitlab_ci_block(),
             Self::GitHub => github_workflow_block(),
             Self::Jenkins => jenkinsfile_block(),
+            Self::Bitbucket => bitbucket_jenkinsfile_block(),
         }
     }
 }
@@ -211,6 +221,91 @@ fn jenkinsfile_block() -> String {
     )
 }
 
+/// Блок Jenkinsfile для Bitbucket Data Center (D1, ADR-059).
+///
+/// Сеть живёт ТОЛЬКО в этом CI-скрипте (curl), в Rust-коде сетевых крейтов
+/// нет (Core-граница C-34). Вердикт гейта сериализуется `--format
+/// bitbucket-insights` и публикуется в Code Insights; build-status API даёт
+/// merge check «Required builds».
+///
+/// Точные пути/поля REST API Code Insights и build-status зависят от версии
+/// Bitbucket DC — при внедрении сверить с документацией Atlassian
+/// (в шаблоне помечено `[ТРЕБУЕТ ПРОВЕРКИ]`); ниже — общеизвестные формы
+/// (report `key`/`title`/`result`/`details`/`data[]`, build-status
+/// `POST /rest/build-status/1.0/commits/<sha>` со `state`).
+const BITBUCKET_BLOCK: &str = r#"// spine-connect:begin — архитектурный гейт Spine (arch-be) → Bitbucket Code Insights
+// Блок перегенерируется: `arch-be connect ci --provider bitbucket`; свои правки — вне маркеров.
+// Bitbucket Data Center + Jenkins. Вердикт доезжает до merge checks проекта:
+//   * «Required builds» — через build-status API (job публикует state коммита);
+//   * «Code Insights»   — через отчёт `--format bitbucket-insights`.
+// Включите оба merge check в настройках репозитория Bitbucket.
+// [ТРЕБУЕТ ПРОВЕРКИ по документации Atlassian]: точные пути/поля REST API Code
+// Insights (reports, annotations) и build-status API зависят от версии Bitbucket DC;
+// аутентификация ниже — Bearer-токен. Сверьте поля с докой вашей версии.
+pipeline {
+    agent any
+    environment {
+        // Заполните под свой проект (или вынесите в глобальные настройки Jenkins).
+        BITBUCKET_URL     = 'https://bitbucket.example.invalid'
+        BITBUCKET_PROJECT = 'PROJ'
+        BITBUCKET_REPO    = 'repo'
+        BITBUCKET_COMMIT  = 'HEAD'
+        BITBUCKET_CREDS   = 'bitbucket-insights-token'
+    }
+    stages {
+        stage('Spine gate') {
+            steps {
+                // Бинарь arch-be (linux-x86_64): A) curl из релизов (ниже);
+                // B) закрытый контур — офлайн-бандл из внутреннего хранилища.
+                sh '''
+                  if ! command -v arch-be >/dev/null 2>&1; then
+                    curl -fsSL -o /tmp/arch-be "${RELEASES_URL:-https://github.com/<org>/<repo>/releases/download}/v@ARCH_BE_VERSION@/arch-be-linux-x86_64" && install -m 755 /tmp/arch-be /usr/local/bin/arch-be
+                  fi
+                  arch-be --version
+                '''
+                script {
+                    // Отчёт Code Insights (JSON) — артефакт публикации; код возврата
+                    // сохраняем: публикуем отчёт и статус даже при красном гейте.
+                    env.SPINE_GATE_EXIT = sh(script: 'arch-be gate --route auto --format bitbucket-insights > spine-insights.json', returnStatus: true).toString()
+                    sh 'arch-be gate --route auto || true'   // текстовая сводка в лог
+                }
+            }
+            post {
+                always {
+                    // [ТРЕБУЕТ ПРОВЕРКИ по документации Atlassian]: путь отчёта
+                    //   PUT /rest/insights/1.0/projects/<proj>/repos/<repo>/reports/<key>
+                    // и аннотаций .../reports/<key>/annotations; build-status —
+                    //   POST /rest/build-status/1.0/commits/<sha> (state INPROGRESS|SUCCESSFUL|FAILED).
+                    withCredentials([string(credentialsId: env.BITBUCKET_CREDS, variable: 'BITBUCKET_TOKEN')]) {
+                        sh '''
+                          set -eu
+                          AUTH="Authorization: Bearer ${BITBUCKET_TOKEN}"
+                          REPORT_URL="${BITBUCKET_URL}/rest/insights/1.0/projects/${BITBUCKET_PROJECT}/repos/${BITBUCKET_REPO}/reports/spine-gate"
+                          curl -fsS -X PUT -H "$AUTH" -H 'Content-Type: application/json' --data @spine-insights.json "$REPORT_URL"
+                          if [ "${SPINE_GATE_EXIT:-1}" = "0" ]; then STATE=SUCCESSFUL; else STATE=FAILED; fi
+                          curl -fsS -X POST -H "$AUTH" -H 'Content-Type: application/json' \
+                            --data "{\"state\":\"${STATE}\",\"key\":\"spine-gate\",\"url\":\"${REPORT_URL}\"}" \
+                            "${BITBUCKET_URL}/rest/build-status/1.0/commits/${BITBUCKET_COMMIT}"
+                        '''
+                    }
+                    archiveArtifacts artifacts: 'spine-insights.json', allowEmptyArchive: true
+                    script {
+                        if (env.SPINE_GATE_EXIT != '0') {
+                            error('Spine gate FAIL — находки в spine-insights.json и в логе джобы')
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+// spine-connect:end"#;
+
+/// Собирает блок Bitbucket, подставляя версию крейта.
+fn bitbucket_jenkinsfile_block() -> String {
+    with_version(BITBUCKET_BLOCK)
+}
+
 /// Заменяет зону между маркерами [`BLOCK_BEGIN`]/[`BLOCK_END`] в существующем
 /// файле; маркеров нет — дописка блока в конец (чужое содержимое сохраняется).
 /// Детерминировано: повторный прогон побайтово совпадает.
@@ -348,6 +443,24 @@ pub fn connect_ci(
                     .to_string(),
             ]);
         }
+        CiProvider::Bitbucket => {
+            report.notes.push(
+                "вердикт публикуется из CI-скрипта curl'ом в Bitbucket Code Insights \
+                 (отчёт `--format bitbucket-insights`) и build-status API; сеть живёт в \
+                 Jenkinsfile заказчика — в Rust-коде её нет (Core-граница C-34)"
+                    .into(),
+            );
+            report.next_steps.extend([
+                "закоммитьте Jenkinsfile (или перенесите блок в свой) — этап 'Spine gate' \
+                 публикует отчёт Insights и статус коммита"
+                    .to_string(),
+                "включите в Bitbucket merge checks «Required builds» и «Code Insights», \
+                 заполните BITBUCKET_URL/PROJECT/REPO и credentialsId (BITBUCKET_CREDS); \
+                 точные пути REST API сверьте с докой Atlassian — в шаблоне помечено \
+                 [ТРЕБУЕТ ПРОВЕРКИ]"
+                    .to_string(),
+            ]);
+        }
     }
     Ok(report)
 }
@@ -401,7 +514,12 @@ mod tests {
             ("post-tool-use", post_tool_use_hook_command()),
             ("pre-push", pre_push_hook_block()),
         ];
-        for provider in [CiProvider::GitLab, CiProvider::GitHub, CiProvider::Jenkins] {
+        for provider in [
+            CiProvider::GitLab,
+            CiProvider::GitHub,
+            CiProvider::Jenkins,
+            CiProvider::Bitbucket,
+        ] {
             blocks.push((provider.name(), provider.job_block()));
         }
         for (name, block) in blocks {
@@ -409,10 +527,10 @@ mod tests {
                 !block.contains("...HEAD"),
                 "{name}: база обязана быть голой ревизией: {block}"
             );
-            // Jenkins-шаблон базу не передаёт вовсе (гейт считает дифф
-            // рабочего дерева против HEAD) — это отдельная тема, не двойной
-            // `...HEAD`; проверяем те шаблоны, где база есть.
-            if name != "jenkins" {
+            // Jenkins/Bitbucket-шаблоны базу не передают вовсе (гейт считает
+            // дифф рабочего дерева против HEAD) — это отдельная тема, не
+            // двойной `...HEAD`; проверяем те шаблоны, где база есть.
+            if name != "jenkins" && name != "bitbucket" {
                 assert!(
                     block.contains("--base "),
                     "{name}: гейт вызывается с базой: {block}"
@@ -427,13 +545,19 @@ mod tests {
         assert_eq!(CiProvider::parse("gitlab"), Ok(CiProvider::GitLab));
         assert_eq!(CiProvider::parse("GitHub"), Ok(CiProvider::GitHub));
         assert_eq!(CiProvider::parse("jenkins"), Ok(CiProvider::Jenkins));
+        assert_eq!(CiProvider::parse("bitbucket"), Ok(CiProvider::Bitbucket));
+        assert_eq!(
+            CiProvider::parse("bitbucket-data-center"),
+            Ok(CiProvider::Bitbucket)
+        );
         let err = CiProvider::parse("gitlab-ci").expect_err("неизвестный провайдер");
         assert!(err.contains("gitlab"), "{err}");
         assert!(err.contains("jenkins"), "{err}");
+        assert!(err.contains("bitbucket"), "{err}");
     }
 
-    /// Джобы всех трёх провайдеров: файл с маркерами и нативной командой
-    /// гейта; сухой прогон ничего не пишет; повтор — без дублей.
+    /// Джобы всех провайдеров: файл с маркерами и нативной командой гейта;
+    /// сухой прогон ничего не пишет; повтор — без дублей.
     #[test]
     fn ci_scaffolds_job_per_provider_idempotently() {
         for (provider, rel, native) in [
@@ -448,6 +572,11 @@ mod tests {
                 "--format sarif",
             ),
             (CiProvider::Jenkins, "Jenkinsfile", "--format junit"),
+            (
+                CiProvider::Bitbucket,
+                "Jenkinsfile",
+                "--format bitbucket-insights",
+            ),
         ] {
             let tmp = tempfile::tempdir().expect("tmp");
             let dir = tmp.path().join("proj");
@@ -565,6 +694,47 @@ mod tests {
         let text = read(&wf);
         assert!(text.contains("--format sarif"), "{text}");
         assert_eq!(text.matches(BLOCK_BEGIN).count(), 1, "{text}");
+    }
+
+    /// D1 (ADR-059): Bitbucket-блок — маркеры, curl в Code Insights
+    /// (`/rest/insights/1.0`) и build-status, комментарий про merge checks;
+    /// повтор обновляет блок внутри маркеров, правки вне маркеров целы.
+    #[test]
+    fn ci_bitbucket_block_publishes_insights_and_keeps_handwritten_zones() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path().join("proj");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let report =
+            connect_ci(CiProvider::Bitbucket, &dir, false, None).expect("connect ci bitbucket");
+        assert!(
+            report.created.iter().any(|p| p.ends_with("Jenkinsfile")),
+            "{:?}",
+            report.created
+        );
+        let text = read(&dir.join("Jenkinsfile"));
+        assert!(text.contains(BLOCK_BEGIN), "{text}");
+        assert!(text.contains("--format bitbucket-insights"), "{text}");
+        // Сеть — только curl в CI-скрипте; путь отчёта помечен проверкой.
+        assert!(text.contains("/rest/insights/1.0"), "{text}");
+        assert!(text.contains("build-status/1.0/commits"), "{text}");
+        assert!(text.contains("Required builds"), "{text}");
+        assert!(text.contains("Code Insights"), "{text}");
+        assert!(text.contains("[ТРЕБУЕТ ПРОВЕРКИ"), "{text}");
+
+        // Правка вне маркеров + повторный вызов: чужое цело, наш блок заменён.
+        let with_own = text.replace(
+            "// spine-connect:end",
+            "// spine-connect:end\n// МОЙ этап\n",
+        );
+        std::fs::write(dir.join("Jenkinsfile"), &with_own).expect("write");
+        connect_ci(CiProvider::Bitbucket, &dir, false, None).expect("повтор");
+        let again = read(&dir.join("Jenkinsfile"));
+        assert!(
+            again.contains("// МОЙ этап"),
+            "правка вне маркеров цела: {again}"
+        );
+        assert!(again.contains("--format bitbucket-insights"), "{again}");
+        assert_eq!(again.matches(BLOCK_BEGIN).count(), 1, "{again}");
     }
 
     /// Маркерный сплайс: замена зоны между маркерами, рукописное снаружи цело.
