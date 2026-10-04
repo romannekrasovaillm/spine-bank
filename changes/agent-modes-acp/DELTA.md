@@ -193,11 +193,20 @@ session/prompt + стрим session/update, request_permission, cancel), но
       `qwen --acp` и `claude-code-acp` (newline-JSON, ответ распарсен,
       authMethods получены); фолбэк auto→headless по authMethods отработал
       в бою на обоих; headless-хвост claude-code выполнил минимальную
-      задачу (файл+коммит+JSON-контракт, 9 с, complete). Полный
-      prompt-turn по ACP — после мини-среза F2 (ложное срабатывание на
-      информационных authMethods). qwen из bash-песочницы не
-      аутентифицируется (env-scrub режет DEEPSEEK_API_KEY); в продуктовом
-      контуре (MCP-сервер) окружение полное.
+      задачу (файл+коммит+JSON-контракт, 9 с, complete).
+      **Финальный прогон (после F2-фикса 34fe43b): полный prompt-turn по
+      ACP подтверждён живьём на `openclaw acp`** — режим acp, адаптер
+      openclaw-acp 2026.9.5 в журнале, request_permission 0, агент выполнил
+      задачу (файл+коммит ac664ce), JSON-контракт complete разобран из
+      финального текста (12.6 с). `claude-code-acp` в live-контуре
+      отвечает -32000 Authentication required на session/prompt:
+      адаптеру Zed нужен OAuth `claude /login`, env-аутентификацию
+      (ANTHROPIC_BASE_URL на открытый шлюз) он не использует — известное
+      ограничение адаптера [ТРЕБУЕТ ПРОВЕРКИ], не клиента; клиент
+      отработал честно (ошибка протокола → ошибка прогона, без тихого
+      фолбэка). qwen из bash-песочницы не аутентифицируется (env-scrub
+      режет DEEPSEEK_API_KEY); в продуктовом контуре (MCP-сервер)
+      окружение полное.
 - [ ] Опционально [ТРЕБУЕТ ПРОВЕРКИ]: TCK
       (github.com/agentclientprotocol/acp-tck, экспериментальный) против
       тестовой фикстуры — подтверждает, что фикстура — честный ACP-агент;
