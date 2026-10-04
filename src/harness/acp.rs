@@ -1214,9 +1214,21 @@ mod tests {
         cfg(mode, AcpMode::Acp)
     }
 
+    /// Есть ли `python3` в PATH: без него фикстуру не запустить, тесты
+    /// скипаются (инвариант A2 — герметичный прогон без внешних зависимостей).
+    fn python3_available() -> bool {
+        std::env::var_os("PATH").is_some_and(|path| {
+            std::env::split_paths(&path).any(|dir| dir.join("python3").is_file())
+        })
+    }
+
     /// Базовая последовательность: initialize → new → prompt → стрим → финал.
     #[tokio::test]
     async fn handshake_stream_and_final_text() {
+        if !python3_available() {
+            eprintln!("skipped: no python3");
+            return;
+        }
         let tmp = tempfile::tempdir().expect("tmp");
         let s = run_session(&session("ok"), tmp.path(), "задача")
             .await
@@ -1242,6 +1254,10 @@ mod tests {
     /// Весь текст (без `tool_call`) — финальный ответ целиком.
     #[tokio::test]
     async fn text_without_tool_calls_is_final() {
+        if !python3_available() {
+            eprintln!("skipped: no python3");
+            return;
+        }
         let tmp = tempfile::tempdir().expect("tmp");
         let s = run_session(&session("plain"), tmp.path(), "задача")
             .await
@@ -1254,6 +1270,10 @@ mod tests {
     /// `session/request_permission` → авто-выбор `allow_once` + журнал.
     #[tokio::test]
     async fn permission_request_auto_allows_once() {
+        if !python3_available() {
+            eprintln!("skipped: no python3");
+            return;
+        }
         let tmp = tempfile::tempdir().expect("tmp");
         let s = run_session(&session("permission"), tmp.path(), "задача")
             .await
@@ -1272,6 +1292,10 @@ mod tests {
     /// Запрос fs-метода агентом → error -32601 (capabilities false).
     #[tokio::test]
     async fn fs_method_is_rejected_with_32601() {
+        if !python3_available() {
+            eprintln!("skipped: no python3");
+            return;
+        }
         let tmp = tempfile::tempdir().expect("tmp");
         let s = run_session(&session("fs"), tmp.path(), "задача")
             .await
@@ -1287,6 +1311,10 @@ mod tests {
     /// Провал инициализации: ранний exit процесса.
     #[tokio::test]
     async fn early_exit_is_init_error() {
+        if !python3_available() {
+            eprintln!("skipped: no python3");
+            return;
+        }
         let tmp = tempfile::tempdir().expect("tmp");
         let err = run_session(&session("init-exit"), tmp.path(), "задача")
             .await
@@ -1298,6 +1326,10 @@ mod tests {
     /// Провал инициализации: таймаут ответа на initialize.
     #[tokio::test]
     async fn init_timeout_is_init_error() {
+        if !python3_available() {
+            eprintln!("skipped: no python3");
+            return;
+        }
         let tmp = tempfile::tempdir().expect("tmp");
         let err = run_session(&session("init-silent"), tmp.path(), "задача")
             .await
@@ -1311,6 +1343,10 @@ mod tests {
     /// классифицируется мягкой отменой, а не таймаутом.
     #[tokio::test]
     async fn cancelled_after_cancel_is_soft_cancelled() {
+        if !python3_available() {
+            eprintln!("skipped: no python3");
+            return;
+        }
         let tmp = tempfile::tempdir().expect("tmp");
         let mut c = session("cancelled-after-cancel");
         c.timeout_secs = 2;
@@ -1339,6 +1375,10 @@ mod tests {
     /// (существующие таймаутные ветки не переписаны).
     #[tokio::test]
     async fn timeout_without_agent_ack_stays_timeout() {
+        if !python3_available() {
+            eprintln!("skipped: no python3");
+            return;
+        }
         let tmp = tempfile::tempdir().expect("tmp");
         let mut c = session("perm-cancel");
         c.timeout_secs = 2;
@@ -1352,6 +1392,10 @@ mod tests {
     /// частичный ответ сохранён, контракт `partial` доходит до потребителя.
     #[tokio::test]
     async fn stop_reason_max_tokens_is_turn_limit() {
+        if !python3_available() {
+            eprintln!("skipped: no python3");
+            return;
+        }
         let tmp = tempfile::tempdir().expect("tmp");
         let s = run_session(&session("limit-tokens"), tmp.path(), "задача")
             .await
@@ -1377,6 +1421,10 @@ mod tests {
     /// Срез «полный stopReason»: `max_turn_requests` → `TurnLimit` с причиной.
     #[tokio::test]
     async fn stop_reason_max_turn_requests_is_turn_limit() {
+        if !python3_available() {
+            eprintln!("skipped: no python3");
+            return;
+        }
         let tmp = tempfile::tempdir().expect("tmp");
         let s = run_session(&session("limit-turns"), tmp.path(), "задача")
             .await
@@ -1397,6 +1445,10 @@ mod tests {
     /// Срез «полный stopReason»: `refusal` → `Refused`, текст агента сохранён.
     #[tokio::test]
     async fn stop_reason_refusal_is_refused() {
+        if !python3_available() {
+            eprintln!("skipped: no python3");
+            return;
+        }
         let tmp = tempfile::tempdir().expect("tmp");
         let s = run_session(&session("refusal"), tmp.path(), "задача")
             .await
@@ -1412,6 +1464,10 @@ mod tests {
     /// Idle-детект: молчание стрима дольше `idle_timeout` → прерывание.
     #[tokio::test]
     async fn idle_timeout_fires_on_silent_stream() {
+        if !python3_available() {
+            eprintln!("skipped: no python3");
+            return;
+        }
         let tmp = tempfile::tempdir().expect("tmp");
         let mut c = session("idle");
         c.timeout_secs = 60;
@@ -1425,6 +1481,10 @@ mod tests {
     /// Активный стрим событий не считается тишиной (C4).
     #[tokio::test]
     async fn active_stream_is_not_interrupted() {
+        if !python3_available() {
+            eprintln!("skipped: no python3");
+            return;
+        }
         let tmp = tempfile::tempdir().expect("tmp");
         let mut c = session("active");
         c.timeout_secs = 60;
@@ -1446,6 +1506,10 @@ mod tests {
     /// переменная окружения до процесса не доходит.
     #[tokio::test]
     async fn env_whitelist_applies_to_acp_process() {
+        if !python3_available() {
+            eprintln!("skipped: no python3");
+            return;
+        }
         let tmp = tempfile::tempdir().expect("tmp");
         let mut c = session("env");
         // Строгий whitelist: только PATH (HOME/LANG/TERM/TMPDIR не критичны,
@@ -1470,6 +1534,10 @@ mod tests {
     /// ними — финальный ответ = ПОСЛЕДНЕЕ сообщение, не «текст после `tool_call`».
     #[tokio::test]
     async fn final_text_is_last_message_by_message_id() {
+        if !python3_available() {
+            eprintln!("skipped: no python3");
+            return;
+        }
         let tmp = tempfile::tempdir().expect("tmp");
         let s = run_session(&session("multi-message"), tmp.path(), "задача")
             .await
@@ -1492,6 +1560,10 @@ mod tests {
     /// информационный список: сессия продолжается, в журнале запись.
     #[tokio::test]
     async fn auth_methods_without_cap_is_informational() {
+        if !python3_available() {
+            eprintln!("skipped: no python3");
+            return;
+        }
         let tmp = tempfile::tempdir().expect("tmp");
         let s = run_session(&session("auth"), tmp.path(), "задача")
             .await
@@ -1515,6 +1587,10 @@ mod tests {
     /// отказ инициализации (клиент аутентификацию не поддерживает).
     #[tokio::test]
     async fn auth_methods_with_cap_is_init_error() {
+        if !python3_available() {
+            eprintln!("skipped: no python3");
+            return;
+        }
         let tmp = tempfile::tempdir().expect("tmp");
         let err = run_session(&session("auth-required"), tmp.path(), "задача")
             .await
@@ -1526,6 +1602,10 @@ mod tests {
     /// F2: пустой `authMethods` без cap — чисто, без записей об аутентификации.
     #[tokio::test]
     async fn empty_auth_methods_is_clean() {
+        if !python3_available() {
+            eprintln!("skipped: no python3");
+            return;
+        }
         let tmp = tempfile::tempdir().expect("tmp");
         let s = run_session(&session("ok"), tmp.path(), "задача")
             .await
@@ -1545,6 +1625,10 @@ mod tests {
     /// журнальная запись с продолжением сессии.
     #[tokio::test]
     async fn version_mismatch_is_init_error() {
+        if !python3_available() {
+            eprintln!("skipped: no python3");
+            return;
+        }
         let tmp = tempfile::tempdir().expect("tmp");
         let err = run_session(&session("version-mismatch"), tmp.path(), "задача")
             .await
@@ -1568,6 +1652,10 @@ mod tests {
     /// сессия живёт до `end_turn` (мимо ветки расхождения).
     #[tokio::test]
     async fn matching_version_is_journaled_and_session_lives() {
+        if !python3_available() {
+            eprintln!("skipped: no python3");
+            return;
+        }
         let tmp = tempfile::tempdir().expect("tmp");
         let s = run_session(&session("ok"), tmp.path(), "задача")
             .await
@@ -1586,6 +1674,10 @@ mod tests {
     /// (старые адаптеры), сессия продолжается штатно.
     #[tokio::test]
     async fn missing_protocol_version_is_tolerated() {
+        if !python3_available() {
+            eprintln!("skipped: no python3");
+            return;
+        }
         let tmp = tempfile::tempdir().expect("tmp");
         let s = run_session(&session("no-version"), tmp.path(), "задача")
             .await
@@ -1601,6 +1693,10 @@ mod tests {
     /// F3: незнакомый `sessionUpdate` журналируется, но не рушит прогон.
     #[tokio::test]
     async fn unknown_session_update_is_journaled_not_fatal() {
+        if !python3_available() {
+            eprintln!("skipped: no python3");
+            return;
+        }
         let tmp = tempfile::tempdir().expect("tmp");
         let s = run_session(&session("unknown-update"), tmp.path(), "задача")
             .await
@@ -1622,6 +1718,10 @@ mod tests {
     /// прогон завершается отменой (не зависанием).
     #[tokio::test]
     async fn pending_permission_denied_on_cancel() {
+        if !python3_available() {
+            eprintln!("skipped: no python3");
+            return;
+        }
         let tmp = tempfile::tempdir().expect("tmp");
         let mut c = session("perm-cancel");
         c.timeout_secs = 2;
@@ -1652,6 +1752,10 @@ mod tests {
     /// `session/close`; агент отвечает и фиксирует факт.
     #[tokio::test]
     async fn session_close_sent_when_capability_declared() {
+        if !python3_available() {
+            eprintln!("skipped: no python3");
+            return;
+        }
         let tmp = tempfile::tempdir().expect("tmp");
         let s = run_session(&session("close"), tmp.path(), "задача")
             .await
@@ -1672,6 +1776,10 @@ mod tests {
     /// F5 (негатив): без cap `session/close` метод не зовётся.
     #[tokio::test]
     async fn session_close_not_called_without_capability() {
+        if !python3_available() {
+            eprintln!("skipped: no python3");
+            return;
+        }
         let tmp = tempfile::tempdir().expect("tmp");
         let s = run_session(&session("ok"), tmp.path(), "задача")
             .await
