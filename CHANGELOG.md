@@ -47,6 +47,18 @@
   (`tests/fixtures/acp_agent.py`), сети не требуют. Примеры acp-секций для
   пяти агентов хоста — в `config.example.toml`, разбор режимов —
   `docs/harness_integrations.md`.
+- **Срез «полный stopReason» (дельта `agent-modes-acp`).** ACP-ход различает
+  завершение по `stopReason` ответа агента: `cancelled` → новый
+  `Termination::Cancelled` (мягкая отмена, итог «прерван», не ошибка),
+  `max_tokens`/`max_turn_requests` → новый `Termination::TurnLimit(reason)`
+  (частичный ответ сохраняется и разбирается на JSON-контракт, в итог —
+  предупреждение «ход оборван по лимиту (<причина>), ответ частичный»,
+  пост-гейт и авто-коммит — как для `Completed`), `refusal` → новый
+  `Termination::Refused` (ошибка прогона, текст агента сохранён в выводе).
+  MCP-контракт результата (`status`/`assumptions`/`open_questions`/`conflicts`)
+  и `gate-verdict/v1` не меняются; headless-путь и его тексты (`Completed`/
+  `AbsoluteTimeout`/`IdleTimeout`) байт-в-байт прежние. CLI `harness-run` при
+  `refusal` завершается кодом 1.
 
 ### Что может покраснеть после обновления
 
@@ -102,6 +114,12 @@
   допуска. Старые конфиги (без `mode`/`acp`) работают как раньше: headless
   без изменений. Итог прогона несёт режим (`prompt` | `acp` | `fallback`),
   версию ACP-адаптера и число `request_permission`.
+- **ACP-прогоны с `max_tokens`/`max_turn_requests`/`refusal` теперь дают
+  видимые `TurnLimit`/`Refused` вместо `Completed`.** В итоге прогона
+  появляется предупреждение (обрыв по лимиту) или признак ошибки (отказ
+  агента) там, где раньше любое значение `stopReason` считалось успешным
+  завершением хода. Ветки таймаутов не изменились: прерывание без
+  подтверждения агента остаётся `AbsoluteTimeout`/`IdleTimeout`.
 - **D — слои после гейта (ADR-059): новые флаги и подкоманды НЕ краснеют
   сами по себе.** `gate --shadow-constraints <файл>` добавляет в отчёт
   отдельный блок shadow (новые/исчезнувшие находки, смена severity,

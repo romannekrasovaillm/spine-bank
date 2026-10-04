@@ -874,17 +874,37 @@ pub(crate) async fn run() -> Result<()> {
                      --owner-approve, отклонение — arch worktree drop {id}"
                 );
             }
-            if run.termination != Termination::Completed {
-                eprintln!(
-                    "⚠ прогон ПРЕРВАН ({}{}); процессная группа завершена, \
-                     репозиторий может быть в промежуточном состоянии — проверьте git status",
-                    run.termination,
-                    if run.termination == Termination::IdleTimeout {
-                        format!(" {} с", hcfg.idle_timeout_secs)
-                    } else {
-                        format!(" {} с", hcfg.timeout_secs)
-                    }
-                );
+            match &run.termination {
+                Termination::Completed => {}
+                Termination::AbsoluteTimeout | Termination::IdleTimeout => {
+                    eprintln!(
+                        "⚠ прогон ПРЕРВАН ({}{}); процессная группа завершена, \
+                         репозиторий может быть в промежуточном состоянии — проверьте git status",
+                        run.termination,
+                        if run.termination == Termination::IdleTimeout {
+                            format!(" {} с", hcfg.idle_timeout_secs)
+                        } else {
+                            format!(" {} с", hcfg.timeout_secs)
+                        }
+                    );
+                }
+                // Срез «полный stopReason» (дельта agent-modes-acp): мягкие
+                // завершения ACP-хода — не ошибка исполнения (тихий успех
+                // тоже исключён: предупреждение видно).
+                Termination::Cancelled => eprintln!(
+                    "⚠ прогон ПРЕРВАН МЯГКО: агент подтвердил отмену \
+                     (stopReason=cancelled); частичный вывод сохранён, пост-гейт и \
+                     авто-коммит — как для завершённого хода"
+                ),
+                Termination::TurnLimit(reason) => eprintln!(
+                    "⚠ ПРЕДУПРЕЖДЕНИЕ: ход оборван по лимиту ({reason}), ответ частичный; \
+                     частичный ответ разобран на JSON-контракт, пост-гейт и авто-коммит — \
+                     как для завершённого хода"
+                ),
+                Termination::Refused => eprintln!(
+                    "⚠ прогон ОТКАЗАН агентом (stopReason=refusal) — ошибка прогона; \
+                     текст агента — в выводе ниже"
+                ),
             }
             println!(
                 "── stdout (exit {:?}, {:.1}s) ──",
@@ -893,6 +913,10 @@ pub(crate) async fn run() -> Result<()> {
             println!("{}", run.stdout);
             if !run.stderr.is_empty() {
                 eprintln!("── stderr ──\n{}", run.stderr);
+            }
+            // Отказ агента — ошибка прогона: ненулевой exit (текст уже выведен).
+            if matches!(run.termination, Termination::Refused) {
+                std::process::exit(1);
             }
             // Скриптовый гейт: status=blocked — код 2; непустые
             // conflicts_with_prior_decisions — код 3 (конфликт со spine

@@ -886,6 +886,42 @@ fn harness_run_acp_mode_reports_mode_and_adapter() {
         .stdout(contains("status=complete"));
 }
 
+/// Срез «полный stopReason» (дельта agent-modes-acp): отказ агента
+/// (`stopReason=refusal`) — ошибка прогона: CLI завершается кодом 1, текст
+/// отказа сохранён в выводе.
+#[test]
+#[cfg(feature = "harness")]
+fn harness_run_acp_refusal_exits_1() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let home = tmp.path();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/acp_agent.py");
+    let config = home.join("config.toml");
+    let text = format!(
+        "[harnesses.fake]\nbinary = 'cat'\nprompt_mode = 'stdin'\n\
+         timeout_secs = 30\nidle_timeout_secs = 0\nauto_commit = false\n\
+         [harnesses.fake.acp]\nbinary = 'python3'\nargs = ['{}', 'refusal']\n\
+         init_timeout_secs = 5\ncancel_grace_secs = 1\n",
+        fixture.display()
+    );
+    std::fs::write(&config, text).expect("запись config.toml");
+    let repo = home.join("repo");
+    std::fs::create_dir_all(&repo).expect("mkdir repo");
+    let mut cmd = arch_cmd(home);
+    cmd.arg("--config")
+        .arg(config.as_os_str())
+        .arg("harness-run")
+        .arg("fake")
+        .arg("--repo")
+        .arg(repo.as_os_str())
+        .arg("--task")
+        .arg("тестовая задача");
+    cmd.assert()
+        .failure()
+        .code(1)
+        .stderr(contains("ОТКАЗАН"))
+        .stdout(contains("отказываюсь выполнять"));
+}
+
 /// C2 (RA-9): на маршруте Critical из пакета процесс исполнителя получает
 /// только whitelist окружения — секретоподобная переменная сервера в него не
 /// протекает. `env_inherit = true` возвращает полное наследование, но с

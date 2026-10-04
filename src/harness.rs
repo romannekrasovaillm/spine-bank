@@ -74,7 +74,8 @@ pub struct HarnessRun {
     /// Как завершился прогон.
     pub termination: Termination,
     /// Авто-коммит незакоммиченных правок исполнителя (None — не потребовался:
-    /// дерево чистое, прогон прерван, репозиторий не git или опция выключена).
+    /// дерево чистое, прогон прерван жёстко (таймаут/отказ), репозиторий не
+    /// git или опция выключена).
     pub auto_commit: Option<AutoCommit>,
     /// Механически разобранный JSON-контракт результата из stdout
     /// (валидация схемы — [`parse_result_contract`]).
@@ -352,8 +353,33 @@ pub struct AutoCommit {
     pub message: String,
 }
 
-/// Способ завершения прогона харнесса.
+/// Причина обрыва хода по лимиту агента (`stopReason` ACP, дельта
+/// `agent-modes-acp`, срез «полный stopReason»).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TurnLimitReason {
+    /// Исчерпан лимит выходных токенов хода (`max_tokens`).
+    #[serde(rename = "max_tokens")]
+    MaxTokens,
+    /// Исчерпан лимит числа ходов агента (`max_turn_requests`).
+    #[serde(rename = "max_turn_requests")]
+    MaxTurnRequests,
+}
+
+impl std::fmt::Display for TurnLimitReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MaxTokens => write!(f, "max_tokens"),
+            Self::MaxTurnRequests => write!(f, "max_turn_requests"),
+        }
+    }
+}
+
+/// Способ завершения прогона харнесса.
+///
+/// Варианты `Cancelled`/`TurnLimit`/`Refused` приходят из ACP-хода (по
+/// `stopReason` агента); headless-путь их не порождает — там прежние
+/// `Completed`/`AbsoluteTimeout`/`IdleTimeout` и их тексты без изменений.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Termination {
     /// Процесс завершился сам.
     Completed,
@@ -362,6 +388,37 @@ pub enum Termination {
     /// Прерван по таймауту тишины: нет вывода и изменений файлов репо
     /// дольше `idle_timeout_secs`.
     IdleTimeout,
+    /// Мягкая отмена подтверждена агентом (`stopReason = "cancelled"`):
+    /// прогон прерван, частичный вывод сохранён — не ошибка исполнения и не
+    /// тихий успех.
+    Cancelled,
+    /// Ход оборван по лимиту агента (`max_tokens` / `max_turn_requests`):
+    /// ответ частичный, но сохраняется и разбирается на JSON-контракт;
+    /// пост-гейт и авто-коммит — как для `Completed`.
+    TurnLimit(TurnLimitReason),
+    /// Агент отказался выполнять задачу (`stopReason = "refusal"`) — ошибка
+    /// прогона; текст агента сохраняется в выводе.
+    Refused,
+}
+
+impl Termination {
+    /// Ход завершён штатно или мягко (мягкая отмена/лимит, подтверждённые
+    /// агентом): авто-коммит и пост-гейт выполняются как для `Completed`.
+    #[must_use]
+    pub fn is_soft_completion(&self) -> bool {
+        matches!(self, Self::Completed | Self::Cancelled | Self::TurnLimit(_))
+    }
+
+    /// Ошибка исполнения для оркестратора независимо от кода возврата:
+    /// таймауты и отказ агента. Мягкие завершения (отмена/лимит) сюда не
+    /// входят — их итог предупреждение, а не ошибка.
+    #[must_use]
+    pub fn is_run_error(&self) -> bool {
+        matches!(
+            self,
+            Self::AbsoluteTimeout | Self::IdleTimeout | Self::Refused
+        )
+    }
 }
 
 impl std::fmt::Display for Termination {
@@ -370,6 +427,9 @@ impl std::fmt::Display for Termination {
             Self::Completed => write!(f, "завершён"),
             Self::AbsoluteTimeout => write!(f, "абсолютный таймаут"),
             Self::IdleTimeout => write!(f, "idle-таймаут (тишина)"),
+            Self::Cancelled => write!(f, "мягкая отмена (агент подтвердил)"),
+            Self::TurnLimit(reason) => write!(f, "ход оборван по лимиту ({reason})"),
+            Self::Refused => write!(f, "отказ агента"),
         }
     }
 }
@@ -504,16 +564,19 @@ async fn finalize_run(
     // Страховка финализации: контракт TASK.md требует от исполнителя
     // финальный git-коммит; не сделал — фиксируем сами, иначе работа
     // теряется для оркестратора (результат забирается из git).
-    let auto_commit = if termination == Termination::Completed && cfg.auto_commit {
+    // Мягкая отмена/лимит (срез «полный stopReason») финализируются как
+    // Completed: агент мог успеть закоммитить работу.
+    let auto_commit = if termination.is_soft_completion() && cfg.auto_commit {
         auto_commit_leftovers(repo, name, task)
     } else {
         None
     };
     // A4: пост-гейт — собственная проверка результата харнессом, вне
     // окружения исполнителя (Stop-хук живёт ВНУТРИ песочницы и fail-soft).
-    // Только по завершённому прогону: прерванный уже красный по termination,
-    // судить промежуточное дерево нечем.
-    let post_gate = if termination == Termination::Completed {
+    // Только по завершённому прогону (в т.ч. мягкому — отмена/лимит):
+    // прерванный по таймауту уже красный по termination, судить
+    // промежуточное дерево нечем.
+    let post_gate = if termination.is_soft_completion() {
         run_post_gate(repo, cfg, manifest_before).await
     } else {
         None
@@ -1345,7 +1408,11 @@ impl Tool for HarnessRunTool {
                 абсолютный потолок 30 мин (по умолчанию) + таймаут тишины 10 мин — прогон \
                 прерывается, только если харнесс не выводит и не меняет файлы репозитория; \
                 при прерывании убивается вся процессная группа (сирот не остаётся) и \
-                возвращается частичный вывод. НЕ занижайте timeout_secs: значения ниже \
+                возвращается частичный вывод. ACP-ход различает завершение по stopReason \
+                агента: мягкая отмена (cancelled) и обрыв по лимиту (max_tokens/ \
+                max_turn_requests) — предупреждение, не ошибка исполнения (для лимита \
+                пост-гейт/авто-коммит как для завершённого хода); отказ агента (refusal) — \
+                ошибка прогона. НЕ занижайте timeout_secs: значения ниже \
                 600 поднимаются до 600 — кодовый харнесс за меньшее время почти никогда \
                 не успевает. stdout/stderr и код возврата захватываются, JSON-контракт \
                 результата (status/assumptions/open_questions) разбирается механически \
@@ -1517,7 +1584,7 @@ async fn execute_run(
         Ok(run) => {
             let code = run.exit_code.map_or("сигнал".into(), |c| c.to_string());
             let mut content = note;
-            match run.termination {
+            match &run.termination {
                 Termination::Completed => {
                     let _ = write!(
                         content,
@@ -1554,6 +1621,35 @@ async fn execute_run(
                              (TERM→KILL), сирот нет. Вывод ниже — частичный; перед \
                              повторным запуском проверьте git status/diff.",
                         hcfg.idle_timeout_secs
+                    );
+                }
+                // Срез «полный stopReason» (дельта agent-modes-acp): мягкая
+                // отмена/лимит/отказ агента в ACP-ходе. Головной текст
+                // таймаутов выше не меняется — новые строки аддитивны.
+                Termination::Cancelled => {
+                    let _ = writeln!(
+                        content,
+                        "Харнесс '{name}' ПРЕРВАН МЯГКО: агент подтвердил отмену \
+                             (stopReason=cancelled, код {code}, {:.1} с). Частичный вывод \
+                             сохранён; пост-гейт и авто-коммит — как для завершённого хода.",
+                        run.duration_secs
+                    );
+                }
+                Termination::TurnLimit(reason) => {
+                    let _ = writeln!(
+                        content,
+                        "ПРЕДУПРЕЖДЕНИЕ: ход оборван по лимиту ({reason}), ответ частичный \
+                             (код {code}, {:.1} с). Частичный ответ сохранён и разобран на \
+                             JSON-контракт; пост-гейт и авто-коммит — как для завершённого хода.",
+                        run.duration_secs
+                    );
+                }
+                Termination::Refused => {
+                    let _ = writeln!(
+                        content,
+                        "Харнесс '{name}' ОТКАЗАЛСЯ выполнять задачу (stopReason=refusal, \
+                             код {code}, {:.1} с). Это ошибка прогона; текст агента сохранён ниже.",
+                        run.duration_secs
                     );
                 }
             }
@@ -1678,9 +1774,15 @@ async fn execute_run(
                 content.push_str(run.stderr.trim_end());
             }
             let post_gate_red = run.post_gate.as_ref().is_some_and(|pg| pg.verdict.is_red());
-            let is_error = run.exit_code != Some(0)
-                || run.termination != Termination::Completed
-                || post_gate_red;
+            // Exit-семантика (дельта agent-modes-acp): мягкая отмена/лимит —
+            // не ошибка исполнения для оркестратора (итог с предупреждением);
+            // красный пост-гейт делает прогон красным и для них. Таймауты и
+            // отказ агента — ошибка независимо от кода возврата (как раньше).
+            let is_error = run.termination.is_run_error()
+                || match &run.termination {
+                    Termination::Completed => run.exit_code != Some(0) || post_gate_red,
+                    _ => post_gate_red,
+                };
             ToolOutput {
                 content,
                 is_error,

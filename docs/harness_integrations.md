@@ -204,6 +204,18 @@ skip-permissions, security boundary не улучшается); вызовы `fs
 режим (`prompt` | `acp` | `fallback`), версию ACP-адаптера из `initialize`
 и число `request_permission`.
 
+Завершение ACP-хода различается по `stopReason` ответа на `session/prompt`
+(срез «полный stopReason», дельта `agent-modes-acp`): `end_turn` —
+`Completed`; `cancelled` (агент подтвердил отмену в graceful-окне после
+`session/cancel`) — `Cancelled`: итог «прерван», не ошибка; `max_tokens` /
+`max_turn_requests` — `TurnLimit`: частичный ответ сохраняется и разбирается
+на JSON-контракт, в итог — предупреждение «ход оборван по лимиту (<причина>),
+ответ частичный», пост-гейт и авто-коммит — как для `Completed`; `refusal` —
+`Refused`: ошибка прогона, текст агента сохраняется в выводе. Прерывание по
+таймауту БЕЗ подтверждения агента остаётся `AbsoluteTimeout`/`IdleTimeout`.
+Headless-путь (`Completed`/`AbsoluteTimeout`/`IdleTimeout` и тексты) не
+меняется.
+
 Развёртка на агентов хоста (образцы — `config.example.toml`): claude-code
 (`claude-code-acp`), qwen-code (`qwen --acp`), kimi-code (`kimi acp`),
 openclaw (`openclaw acp`), hermes (`hermes acp`); theseus и codewhale ACP
@@ -223,8 +235,10 @@ openclaw (`openclaw acp`), hermes (`hermes acp`); theseus и codewhale ACP
 перечитыванию — без перезапуска сессии).
 
 **Коды выхода CLI** `arch-be harness-run` (скриптовые гейты в пайпах):
-`0` — прогон завершён, контракт `complete`/`partial` без конфликтов;
-`1` — ошибка запуска/прерывание по таймауту; `2` — `status=blocked`;
+`0` — прогон завершён, контракт `complete`/`partial` без конфликтов (в т.ч.
+мягкая отмена/лимит ACP-хода: `Cancelled`/`TurnLimit` — предупреждение, не
+ошибка исполнения); `1` — ошибка запуска/прерывание по таймауту, а также
+`stopReason=refusal` (отказ агента в ACP-режиме); `2` — `status=blocked`;
 `3` — непустой `conflicts_with_prior_decisions` (конфликт со spine
 останавливает интеграцию по контракту).
 

@@ -1666,3 +1666,102 @@ async fn auto_uses_acp_when_declared_and_working() {
     // Контракт разобран механически — из ACP-текста, не из сырого вывода.
     assert!(matches!(run.contract, ContractParse::Valid(_)));
 }
+
+// --- Срез «полный stopReason» (дельта agent-modes-acp) ------------------
+
+/// ACP-ход, оборванный по лимиту токенов, — `TurnLimit`: частичный ответ
+/// разобран на JSON-контракт, пост-гейт и авто-коммит работают как для
+/// `Completed`, итог — предупреждение (не ошибка исполнения).
+#[tokio::test]
+async fn acp_turn_limit_keeps_partial_contract_and_runs_post_gate() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let repo = tmp.path().join("repo");
+    a4_sandbox(&repo, true);
+    let cfg = CodingHarnessConfig {
+        binary: "cat".into(),
+        prompt_mode: PromptMode::Stdin,
+        timeout_secs: 30,
+        idle_timeout_secs: 0,
+        mode: AcpMode::Acp,
+        acp: Some(acp_fixture("limit-tokens")),
+        ..CodingHarnessConfig::default()
+    };
+    let run = run_harness("fake", &cfg, &repo, "задача")
+        .await
+        .expect("run");
+    assert_eq!(
+        run.termination,
+        Termination::TurnLimit(TurnLimitReason::MaxTokens)
+    );
+    let ContractParse::Valid(c) = &run.contract else {
+        panic!("частичный контракт обязан разобраться: {:?}", run.contract);
+    };
+    assert_eq!(c.status, ContractStatus::Partial, "{c:?}");
+    let pg = run
+        .post_gate
+        .expect("пост-гейт обязан отработать (пакет есть)");
+    assert_eq!(pg.verdict, PostGateVerdict::Pass, "{pg:?}");
+    let out = execute_run("fake", &cfg, &repo, "задача", String::new()).await;
+    assert!(
+        !out.is_error,
+        "TurnLimit — не ошибка исполнения: {}",
+        out.content
+    );
+    assert!(
+        out.content
+            .contains("ход оборван по лимиту (max_tokens), ответ частичный"),
+        "{}",
+        out.content
+    );
+    assert!(out.content.contains("Пост-гейт: PASS"), "{}", out.content);
+}
+
+/// Мягкая отмена, подтверждённая агентом после нашего `session/cancel`, —
+/// `Cancelled`: итог «прерван», не ошибка прогона.
+#[tokio::test]
+async fn acp_cancelled_after_cancel_is_soft_not_error() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let cfg = CodingHarnessConfig {
+        binary: "cat".into(),
+        prompt_mode: PromptMode::Stdin,
+        timeout_secs: 2,
+        idle_timeout_secs: 0,
+        mode: AcpMode::Acp,
+        acp: Some(acp_fixture("cancelled-after-cancel")),
+        ..CodingHarnessConfig::default()
+    };
+    let run = run_harness("fake", &cfg, tmp.path(), "задача")
+        .await
+        .expect("run");
+    assert_eq!(run.termination, Termination::Cancelled);
+    let out = execute_run("fake", &cfg, tmp.path(), "задача", String::new()).await;
+    assert!(!out.is_error, "мягкая отмена — не ошибка: {}", out.content);
+    assert!(out.content.contains("ПРЕРВАН МЯГКО"), "{}", out.content);
+}
+
+/// Отказ агента (`refusal`) — ошибка прогона; текст отказа сохранён в выводе.
+#[tokio::test]
+async fn acp_refusal_is_run_error() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let cfg = CodingHarnessConfig {
+        binary: "cat".into(),
+        prompt_mode: PromptMode::Stdin,
+        timeout_secs: 30,
+        idle_timeout_secs: 0,
+        mode: AcpMode::Acp,
+        acp: Some(acp_fixture("refusal")),
+        ..CodingHarnessConfig::default()
+    };
+    let run = run_harness("fake", &cfg, tmp.path(), "задача")
+        .await
+        .expect("run");
+    assert_eq!(run.termination, Termination::Refused);
+    let out = execute_run("fake", &cfg, tmp.path(), "задача", String::new()).await;
+    assert!(out.is_error, "отказ — ошибка прогона: {}", out.content);
+    assert!(out.content.contains("ОТКАЗАЛСЯ"), "{}", out.content);
+    assert!(
+        out.content.contains("отказываюсь выполнять"),
+        "текст агента сохранён: {}",
+        out.content
+    );
+}
