@@ -12,8 +12,10 @@ newline-delimited JSON-RPC 2.0 на stdin/stdout. Поведение выбир�
               выбранной опции в финальный текст;
   multi-message два агентских сообщения с РАЗНЫМИ messageId и tool_call
               между ними — финал = второе сообщение (F1);
-  auth        initialize с непустым authMethods — клиент обязан отказаться
-              от сессии (F2);
+  auth        initialize с непустым authMethods БЕЗ authenticate-cap —
+              информационный список, сессия продолжается штатно (F2);
+  auth-required initialize с непустым authMethods И authenticate-cap —
+              клиент обязан отказаться от сессии (F2);
   unknown-update session/update с выдуманным sessionUpdate — прогон жив, в
               журнале запись (F3);
   perm-cancel ждёт допуск и молчит; по session/cancel просит допуск ещё раз
@@ -224,8 +226,13 @@ def main():
     if mode == "close":
         # F5: агент заявляет cap session/close — клиент обязан закрыть сессию.
         capabilities["sessionCapabilities"] = {"close": True}
+    if mode == "auth-required":
+        # F2: агент заявляет cap authenticate — клиент обязан отказаться.
+        capabilities["authenticate"] = True
     auth_methods = (
-        [{"kind": "oauth", "name": "OAuth"}] if mode == "auth" else []
+        [{"id": "oauth", "name": "OAuth"}]
+        if mode in ("auth", "auth-required")
+        else []
     )
     response(
         init["id"],
@@ -236,7 +243,7 @@ def main():
             "authMethods": auth_methods,
         },
     )
-    if mode == "auth":
+    if mode == "auth-required":
         # Клиент обязан отказаться от сессии (аутентификацию не поддерживает).
         time.sleep(30)
         sys.exit(0)
@@ -259,6 +266,11 @@ def main():
         finish()
     elif mode == "plain":
         chunk("работаю без инструментов\n" + CONTRACT + "\n")
+        finish()
+    elif mode == "auth":
+        # F2: authMethods без authenticate-cap — информационный список,
+        # сессия продолжается штатно до end_turn.
+        chunk("authMethods информационны\n" + CONTRACT + "\n")
         finish()
     elif mode == "permission":
         # Инструмент ДО запроса допуска: финальный текст — только чанки
