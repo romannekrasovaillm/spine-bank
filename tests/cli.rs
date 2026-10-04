@@ -26,6 +26,15 @@ fn pytest_available() -> bool {
         .is_ok_and(|status| status.success())
 }
 
+/// Есть ли `python3` в PATH (A2): без него python-фикстуру ACP не запустить,
+/// тесты скипаются. Тот же PATH-scan, что в интеграционном таргете
+/// `tests/acp_fixture.rs` (дублирование по таргетам — конвенция).
+#[cfg(feature = "harness")]
+fn python3_available() -> bool {
+    std::env::var_os("PATH")
+        .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join("python3").is_file()))
+}
+
 /// Пишет исполняемый shell-скрипт фейкового кодового харнесса: печатает
 /// в stdout headless JSON-контракт результата (fenced json-блок со
 /// `status`) и завершается нулём. Возвращает путь к скрипту.
@@ -856,6 +865,10 @@ fn harness_run_complete_exits_0() {
 #[test]
 #[cfg(feature = "harness")]
 fn harness_run_acp_mode_reports_mode_and_adapter() {
+    if !python3_available() {
+        eprintln!("skipped: no python3");
+        return;
+    }
     let tmp = tempfile::tempdir().expect("tempdir");
     let home = tmp.path();
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/acp_agent.py");
@@ -892,6 +905,10 @@ fn harness_run_acp_mode_reports_mode_and_adapter() {
 #[test]
 #[cfg(feature = "harness")]
 fn harness_run_acp_refusal_exits_1() {
+    if !python3_available() {
+        eprintln!("skipped: no python3");
+        return;
+    }
     let tmp = tempfile::tempdir().expect("tempdir");
     let home = tmp.path();
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/acp_agent.py");
