@@ -1542,6 +1542,47 @@ async fn auto_falls_back_to_headless_on_acp_init_failure() {
     assert!(note.contains("initialize"), "{note}");
 }
 
+/// F2: `auto` + агент требует аутентификацию (`authMethods`) → откат на
+/// headless с честной причиной (клиент аутентификацию не поддерживает).
+#[tokio::test]
+async fn auto_falls_back_on_auth_methods() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let cfg = CodingHarnessConfig {
+        binary: "cat".into(),
+        prompt_mode: PromptMode::Stdin,
+        timeout_secs: 30,
+        idle_timeout_secs: 0,
+        acp: Some(acp_fixture("auth")),
+        ..CodingHarnessConfig::default()
+    };
+    let run = run_harness("fake", &cfg, tmp.path(), "задача")
+        .await
+        .expect("откат — не ошибка");
+    assert_eq!(run.mode, HarnessMode::Fallback);
+    assert_eq!(run.stdout, "задача", "откат выполнил headless-путь");
+    let note = run.mode_note.expect("предупреждение об откате");
+    assert!(note.contains("authMethods"), "{note}");
+}
+
+/// F2: `mode = "acp"` + `authMethods` — ошибка прогона без отката.
+#[tokio::test]
+async fn explicit_acp_errors_on_auth_methods() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let cfg = CodingHarnessConfig {
+        binary: "cat".into(),
+        prompt_mode: PromptMode::Stdin,
+        timeout_secs: 30,
+        idle_timeout_secs: 0,
+        mode: AcpMode::Acp,
+        acp: Some(acp_fixture("auth")),
+        ..CodingHarnessConfig::default()
+    };
+    let err = run_harness("fake", &cfg, tmp.path(), "задача")
+        .await
+        .expect_err("mode=acp: authMethods = ошибка без отката");
+    assert!(err.to_string().contains("authMethods"), "{err}");
+}
+
 /// C3: `mode = "acp"` — провал инициализации БЕЗ отката (ошибка прогона).
 #[tokio::test]
 async fn explicit_acp_does_not_fall_back() {
