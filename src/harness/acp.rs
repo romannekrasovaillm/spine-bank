@@ -33,7 +33,7 @@ use tokio::sync::mpsc;
 
 use crate::config::{AcpConfig, AcpMode, CodingHarnessConfig};
 
-use super::{Termination, repo_changed_since};
+use super::{Termination, TurnLimitReason, repo_changed_since};
 
 /// Версия ACP, которую реализует клиент (схема `ProtocolVersion`, текущая — 1).
 const ACP_PROTOCOL_VERSION: u64 = 1;
@@ -339,7 +339,7 @@ pub async fn run_session(
         }
     };
     let text = session.final_text();
-    session.finish(termination).await?;
+    session.finish(&termination).await?;
 
     let stderr = session.take_stderr();
     Ok(AcpSession {
@@ -356,6 +356,21 @@ pub async fn run_session(
         permissions: session.permissions,
         journal: session.journal.clone(),
     })
+}
+
+/// Классификация завершения хода по `stopReason` ответа на `session/prompt`
+/// (дельта `agent-modes-acp`, срез «полный stopReason»):
+/// `end_turn` и неизвестные значения — `Completed` (расширяемость протокола);
+/// `cancelled` — мягкая отмена; `max_tokens`/`max_turn_requests` — лимит;
+/// `refusal` — отказ агента.
+fn termination_from_stop_reason(stop: Option<&str>) -> Termination {
+    match stop {
+        Some("cancelled") => Termination::Cancelled,
+        Some("max_tokens") => Termination::TurnLimit(TurnLimitReason::MaxTokens),
+        Some("max_turn_requests") => Termination::TurnLimit(TurnLimitReason::MaxTurnRequests),
+        Some("refusal") => Termination::Refused,
+        _ => Termination::Completed,
+    }
 }
 
 /// Дедлайн ожидания ответа: `0` секунд — «без таймаута» (сутки).
@@ -672,7 +687,8 @@ impl Session {
 
     /// Цикл `session/prompt`: стрим `session/update` до ответа агента либо
     /// абсолютного/idle-таймаута. Таймаут — `session/cancel` + graceful окно,
-    /// затем SIGKILL процессной группы.
+    /// затем SIGKILL процессной группы. Ответ хода классифицируется по
+    /// `stopReason` (срез «полный stopReason»).
     async fn pump_prompt(
         &mut self,
         prompt_id: u64,
@@ -690,10 +706,12 @@ impl Session {
         let mut scan_due = Instant::now();
         let mut termination = Termination::Completed;
         let mut closed = false;
+        let mut timed_out = false;
 
         loop {
             if started.elapsed() >= abs_limit {
                 termination = Termination::AbsoluteTimeout;
+                timed_out = true;
                 break;
             }
             if let Some(idle) = idle_limit {
@@ -714,6 +732,7 @@ impl Session {
                     >= idle
                 {
                     termination = Termination::IdleTimeout;
+                    timed_out = true;
                     break;
                 }
             }
@@ -753,6 +772,7 @@ impl Session {
                                 "session/prompt: stopReason={}",
                                 stop.unwrap_or("?")
                             ));
+                            termination = termination_from_stop_reason(stop);
                             break;
                         }
                         continue;
@@ -767,15 +787,24 @@ impl Session {
                 "процесс ACP завершился до ответа на session/prompt",
             ));
         }
-        if termination != Termination::Completed {
-            self.cancel_and_grace(cfg).await;
+        if timed_out {
+            // Таймаутные ветки выше не переписаны: прерывание остаётся
+            // таймаутом. Но если агент в graceful-окне штатно подтвердил
+            // отмену (`stopReason="cancelled"`), прогон классифицируется как
+            // мягкая отмена — не «ложная ошибка» таймаута (срез «полный
+            // stopReason»).
+            if self.cancel_and_grace(cfg, prompt_id).await {
+                termination = Termination::Cancelled;
+            }
         }
         Ok(termination)
     }
 
     /// Мягкая отмена текущего хода: `session/cancel` + окно graceful, затем
-    /// SIGKILL процессной группы (существующий последний рубеж).
-    async fn cancel_and_grace(&mut self, cfg: &CodingHarnessConfig) {
+    /// SIGKILL процессной группы (существующий последний рубеж). Возвращает
+    /// `true`, если агент успел штатно ответить на `session/prompt` со
+    /// `stopReason="cancelled"` — подтверждение мягкой отмены.
+    async fn cancel_and_grace(&mut self, cfg: &CodingHarnessConfig, prompt_id: u64) -> bool {
         // F4: прогон отменяется — агент не должен получить допуск на работе.
         // Висящий `session/request_permission` закрывается `outcome=cancelled`
         // ДО `session/cancel`, чтобы агент не остался ждать ответа.
@@ -798,24 +827,57 @@ impl Session {
             grace_secs
         };
         let deadline = Instant::now() + Duration::from_secs(grace_secs);
+        let mut confirmed = false;
         loop {
-            if Instant::now() >= deadline {
-                break;
+            // Сначала дочитываем УЖЕ пришедшие кадры: ответ агента на
+            // `session/prompt` может опередить наблюдаемый выход процесса.
+            while let Ok(v) = self.rx.try_recv() {
+                self.touch();
+                confirmed |= self.absorb_grace_frame(&v, prompt_id).await;
             }
-            if matches!(self.child.try_wait(), Ok(Some(_))) {
+            if confirmed || Instant::now() >= deadline {
                 break;
             }
             // Дочитываем стрим: агент может успеть доиграть ход.
             let step = (deadline - Instant::now()).min(POLL_STEP);
-            if let NextMsg::Msg(v) = self.next_message(step).await {
-                self.touch();
-                if v.get("method").is_some() {
-                    let _ = self.handle_incoming(&v).await;
+            match self.next_message(step).await {
+                NextMsg::Msg(v) => {
+                    self.touch();
+                    confirmed |= self.absorb_grace_frame(&v, prompt_id).await;
                 }
+                NextMsg::Timeout => {}
+                // Поток закрылся — агент завершился; дочитанное выше уже учтено.
+                NextMsg::Closed => break,
             }
         }
         crate::proc::kill_process_group(self.pid, &mut self.child).await;
         self.journal(format!("session/cancel: graceful-окно {grace_secs} с"));
+        confirmed
+    }
+
+    /// Обрабатывает кадр в graceful-окне отмены. Возвращает `true`, если это
+    /// ответ агента на `session/prompt` со `stopReason="cancelled"` — мягкая
+    /// отмена подтверждена (остальные кадры разбираются как обычно).
+    async fn absorb_grace_frame(&mut self, v: &Value, prompt_id: u64) -> bool {
+        if v.get("method").is_some() {
+            let _ = self.handle_incoming(v).await;
+            return false;
+        }
+        if v.get("id").and_then(Value::as_u64) != Some(prompt_id) {
+            return false;
+        }
+        let stop = v
+            .get("result")
+            .and_then(|r| r.get("stopReason"))
+            .and_then(Value::as_str);
+        if stop == Some("cancelled") {
+            self.stop_reason = Some(String::from("cancelled"));
+            self.journal(String::from(
+                "session/prompt: stopReason=cancelled (graceful-окно отмены)",
+            ));
+            return true;
+        }
+        false
     }
 
     /// Дочитывает УЖЕ пришедшие кадры перед `session/cancel` (F4): запрос
@@ -1006,17 +1068,19 @@ impl Session {
 
     /// Завершает сессию: закрывает stdin (EOF для агента), ждёт короткое окно,
     /// затем завершает процессную группу.
-    async fn finish(&mut self, termination: Termination) -> Result<(), AcpError> {
+    async fn finish(&mut self, termination: &Termination) -> Result<(), AcpError> {
         // F5: ход завершён `end_turn` и агент заявил cap `session/close` —
         // освобождаем ресурсы сессии до закрытия транспорта. Без cap или не
         // по `end_turn` — как раньше.
-        if termination == Termination::Completed
+        if termination.is_soft_completion()
             && self.session_close_cap
             && self.stop_reason.as_deref() == Some("end_turn")
         {
             self.close_session().await;
         }
-        if termination == Termination::Completed {
+        // Мягкое завершение (в т.ч. отмена/лимит) — как `Completed`:
+        // закрываем stdin (EOF для агента) и даём короткое окно на выход.
+        if termination.is_soft_completion() {
             let _ = self.stdin.shutdown().await;
             let deadline = Instant::now() + Duration::from_secs(2);
             while Instant::now() < deadline {
@@ -1230,16 +1294,22 @@ mod tests {
         assert!(err.message().contains("таймаут"), "{err}");
     }
 
-    /// Таймаут прогона → session/cancel + graceful; фикстура подтверждает cancel.
+    /// Срез «полный stopReason»: таймаут → session/cancel + graceful;
+    /// агент штатно подтверждает отмену `stopReason=cancelled` — прогон
+    /// классифицируется мягкой отменой, а не таймаутом.
     #[tokio::test]
-    async fn absolute_timeout_cancels_session() {
+    async fn cancelled_after_cancel_is_soft_cancelled() {
         let tmp = tempfile::tempdir().expect("tmp");
-        let mut c = session("cancel");
+        let mut c = session("cancelled-after-cancel");
         c.timeout_secs = 2;
         let s = run_session(&c, tmp.path(), "задача")
             .await
             .expect("ACP-сессия");
-        assert_eq!(s.termination, Termination::AbsoluteTimeout);
+        assert_eq!(
+            s.termination,
+            Termination::Cancelled,
+            "мягкая отмена подтверждена агентом"
+        );
         // Фикстура пишет файл-маркер, получив session/cancel: окно graceful
         // дало ей доиграть ход, SIGKILL не понадобился.
         assert!(
@@ -1250,6 +1320,80 @@ mod tests {
             s.journal.iter().any(|j| j.contains("session/cancel")),
             "{:?}",
             s.journal
+        );
+    }
+
+    /// Прерывание по таймауту БЕЗ подтверждения агента остаётся таймаутом
+    /// (существующие таймаутные ветки не переписаны).
+    #[tokio::test]
+    async fn timeout_without_agent_ack_stays_timeout() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let mut c = session("perm-cancel");
+        c.timeout_secs = 2;
+        let s = run_session(&c, tmp.path(), "задача")
+            .await
+            .expect("ACP-сессия");
+        assert_eq!(s.termination, Termination::AbsoluteTimeout);
+    }
+
+    /// Срез «полный stopReason»: `max_tokens` → `TurnLimit(max_tokens)` —
+    /// частичный ответ сохранён, контракт `partial` доходит до потребителя.
+    #[tokio::test]
+    async fn stop_reason_max_tokens_is_turn_limit() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let s = run_session(&session("limit-tokens"), tmp.path(), "задача")
+            .await
+            .expect("ACP-сессия");
+        assert_eq!(
+            s.termination,
+            Termination::TurnLimit(TurnLimitReason::MaxTokens)
+        );
+        assert!(
+            s.text.contains("\"status\": \"partial\""),
+            "частичный контракт в финальном тексте: {}",
+            s.text
+        );
+        assert!(
+            s.journal
+                .iter()
+                .any(|j| j.contains("stopReason=max_tokens")),
+            "{:?}",
+            s.journal
+        );
+    }
+
+    /// Срез «полный stopReason»: `max_turn_requests` → `TurnLimit` с причиной.
+    #[tokio::test]
+    async fn stop_reason_max_turn_requests_is_turn_limit() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let s = run_session(&session("limit-turns"), tmp.path(), "задача")
+            .await
+            .expect("ACP-сессия");
+        assert_eq!(
+            s.termination,
+            Termination::TurnLimit(TurnLimitReason::MaxTurnRequests)
+        );
+        assert!(
+            s.journal
+                .iter()
+                .any(|j| j.contains("stopReason=max_turn_requests")),
+            "{:?}",
+            s.journal
+        );
+    }
+
+    /// Срез «полный stopReason»: `refusal` → `Refused`, текст агента сохранён.
+    #[tokio::test]
+    async fn stop_reason_refusal_is_refused() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let s = run_session(&session("refusal"), tmp.path(), "задача")
+            .await
+            .expect("ACP-сессия");
+        assert_eq!(s.termination, Termination::Refused);
+        assert!(
+            s.text.contains("отказываюсь выполнять"),
+            "текст отказа сохранён: {}",
+            s.text
         );
     }
 

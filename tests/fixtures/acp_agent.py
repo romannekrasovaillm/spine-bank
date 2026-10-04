@@ -26,6 +26,12 @@ newline-delimited JSON-RPC 2.0 на stdin/stdout. Поведение выбир�
   env         эхо наличия переменной ARCH_ACP_LEAK (проверка env-политики);
   cancel      после промпта ждёт session/cancel, пишет маркер и отвечает
               stopReason=cancelled;
+  cancelled-after-cancel синоним `cancel`: мягкая отмена, подтверждённая
+              агентом после нашего session/cancel (срез «полный stopReason»);
+  limit-tokens      частичный ответ + stopReason=max_tokens (обрыв хода по
+              лимиту токенов): контракт partial должен дойти до разбора;
+  limit-turns       частичный ответ + stopReason=max_turn_requests;
+  refusal     текст отказа + stopReason=refusal (ошибка прогона сохранена);
   idle        один чанк и молчание (idle-детект клиента);
   active      частые чанки дольше idle-окна — прерывать нельзя;
   init-exit   ранний выход до ответа на initialize;
@@ -41,6 +47,7 @@ import sys
 import time
 
 CONTRACT = '```json\n{"status": "complete", "assumptions": [], "open_questions": [], "conflicts_with_prior_decisions": []}\n```'
+PARTIAL_CONTRACT = '```json\n{"status": "partial", "assumptions": ["ход оборван по лимиту"], "open_questions": [], "conflicts_with_prior_decisions": []}\n```'
 
 
 def send(obj):
@@ -121,8 +128,9 @@ def tool_call(tool_id, title):
     )
 
 
-def finish(end_turn=True):
-    response(PROMPT_ID, {"stopReason": "end_turn" if end_turn else "cancelled"})
+def finish(stop="end_turn"):
+    """Ответ на session/prompt с данным stopReason (срез «полный stopReason»)."""
+    response(PROMPT_ID, {"stopReason": stop})
 
 
 def request_permission():
@@ -319,10 +327,23 @@ def main():
         leak = "present" if os.environ.get("ARCH_ACP_LEAK") else "none"
         chunk("LEAK=%s\n" % leak + CONTRACT + "\n")
         finish()
-    elif mode == "cancel":
+    elif mode == "limit-tokens":
+        # Срез «полный stopReason»: ход оборван по лимиту токенов — частичный
+        # ответ (контракт partial) обязан дойти до разбора JSON-контракта.
+        chunk("начал работу\n")
+        chunk("оборван по лимиту токенов\n" + PARTIAL_CONTRACT + "\n")
+        finish("max_tokens")
+    elif mode == "limit-turns":
+        chunk("оборван по лимиту ходов\n" + PARTIAL_CONTRACT + "\n")
+        finish("max_turn_requests")
+    elif mode == "refusal":
+        # Агент отказался выполнять: текст отказа — в выводе прогона.
+        chunk("отказываюсь выполнять: задача вне политики\n")
+        finish("refusal")
+    elif mode in ("cancel", "cancelled-after-cancel"):
         chunk("работаю\n")
         if wait_for_cancel("cancel-received"):
-            finish(end_turn=False)
+            finish("cancelled")
         sys.exit(0)
     elif mode == "idle":
         chunk("начал\n")
