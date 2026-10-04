@@ -44,6 +44,7 @@ mod explain;
 mod git;
 mod route;
 mod semantic;
+pub mod shadow;
 #[cfg(test)]
 mod testkit;
 mod types;

@@ -663,6 +663,10 @@ pub struct ControlReport {
     pub unverifiable_rules: Vec<String>,
     /// Расхождения пинов версий `extends` (текст находок).
     pub version_mismatches: Vec<String>,
+    /// Флотовой срез теневого гейта (D2, ADR-059): сохранённые отчёты
+    /// `--shadow-constraints` по проектам и агрегат «что покраснеет по флоту».
+    /// Пусто, если у проектов нет сохранённых shadow-результатов.
+    pub shadow_fleet: crate::control::ShadowFleet,
 }
 
 /// Отчёт `control report --level corp|all` по текущему репо: прогоняет
@@ -757,6 +761,11 @@ pub fn control_report(repo: &Path, constraints: &Path, level: &str) -> Result<Co
         expired_rules,
         unverifiable_rules,
         version_mismatches,
+        // D2 (ADR-059): флотовой срез теневого гейта — сохранённые прогоны
+        // `--shadow-constraints` по проектам (сам репозиторий и его
+        // подкаталоги). Артефакт прогона, не вердикт: отсутствие записей
+        // даёт пустой (а не ошибочный) срез.
+        shadow_fleet: crate::control::shadow_fleet(repo),
     })
 }
 
@@ -827,6 +836,45 @@ pub fn render_control_report(report: &ControlReport) -> String {
     }
     for m in &report.version_mismatches {
         let _ = writeln!(out, "- {m}");
+    }
+
+    // D2 (ADR-059): флотовой срез теневого гейта — «что покраснеет при
+    // переходе» по сохранённым прогонам `gate --shadow-constraints`.
+    let _ = writeln!(out, "\n## Теневой гейт (что покраснеет по флоту)");
+    let fleet = &report.shadow_fleet;
+    if fleet.is_empty() {
+        let _ = writeln!(
+            out,
+            "- нет сохранённых shadow-результатов (прогоните `arch-be gate --shadow-constraints <файл>`)"
+        );
+    } else {
+        let _ = writeln!(out, "Проектов с shadow-результатами: {}", fleet.projects);
+        if fleet.new_rules.is_empty() {
+            let _ = writeln!(out, "- новых правил не появляется");
+        } else {
+            let _ = writeln!(out, "| Правило | Severity | Проектов |");
+            let _ = writeln!(out, "|---|---|---:|");
+            for r in &fleet.new_rules {
+                let _ = writeln!(
+                    out,
+                    "| {} | {} | {} ({}) |",
+                    r.rule,
+                    r.severity,
+                    r.projects.len(),
+                    r.projects.join(", ")
+                );
+            }
+        }
+        for c in &fleet.severity_changes {
+            let _ = writeln!(
+                out,
+                "- смена severity {} → {}: {} (проектов: {})",
+                c.from,
+                c.to,
+                c.rule,
+                c.projects.len()
+            );
+        }
     }
     out
 }
@@ -1271,6 +1319,82 @@ mod tests {
         let all = control_report(&product_dir, &product, "all").unwrap();
         assert_eq!(all.rules_total, 3);
         assert_eq!(all.own, 1);
+    }
+
+    /// D2 (ADR-059): `control report --level corp` на фикстуре двух проектов
+    /// с сохранёнными shadow-результатами агрегирует счётчики по правилам.
+    #[test]
+    fn control_report_aggregates_shadow_fleet_by_rule() {
+        use crate::control::{
+            SHADOW_RECORD_SCHEMA, ShadowChange, ShadowRecord, save_shadow_record,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let constraints = write_file(root, "CONSTRAINTS.yaml", CORP_YAML);
+        let record = |new: &[(&str, &str)], changes: &[(&str, &str, &str)]| ShadowRecord {
+            schema: SHADOW_RECORD_SCHEMA.to_string(),
+            shadow_constraints: "candidate.yaml".to_string(),
+            new_findings: new
+                .iter()
+                .map(|(r, s)| ((*r).to_string(), (*s).to_string()))
+                .collect(),
+            severity_changes: changes
+                .iter()
+                .map(|(r, f, t)| {
+                    (
+                        (*r).to_string(),
+                        ShadowChange {
+                            from: (*f).to_string(),
+                            to: (*t).to_string(),
+                        },
+                    )
+                })
+                .collect(),
+            summary: "тест".to_string(),
+        };
+        let p1 = root.join("p1");
+        std::fs::create_dir_all(&p1).unwrap();
+        save_shadow_record(
+            &p1,
+            &record(&[("X-2", "error")], &[("X-1", "warn", "error")]),
+        )
+        .unwrap();
+        let p2 = root.join("p2");
+        std::fs::create_dir_all(&p2).unwrap();
+        save_shadow_record(&p2, &record(&[("X-2", "warn")], &[])).unwrap();
+
+        let report = control_report(root, &constraints, "corp").unwrap();
+        assert_eq!(report.shadow_fleet.projects, 2);
+        let x2 = report
+            .shadow_fleet
+            .new_rules
+            .iter()
+            .find(|r| r.rule == "X-2")
+            .expect("X-2");
+        assert_eq!(x2.severity, "error");
+        assert_eq!(x2.projects, ["p1", "p2"]);
+        assert!(
+            report
+                .shadow_fleet
+                .severity_changes
+                .iter()
+                .any(|c| c.rule == "X-1" && c.projects == ["p1"])
+        );
+        // JSON-контракт: аддитивное поле сериализуется.
+        let json = serde_json::to_value(&report).unwrap();
+        assert!(json.get("shadow_fleet").is_some(), "{json}");
+        // Markdown называет правило и число проектов.
+        let md = render_control_report(&report);
+        assert!(md.contains("Теневой гейт"), "{md}");
+        assert!(md.contains("X-2"), "{md}");
+    }
+
+    /// Без сохранённых shadow-результатов раздел пуст, но присутствует.
+    #[test]
+    fn control_report_empty_shadow_fleet_is_not_an_error() {
+        let (dir, product) = override_fixture("");
+        let report = control_report(&dir.path().join("product"), &product, "corp").unwrap();
+        assert!(report.shadow_fleet.is_empty());
     }
 
     #[test]

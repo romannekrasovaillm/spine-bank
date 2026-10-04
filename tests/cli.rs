@@ -1394,6 +1394,70 @@ fn gate_clean_repo_exits_0() {
         .stdout(contains("Итог: PASS"));
 }
 
+/// D2 (ADR-059): `gate --shadow-constraints` добавляет теневой блок —
+/// новые находки по правилам-кандидатам, — не меняя основной вердикт и
+/// exit-код; без флага блока нет, а отчёт прогона сохраняется для флота.
+#[test]
+fn gate_shadow_constraints_is_additive_and_saved() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = gate_repo(tmp.path());
+    std::fs::create_dir_all(repo.join("src")).expect("mkdir src");
+    // Размеченная метка, которой нет в текущем реестре: основной вердикт
+    // по ней зелёный (правила нет), теневой — красный (правило появится).
+    std::fs::write(repo.join("src/a.py"), "SECRET=42\n").expect("write py");
+
+    // Без флага — теневого блока нет.
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("gate").arg("--repo").arg(repo.as_os_str());
+    cmd.assert()
+        .success()
+        .stdout(contains("Итог: PASS"))
+        .stdout(predicates::str::contains("Теневой гейт").not());
+
+    // Реестр-кандидат: тот же + новое error-правило X-2 по SECRET.
+    let shadow = tmp.path().join("shadow-constraints.yaml");
+    std::fs::write(
+        &shadow,
+        "rules:\n\
+         \x20 - name: spine_present\n    type: file_exists\n    path: \"ARCHITECTURE-SPINE.md\"\n    severity: error\n\
+         \x20 - name: no_pan\n    type: must_not_contain\n    glob: \"**/*.py\"\n    pattern: 'PAN'\n    severity: error\n\
+         \x20 - name: X-2\n    type: must_not_contain\n    glob: \"**/*.py\"\n    pattern: 'SECRET'\n    severity: error\n",
+    )
+    .expect("shadow constraints");
+
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("gate")
+        .arg("--repo")
+        .arg(repo.as_os_str())
+        .arg("--shadow-constraints")
+        .arg(shadow.as_os_str());
+    cmd.assert()
+        .success()
+        .stdout(contains("Итог: PASS"))
+        .stdout(contains("Теневой гейт"))
+        .stdout(contains("X-2"))
+        .stdout(contains("основной вердикт не изменён"));
+    // Отчёт прогона — для флотового среза (`control report --level corp`).
+    assert!(
+        repo.join(".arch-handoff/shadow.json").exists(),
+        "shadow-отчёт сохранён"
+    );
+    // JSON-конверт: аддитивный ключ shadow, схема вердикта не меняется.
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("gate")
+        .arg("--repo")
+        .arg(repo.as_os_str())
+        .arg("--shadow-constraints")
+        .arg(shadow.as_os_str())
+        .arg("--format")
+        .arg("json");
+    cmd.assert()
+        .success()
+        .stdout(contains("arch-be/gate-verdict/v1"))
+        .stdout(contains("\"shadow\""))
+        .stdout(contains("\"X-2\""));
+}
+
 /// Анти-ослабление: агент удалил правило `no_pan`, чтобы пройти гейт —
 /// `arch-be gate` падает exit 1 с находкой `rule_weakened` (бэклог п.4:
 /// детекция по коду возврата, не по строкам).
