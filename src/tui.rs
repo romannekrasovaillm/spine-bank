@@ -76,10 +76,22 @@ pub async fn run(cfg: Arc<Config>) -> Result<()> {
     let mut ticker = tokio::time::interval(SPINNER_INTERVAL);
     let ctrl_c = tokio::signal::ctrl_c();
     tokio::pin!(ctrl_c);
+    let mut last_size: Option<(u16, u16)> = None;
 
     loop {
         if app.should_quit {
             break;
+        }
+        // Страховка от «призрачных» хвостов: сверяем фактический размер
+        // терминала каждый кадр. Событие Resize доходит не всегда (часть
+        // терминалов рефлоуит alternate screen без SIGWINCH, tmux
+        // пересобирает сетку сам) — без полной очистки diff-рендер оставляет
+        // на экране остатки строк прежней, более широкой раскладки.
+        if let Ok(size) = terminal.size() {
+            if size_changed(&mut last_size, (size.width, size.height)) {
+                // Ошибка очистки не фатальна: кадр всё равно перерисуется.
+                let _ = terminal.clear();
+            }
         }
         terminal
             .draw(|f| app.render(f))
@@ -159,4 +171,33 @@ fn install_panic_hook() {
         let _ = disable_raw_mode();
         original(info);
     }));
+}
+
+/// Политика полной очистки при смене размера терминала: первый кадр только
+/// фиксирует размер (экран уже очищен перед циклом), каждая ПОСЛЕДУЮЩАЯ
+/// смена требует clear — страховка на случай потерянного `Event::Resize`.
+fn size_changed(last: &mut Option<(u16, u16)>, now: (u16, u16)) -> bool {
+    let changed = last.is_some() && *last != Some(now);
+    *last = Some(now);
+    changed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn size_change_policy_clears_only_after_first_frame() {
+        let mut last = None;
+        // Первый кадр: размер фиксируется, очистка не нужна (уже сделана).
+        assert!(!size_changed(&mut last, (120, 40)));
+        // Тот же размер — чисто.
+        assert!(!size_changed(&mut last, (120, 40)));
+        // Смена размера (событие Resize могло не дойти) — полная очистка.
+        assert!(size_changed(&mut last, (100, 30)));
+        // Повтор без смены — снова чисто.
+        assert!(!size_changed(&mut last, (100, 30)));
+        // Рост тоже отслеживается.
+        assert!(size_changed(&mut last, (200, 50)));
+    }
 }
