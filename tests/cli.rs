@@ -1175,6 +1175,51 @@ fn nfr_budget_exceeded_exits_1_with_guilty_hops() {
         .stdout(contains("Итог: FAIL"));
 }
 
+/// D4 (ADR-059): `nfr verify --metrics` — расхождение p99/доступности с
+/// бюджетами модели → находки с виновным hop и exit 1; совпадение — PASS.
+#[test]
+fn nfr_verify_metrics_reports_discrepancy_then_pass() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let case = nfr_budget_case(tmp.path(), 2000, Some(800));
+    std::fs::write(
+        case.join("model/NFR-004-sla.md"),
+        "---\nid: NFR-004\ntype: nfr\ntitle: SLA\nstatus: accepted\nverification: v\n\
+         availability_target: 0.9995\naffects: [INT-001]\n---\n",
+    )
+    .expect("write NFR-004");
+    let metrics = case.join("metrics.json");
+    std::fs::write(
+        &metrics,
+        r#"{"operations":[{"id":"INT-001","p99_ms":1200}],"availability":0.997}"#,
+    )
+    .expect("metrics");
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("nfr")
+        .arg("verify")
+        .arg(case.as_os_str())
+        .arg("--metrics")
+        .arg(metrics.as_os_str());
+    cmd.assert()
+        .code(1)
+        .stdout(contains("runtime-latency-exceeded"))
+        .stdout(contains("INT-001"))
+        .stdout(contains("runtime-availability-below-sla"));
+
+    // Метрики в пределах бюджетов и SLA — PASS (exit 0).
+    std::fs::write(
+        &metrics,
+        r#"{"operations":[{"id":"INT-001","p99_ms":700}],"availability":0.9999,"error_rate":0.0001}"#,
+    )
+    .expect("metrics");
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("nfr")
+        .arg("verify")
+        .arg(case.as_os_str())
+        .arg("--metrics")
+        .arg(metrics.as_os_str());
+    cmd.assert().success().stdout(contains("Итог: PASS"));
+}
+
 /// `arch-be nfr budget`: hop без заявленного бюджета → error, exit 1.
 #[test]
 fn nfr_budget_missing_hop_budget_exits_1() {

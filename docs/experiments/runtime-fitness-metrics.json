@@ -1,0 +1,10 @@
+{
+  "window": "2026-10-04T00:00:00Z/2026-10-04T01:00:00Z",
+  "operations": [
+    { "id": "INT-001", "p99_ms": 1200 },
+    { "name": "Payment authorization", "p99_ms": 1100 }
+  ],
+  "availability": 0.9975,
+  "error_rate": 0.001,
+  "error_rate_target": 0.002
+}
