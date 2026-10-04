@@ -883,7 +883,8 @@ fn tool_specs() -> Vec<Value> {
             "name": "significance_from_diff",
             "description": "Маршрут значимости Fast/Standard/Critical, выведенный из git-диффа \
                             репозитория (anti-bypass S-1, ADR-034): детекторы new_component / \
-                            new_vendor / api_contract_change / irreversible_migration / \
+                            new_vendor / api_contract_change / cross_domain_integration / \
+                            significant_nfr / rto_rpo_targets / irreversible_migration / \
                             new_datastore объединяются с заявленными 'declared' (детектор \
                             только добавляет). Ответ: route+score, sources каждого триггера \
                             (declared/diff/declared+diff), undeclared — найденные диффом, но \

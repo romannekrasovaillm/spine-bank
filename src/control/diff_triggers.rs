@@ -437,6 +437,8 @@ pub fn base_rev(base: &str) -> &str {
 /// (`arch-harness.toml` проекта или `config.toml` пользователя), чтобы
 /// соглашения репозитория («контракты лежат в `docs/contracts/`») не были
 /// зашиты в бинарь.
+/// Структура глобов детекторов диффа (T-05): что считать контрактом,
+/// компонентом, интеграцией и NFR-сущностью модели.
 #[derive(Debug, Clone)]
 pub struct DiffGlobs {
     /// Пути/глобы контрактов.
@@ -445,6 +447,8 @@ pub struct DiffGlobs {
     pub components: Vec<String>,
     /// Файлы сущностей модели-интеграций.
     pub integrations: Vec<String>,
+    /// Файлы NFR-сущностей модели (1.7 п.3).
+    pub nfr: Vec<String>,
 }
 
 impl Default for DiffGlobs {
@@ -453,6 +457,7 @@ impl Default for DiffGlobs {
             contracts: vec!["docs/contracts/**".to_string(), "contracts/**".to_string()],
             components: vec!["model/CMP-*".to_string()],
             integrations: vec!["model/INT-*".to_string()],
+            nfr: vec!["model/NFR-*".to_string()],
         }
     }
 }
@@ -485,6 +490,13 @@ pub fn detect_diff_triggers(repo: &Path, git_ref: Option<&str>) -> Result<DiffTr
 ///   `docs/contracts/wallet-api.v1.yaml` в дельте был невидим);
 /// - `cross_domain_integration` — появилась или изменена сущность интеграции
 ///   модели по глобу [`DiffGlobs::integrations`];
+/// - `significant_nfr` — появилась или изменена NFR-сущность модели по глобу
+///   [`DiffGlobs::nfr`] (1.7 п.3: новая NFR — новое требование к системе,
+///   правка — изменение целевого показателя);
+/// - `rto_rpo_targets` — в добавленных строках файлов `model/` изменились
+///   цели RTO/RPO: поля `rto_minutes:`/`rpo_seconds:` (канон) или инлайн-формы
+///   «RTO ≤ 15»/«RPO = 0» (1.7 п.3: правка цели 4ч → 15мин по имени файла
+///   не видна);
 /// - `irreversible_migration` — в диффе файла миграций (каталог `migrations/`
 ///   или `*.sql`) есть `DROP TABLE`/`TRUNCATE`/`DROP COLUMN`;
 /// - `new_datastore` — в конфигах добавлены строки подключения
@@ -593,6 +605,10 @@ pub fn detect_diff_triggers_with(
     let re_datastore = diff_regex(
         r"(?i)(?:postgres(?:ql)?://|mysql://|mongodb(?:\+srv)?://|redis://|kafka://|bootstrap\.servers)",
     )?;
+    // Цели RTO/RPO (1.7 п.3): frontmatter-поля `rto_minutes:` / `rpo_seconds:`
+    // (канон типизированной модели) и инлайн-формы «RTO ≤ 15», «RPO = 0».
+    let re_rto_rpo_field = diff_regex(r"(?i)^\s*(?:rto|rpo)_\w*\s*:")?;
+    let re_rto_rpo_target = diff_regex(r"(?i)\b(?:rto|rpo)\s*[≤<:=]\s*\d")?;
 
     let mut found = DiffTriggers::default();
     for (code, path) in &files {
@@ -640,6 +656,45 @@ pub fn detect_diff_triggers_with(
                     }
                 ),
             );
+        }
+
+        // significant_nfr (1.7 п.3): новая NFR — новое требование к системе;
+        // правка существующей — изменение целевого показателя (p99,
+        // доступность, ёмкость). Та же семантика «появление/правка», что у
+        // интеграций выше.
+        if (*code == 'A' || *code == 'M') && globs.nfr.iter().any(|g| glob_match(g, path.as_str()))
+        {
+            found.fire(
+                "significant_nfr",
+                &format!(
+                    "{} NFR-сущность {path}",
+                    if *code == 'A' {
+                        "новая"
+                    } else {
+                        "изменена"
+                    }
+                ),
+            );
+        }
+
+        // rto_rpo_targets (1.7 п.3): правка цели восстановления (4ч → 15мин)
+        // видна только по содержимому сущности модели. Область — только
+        // `model/`: упоминание RTO/RPO в ADR или прозе — не цель системы.
+        if *code != 'D' && lower_path.starts_with("model/") {
+            if let Some(lines) = added.get(path.as_str()) {
+                if let Some(l) = lines
+                    .iter()
+                    .find(|l| re_rto_rpo_field.is_match(l) || re_rto_rpo_target.is_match(l))
+                {
+                    found.fire(
+                        "rto_rpo_targets",
+                        &format!(
+                            "цели RTO/RPO в {path}: {}",
+                            l.trim().chars().take(80).collect::<String>()
+                        ),
+                    );
+                }
+            }
         }
 
         // new_vendor: строка зависимости в диффе манифеста.
@@ -946,6 +1001,119 @@ mod tests {
         // Чистый дифф (HEAD против самого себя) — триггеров нет.
         let clean = detect_diff_triggers(&repo, None).unwrap();
         assert!(clean.triggers.is_empty(), "{:?}", clean.triggers);
+    }
+
+    /// 1.7 п.3: NFR-сущности и цели RTO/RPO поднимают маршрут. Ужесточение
+    /// `rto_minutes: 240 → 15` в существующей NFR раньше уходило по Fast:
+    /// дифф видел CMP/INT/контракты, но не цели восстановления и новые NFR.
+    #[test]
+    fn diff_detector_sees_nfr_entities_and_rto_rpo_targets() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = git_repo(dir.path());
+        write_file(
+            &repo,
+            "model/NFR-006-rto.md",
+            "---\nid: NFR-006\ntype: nfr\ntitle: RTO\nstatus: accepted\nrto_minutes: 240\n---\n\nЦель: 240 минут.\n",
+        );
+        write_file(
+            &repo,
+            "model/CMP-002-core.md",
+            "---\nid: CMP-002\ntype: cmp\ntitle: Ядро\nstatus: accepted\n---\n\nТело.\n",
+        );
+        write_file(
+            &repo,
+            "docs/adr/ADR-001-dr.md",
+            "# ADR-001\n\nРезерв: RTO ≤ 240, RPO ≤ 300.\n",
+        );
+        git_in(&repo, &["add", "."]);
+        git_in(&repo, &["commit", "-q", "-m", "model"]);
+
+        // Ужесточение цели восстановления в существующей NFR.
+        write_file(
+            &repo,
+            "model/NFR-006-rto.md",
+            "---\nid: NFR-006\ntype: nfr\ntitle: RTO\nstatus: accepted\nrto_minutes: 15\n---\n\nЦель: 15 минут.\n",
+        );
+        // Новая NFR-сущность.
+        write_file(
+            &repo,
+            "model/NFR-013-dr-drill-rpo.md",
+            "---\nid: NFR-013\ntype: nfr\ntitle: RPO\nstatus: accepted\nrpo_seconds: 60\n---\n\nПотеря данных ≤ 60 секунд.\n",
+        );
+        // RTO/RPO в ДОКУМЕНТЕ (не сущность модели) — не цель системы.
+        write_file(
+            &repo,
+            "docs/adr/ADR-001-dr.md",
+            "# ADR-001\n\nРезерв: RTO ≤ 240, RPO ≤ 60.\n",
+        );
+        // Обычная правка CMP без целей — NFR-триггеров не даёт.
+        write_file(
+            &repo,
+            "model/CMP-002-core.md",
+            "---\nid: CMP-002\ntype: cmp\ntitle: Ядро\nstatus: accepted\n---\n\nТело шире.\n",
+        );
+        git_in(&repo, &["add", "."]);
+        git_in(&repo, &["commit", "-q", "-m", "nfr"]);
+
+        let found = detect_diff_triggers(&repo, Some("HEAD~1")).unwrap();
+        assert_eq!(
+            found.triggers.len(),
+            2,
+            "ровно NFR-детекторы: {:?}",
+            found.triggers
+        );
+        assert!(
+            found.triggers.contains("significant_nfr"),
+            "{:?}",
+            found.triggers
+        );
+        assert!(
+            found.triggers.contains("rto_rpo_targets"),
+            "{:?}",
+            found.triggers
+        );
+        // Доказательства называют сущности модели и поле цели, а не ADR
+        // (evidence пишется по первому срабатыванию триггера — fire()).
+        let ev = found.evidence.join("\n");
+        assert!(ev.contains("NFR-сущность model/NFR-006"), "{ev}");
+        assert!(ev.contains("rto_minutes"), "{ev}");
+        assert!(
+            !ev.contains("ADR-001"),
+            "упоминание в прозе — не цель: {ev}"
+        );
+        // Маршрут не ниже Standard (score 2 > fast_max 1): правка RTO не Fast.
+        let scored = score_with_sources(
+            &BTreeMap::new(),
+            &found,
+            DEFAULT_FAST_MAX,
+            DEFAULT_STANDARD_MAX,
+        );
+        assert_eq!(scored.significance.route, Route::Standard);
+    }
+
+    /// Только добавление NFR — «новая NFR-сущность» в основании.
+    #[test]
+    fn diff_detector_marks_new_nfr_entity() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = git_repo(dir.path());
+        write_file(
+            &repo,
+            "model/NFR-016-error-budget.md",
+            "---\nid: NFR-016\ntype: nfr\ntitle: Error budget\nstatus: accepted\n---\n\nБюджет 43 минуты/мес.\n",
+        );
+        git_in(&repo, &["add", "."]);
+        git_in(&repo, &["commit", "-q", "-m", "nfr"]);
+
+        let found = detect_diff_triggers(&repo, Some("HEAD~1")).unwrap();
+        assert!(
+            found.triggers.contains("significant_nfr"),
+            "{:?}",
+            found.triggers
+        );
+        let ev = found.evidence.join("\n");
+        assert!(ev.contains("новая NFR-сущность model/NFR-016"), "{ev}");
+        // Поля RTO/RPO в файле нет — второй NFR-детектор молчит.
+        assert!(!found.triggers.contains("rto_rpo_targets"), "{ev}");
     }
 
     /// T-03: форма базы не меняет вердикт. Голая ревизия и готовый диапазон

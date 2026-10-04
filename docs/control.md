@@ -101,6 +101,8 @@ git-репозитория — ошибка с понятным текстом.
 | `new_vendor` | в диффе манифеста зависимостей добавлена строка зависимости |
 | `api_contract_change` | контракт изменён, добавлен или УДАЛЁН: по содержимому (ключ верхнего уровня `openapi:`/`asyncapi:`/`swagger:`, расширение `.proto`), по `contract_globs` или по `openapi`/`asyncapi` в имени (T-05) |
 | `cross_domain_integration` | появилась или изменена сущность интеграции модели по `integration_globs` (T-05) |
+| `significant_nfr` | появилась или изменена NFR-сущность модели по `nfr_globs` (1.7 п.3) |
+| `rto_rpo_targets` | в добавленных строках файлов `model/` изменились цели RTO/RPO: поля `rto_minutes:`/`rpo_seconds:` или инлайн-формы «RTO ≤ 15»/«RPO = 0» (1.7 п.3; упоминание в ADR/прозе — не цель) |
 | `irreversible_migration` | в диффе файла миграций (`migrations/` или `*.sql`) есть `DROP TABLE`/`TRUNCATE`/`DROP COLUMN` |
 | `new_datastore` | в конфигах добавлены строки подключения `postgres://`/`mysql://`/`kafka`/`mongodb`/`redis://` |
 

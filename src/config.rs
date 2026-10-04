@@ -937,6 +937,10 @@ pub struct SignificanceConfig {
     /// интеграций модели.
     #[serde(default = "default_integration_globs")]
     pub integration_globs: Vec<String>,
+    /// Глобы детектора NFR-сущностей (1.7 п.3): файлы NFR модели, появление
+    /// или правка которых поднимает `significant_nfr`.
+    #[serde(default = "default_nfr_globs")]
+    pub nfr_globs: Vec<String>,
 }
 
 /// Дефолтные глобы контрактов (T-05): каталоги, где контракты лежат по
@@ -955,6 +959,11 @@ fn default_integration_globs() -> Vec<String> {
     vec!["model/INT-*".to_string()]
 }
 
+/// Дефолтный глоб NFR-сущностей модели (1.7 п.3).
+fn default_nfr_globs() -> Vec<String> {
+    vec!["model/NFR-*".to_string()]
+}
+
 impl Default for SignificanceConfig {
     fn default() -> Self {
         Self {
@@ -963,6 +972,7 @@ impl Default for SignificanceConfig {
             contract_globs: default_contract_globs(),
             component_globs: default_component_globs(),
             integration_globs: default_integration_globs(),
+            nfr_globs: default_nfr_globs(),
         }
     }
 }
@@ -994,6 +1004,7 @@ impl SignificanceConfig {
             contracts: self.contract_globs.clone(),
             components: self.component_globs.clone(),
             integrations: self.integration_globs.clone(),
+            nfr: self.nfr_globs.clone(),
         }
     }
 }
