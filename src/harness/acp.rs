@@ -234,6 +234,18 @@ pub async fn run_session(
             let negotiated = res.get("protocolVersion").and_then(Value::as_u64);
             if let Some(v) = negotiated {
                 session.journal(format!("initialize: protocolVersion={v}"));
+                // S3: версия, которую клиент не поддерживает (чужой MAJOR),
+                // → закрыть соединение: провал ИНИЦИАЛИЗАЦИИ (auto → fallback
+                // headless с причиной, mode=acp → ошибка прогона). Отсутствие
+                // `protocolVersion` — НЕ ошибка (толерантность к старым
+                // адаптерам): ветка не срабатывает.
+                if v != ACP_PROTOCOL_VERSION {
+                    session.shutdown().await;
+                    return Err(AcpError::init(format!(
+                        "несогласованная версия протокола: агент ответил {v}, \
+                         клиент поддерживает {ACP_PROTOCOL_VERSION}"
+                    )));
+                }
             }
             // F2: непустые `authMethods` фатальны ТОЛЬКО при заявленной
             // capability `agentCapabilities.authenticate` — тогда клиентская
@@ -1522,6 +1534,66 @@ mod tests {
         assert!(
             !s.journal.iter().any(|j| j.contains("authMethods")),
             "нет записей об authMethods: {:?}",
+            s.journal
+        );
+    }
+
+    // --- S3: несогласованная версия протокола -----------------------------
+
+    /// S3: агент ответил ЧУЖИМ MAJOR версии протокола — провал
+    /// ИНИЦИАЛИЗАЦИИ (auto → fallback headless, mode=acp → ошибка), а не
+    /// журнальная запись с продолжением сессии.
+    #[tokio::test]
+    async fn version_mismatch_is_init_error() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let err = run_session(&session("version-mismatch"), tmp.path(), "задача")
+            .await
+            .expect_err("чужой MAJOR — ошибка инициализации");
+        assert!(err.is_init(), "{err}");
+        assert!(
+            err.message().contains("версия протокола"),
+            "причина названа: {err}"
+        );
+        assert!(
+            err.message().contains("99"),
+            "версия агента в причине: {err}"
+        );
+        assert!(
+            err.message().contains(&ACP_PROTOCOL_VERSION.to_string()),
+            "поддерживаемая версия в причине: {err}"
+        );
+    }
+
+    /// S3 (совпадающая версия): прежнее поведение — версия в журнале,
+    /// сессия живёт до `end_turn` (мимо ветки расхождения).
+    #[tokio::test]
+    async fn matching_version_is_journaled_and_session_lives() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let s = run_session(&session("ok"), tmp.path(), "задача")
+            .await
+            .expect("ACP-сессия");
+        assert_eq!(s.termination, Termination::Completed);
+        assert!(
+            s.journal
+                .iter()
+                .any(|j| j.contains(&format!("protocolVersion={ACP_PROTOCOL_VERSION}"))),
+            "журнал версии сохранён: {:?}",
+            s.journal
+        );
+    }
+
+    /// S3 (толерантность): `protocolVersion` в ответе отсутствует — НЕ ошибка
+    /// (старые адаптеры), сессия продолжается штатно.
+    #[tokio::test]
+    async fn missing_protocol_version_is_tolerated() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let s = run_session(&session("no-version"), tmp.path(), "задача")
+            .await
+            .expect("отсутствие protocolVersion — не ошибка");
+        assert_eq!(s.termination, Termination::Completed);
+        assert!(
+            s.journal.iter().all(|j| !j.contains("protocolVersion=")),
+            "нет записей о версии: {:?}",
             s.journal
         );
     }
