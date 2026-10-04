@@ -298,8 +298,8 @@ mod tests {
     #[test]
     fn lock_path_is_sibling_of_library() {
         assert_eq!(
-            lock_path_for_library(Path::new("/home/u/.arch-harness/plugins")),
-            PathBuf::from("/home/u/.arch-harness/plugins.lock")
+            lock_path_for_library(Path::new("/home/user/.arch-harness/plugins")),
+            PathBuf::from("/home/user/.arch-harness/plugins.lock")
         );
     }
 
