@@ -6,7 +6,7 @@ MCP-сервер, разложил скиллы, подключил хуки-г�
 Code, поэтому все шаги проверены живьём на qwen-code (0.0.5 и 0.24.0).
 
 > **Версия.** Инструкция сверена с последним релизом на GitHub —
-> **v0.3.11** (2026-09-27); установочные ссылки ниже ведут на
+> **v0.3.12** (2026-10-04); установочные ссылки ниже ведут на
 > `releases/latest`, то есть ровно на опубликованный релиз.
 > Релиз публикует **две редакции × четыре платформы** + сводный `SHA256SUMS`
 > (см. Часть 0). Что из релиза важно именно этому сценарию:
@@ -25,6 +25,14 @@ Code, поэтому все шаги проверены живьём на qwen-c
 >   применяется: смена типа колонки в DDL больше не проходит незамеченной
 >   (несовместимая — `CD-S03`, exit 1); джоба `cargo-mutants` в Nightly
 >   больше не падает из-за невалидного номера шарда.
+> - **0.3.12** — «эшелонированная защита»: контрольная плоскость на замке
+>   (находка `BodyChanged` ловит правки тела запроса `harness_run` мимо
+>   спеки), поставка — SBOM/provenance/подпись от той же сборки, тег —
+>   только с зелёного CI; режимы вызова агента ADR-057 (ACP-клиент рядом с
+>   headless, `auto` с откатом), экспорт инвариантов развёртывания в
+>   Kyverno/Rego (`policy export`), теневой гейт `--shadow-constraints`.
+>   Для GigaCode (форк qwen-code) без acp-секции в конфиге ничего не
+>   меняется — headless-путь байт-в-байт прежний.
 
 > **Нативная поддержка.** У `arch-be connect` есть хост `gigacode`
 > (алиасы: `giga-code`, `gcode`): каталог настроек определяется
@@ -94,7 +102,7 @@ $env:PROCESSOR_ARCHITECTURE   # Windows: AMD64 → windows-x86_64
 ```bash
 curl -L -o arch-be https://github.com/romannekrasovaillm/spine-bank/releases/latest/download/arch-be-core-linux-x86_64
 chmod +x arch-be && mkdir -p ~/.local/bin && mv arch-be ~/.local/bin/
-arch-be --version          # ожидается 0.3.11
+arch-be --version          # ожидается 0.3.12
 ```
 
 **Установка, Windows (PowerShell):**
@@ -148,7 +156,7 @@ curl.exe -L -o arch-be.exe https://github.com/romannekrasovaillm/spine-bank/rele
 ```text
 Разверни Spine (arch-be) в этом проекте по следующей инструкции.
 (проверено прогонами на qwen-code 0.0.5 и 0.24.0 — GigaCode CLI его форк;
- последний релиз Spine на GitHub — v0.3.11)
+ последний релиз Spine на GitHub — v0.3.12)
 Репозиторий Spine (если он есть локально): <ПУТЬ_К_КЛОНУ, напр. ~/spine-bank>
 
 ВАЖНО: пути `.qwen/settings.json` и `.qwen/skills/` ниже — от Qwen Code.
@@ -184,7 +192,7 @@ curl.exe -L -o arch-be.exe https://github.com/romannekrasovaillm/spine-bank/rele
    - ВАРИАНТ В (закрытый контур, офлайн-бандл): распакуй
      spine-offline-*.tar.gz и выполни ./install.sh из него (бинарь, движок
      Archify, init — всё офлайн; целостность проверяется по SHA256SUMS).
-   - Проверь: `arch-be --version` (ожидается 0.3.11).
+   - Проверь: `arch-be --version` (ожидается 0.3.12).
 
 2. MCP-сервер + скиллы (project-level, НЕ затирай существующее — мердж):
    - Выполни `arch-be connect gigacode --rw=reports` в корне проекта (если

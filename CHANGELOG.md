@@ -7,34 +7,11 @@
 
 ## [Unreleased]
 
-Волна D, пункт D3 (ADR-059 §D3, дельта `changes/policy-export-deployment`):
-мост «спайн → политики кластера» по аналогии с `ArchUnit`-мостом (ADR-039).
+## [0.3.12] — 2026-10-04
 
-### Added
-
-- **D3: экспорт инвариантов развёртывания в политики кластера.** Новая
-  секция `deployment:` в `CONSTRAINTS.yaml` (образы — внутренний реестр и
-  подпись, non-root, лимиты ресурсов, deny-список образов) и подкоманда
-  `arch-be policy export <kyverno|rego>` (`--repo`/`--constraints`/`--output`):
-  детерминированная генерация политик Kyverno `ClusterPolicy` и OPA/Conftest
-  Rego (`package archbe.deployment`). Схема и честные границы —
-  `docs/policy-export.md`.
-
-### Что может покраснеть после обновления
-
-- **Ничего: секция `deployment:` и подкоманда `policy export` нейтральны к
-  дефолту.** Все читатели реестра (`gate`, `fitness`, `rules_report`,
-  delta-guard, handoff-копия) разбирают только
-  `rules:`/`constraints:`/`extends:`/`overrides:`; неизвестное top-level-поле
-  `deployment:` serde игнорирует — вердикт не меняется (тест: фикстура с
-  секцией проходит гейт байт-в-байт как без неё). Экспорт ничего не пишет
-  без `--output` и на прогоны контроля не влияет.
-
-## [0.3.12] — 2026-10-03
-
-Волны A, B и C задания «эшелонированная защита»: проверяемый не управляет
+Волны A, B, C и D задания «эшелонированная защита»: проверяемый не управляет
 проверкой (A), поставка, которой можно верить (B), рантайм и исходники на
-замке (C). Волна D — отдельно.
+замке (C), слои после гейта (D); рядом — режимы вызова агента ADR-057.
 
 ### Added
 
@@ -84,6 +61,26 @@
   и `gate-verdict/v1` не меняются; headless-путь и его тексты (`Completed`/
   `AbsoluteTimeout`/`IdleTimeout`) байт-в-байт прежние. CLI `harness-run` при
   `refusal` завершается кодом 1.
+- **Уточнения протокола ACP (срезы F1–F5 и S1–S3, дельта
+  `agent-modes-acp`).** Финальный текст агрегируется по `messageId` (смена
+  id — новое сообщение; без id — прежний фолбэк); `authMethods` в ответе
+  `initialize` фатальны только при заявленной агентом capability
+  `authenticate` — информационный список без cap не мешает сессии; неизвестные
+  `sessionUpdate` журналируются и пропускаются; висящий `request_permission`
+  при отмене получает `outcome: cancelled`; `session/close` отправляется по
+  capability после `end_turn`; несогласованный MAJOR `protocolVersion`
+  закрывает сессию (`auto` — откат на headless с причиной, `mode=acp` —
+  ошибка прогона). Фикстура-агент конформна официальному TCK v1 ACP
+  (33/33, MANDATORY 19/19 — `docs/experiments/acp-tck-2026-10-04.md`).
+- **D3: экспорт инвариантов развёртывания в политики кластера**
+  (ADR-059 §D3, дельта `changes/policy-export-deployment`). Новая секция
+  `deployment:` в `CONSTRAINTS.yaml` (образы — внутренний реестр, подпись и
+  `public_key`, non-root, лимиты ресурсов, deny-список) и подкоманда
+  `arch-be policy export <kyverno|rego>` (`--repo`/`--constraints`/`--output`):
+  детерминированная генерация Kyverno `ClusterPolicy` (с `verifyImages`) и
+  OPA/Conftest Rego; проверено на реальных движках (kyverno apply 1.19.1,
+  opa 1.21.1). Схема и честные границы — `docs/policy-export.md`; нейтральна
+  к дефолту — все читатели реестра секцию игнорируют, вердикт байт-в-байт.
 
 ### Что может покраснеть после обновления
 
