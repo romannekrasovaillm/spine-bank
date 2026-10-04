@@ -1639,6 +1639,47 @@ async fn explicit_acp_does_not_fall_back() {
     assert!(err.to_string().contains("ACP"), "{err}");
 }
 
+/// S3: `auto` + агент ответил ЧУЖИМ MAJOR протокола → откат на headless
+/// с честной причиной «версия протокола не согласована».
+#[tokio::test]
+async fn auto_falls_back_on_version_mismatch() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let cfg = CodingHarnessConfig {
+        binary: "cat".into(),
+        prompt_mode: PromptMode::Stdin,
+        timeout_secs: 30,
+        idle_timeout_secs: 0,
+        acp: Some(acp_fixture("version-mismatch")),
+        ..CodingHarnessConfig::default()
+    };
+    let run = run_harness("fake", &cfg, tmp.path(), "задача")
+        .await
+        .expect("откат — не ошибка");
+    assert_eq!(run.mode, HarnessMode::Fallback);
+    assert_eq!(run.stdout, "задача", "откат выполнил headless-путь");
+    let note = run.mode_note.expect("предупреждение об откате");
+    assert!(note.contains("версия протокола"), "{note}");
+}
+
+/// S3: `mode = "acp"` + чужой MAJOR протокола — ошибка прогона без отката.
+#[tokio::test]
+async fn explicit_acp_errors_on_version_mismatch() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let cfg = CodingHarnessConfig {
+        binary: "cat".into(),
+        prompt_mode: PromptMode::Stdin,
+        timeout_secs: 30,
+        idle_timeout_secs: 0,
+        mode: AcpMode::Acp,
+        acp: Some(acp_fixture("version-mismatch")),
+        ..CodingHarnessConfig::default()
+    };
+    let err = run_harness("fake", &cfg, tmp.path(), "задача")
+        .await
+        .expect_err("mode=acp: чужой MAJOR = ошибка без отката");
+    assert!(err.to_string().contains("версия протокола"), "{err}");
+}
+
 /// C3/C5: `auto` + рабочий ACP-агент → режим `acp`, метаданные адаптера.
 #[tokio::test]
 async fn auto_uses_acp_when_declared_and_working() {

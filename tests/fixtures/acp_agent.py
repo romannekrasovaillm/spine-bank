@@ -16,6 +16,11 @@ newline-delimited JSON-RPC 2.0 на stdin/stdout. Поведение выбир�
               информационный список, сессия продолжается штатно (F2);
   auth-required initialize с непустым authMethods И authenticate-cap —
               клиент обязан отказаться от сессии (F2);
+  version-mismatch initialize отвечает ЧУЖИМ MAJOR версии протокола
+              (protocolVersion 99) — клиент обязан закрыть соединение:
+              auto → fallback headless, mode=acp → ошибка прогона (S3);
+  no-version  initialize БЕЗ protocolVersion — толерантность к старым
+              адаптерам: не ошибка, сессия продолжается штатно (S3);
   unknown-update session/update с выдуманным sessionUpdate — прогон жив, в
               журнале запись (F3);
   perm-cancel ждёт допуск и молчит; по session/cancel просит допуск ещё раз
@@ -303,15 +308,22 @@ def main():
         if mode in ("auth", "auth-required")
         else []
     )
-    response(
-        init["id"],
-        {
-            "protocolVersion": 1,
-            "agentCapabilities": capabilities,
-            "agentInfo": {"name": "fixture-agent", "version": "0.0.1"},
-            "authMethods": auth_methods,
-        },
-    )
+    init_result = {
+        "agentCapabilities": capabilities,
+        "agentInfo": {"name": "fixture-agent", "version": "0.0.1"},
+        "authMethods": auth_methods,
+    }
+    if mode == "version-mismatch":
+        # S3: чужой MAJOR протокола — клиент обязан закрыть соединение.
+        init_result["protocolVersion"] = 99
+    elif mode != "no-version":
+        init_result["protocolVersion"] = 1
+    response(init["id"], init_result)
+    if mode == "version-mismatch":
+        # Клиент обязан закрыть соединение (чужой MAJOR не согласован):
+        # молчим, пока клиент не завершит процессную группу.
+        time.sleep(30)
+        sys.exit(0)
     if mode == "auth-required":
         # Клиент обязан отказаться от сессии (аутентификацию не поддерживает).
         time.sleep(30)
