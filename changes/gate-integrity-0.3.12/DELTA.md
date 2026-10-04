@@ -131,13 +131,14 @@ warn-по-умолчанию либо за флагом, краснить чуж
 - [x] B4/B5: actions по SHA, permissions, cargo deny, CODEOWNERS — под
       фитнес-правилами dogfood (сам CONSTRAINTS.yaml). — C-35…C-43, dogfood
       59/0 PASS; 56/56 пинов сверены со списком архитектора.
-- [~] C1–C3: plugins.lock, env_allow на Critical, составляющая secrets;
-      ключ в коде → `secret_literal` в пост-гейте. — реализовано волной C
-      (unit/CLI-тесты: «плагин с подменённым хуком/скиллом не загружается,
-      `plugin_tampered` (RA-8)», «Critical-прогон получает только whitelist,
-      `env_inherit` — наследование с предупреждением (RA-9)»,
-      «`src/leak.go` → `secret_literal` [warn] файл:строка, severity error
-      по конфигу (RA-10)»); ожидает приёмки архитектора.
+- [x] C1–C3: plugins.lock, env_allow на Critical, составляющая secrets;
+      ключ в коде → `secret_literal` в пост-гейте. — коммиты `2de11d7`
+      (волна C) + `efa058a` (rustfmt по пост-гейту), влито `711171f`;
+      приёмка архитектора 2026-10-04: RA-8 (замок: exit 1 + plugin_tampered
+      + плагин исключён из загрузки; замок развёрнут на библиотеке хоста),
+      RA-9 (Critical: проба получила только whitelist, env_inherit —
+      наследование с предупреждением), RA-10 (secret_literal [warn]
+      файл:строка; severity error → FAIL), полный сьют 1883/0.
 - [~] ADR-055 (A5), ADR-056 (B3), ADR-057 (C4) приняты человеком;
       D1–D4 — ADR или docs/experiments/, код за флагами. — ADR-055
       Accepted 2026-10-03 (вариант (а)); ADR-056 Accepted 2026-10-03
