@@ -18,69 +18,27 @@ const STOP_HOOK_TIMEOUT_SECS: u64 = 150;
 /// Таймаут PostToolUse-хука под `--strict-hooks`, секунды.
 const POST_TOOL_USE_HOOK_TIMEOUT_SECS: u64 = 300;
 
-/// База для хуков сессии (Stop / PostToolUse): точка ответвления от основной
-/// ветки — тот же список веток и тот же `merge-base`, что у
-/// [`crate::control::default_anchor_base`]. Ветка не найдена — пусто, и хук
-/// работает без базы (как 0.3.3). После Н5 хуки обязаны видеть УЖЕ
-/// закоммиченное ослабление правила: без базы сравнение шло с `HEAD`.
+/// Команда Stop-хука Claude Code: тонкий shim на бинарь (ROADMAP 1.7 п.2).
+/// Вся семантика — якорь базы диффа, запуск `gate`, коды выхода (2 — блок,
+/// stderr модели) — живёт в `arch-be hook stop` и версионируется вместе с
+/// ядром: исправление хука приезжает с обновлением бинаря, а не повторным
+/// `connect` на каждой машине. В shell остаётся только fail-soft гард
+/// `command -v arch-be` (удалённый бинарь не ломает завершение сессии).
 ///
-/// T-03: в `--base` уходит ГОЛАЯ ревизия. Раньше шаблоны передавали готовый
-/// диапазон `$BASE...HEAD`, гейт дописывал `...HEAD` второй раз, и дифф не
-/// вычислялся вовсе — гейт молча уходил в fail-safe Critical.
-const ANCHOR_BASE_SNIPPET: &str = "\
-BASE=\"\"\n\
-for anchor in origin/main main origin/master master; do\n\
-\x20 if git rev-parse --verify --quiet \"$anchor\" >/dev/null 2>&1; then\n\
-\x20   BASE=$(git merge-base \"$anchor\" HEAD 2>/dev/null || true)\n\
-\x20   break\n\
-\x20 fi\n\
-done\n";
-
-/// Команда Stop-хука Claude Code: единый архитектурный гейт перед завершением
-/// сессии. Гард — только `command -v arch-be` (fail-soft на инфраструктуру:
-/// нет бинаря — пропуск); блок (exit 2, stderr агенту) — по коду возврата
-/// `arch-be gate` (ненулевой = провал хотя бы одной составляющей; строки
-/// вывода не разбираются).
-///
-/// T-01: раньше шаблон сам проверял наличие `.arch-handoff/CONSTRAINTS.yaml`,
-/// и на кейсе, собранном `bootstrap` (реестр в КОРНЕ), хук молча пропускал
-/// красный гейт — контур молчал там, где обязан остановить. Расположение
-/// реестра знает только бинарь (резолвер `control::resolve_constraints_path`:
-/// корень, затем `.arch-handoff/`), поэтому в shell его больше нет: нет
-/// реестра нигде — `gate` печатает «реестр правил не найден» и отдаёт
-/// INCOMPLETE, хук блокирует.
-pub(super) fn stop_hook_command() -> String {
+/// T-01: расположения реестра в shim'е нет и быть не может — его знает
+/// только бинарь (резолвер `control::resolve_constraints_path`).
+pub(crate) fn stop_hook_command() -> String {
     format!(
-        "if command -v arch-be >/dev/null 2>&1; then \
-         {ANCHOR_BASE_SNIPPET}\
-         if [ -n \"$BASE\" ]; then \
-         if ! out=$(arch-be gate --route auto --base \"$BASE\" 2>&1); then \
-         printf '%s\\n\\n%s\\n' \"$out\" \
-         \"{HOOK_MARKER}: архитектурный гейт FAIL — исправьте находки error перед завершением \
-         (подробности выше; гейт: arch-be gate)\" >&2; exit 2; fi; \
-         elif ! out=$(arch-be gate --route auto 2>&1); then \
-         printf '%s\\n\\n%s\\n' \"$out\" \
-         \"{HOOK_MARKER}: архитектурный гейт FAIL — исправьте находки error перед завершением \
-         (подробности выше; гейт: arch-be gate)\" >&2; exit 2; fi; fi \
+        "if command -v arch-be >/dev/null 2>&1; then arch-be hook stop; fi \
          # {HOOK_MARKER}:stop"
     )
 }
 
-/// Команда PostToolUse-хука (`--strict-hooks`): тот же гейт на каждую
-/// правку файла (matcher `Edit|Write|MultiEdit`).
+/// Команда PostToolUse-хука (`--strict-hooks`): тот же shim на бинарь —
+/// гейт на каждую правку файла (matcher `Edit|Write|MultiEdit`).
 pub(super) fn post_tool_use_hook_command() -> String {
     format!(
-        "if command -v arch-be >/dev/null 2>&1; then \
-         {ANCHOR_BASE_SNIPPET}\
-         if [ -n \"$BASE\" ]; then \
-         if ! out=$(arch-be gate --route auto --base \"$BASE\" 2>&1); then \
-         printf '%s\\n\\n%s\\n' \"$out\" \
-         \"{HOOK_MARKER}: правка не проходит архитектурный гейт (arch-be gate FAIL) — \
-         исправьте находки error\" >&2; exit 2; fi; \
-         elif ! out=$(arch-be gate --route auto 2>&1); then \
-         printf '%s\\n\\n%s\\n' \"$out\" \
-         \"{HOOK_MARKER}: правка не проходит архитектурный гейт (arch-be gate FAIL) — \
-         исправьте находки error\" >&2; exit 2; fi; fi \
+        "if command -v arch-be >/dev/null 2>&1; then arch-be hook post-tool-use; fi \
          # {HOOK_MARKER}:post-tool-use"
     )
 }
@@ -101,18 +59,48 @@ fn has_marked_hook(entries: &[Value]) -> bool {
     })
 }
 
-/// Добавляет наш хук в массив события `hooks[event]`, если записи с
-/// маркером там ещё нет (идемпотентность). Возвращает true, если изменил.
+/// Обновляет записи с нашим маркером до канонической формы текущей версии:
+/// хук, записанный прежней версией (shell-шаблон с зашитой логикой),
+/// заменяется shim'ом на бинарь — дальше семантика приезжает с обновлениями
+/// `arch-be`, без повторной правки settings вручную. Matcher групп и чужие
+/// поля не трогаются. Возвращает true, если хотя бы одна команда заменена.
+fn upgrade_marked_hooks(entries: &mut [Value], canonical_command: &str, timeout_secs: u64) -> bool {
+    let mut changed = false;
+    for group in entries.iter_mut() {
+        let Some(cmds) = group.get_mut("hooks").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for c in cmds.iter_mut() {
+            let is_ours = c
+                .get("command")
+                .and_then(Value::as_str)
+                .is_some_and(|cmd| cmd.contains(HOOK_MARKER));
+            if !is_ours {
+                continue;
+            }
+            if c.get("command").and_then(Value::as_str) != Some(canonical_command) {
+                c["command"] = json!(canonical_command);
+                c["timeout"] = json!(timeout_secs);
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
+/// Идемпотентная гарантия хука события: записи с маркером нет — вставить;
+/// есть — обновить до канонической формы (если отличается). Возвращает
+/// `(added, upgraded)`.
 ///
 /// # Errors
 /// Существующее значение `hooks[event]` не массив — не затираем чужое.
-fn upsert_hook(
+fn ensure_hook(
     hooks: &mut serde_json::Map<String, Value>,
     event: &str,
     matcher: Option<&str>,
     command: &str,
     timeout_secs: u64,
-) -> Result<bool> {
+) -> Result<(bool, bool)> {
     let entries_value = hooks.entry(event.to_string()).or_insert_with(|| json!([]));
     let Some(entries) = entries_value.as_array_mut() else {
         return Err(HarnessError::Config(format!(
@@ -120,7 +108,7 @@ fn upsert_hook(
         )));
     };
     if has_marked_hook(entries) {
-        return Ok(false);
+        return Ok((false, upgrade_marked_hooks(entries, command, timeout_secs)));
     }
     let mut group = json!({
         "hooks": [{"type": "command", "command": command, "timeout": timeout_secs}]
@@ -129,12 +117,13 @@ fn upsert_hook(
         group["matcher"] = json!(m);
     }
     entries.push(group);
-    Ok(true)
+    Ok((true, false))
 }
 
 /// Мердж хуков в `.claude/settings.json`: событие `Stop` всегда,
 /// `PostToolUse` (matcher `Edit|Write|MultiEdit`) — под `--strict-hooks`.
-/// Чужие ключи и хуки не трогаются.
+/// Чужие ключи и хуки не трогаются; записи прежних версий (shell-шаблоны с
+/// зашитой логикой) обновляются до shim'а на бинарь.
 pub(super) fn merge_claude_settings(
     path: &Path,
     strict: bool,
@@ -150,25 +139,34 @@ pub(super) fn merge_claude_settings(
         )));
     };
     let mut added: Vec<&str> = Vec::new();
-    if upsert_hook(
+    let mut upgraded: Vec<&str> = Vec::new();
+    let (a, u) = ensure_hook(
         hooks,
         "Stop",
         None,
         &stop_hook_command(),
         STOP_HOOK_TIMEOUT_SECS,
-    )? {
+    )?;
+    if a {
         added.push("Stop");
     }
-    if strict
-        && upsert_hook(
+    if u {
+        upgraded.push("Stop");
+    }
+    if strict {
+        let (a, u) = ensure_hook(
             hooks,
             "PostToolUse",
             Some("Edit|Write|MultiEdit"),
             &post_tool_use_hook_command(),
             POST_TOOL_USE_HOOK_TIMEOUT_SECS,
-        )?
-    {
-        added.push("PostToolUse");
+        )?;
+        if a {
+            added.push("PostToolUse");
+        }
+        if u {
+            upgraded.push("PostToolUse");
+        }
     }
     if !added.is_empty() {
         report.notes.push(format!(
@@ -176,13 +174,20 @@ pub(super) fn merge_claude_settings(
             added.join(", ")
         ));
     }
+    if !upgraded.is_empty() {
+        report.notes.push(format!(
+            "хуки обновлены до shim'а на бинарь: {} — далее семантика приезжает с обновлением \
+             arch-be, повторный connect не нужен",
+            upgraded.join(", ")
+        ));
+    }
     report.notes.push(
-        "семантика хуков: fail-soft на инфраструктуру (нет arch-be — молча \
-         пропуск; нет входа у составляющих — SKIP), блок (exit 2) — по ненулевому коду \
-         `arch-be gate --route auto` (провал любой составляющей: fitness, \
-         delta guard, rule_weakened, spine, trace); PostToolUse-гейт на \
-         каждую правку — через --strict-hooks (дорого на репозиториях с \
-         command_succeeds-правилами)"
+        "семантика хуков: shim `arch-be hook stop|post-tool-use` — логика в бинаре \
+         (версионируется с ядром); fail-soft на инфраструктуру (нет arch-be — молча пропуск; \
+         нет входа у составляющих — SKIP), блок (exit 2) — по ненулевому коду гейта \
+         (провал любой составляющей: fitness, delta guard, rule_weakened, spine, trace); \
+         PostToolUse-гейт на каждую правку — через --strict-hooks (дорого на репозиториях \
+         с command_succeeds-правилами)"
             .into(),
     );
     let new = match serde_json::to_string_pretty(&Value::Object(root)) {
@@ -196,8 +201,8 @@ pub(super) fn merge_claude_settings(
 /// команды, что пишутся мерджем, — у хостов без записи виден точный текст.
 pub(super) fn hooks_snippet(strict: bool) -> String {
     let mut hooks = serde_json::Map::new();
-    // Свежая карта — upsert заведомо добавляет; ошибка формы невозможна.
-    let _ = upsert_hook(
+    // Свежая карта — ensure заведомо добавляет; ошибка формы невозможна.
+    let _ = ensure_hook(
         &mut hooks,
         "Stop",
         None,
@@ -205,7 +210,7 @@ pub(super) fn hooks_snippet(strict: bool) -> String {
         STOP_HOOK_TIMEOUT_SECS,
     );
     if strict {
-        let _ = upsert_hook(
+        let _ = ensure_hook(
             &mut hooks,
             "PostToolUse",
             Some("Edit|Write|MultiEdit"),
@@ -251,12 +256,11 @@ fn toml_escape_basic(text: &str) -> String {
 mod tests {
     use super::*;
 
-    /// Команды хуков: гард по бинарю, маркер, exit 2 по коду возврата
-    /// `arch-be gate` (без разбора строк вывода).
+    /// Команды хуков — тонкие shim'ы на бинарь (ROADMAP 1.7 п.2): гард по
+    /// бинарю, маркер, вызов `arch-be hook <имя>`; логика (база диффа,
+    /// запуск гейта, exit-коды) — в бинаре, в shell её нет.
     ///
-    /// T-01: расположения реестра в shell-шаблонах НЕТ — на кейсе `bootstrap`
-    /// (реестр в корне) прежний гард `[ -f .arch-handoff/CONSTRAINTS.yaml ]`
-    /// глушил красный гейт. Путь резолвит бинарь.
+    /// T-01: расположения реестра в shim'ах НЕТ — путь резолвит бинарь.
     #[test]
     fn hook_commands_are_guarded_and_marked() {
         for cmd in [stop_hook_command(), post_tool_use_hook_command()] {
@@ -265,15 +269,59 @@ mod tests {
                 !cmd.contains("CONSTRAINTS"),
                 "путь к реестру знает только бинарь (T-01): {cmd}"
             );
-            assert!(cmd.contains("arch-be gate --route auto"), "{cmd}");
+            assert!(cmd.contains("arch-be hook "), "shim на бинарь: {cmd}");
             assert!(
-                !cmd.contains("Итог: FAIL"),
-                "детекция провала — по exit-коду, не по строке: {cmd}"
+                !cmd.contains("arch-be gate") && !cmd.contains("merge-base"),
+                "логика переехала в бинарь: {cmd}"
             );
-            assert!(cmd.contains("exit 2"), "{cmd}");
             assert!(cmd.contains(HOOK_MARKER), "{cmd}");
         }
+        assert!(stop_hook_command().contains("arch-be hook stop"));
         assert!(stop_hook_command().contains("# spine-connect:stop"));
+        assert!(post_tool_use_hook_command().contains("arch-be hook post-tool-use"));
         assert!(post_tool_use_hook_command().contains("# spine-connect:post-tool-use"));
+    }
+
+    /// Прежний хук (shell-шаблон с зашитой логикой) обновляется до shim'а
+    /// тем же connect: маркер один, чужие записи и matcher не тронуты.
+    #[test]
+    fn merge_upgrades_legacy_fat_hook_to_shim() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let path = tmp.path().join("settings.json");
+        let legacy = "if command -v arch-be >/dev/null 2>&1; then BASE=x; arch-be gate \
+                      --route auto; exit 2; fi # spine-connect:stop";
+        std::fs::write(
+            &path,
+            format!(
+                "{{\"hooks\": {{\"Stop\": [{{\"matcher\": \"m\", \"hooks\": [\
+                 {{\"type\": \"command\", \"command\": \"{legacy}\", \"timeout\": 150}},\
+                 {{\"type\": \"command\", \"command\": \"echo чужой\", \"timeout\": 1}}\
+                 ]}}]}}}}"
+            ),
+        )
+        .expect("settings");
+        let mut report = ConnectReport::default();
+        merge_claude_settings(&path, false, false, &mut report).expect("merge");
+        let text = std::fs::read_to_string(&path).expect("read");
+        assert!(text.contains("arch-be hook stop"), "shim: {text}");
+        assert!(
+            !text.contains("arch-be gate --route auto"),
+            "старое убрано: {text}"
+        );
+        assert!(text.contains("echo чужой"), "чужой хук цел: {text}");
+        assert!(
+            text.contains("\"matcher\": \"m\""),
+            "matcher группы цел: {text}"
+        );
+        assert_eq!(text.matches("spine-connect:stop").count(), 1, "маркер один");
+        assert!(
+            report.notes.iter().any(|n| n.contains("обновлены")),
+            "заметка об обновлении: {:?}",
+            report.notes
+        );
+        // Повторный connect — уже канон, ничего не меняет.
+        let mut report2 = ConnectReport::default();
+        merge_claude_settings(&path, false, false, &mut report2).expect("повтор");
+        assert_eq!(text, std::fs::read_to_string(&path).expect("read2"));
     }
 }

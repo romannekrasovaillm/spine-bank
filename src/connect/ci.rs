@@ -506,14 +506,25 @@ mod tests {
     /// T-03: шаблоны передают базу ГОЛОЙ ревизией. Готовый диапазон
     /// `rev...HEAD` гейт дополнял вторым `...HEAD`, git отказывал, и гейт
     /// молча уходил в fail-safe Critical — строгость зависела от формы записи
-    /// базы, а не от изменения.
+    /// базы, а не от изменения. ROADMAP 1.7 п.2: хуки — shim'ы на бинарь,
+    /// база вычисляется ВНУТРИ `arch-be hook <имя>`; `--base` остаётся
+    /// только в CI-шаблонах (они вызывают `gate` напрямую).
     #[test]
     fn templates_pass_a_bare_base_revision() {
-        let mut blocks = vec![
+        // Хуки-shim'ы: базы в shell нет — она в бинаре; двойного `...HEAD`
+        /// быть не может по построению.
+        for (name, block) in [
             ("stop-хук", stop_hook_command()),
             ("post-tool-use", post_tool_use_hook_command()),
             ("pre-push", pre_push_hook_block()),
-        ];
+        ] {
+            assert!(block.contains("arch-be hook "), "{name} — shim: {block}");
+            assert!(
+                !block.contains("...HEAD") && !block.contains("merge-base"),
+                "{name}: база живёт в бинаре, не в shell: {block}"
+            );
+        }
+        let mut blocks = Vec::new();
         for provider in [
             CiProvider::GitLab,
             CiProvider::GitHub,

@@ -555,6 +555,10 @@ pub fn run_host_checks(host: Host, project_dir: &Path, home: Option<&Path>) -> V
         Host::Claude | Host::Omp => {
             checks.push(check_json_mcp_settings(&project_dir.join(".mcp.json")));
             checks.push(check_skills_dir(&project_dir.join(".claude/skills")));
+            checks.push(check_spine_hooks(
+                &project_dir.join(".claude/settings.json"),
+                &format!("arch-be connect {}", host.name()),
+            ));
         }
         Host::Qwen => {
             checks.push(check_json_mcp_settings(
@@ -586,6 +590,12 @@ pub fn run_host_checks(host: Host, project_dir: &Path, home: Option<&Path>) -> V
             let project = project_dir.join(".kimi-code/mcp.json");
             let user = home.map(|h| h.join(".kimi-code/mcp.json"));
             checks.push(check_kimi_settings(&project, user.as_deref()));
+            if let Some(cfg_toml) = home.map(|h| h.join(".kimi-code/config.toml")) {
+                checks.push(check_spine_hooks(
+                    &cfg_toml,
+                    "arch-be connect kimi (сниппет)",
+                ));
+            }
         }
         Host::Generic => checks.push(Check {
             name: "settings",
@@ -599,6 +609,39 @@ pub fn run_host_checks(host: Host, project_dir: &Path, home: Option<&Path>) -> V
         checks.push(check_host_version(binary));
     }
     checks
+}
+
+/// Имя хоста для подсказок в проверках (как в CLI `connect <host>`).
+/// Хуки-гейты в настройках хоста (ROADMAP 1.7 п.2): наш маркер
+/// `spine-connect` присутствует и команда — канонический shim `arch-be hook
+/// stop` (логика в бинаре). Устаревший shell-шаблон прежней версии (маркер
+/// есть, shim'а нет) — Warn с подсказкой `connect` (обновит до shim'а);
+/// отсутствие блока или файла — Warn с той же подсказкой.
+fn check_spine_hooks(path: &Path, hint: &str) -> Check {
+    const MARKER: &str = "spine-connect";
+    const SHIM: &str = "arch-be hook stop";
+    let missing = |text: String| Check {
+        name: "hooks",
+        verdict: Verdict::Warn,
+        text,
+    };
+    match std::fs::read_to_string(path) {
+        Err(_) => missing(format!(
+            "хуки-гейты не установлены (нет {} или блока с маркером) — {hint}",
+            path.display()
+        )),
+        Ok(text) if !text.contains(MARKER) => missing(format!(
+            "хуки-гейты не установлены (маркера «{MARKER}» нет) — {hint}"
+        )),
+        Ok(text) if text.contains(SHIM) => Check {
+            name: "hooks",
+            verdict: Verdict::Ok,
+            text: "Stop-хук — shim на бинарь (версионируется с ядром)".into(),
+        },
+        Ok(_) => missing(format!(
+            "хуки устаревшего формата (shell-шаблон с зашитой логикой) — {hint} обновит до shim'а"
+        )),
+    }
 }
 
 /// Имя бинаря хоста для проверки версии (None у generic — его нет).
@@ -1990,5 +2033,56 @@ mod tests {
             Some("https://api.giga.chat/v1")
         );
         assert_eq!(crate::llm::preset_base_url("openrouter"), None);
+    }
+
+    // ---- хуки-гейты в настройках хоста (ROADMAP 1.7 п.2) ----
+
+    #[test]
+    fn spine_hooks_check_states() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let path = tmp.path().join("settings.json");
+        // Нет файла — Warn с подсказкой connect.
+        let c = check_spine_hooks(&path, "arch-be connect claude");
+        assert_eq!(c.verdict, Verdict::Warn, "{c:?}");
+        assert!(c.text.contains("arch-be connect claude"), "{}", c.text);
+        // Файл без маркера — Warn.
+        std::fs::write(&path, "{\"hooks\": {}}").expect("write");
+        let c = check_spine_hooks(&path, "arch-be connect claude");
+        assert_eq!(c.verdict, Verdict::Warn);
+        // Устаревший shell-шаблон (маркер есть, shim'а нет) — Warn «устаревший».
+        std::fs::write(
+            &path,
+            "{\"hooks\": {\"Stop\": [{\"hooks\": [{\"command\": \"arch-be gate --route auto # spine-connect:stop\"}]}]}}",
+        )
+        .expect("write legacy");
+        let c = check_spine_hooks(&path, "arch-be connect claude");
+        assert_eq!(c.verdict, Verdict::Warn, "{c:?}");
+        assert!(c.text.contains("устаревшего формата"), "{}", c.text);
+        // Канонический shim — Ok.
+        std::fs::write(
+            &path,
+            "{\"hooks\": {\"Stop\": [{\"hooks\": [{\"command\": \"if command -v arch-be >/dev/null 2>&1; then arch-be hook stop; fi # spine-connect:stop\"}]}]}}",
+        )
+        .expect("write shim");
+        let c = check_spine_hooks(&path, "arch-be connect claude");
+        assert_eq!(c.verdict, Verdict::Ok, "{c:?}");
+        assert!(c.text.contains("версионируется с ядром"), "{}", c.text);
+    }
+
+    #[test]
+    fn claude_host_checks_include_hooks_row() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let proj = tmp.path().join("proj");
+        std::fs::create_dir_all(&proj).expect("mkdir");
+        let checks = run_host_checks(Host::Claude, &proj, None);
+        let hooks = checks
+            .iter()
+            .find(|c| c.name == "hooks")
+            .expect("строка hooks");
+        assert_eq!(
+            hooks.verdict,
+            Verdict::Warn,
+            "не установлены — Warn: {checks:?}"
+        );
     }
 }

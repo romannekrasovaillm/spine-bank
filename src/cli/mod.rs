@@ -265,6 +265,18 @@ enum Cmd {
         #[arg(long, value_name = "FILE")]
         shadow_constraints: Option<PathBuf>,
     },
+    /// Хук-гейт как подкоманда бинаря (ROADMAP 1.7 п.2): stop | post-tool-use
+    /// | pre-commit | pre-push. Логика, раньше зашитая в shell-шаблоны
+    /// `connect`, версионируется вместе с ядром: установленный shim
+    /// `arch-be hook <имя>` обновляется с бинарём, без повторного connect.
+    /// Коды: 0 — пропуск; блок — 2 (хостовые хуки Claude/Kimi) или 1 (git).
+    Hook {
+        /// Имя хука: stop | post-tool-use | pre-commit | pre-push.
+        kind: String,
+        /// Репозиторий (по умолчанию — текущий каталог).
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+    },
     /// Метрика доверия к контуру (W4): положение на шкале 1–5 с ЯКОРЯМИ и
     /// ДОКАЗАТЕЛЬСТВАМИ — какие якоря выполнены, какие нет и почему. Источники:
     /// журнал MCP-вызовов, реестр правил и регистр FP, результат `redteam
@@ -1101,6 +1113,19 @@ pub(crate) async fn run() -> Result<()> {
                 }
             }
             let code = report.outcome.exit_code();
+            if code != 0 {
+                std::process::exit(code);
+            }
+        }
+        Some(Cmd::Hook { kind, repo }) => {
+            let kind = arch_harness::hook::HookKind::parse(&kind).map_err(anyhow::Error::msg)?;
+            // pre-push читает строки git'а из stdin; на терминале — без блокировки.
+            let stdin_text = if kind == arch_harness::hook::HookKind::PrePush {
+                arch_harness::hook::read_stdin_if_piped()
+            } else {
+                String::new()
+            };
+            let code = arch_harness::hook::run_hook(kind, &cfg, &repo, &stdin_text)?;
             if code != 0 {
                 std::process::exit(code);
             }

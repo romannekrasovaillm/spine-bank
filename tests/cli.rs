@@ -2970,12 +2970,15 @@ fn connect_git_hooks_writes_marked_hooks_idempotently() {
     let pre_commit = std::fs::read_to_string(repo.join(".git/hooks/pre-commit")).expect("read");
     assert!(pre_commit.contains("spine-connect:begin"), "{pre_commit}");
     assert!(
-        pre_commit.contains("arch-be control check ."),
-        "{pre_commit}"
+        pre_commit.contains("arch-be hook pre-commit"),
+        "shim на бинарь: {pre_commit}"
     );
     assert!(pre_commit.contains("command -v arch-be"), "{pre_commit}");
     let pre_push = std::fs::read_to_string(repo.join(".git/hooks/pre-push")).expect("read");
-    assert!(pre_push.contains("arch-be gate --route auto"), "{pre_push}");
+    assert!(
+        pre_push.contains("arch-be hook pre-push"),
+        "shim на бинарь: {pre_push}"
+    );
 
     // Повтор: содержимое то же, маркеры по одному.
     let mut cmd = arch_cmd(tmp.path());

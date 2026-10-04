@@ -40,80 +40,34 @@ fn git_common_dir(dir: &Path) -> Result<PathBuf> {
     })
 }
 
-/// Блок pre-commit: быстрый гейт fitness-правил. Fail-soft: нет `arch-be` в
-/// PATH — молча пропуск (exit 0), как хуки connect хостов; красный гейт —
-/// exit 1 (коммит отменяется).
-///
-/// T-01: проверки `.arch-handoff/CONSTRAINTS.yaml` в шаблоне нет — реестр
-/// кейса `bootstrap` лежит в корне, и прежний гард глушил хук на таких
-/// проектах. Путь к реестру резолвит бинарь (корень, затем `.arch-handoff/`);
-/// нет реестра нигде — внятное сообщение и ненулевой код.
+/// Блок pre-commit: быстрый гейт fitness-правил. Тонкий shim на бинарь
+/// (ROADMAP 1.7 п.2): резолв реестра (корень / `.arch-handoff/`), запуск
+/// `control check` и код выхода (1 — блок) — в `arch-be hook pre-commit`,
+/// версионируется с ядром. Fail-soft: нет `arch-be` в PATH — молча пропуск.
 fn pre_commit_hook_block() -> String {
     "# spine-connect:begin — быстрый архитектурный гейт перед коммитом (arch-be)\n\
-     # Fail-soft: нет arch-be в PATH — пропуск; где лежит реестр правил, решает бинарь.\n\
+     # Fail-soft: нет arch-be в PATH — пропуск; семантика — в бинаре (arch-be hook pre-commit).\n\
      if command -v arch-be >/dev/null 2>&1; then\n\
-     \x20 if ! arch-be control check .; then\n\
-     \x20   echo \"spine-connect: pre-commit FAIL — исправьте находки error (отчёт выше)\" >&2\n\
-     \x20   exit 1\n\
-     \x20 fi\n\
+     \x20 arch-be hook pre-commit\n\
      fi\n\
      # spine-connect:end"
         .to_string()
 }
 
-/// База диффа для хуков в виде shell-фрагмента: pre-push получает от git
-/// строки `<local ref> <local sha> <remote ref> <remote sha>` на stdin.
-///
-/// Без базы гейт сравнивал бы состав правил с `HEAD`, и **уже закоммиченное**
-/// ослабление правила хуком не ловилось бы (Н5): `--base HEAD~1` краснел, а
-/// pre-push — нет, то есть вердикт зависел от способа вызова, а не от
-/// изменения. Remote sha из нулей — новая ветка: база — точка ответвления от
-/// основной ветки (`merge-base`), тот же список веток, что у
-/// [`crate::control::default_anchor_base`].
-const PRE_PUSH_BASE_SNIPPET: &str = "\
-BASE=\"\"\n\
-while read -r local_ref local_sha remote_ref remote_sha; do\n\
-\x20 [ -z \"$remote_sha\" ] && continue\n\
-\x20 case \"$remote_sha\" in\n\
-\x20   0000000000000000000000000000000000000000)\n\
-\x20     for main in origin/main main origin/master master; do\n\
-\x20       if git rev-parse --verify --quiet \"$main\" >/dev/null 2>&1; then\n\
-\x20         BASE=$(git merge-base \"$main\" \"$local_sha\" 2>/dev/null || true)\n\
-\x20         break\n\
-\x20       fi\n\
-\x20     done\n\
-\x20     ;;\n\
-\x20   *)\n\
-\x20     BASE=\"$remote_sha\"\n\
-\x20     ;;\n\
-\x20 esac\n\
-\x20 [ -n \"$BASE\" ] && break\n\
-done\n";
-
 /// Блок pre-push: полный единый гейт (fitness + delta guard + анти-ослабление
 /// правил + линтер спайна + трассировка + целостность модели; маршрут — из
-/// диффа). Fail-soft при отсутствии `arch-be`; без входа гейт сам уходит в SKIP
-/// и пропускает пуш.
+/// диффа). Тонкий shim на бинарь (ROADMAP 1.7 п.2): stdin git'а (remote sha)
+/// и выбор базы диффа — в `arch-be hook pre-push` (Н5: без базы уже
+/// закоммиченное ослабление правил хуком не ловилось бы). Fail-soft при
+/// отсутствии `arch-be`; без входа гейт сам уходит в SKIP и пропускает пуш.
 pub(super) fn pre_push_hook_block() -> String {
-    format!(
-        "# spine-connect:begin — полный архитектурный гейт перед пушем (arch-be)\n\
-         # Fail-soft: нет arch-be в PATH — пропуск; нет входа у составляющих — SKIP внутри гейта.\n\
-         # База диффа — из stdin git\'а (remote sha), иначе анти-ослабление правил\n\
-         # не увидело бы УЖЕ закоммиченного ослабления (Н5).\n\
-         if command -v arch-be >/dev/null 2>&1; then\n\
-         {PRE_PUSH_BASE_SNIPPET}\
-         \x20 if [ -n \"$BASE\" ]; then\n\
-         \x20   if ! arch-be gate --route auto --base \"$BASE\"; then\n\
-         \x20     echo \"spine-connect: pre-push FAIL — arch-be gate не пройден (находки выше)\" >&2\n\
-         \x20     exit 1\n\
-         \x20   fi\n\
-         \x20 elif ! arch-be gate --route auto; then\n\
-         \x20   echo \"spine-connect: pre-push FAIL — arch-be gate не пройден (находки выше)\" >&2\n\
-         \x20   exit 1\n\
-         \x20 fi\n\
-         fi\n\
-         # spine-connect:end"
-    )
+    "# spine-connect:begin — полный архитектурный гейт перед пушем (arch-be)\n\
+     # Fail-soft: нет arch-be в PATH — пропуск; база диффа из stdin git'а и коды — в бинаре.\n\
+     if command -v arch-be >/dev/null 2>&1; then\n\
+     \x20 arch-be hook pre-push\n\
+     fi\n\
+     # spine-connect:end"
+        .to_string()
 }
 
 /// Право на исполнение для hook-файла (unix); вне unix — no-op.
@@ -220,7 +174,8 @@ mod tests {
     /// T-01: та же ошибка в git-хуках и CI-шаблонах — гард по
     /// `.arch-handoff/CONSTRAINTS.yaml` глушил pre-commit на кейсе с реестром
     /// в корне. Расположение реестра в шаблонах не зашито: его резолвит
-    /// бинарь (корень, затем `.arch-handoff/`).
+    /// бинарь (корень, затем `.arch-handoff/`). ROADMAP 1.7 п.2: блоки —
+    /// тонкие shim'ы на `arch-be hook <имя>`, логика в бинаре.
     #[test]
     fn git_and_ci_templates_do_not_encode_registry_location() {
         for (name, block) in [
@@ -233,9 +188,10 @@ mod tests {
             );
             assert!(block.contains("command -v arch-be"), "{name}: {block}");
             assert!(block.contains("spine-connect"), "{name}: {block}");
+            assert!(block.contains("arch-be hook "), "{name} — shim: {block}");
         }
-        assert!(pre_commit_hook_block().contains("arch-be control check ."));
-        assert!(pre_push_hook_block().contains("arch-be gate --route auto"));
+        assert!(pre_commit_hook_block().contains("arch-be hook pre-commit"));
+        assert!(pre_push_hook_block().contains("arch-be hook pre-push"));
     }
 
     /// git-hooks: pre-commit и pre-push с маркерами, исполняемые, fail-soft
@@ -259,14 +215,14 @@ mod tests {
             "fail-soft гард: {pre_commit}"
         );
         assert!(
-            pre_commit.contains("arch-be control check ."),
-            "быстрый гейт: {pre_commit}"
+            pre_commit.contains("arch-be hook pre-commit"),
+            "быстрый гейт — shim на бинарь: {pre_commit}"
         );
         let pre_push = read(&dir.join(".git/hooks/pre-push"));
         assert!(pre_push.contains("echo mine"), "чужой хук цел: {pre_push}");
         assert!(
-            pre_push.contains("arch-be gate --route auto"),
-            "полный гейт: {pre_push}"
+            pre_push.contains("arch-be hook pre-push"),
+            "полный гейт — shim на бинарь: {pre_push}"
         );
         assert!(
             report

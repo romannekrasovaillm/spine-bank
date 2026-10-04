@@ -983,8 +983,8 @@ mod tests {
             "{all_snippets}"
         );
         assert!(
-            all_snippets.contains("arch-be gate --route auto"),
-            "{all_snippets}"
+            all_snippets.contains("arch-be hook stop"),
+            "TOML-блок хука — shim на бинарь: {all_snippets}"
         );
         assert!(
             report.next_steps.iter().any(|s| s.contains("trust")),

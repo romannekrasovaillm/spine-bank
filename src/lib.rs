@@ -63,6 +63,7 @@ pub mod harness;
 #[cfg(feature = "harness")]
 pub mod harness_env;
 pub mod hash;
+pub mod hook;
 pub mod hooks;
 pub mod injection;
 pub mod judge;
