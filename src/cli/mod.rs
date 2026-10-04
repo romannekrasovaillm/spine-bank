@@ -823,6 +823,10 @@ pub(crate) async fn run() -> Result<()> {
                     ac.files, ac.hash, ac.message
                 );
             }
+            // C2: политика окружения прогона — заметка/предупреждение в итоге.
+            if let Some(note) = &run.env_note {
+                println!("Окружение: {note}.");
+            }
             match &run.contract {
                 arch_harness::harness::ContractParse::Valid(c) => {
                     println!(

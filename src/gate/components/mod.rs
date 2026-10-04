@@ -629,6 +629,184 @@ pub(super) fn component_rule_weakened(
     }
 }
 
+/// Потолок числа находок `secrets`, печатаемых в вердикте (остаток —
+/// счётчиком): простыня находок в гейте бесполезна, полный список даёт
+/// `arch-be gate --format json`.
+const MAX_SECRET_FINDINGS: usize = 50;
+
+/// Потолок размера файла для сканирования секретов (байт): больше — скип
+/// (сгенерированные блобы, дампы), чтобы `scope = all` не читал гигабайты.
+const MAX_SECRET_FILE_BYTES: u64 = 2 * 1024 * 1024;
+
+/// Служебные и сборочные каталоги, не сканируемые в режиме `all`: содержимое
+/// не является исходником проекта и даёт шум.
+const SECRET_SKIP_DIRS: [&str; 8] = [
+    ".git",
+    "target",
+    "node_modules",
+    ".venv",
+    "__pycache__",
+    "dist",
+    "build",
+    ".arch-handoff",
+];
+
+/// Составляющая `secrets` (C3 волны C 0.3.12): литеральные секреты в
+/// исходниках — детекторы [`crate::secrets::builtin_rules`] в режиме
+/// СКАНИРОВАНИЯ (не редакции вывода).
+///
+/// Область — `changed` (дифф `base..HEAD`, дефолт) или `all` (весь
+/// репозиторий), severity — `warn` (дефолт) или `error` (`[gate.secrets]`).
+/// Пустой дифф и отсутствие базы — SKIP: чужие пайплайны не краснеют, а
+/// отсутствие входа честно называется. Детекторы эвристичны по форматам:
+/// длинный hex (git-хэш, sha256) формально подходит под `hex-token` и даёт
+/// предупреждение — это граница проверки, а не её вердикт.
+pub(super) fn component_secrets(
+    repo: &Path,
+    cfg: crate::config::SecretsConfig,
+    base: &str,
+    git: &GitProbe,
+) -> GateComponent {
+    let files = match secret_scan_files(repo, cfg.scope, base, git) {
+        Ok(files) => files,
+        Err(reason) => return GateComponent::skip("secrets", reason),
+    };
+    let rules = crate::secrets::builtin_rules();
+    let severity = cfg.severity.as_str();
+    let mut findings: Vec<GateFinding> = Vec::new();
+    let mut scanned = 0usize;
+    for rel in &files {
+        let path = repo.join(rel);
+        let Ok(meta) = std::fs::metadata(&path) else {
+            // Файл удалён в диапазоне — сканировать нечего.
+            continue;
+        };
+        if !meta.is_file() || meta.len() > MAX_SECRET_FILE_BYTES {
+            continue;
+        }
+        // Не-UTF-8 (бинарные/сгенерированные) файлы пропускаем: детекторы
+        // работают по тексту, а не по байтам.
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        scanned += 1;
+        for f in crate::secrets::scan_text(&text, &rules) {
+            findings.push(GateFinding {
+                severity: severity.to_string(),
+                rule: Some("secret_literal".to_string()),
+                file: Some(rel.clone()),
+                line: Some(f.line),
+                message: format!("секрет по шаблону '{}': {}", f.rule, f.masked),
+            });
+        }
+    }
+    let errors = findings.iter().filter(|f| f.severity == "error").count();
+    let total = findings.len();
+    let scope = match cfg.scope {
+        crate::config::SecretScope::Changed => "changed",
+        crate::config::SecretScope::All => "all",
+    };
+    // Границы проверки (W1, блок 2 паспорта): что зелёный здесь НЕ означает.
+    let notes = vec![
+        "детекторы ловят известные ФОРМАТЫ секретов; литерал нестандартного вида \
+         (в т.ч. значение без узнаваемого префикса) ими не ловится"
+            .to_string(),
+        "шаблон hex-token срабатывает на любую последовательность 32+ hex: \
+         git-хэши и sha256 формально подходят и дают предупреждение"
+            .to_string(),
+    ];
+    let detail = format!(
+        "область: {scope}, просканировано файлов: {scanned}, находок: {total} \
+         (error: {errors})"
+    );
+    // Слишком много находок — не вываливаем простыню в вердикт.
+    if findings.len() > MAX_SECRET_FINDINGS {
+        let rest = findings.len() - MAX_SECRET_FINDINGS;
+        findings.truncate(MAX_SECRET_FINDINGS);
+        findings.push(GateFinding::text(
+            "warn",
+            format!("… и ещё {rest} находок (полный список: `arch-be gate --format json`)"),
+        ));
+    }
+    if errors == 0 {
+        GateComponent::pass_with_findings("secrets", detail, findings).noting(notes)
+    } else {
+        GateComponent::fail("secrets", detail, findings).noting(notes)
+    }
+}
+
+/// Файлы для сканирования секретов: список относительных путей или причина
+/// SKIP (нет git/базы для режима `changed`).
+fn secret_scan_files(
+    repo: &Path,
+    scope: crate::config::SecretScope,
+    base: &str,
+    git: &GitProbe,
+) -> std::result::Result<Vec<String>, String> {
+    match scope {
+        crate::config::SecretScope::All => Ok(all_scan_files(repo)),
+        crate::config::SecretScope::Changed => {
+            if !git.repo {
+                return Err("не git-репозиторий — дифф изменённых файлов недоступен".to_string());
+            }
+            let rev = base_rev(base);
+            if !git_rev_exists(repo, rev) {
+                return Err(format!(
+                    "базовая ревизия '{rev}' не существует (нет коммитов?) — дифф недоступен"
+                ));
+            }
+            let files = delta::changed_files(repo, Some(base))
+                .map_err(|e| format!("дифф недоступен: {e}"))?;
+            // Служебные каталоги (в т.ч. `.arch-handoff/` с hex-пинами
+            // контрольной плоскости) исключаются и здесь: sha256-пины
+            // формально подходят под `hex-token` и дали бы шум на каждом
+            // прогоне с пакетом.
+            Ok(files.into_iter().filter(|f| scannable_path(f)).collect())
+        }
+    }
+}
+
+/// Сканируется ли путь: исключаем служебные и сборочные каталоги верхнего
+/// уровня (`.git`, `target`, `.arch-handoff`, …) — их содержимое не является
+/// исходником проекта и даёт ложные срабатывания `hex-token` на хэшах.
+fn scannable_path(rel: &str) -> bool {
+    let first = rel.split('/').next().unwrap_or("");
+    !SECRET_SKIP_DIRS.contains(&first)
+}
+
+/// Обход репозитория для режима `all`: регулярные файлы без служебных и
+/// сборочных каталогов, отсортированы (детерминизм вердикта).
+fn all_scan_files(repo: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut stack = vec![repo.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in rd.flatten() {
+            let path = entry.path();
+            // Символические ссылки не разворачиваем: обход без циклов.
+            let Ok(ft) = entry.file_type() else {
+                continue;
+            };
+            if ft.is_symlink() {
+                continue;
+            }
+            if ft.is_dir() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if !SECRET_SKIP_DIRS.contains(&name.as_str()) {
+                    stack.push(path);
+                }
+            } else if let Ok(rel) = path.strip_prefix(repo) {
+                out.push(rel.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// Составляющая `spine_lint`: линтер `ARCHITECTURE-SPINE.md` в корне
 /// репозитория ([`control::lint_spine`]); error-находки валят гейт.
 pub(super) fn component_spine_lint(repo: &Path) -> GateComponent {
@@ -1596,3 +1774,5 @@ pub(super) fn component_decision_quality(
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_secrets;

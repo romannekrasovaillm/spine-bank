@@ -444,25 +444,17 @@ fn git_stderr_reason(stderr: &[u8]) -> String {
     reason.chars().take(160).collect()
 }
 
-/// Гейт прямых правок спайна мимо дельты (CI-запрет «прямых коммитов в model/
-/// мимо changes/»): каждый изменённый защищённый файл обязан упоминаться
-/// (путём или именем) в теле хотя бы одной дельты-покрытия — активной
-/// (`changes/<name>/DELTA.md`) или заархивированной ВНУТРИ проверяемого
-/// диапазона (`base..HEAD`, T-07). Дельта, заархивированная до базы, не
-/// засчитывается: правок диапазона она не описывает.
+/// Изменённые файлы относительно `base` (дефолт `HEAD`: staged + unstaged
+/// рабочего дерева), включая `НЕотслеживаемые` (Н4): `git diff` их не показывает,
+/// поэтому вердикт не должен зависеть от того, сделан ли `git add`. Пути —
+/// относительно корня репозитория, отсортированы и дедуплицированы.
 ///
-/// Изменённые файлы — `git diff --name-only <base>` (дефолт `HEAD`: staged +
-/// unstaged рабочего дерева; untracked-файлы git-diff не показывает — для CI
-/// передавайте базу вида `origin/main...HEAD`).
+/// Одна реализация на двух потребителей — гейт правок спайна ([`guard`]) и
+/// сканирование секретов в изменённых файлах (составляющая `secrets`, C3).
 ///
 /// # Errors
 /// `git` недоступен или вернул ненулевой код (не репозиторий, плохая база).
-pub fn guard(repo: &Path, base: Option<&str>, protect: &[String]) -> Result<GuardReport> {
-    let protected: Vec<String> = if protect.is_empty() {
-        DEFAULT_PROTECTED.iter().map(|s| (*s).to_string()).collect()
-    } else {
-        protect.to_vec()
-    };
+pub fn changed_files(repo: &Path, base: Option<&str>) -> Result<Vec<String>> {
     let base = base.unwrap_or("HEAD").to_string();
     let out = std::process::Command::new("git")
         // `core.quotepath=false`: имена сущностей в кейсах русские, а git по
@@ -510,6 +502,30 @@ pub fn guard(repo: &Path, base: Option<&str>, protect: &[String]) -> Result<Guar
     }
     changed.sort();
     changed.dedup();
+    Ok(changed)
+}
+
+/// Гейт прямых правок спайна мимо дельты (CI-запрет «прямых коммитов в model/
+/// мимо changes/»): каждый изменённый защищённый файл обязан упоминаться
+/// (путём или именем) в теле хотя бы одной дельты-покрытия — активной
+/// (`changes/<name>/DELTA.md`) или заархивированной ВНУТРИ проверяемого
+/// диапазона (`base..HEAD`, T-07). Дельта, заархивированная до базы, не
+/// засчитывается: правок диапазона она не описывает.
+///
+/// Изменённые файлы — `git diff --name-only <base>` (дефолт `HEAD`: staged +
+/// unstaged рабочего дерева; untracked-файлы git-diff не показывает — для CI
+/// передавайте базу вида `origin/main...HEAD`).
+///
+/// # Errors
+/// `git` недоступен или вернул ненулевой код (не репозиторий, плохая база).
+pub fn guard(repo: &Path, base: Option<&str>, protect: &[String]) -> Result<GuardReport> {
+    let protected: Vec<String> = if protect.is_empty() {
+        DEFAULT_PROTECTED.iter().map(|s| (*s).to_string()).collect()
+    } else {
+        protect.to_vec()
+    };
+    let base = base.unwrap_or("HEAD").to_string();
+    let changed = changed_files(repo, Some(&base))?;
 
     // Тела дельт-покрытий: активные (`changes/<id>`) и заархивированные ВНУТРИ
     // проверяемого диапазона (T-07). Дельта, заархивированная ДО базы, — влитая

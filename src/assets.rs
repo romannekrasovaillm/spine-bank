@@ -1198,6 +1198,26 @@ const RULE_TEMPLATE_FILES: &[(&str, &str)] = &[
         include_str!("../assets/rule-templates/no-pii-in-logs/template.yaml"),
     ),
     (
+        "assets/rule-templates/secret-literal/README.md",
+        include_str!("../assets/rule-templates/secret-literal/README.md"),
+    ),
+    (
+        "assets/rule-templates/secret-literal/python/reference_impl.py",
+        include_str!("../assets/rule-templates/secret-literal/python/reference_impl.py"),
+    ),
+    (
+        "assets/rule-templates/secret-literal/python/test_secret_literal.py",
+        include_str!("../assets/rule-templates/secret-literal/python/test_secret_literal.py"),
+    ),
+    (
+        "assets/rule-templates/secret-literal/python/violating_impl.py",
+        include_str!("../assets/rule-templates/secret-literal/python/violating_impl.py"),
+    ),
+    (
+        "assets/rule-templates/secret-literal/template.yaml",
+        include_str!("../assets/rule-templates/secret-literal/template.yaml"),
+    ),
+    (
         "assets/rule-templates/saga-reserve-compensation/README.md",
         include_str!("../assets/rule-templates/saga-reserve-compensation/README.md"),
     ),

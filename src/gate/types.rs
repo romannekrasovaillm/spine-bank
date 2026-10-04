@@ -361,6 +361,9 @@ pub struct GateOptions {
     /// Override по настоящему принятому ADR (A2): каталог ADR и горизонт
     /// `until` (секция `[gate.overrides]`).
     pub overrides: crate::config::OverridesConfig,
+    /// Составляющая `secrets` (C3): severity и область сканирования
+    /// (секция `[gate.secrets]`).
+    pub secrets: crate::config::SecretsConfig,
     /// Модель доверия `command_succeeds` (A3, ADR-053): снимок решения
     /// «исполнять ли команды реестра» для составляющей `fitness`. `Default` —
     /// детерминированный legacy-режим (исполнять, allow-файл не
@@ -397,6 +400,7 @@ impl GateOptions {
             semantic_quality: cfg.gate.semantic_quality.clone(),
             rule_weakened: cfg.gate.rule_weakened.clone(),
             overrides: cfg.gate.overrides.clone(),
+            secrets: cfg.gate.secrets,
             decision_policy: cfg.gate.decision_policy.clone(),
             exec: crate::cmd_trust::ExecPolicy::default(),
             route: None,

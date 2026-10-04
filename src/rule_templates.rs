@@ -2137,6 +2137,25 @@ mod tests {
         }
     }
 
+    /// C3 (0.3.12): шаблон правила о литеральных секретах доступен для
+    /// `rule_template_apply` — исполняемый, с нарушающей реализацией и
+    /// фрагментом `command_succeeds`.
+    #[test]
+    fn secret_literal_template_is_available() {
+        let t = template("secret-literal")
+            .expect("каталог")
+            .expect("шаблон secret-literal встроен");
+        assert!(t.manifest.executable, "шаблон обязан быть исполняемым");
+        assert_eq!(t.manifest.rule.name, "secret_literal");
+        assert_eq!(t.manifest.rule.kind, "command_succeeds");
+        assert!(
+            !t.manifest.violating.is_empty(),
+            "нужна нарушающая реализация"
+        );
+        let files = t.files_for(Lang::Python);
+        assert!(files.len() >= 2, "файлы шаблона: {files:?}");
+    }
+
     #[test]
     fn matching_prefers_the_idempotency_template() {
         let hits = match_templates("Выплата идемпотентна по ключу: повторная доставка", 2)

@@ -434,6 +434,13 @@ post_gate_timeout_secs = 600
 # env_allow = ["PATH", "HOME", "LANG", "TERM", "TMPDIR",
 #              "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
 #              "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL"]
+# C2 (0.3.12): на маршруте Critical из MANIFEST.json пакета (и при
+# bank_profile = true) при НЕзаданном env_allow по умолчанию применяется
+# строгий whitelist PATH, HOME, LANG, TERM, TMPDIR + имена env адаптера —
+# ключи LLM и токены сервера исполнителю не наследуются.
+# bank_profile = false   # строгий дефолт окружения для ВСЕХ прогонов адаптера
+# env_inherit = false    # true — осознанный возврат к полному наследованию
+#                        # (предупреждение в итоге прогона)
 
 [harnesses.qwen-code]
 binary = "qwen"
@@ -609,6 +616,16 @@ memory_file = "~/.arch-harness/MEMORY.md"  # глобальная md-памят�
 # adr_dir = "docs/adr"       # каталог ADR кейса (относительный — от корня репозитория)
 # max_horizon_months = 12    # горизонт until; дальше — находка
 
+# Составляющая `secrets` (C3, 0.3.12): литеральные секреты в исходниках.
+# Работает ПО УМОЛЧАНИЮ в режиме `warn` по изменённым файлам диффа — чужие
+# пайплайны не краснеют. Детекторы те же, что редактируют вывод инструментов
+# (src/secrets.rs: AWS AKIA…, GitHub ghp_/gho_/ghs_…, sk-…, PEM, Bearer,
+# hex 32+). Строгий режим и полная область — явное решение проекта:
+#
+# [gate.secrets]
+# severity = "warn"          # warn (дефолт) | error — блокирующая находка
+# scope = "changed"          # changed (дифф base..HEAD, дефолт) | all
+#
 # Составляющая `semantic_quality` (ADR-052): смысловые рубрики по отчётам судьи.
 # ВЫКЛЮЧЕНА по умолчанию — включение только через [gate.required] нужного
 # маршрута, иначе ужесточение покраснило бы чужие пайплайны без предупреждения.

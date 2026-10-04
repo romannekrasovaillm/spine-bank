@@ -481,6 +481,13 @@ pub enum PromptMode {
     Stdin,
 }
 
+/// Whitelist окружения по умолчанию для строгого режима (C2, 0.3.12): минимум,
+/// без которого процесс кодового агента не стартует, — исполняемый поиск,
+/// домашний каталог, локаль, терминал и временный каталог. Секретоподобные
+/// переменные сервера (`*_API_KEY`, `*_TOKEN`, `GITHUB_TOKEN`, …) в него не
+/// входят: на Critical/bank-profile они не наследуются по умолчанию.
+pub const DEFAULT_ENV_ALLOW: [&str; 5] = ["PATH", "HOME", "LANG", "TERM", "TMPDIR"];
+
 /// Адаптер кодового харнесса (Claude Code, Qwen Code, `OpenClaw`, Hermes, Theseus, `CodeWhale`, Kimi Code).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -501,6 +508,20 @@ pub struct CodingHarnessConfig {
     /// прокси-переменные и ключи хоста не утекают в дочерний процесс.
     #[serde(default)]
     pub env_allow: Vec<String>,
+    /// Полное наследование окружения вопреки строгому дефолту (C2, 0.3.12):
+    /// на маршруте Critical или при `bank_profile = true` процесс исполнителя
+    /// по умолчанию получает whitelist [`DEFAULT_ENV_ALLOW`], а не всё
+    /// окружение сервера. `true` — осознанный возврат к наследованию: в итог
+    /// прогона пишется предупреждение (секреты ключей/токенов доступны
+    /// исполнителю). Явно заданный `env_allow` приоритетнее флага.
+    #[serde(default)]
+    pub env_inherit: bool,
+    /// Банковский профиль (C2, 0.3.12): строгий дефолт окружения для ВСЕХ
+    /// прогонов этого адаптера, независимо от маршрута пакета — как если бы
+    /// каждый прогон был Critical. Включайте в конфиге банка (или в шаблоне,
+    /// из которого разворачиваются адаптеры).
+    #[serde(default)]
+    pub bank_profile: bool,
     /// Таймаут прогона, секунды (абсолютный потолок).
     pub timeout_secs: u64,
     /// Таймаут тишины, секунды: прогон прерывается, если харнесс не пишет
@@ -538,6 +559,8 @@ impl Default for CodingHarnessConfig {
             prompt_mode: PromptMode::Positional,
             env: BTreeMap::new(),
             env_allow: Vec::new(),
+            env_inherit: false,
+            bank_profile: false,
             timeout_secs: 1800,
             idle_timeout_secs: 600,
             auto_commit: true,
@@ -936,6 +959,9 @@ pub struct GateConfig {
     pub semantic_quality: SemanticQualityConfig,
     /// Что делать с решением рубрики `human` на каждом маршруте (E4.2).
     pub decision_policy: DecisionPolicyConfig,
+    /// Составляющая `secrets` (C3 волны C 0.3.12): литеральные секреты в
+    /// исходниках — детекторы [`crate::secrets::builtin_rules`].
+    pub secrets: SecretsConfig,
 }
 
 /// Severity находки `BodyChanged` анти-ослабления реестра (A1).
@@ -972,6 +998,59 @@ impl BodySeverity {
 pub struct RuleWeakenedConfig {
     /// Severity находки `BodyChanged` (дефолт `warn`).
     pub body: BodySeverity,
+}
+
+/// Severity находки `secret_literal` составляющей `secrets` (C3).
+///
+/// `warn` по умолчанию: детекторы работают по форматам и дают ложные
+/// срабатывания на длинных hex (git-хэш, sha256) — краснить ими чужой
+/// пайплайн без явного решения проекта нельзя. Проект, готовый к строгому
+/// режиму, ставит `[gate.secrets] severity = "error"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SecretSeverity {
+    /// Предупреждение (дефолт): находка видна, вердикт не меняется.
+    #[default]
+    Warn,
+    /// Блок: литеральный секрет валит составляющую `secrets`.
+    Error,
+}
+
+impl SecretSeverity {
+    /// Нормализованная метка severity (`warn`/`error`).
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Warn => "warn",
+            Self::Error => "error",
+        }
+    }
+}
+
+/// Область сканирования составляющей `secrets` (C3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SecretScope {
+    /// Только файлы диффа `base..HEAD` (как `rule_weakened`, дефолт) — дешёвый
+    /// режим для потока доработок.
+    #[default]
+    Changed,
+    /// Весь репозиторий (кроме служебных и сборочных каталогов).
+    All,
+}
+
+/// Настройки составляющей `secrets` (C3): секция `[gate.secrets]`.
+///
+/// Сканирование исходников на литеральные секреты — эвристика известных
+/// форматов, поэтому дефолт `warn`/`changed`: чужие пайплайны не краснеют,
+/// включение строгости (`error`) и полной области (`all`) — явное решение.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SecretsConfig {
+    /// Severity находки `secret_literal` (дефолт `warn`).
+    pub severity: SecretSeverity,
+    /// Область сканирования (дефолт `changed`).
+    pub scope: SecretScope,
 }
 
 /// Настройки проверки overrides (A2): секция `[gate.overrides]`.

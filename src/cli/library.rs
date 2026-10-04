@@ -46,6 +46,14 @@ pub(crate) enum PluginsCmd {
         /// Имя плагина.
         name: String,
     },
+    /// Файл-замок библиотеки плагинов (C1): записать `plugins.lock`
+    /// (SHA-256 каждого файла плагина) или `--check` — сверить без записи
+    /// (exit 1 при расхождении).
+    Lock {
+        /// Только проверить расхождение с текущим замком, ничего не писать.
+        #[arg(long)]
+        check: bool,
+    },
 }
 
 /// `arch-be init`: конфиг + ассеты в ~/.arch-harness.
@@ -162,10 +170,18 @@ pub(crate) fn cmd_skills(cfg: &Config, cmd: SkillsCmd) -> Result<()> {
     Ok(())
 }
 
-/// `arch-be plugins`: пакеты скиллов + MCP.
+/// `arch-be plugins`: пакеты скиллов + MCP и файл-замок библиотеки (C1).
 pub(crate) fn cmd_plugins(cfg: &Config, cmd: PluginsCmd) -> Result<()> {
-    let plugins = arch_harness::plugin::discover(&cfg.plugins.dirs);
+    if let PluginsCmd::Lock { check } = cmd {
+        return cmd_plugins_lock(cfg, check);
+    }
+    let discovery = arch_harness::plugin::discover_report(&cfg.plugins.dirs);
+    for event in &discovery.tampered {
+        eprintln!("ОШИБКА {} ({})", event.render(), event.dir.display());
+    }
+    let plugins = discovery.plugins;
     match cmd {
+        PluginsCmd::Lock { .. } => unreachable!("обработано выше"),
         PluginsCmd::List => {
             println!("Плагины ({}):", plugins.len());
             for p in &plugins {
@@ -209,6 +225,91 @@ pub(crate) fn cmd_plugins(cfg: &Config, cmd: PluginsCmd) -> Result<()> {
                 }
             }
         }
+    }
+    Ok(())
+}
+
+/// `arch-be plugins lock [--check]`: файл-замок библиотеки плагинов (C1).
+///
+/// Без `--check` — перезаписать замок по текущему состоянию библиотеки и
+/// напечатать, что изменилось (легитимное изменение плагина проходит через
+/// перегенерацию). С `--check` — сверить без записи; расхождение (подмена,
+/// добавленный/удалённый файл, новый плагин) даёт exit 1. Замка нет — честное
+/// сообщение (библиотека не защищена), но не ошибка: защита включается
+/// генерацией.
+fn cmd_plugins_lock(cfg: &Config, check: bool) -> Result<()> {
+    use arch_harness::plugin_lock::{self, PluginsLock};
+    let mut failed: Vec<String> = Vec::new();
+    let mut locked = 0usize;
+    for dir in &cfg.plugins.dirs {
+        if !dir.is_dir() {
+            continue;
+        }
+        locked += 1;
+        let path = plugin_lock::lock_path_for_library(dir);
+        let current = PluginsLock::generate(dir);
+        let previous =
+            plugin_lock::read(&path).with_context(|| format!("чтение замка {}", path.display()))?;
+        if check {
+            match previous {
+                None => println!(
+                    "замок не найден: {} — библиотека {} не защищена \
+                     (создайте: `arch-be plugins lock`)",
+                    path.display(),
+                    dir.display()
+                ),
+                Some(prev) => {
+                    let changes = prev.diff(&current);
+                    if changes.is_empty() {
+                        println!(
+                            "замок {}: расхождений нет ({} плагинов, {} файлов)",
+                            path.display(),
+                            current.plugins.len(),
+                            current.file_count()
+                        );
+                    } else {
+                        println!("замок {}: расхождения ({}):", path.display(), changes.len());
+                        for line in changes.iter().take(50) {
+                            println!("  {line}");
+                        }
+                        failed.push(path.display().to_string());
+                    }
+                }
+            }
+        } else {
+            let changes = previous.as_ref().map_or_else(
+                || vec!["первичный замок".to_string()],
+                |prev| prev.diff(&current),
+            );
+            plugin_lock::write(&current, &path)?;
+            println!(
+                "замок записан: {} ({} плагинов, {} файлов)",
+                path.display(),
+                current.plugins.len(),
+                current.file_count()
+            );
+            if changes.is_empty() {
+                println!("  изменений относительно прежнего замка нет");
+            } else {
+                for line in changes.iter().take(50) {
+                    println!("  {line}");
+                }
+                let rest = changes.len().saturating_sub(50);
+                if rest > 0 {
+                    println!("  … и ещё {rest}");
+                }
+            }
+        }
+    }
+    if locked == 0 {
+        println!("каталогов плагинов нет — нечего замковывать");
+    }
+    if !failed.is_empty() {
+        anyhow::bail!(
+            "замок плагинов разошёлся: {} — возможна подмена; изменение плагина \
+             узаконивается осознанной перегенерацией: `arch-be plugins lock`",
+            failed.join(", ")
+        );
     }
     Ok(())
 }
