@@ -7,7 +7,8 @@ use std::process::Command;
 use super::components::{
     component_control_plane, component_decision_quality, component_delta_guard, component_evidence,
     component_fitness, component_model_validate, component_nfr, component_rule_weakened,
-    component_sensors, component_spine_lint, component_trace, evidence_bundle_dirs,
+    component_secrets, component_sensors, component_spine_lint, component_trace,
+    evidence_bundle_dirs,
 };
 use super::git::{ConstraintsPath, GitProbe, constraints_label};
 use super::route::{
@@ -203,6 +204,16 @@ pub(super) fn run_inner(
         repo,
         &options,
         required_names.iter().any(|r| r == "decision_quality"),
+    ));
+    // C3 (0.3.12): литеральные секреты в исходниках. Составляющая прогоняется
+    // всегда (дефолт warn/changed — чужие пайплайны не краснеют); включение в
+    // `[gate.required]` делает пропуск (нет git/базы) INCOMPLETE, а
+    // `[gate.secrets] severity = "error"` — блокирующим.
+    components.push(component_secrets(
+        repo,
+        options.secrets,
+        base.unwrap_or("HEAD"),
+        &git,
     ));
     // ADR-052: смысловые рубрики — та же дисциплина, что у `decision_quality`:
     // необязательная составляющая, включается только через `[gate.required]`.

@@ -14,6 +14,12 @@
 //!   без regex-спецсимволов;
 //! - `keep_prefix` оставляет не-секретную часть формата (`sk-`, `Bearer `),
 //!   чтобы текст оставался читаемым, а модель понимала, что здесь был ключ.
+//!
+//! Тот же набор шаблонов работает и в режиме СКАНИРОВАНИЯ исходников
+//! ([`scan_text`]): составляющая гейта `secrets` (C3) ищет литеральные
+//! секреты в изменённых файлах и возвращает их позиции, не раскрывая
+//! значений. Это эвристика известных форматов — литерал нестандартного вида
+//! ею не ловится (граница зафиксирована в паспорте вердикта гейта).
 
 use regex::Regex;
 
@@ -99,9 +105,77 @@ pub fn builtin_rules() -> Vec<SecretRule> {
         compile("openai-api-key", r"\bsk-[A-Za-z0-9_-]{20,}", 3),
         // AWS Access Key ID: keep = "AKIA".
         compile("aws-access-key-id", r"\bAKIA[0-9A-Z]{16}\b", 4),
+        // GitHub-токены: `ghp_` (personal), `gho_` (oauth), `ghu_`
+        // (user-to-server), `ghs_` (server-to-server), `ghr_` (refresh) —
+        // префикс из 4 символов + длинное alnum-тело. keep = "ghp_" (4).
+        compile("github-token", r"\bgh[pousr]_[A-Za-z0-9]{36,}\b", 4),
         // Длинный hex (токены/секреты 32+): keep = 8 символов, как git-хэш.
         compile("hex-token", r"\b[0-9a-fA-F]{32,}\b", 8),
     ]
+}
+
+/// Хвост маскированного фрагмента находки.
+const MASK_SUFFIX: &str = "***";
+
+/// Маскирует одно совпадение: не-секретный префикс формата остаётся открытым
+/// (`sk-`, `AKIA`, `ghp_`, `NAME=`), тело скрывается. Общий код редакции
+/// вывода и сканирования исходников (одна семантика — один результат).
+fn mask_match(rule: &SecretRule, matched: &str) -> String {
+    let keep = if rule.name == "env-api-key" {
+        // Для `NAME=значение` сохраняем `NAME=`.
+        matched.find('=').map_or(rule.keep_prefix, |eq| eq + 1)
+    } else {
+        rule.keep_prefix
+    };
+    let prefix: String = matched.chars().take(keep).collect();
+    format!("{prefix}{MASK_SUFFIX}")
+}
+
+/// Находка сканирования исходников: какое правило сработало, где и что
+/// (маскировано — значение секрета в вердикт не попадает).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecretFinding {
+    /// Имя сработавшего детектора (`aws-access-key-id`, …).
+    pub rule: String,
+    /// Номер строки (1-based).
+    pub line: usize,
+    /// Номер колонки в символах строки (1-based).
+    pub column: usize,
+    /// Маскированный фрагмент (`AKIA***`) — значение не раскрывается.
+    pub masked: String,
+}
+
+/// Сканирует ТЕКСТ исходника встроенными детекторами (в отличие от
+/// [`Redactor`], который правит вывод инструментов): находит литеральные
+/// секреты известных форматов и возвращает их позиции.
+///
+/// Находки отсортированы по (строка, колонка, правило) — вердикт гейта
+/// детерминирован независимо от порядка обхода правил. Многострочный PEM
+/// сворачивается в одну строку и маскируется целиком.
+#[must_use]
+pub fn scan_text(text: &str, rules: &[SecretRule]) -> Vec<SecretFinding> {
+    let mut out = Vec::new();
+    for rule in rules {
+        for m in rule.regex.find_iter(text) {
+            let start = m.start();
+            let line = text[..start].bytes().filter(|b| *b == b'\n').count() + 1;
+            let line_start = text[..start].rfind('\n').map_or(0, |i| i + 1);
+            let column = text[line_start..start].chars().count() + 1;
+            let masked: String = mask_match(rule, m.as_str())
+                .replace('\n', " ")
+                .chars()
+                .take(60)
+                .collect();
+            out.push(SecretFinding {
+                rule: rule.name.clone(),
+                line,
+                column,
+                masked,
+            });
+        }
+    }
+    out.sort_by(|a, b| (a.line, a.column, &a.rule).cmp(&(b.line, b.column, &b.rule)));
+    out
 }
 
 /// Редактор секретов: набор правил + точные значения из окружения.
@@ -161,14 +235,7 @@ impl Redactor {
                 .regex
                 .replace_all(&out, |caps: &regex::Captures<'_>| {
                     let m = caps.get(0).map_or("", |m| m.as_str());
-                    let keep = if rule.name == "env-api-key" {
-                        // Для `NAME=значение` сохраняем `NAME=`.
-                        m.find('=').map_or(rule.keep_prefix, |eq| eq + 1)
-                    } else {
-                        rule.keep_prefix
-                    };
-                    let prefix: String = m.chars().take(keep).collect();
-                    format!("{prefix}***")
+                    mask_match(rule, m)
                 })
                 .into_owned();
         }
@@ -220,6 +287,57 @@ mod tests {
         assert!(out.starts_with("Authorization: Bearer ***"), "{out}");
         let out = r.redact("key = sk-0123456789abcdef0123456789");
         assert!(out.contains("sk-***"), "{out}");
+    }
+
+    #[test]
+    fn redacts_github_tokens_of_all_prefixes() {
+        let r = Redactor::with_builtin_rules();
+        // Тело токена — криптографическая фикстура; префикс приклеивается в
+        // рантайме, чтобы в исходнике не было литерала `ghp_<36>` (fitness
+        // C-05 «нет литералов секретов в коде»).
+        let body = "16C7e42F292c6912E7710c838347Ae178B4a";
+        for prefix in ["ghp", "gho", "ghs"] {
+            let token = format!("{prefix}_{body}");
+            let out = r.redact(&format!("token = {token} в коде"));
+            assert!(out.contains(&format!("{prefix}_***")), "{out}");
+            assert!(!out.contains(body), "тело токена скрыто: {out}");
+        }
+    }
+
+    #[test]
+    fn scan_finds_literals_with_positions_and_masks_values() {
+        let rules = builtin_rules();
+        // GitHub-фикстура собирается в рантайме (см. выше про C-05).
+        let token = format!("ghp_{}", "16C7e42F292c6912E7710c838347Ae178B4a");
+        let src = format!(
+            "package main\n\nvar key = \"AKIAIOSFODNN7EXAMPLE\" // лежит в коде\n\
+             var token = \"{token}\"\n"
+        );
+        let found = scan_text(&src, &rules);
+        assert!(found.len() >= 2, "находки: {found:?}");
+        let aws = found
+            .iter()
+            .find(|f| f.rule == "aws-access-key-id")
+            .expect("aws-ключ найден");
+        assert_eq!(aws.line, 3, "строка ключа: {aws:?}");
+        assert_eq!(aws.masked, "AKIA***", "значение не раскрыто: {aws:?}");
+        let gh = found
+            .iter()
+            .find(|f| f.rule == "github-token")
+            .expect("github-токен найден");
+        assert_eq!(gh.line, 4, "строка токена: {gh:?}");
+        assert_eq!(gh.masked, "ghp_***");
+        // Значение секрета в находке не появляется ни в каком виде.
+        assert!(
+            found
+                .iter()
+                .all(|f| !f.masked.contains("IOSFODNN7") && !f.masked.contains("16C7e42F")),
+            "{found:?}"
+        );
+        // Чистый текст — без находок.
+        assert_eq!(scan_text("fn main() { let x = 1; }", &rules), Vec::new());
+        // Порядок детерминирован: повторный прогон даёт тот же список.
+        assert_eq!(found, scan_text(&src, &rules));
     }
 
     #[test]

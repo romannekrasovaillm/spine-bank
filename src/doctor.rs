@@ -710,7 +710,11 @@ fn check_plugins(cfg: &Config) -> Check {
     // «файлами SKILL.md» (без plugin.json, с битым frontmatter, дубли имён).
     let (plugins, skills, raw) = crate::plugin::library_stats(&existing);
     let drift = raw.saturating_sub(skills);
-    let verdict = if plugins == 0 {
+    // C1 (0.3.12): целостность библиотеки по `plugins.lock` — подмена файла
+    // плагина делает его незагружаемым, и doctor обязан это назвать, а не
+    // показать «15 плагинов, 91 скиллов» (RA-8).
+    let tampered = crate::plugin::discover_report(&existing).tampered;
+    let verdict = if plugins == 0 || !tampered.is_empty() {
         Verdict::Fail
     } else if missing.is_empty() {
         Verdict::Ok
@@ -724,6 +728,18 @@ fn check_plugins(cfg: &Config) -> Check {
     }
     if !missing.is_empty() {
         let _ = write!(text, "; нет каталогов: {}", missing.join(", "));
+    }
+    if !tampered.is_empty() {
+        let names: Vec<String> = tampered
+            .iter()
+            .map(|t| format!("{} ({})", t.plugin, t.reason))
+            .collect();
+        let _ = write!(
+            text,
+            "; ЦЕЛОСТНОСТЬ НАРУШЕНА: {} — плагины не загружены, перегенерируйте замок \
+             осознанно (`arch-be plugins lock`)",
+            names.join("; ")
+        );
     }
     Check {
         name: "plugins",

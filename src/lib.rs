@@ -60,6 +60,8 @@ pub mod gate;
 pub mod handoff;
 #[cfg(feature = "harness")]
 pub mod harness;
+#[cfg(feature = "harness")]
+pub mod harness_env;
 pub mod hash;
 pub mod hooks;
 pub mod injection;
@@ -84,6 +86,7 @@ pub mod openapi;
 pub mod openspec;
 pub mod passport;
 pub mod plugin;
+pub mod plugin_lock;
 pub mod policy;
 pub(crate) mod proc;
 pub mod publish;

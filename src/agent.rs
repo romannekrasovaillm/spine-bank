@@ -160,6 +160,10 @@ impl AgentSession {
             crate::hooks::HookSet::from_specs(&specs)
         };
         let mut tool_ctx = tool_ctx;
+        // C1 (0.3.12): замок библиотеки плагинов. Подменённый плагин уже не
+        // загружен (`discover` отверг его), но событие обязано попасть в
+        // ЖУРНАЛ СЕССИИ — канал аудита, а не только в tracing.
+        let plugin_dirs = config.plugins.dirs.clone();
         // Активная модель в контексте инструментов: субагенты и дистилляция
         // наследуют её (и следят за /model через set_provider).
         tool_ctx.provider = Some(provider.clone());
@@ -185,6 +189,18 @@ impl AgentSession {
         };
         let prompt = session.system_prompt.clone();
         session.log_event("system", serde_json::json!({ "content": prompt }));
+        // C1: события целостности плагинов — в журнал сессии (findings канала
+        // аудита), плагины уже отвергнуты загрузкой.
+        for event in crate::plugin::discover_report(&plugin_dirs).tampered {
+            session.log_event(
+                "plugin_tampered",
+                serde_json::json!({
+                    "plugin": event.plugin,
+                    "path": event.dir.display().to_string(),
+                    "reason": event.reason,
+                }),
+            );
+        }
         session.fire_hook(crate::hooks::HookEvent::SessionStart, None, "{}");
         session
     }

@@ -82,6 +82,10 @@ pub struct HarnessRun {
     /// вне окружения исполнителя. `None` — пост-гейт отключён адаптером
     /// (`post_gate = false`) либо прогон прерван (судить нечего).
     pub post_gate: Option<PostGate>,
+    /// Политика окружения прогона (C2): заметка о применённом whitelist или
+    /// предупреждение о полном наследовании (`env_inherit = true`). `None` —
+    /// обычный режим (Fast/Standard с наследованием) без замечаний.
+    pub env_note: Option<String>,
 }
 
 /// Вердикт пост-гейта прогона (A4).
@@ -422,17 +426,25 @@ pub async fn run_harness(
     let (argv, stdin_data) = build_argv(cfg, task);
     let mut cmd = Command::new(&cfg.binary);
     cmd.args(&argv).current_dir(repo);
-    // Whitelist окружения: чужие переменные хоста (модели, прокси, ключи)
-    // не протекают в дочерний процесс; `env` адаптера — поверх всегда.
-    if !cfg.env_allow.is_empty() {
+    // C2 (0.3.12): политика окружения. Приоритет — явный `env_allow` адаптера
+    // (существующая семантика); затем `env_inherit = true` (осознанный возврат
+    // к наследованию с предупреждением); затем строгий дефолт на маршруте
+    // Critical из пакета или при `bank_profile`; иначе — как раньше.
+    let env_plan =
+        crate::harness_env::select(cfg, crate::harness_env::manifest_route(repo).as_ref());
+    if let Some(allow) = &env_plan.allow {
         cmd.env_clear();
-        for name in &cfg.env_allow {
+        for name in allow {
             if let Ok(v) = std::env::var(name) {
                 cmd.env(name, v);
             }
         }
     }
+    // `env` адаптера — поверх всегда (явно переданные значения важнее).
     cmd.envs(&cfg.env);
+    if let Some(note) = &env_plan.note {
+        tracing::warn!("harness '{name}': {note}");
+    }
     // Своя процессная группа: убивать будем группу целиком (unix; на
     // остальных ОС дерева нет — kill_on_drop добирает только сам процесс).
     #[cfg(unix)]
@@ -587,6 +599,7 @@ pub async fn run_harness(
         auto_commit,
         contract,
         post_gate,
+        env_note: env_plan.note,
     })
 }
 
@@ -1376,6 +1389,11 @@ async fn execute_run(
                         hcfg.idle_timeout_secs
                     );
                 }
+            }
+            // C2: политика окружения — заметка обязана доехать до итога
+            // прогона (журнал и человек видят её), а не остаться в tracing.
+            if let Some(note) = &run.env_note {
+                let _ = writeln!(content, "Окружение: {note}.");
             }
             if let Some(ac) = &run.auto_commit {
                 let _ = writeln!(

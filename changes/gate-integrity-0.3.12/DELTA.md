@@ -69,6 +69,24 @@ docs/experiments/fork-repro-0.3.12.md, RA-1: exit 0 при PAN в коде,
   расширение glob, повышение severity ослаблением не считается).
 - `.arch-handoff/action-pins.txt` (B4/B3): снимок SHA-пинов используемых
   actions на дату выпуска пакета — данные для правки `uses:`, не код.
+- Волна C (файлы, 0.3.12): `src/plugin_lock.rs` (C1, новый — формат
+  `arch-be/plugins-lock/v1`, обход каталога плагина, `verify_entry`/`diff`),
+  `src/plugin.rs` (C1 — `discover_report`/`TamperEvent::plugin_tampered`,
+  плагин с расхождением с замком не загружается), `src/cli/library.rs`
+  (C1 — `arch-be plugins lock [--check]`; выход 1 при расхождении),
+  `src/doctor.rs` (C1 — целостность библиотеки в отчёте), `src/agent.rs`
+  (C1 — событие `plugin_tampered` в журнал сессии), `src/harness_env.rs`
+  (C2, новый — политика окружения прогона), `src/harness.rs` (C2 — применение
+  whitelist и заметка в итоге), `src/config.rs` (C2 — `env_inherit`,
+  `bank_profile`, `DEFAULT_ENV_ALLOW`; C3 — `[gate.secrets]`), `src/cli/mod.rs`
+  (C2 — заметка окружения в выводе `harness-run`), `src/secrets.rs` (C3 —
+  `scan_text` + детектор `github-token`), `src/delta.rs` (C3 — общий
+  `changed_files`), `src/gate/components/mod.rs` (C3 — составляющая
+  `secrets`), `src/gate/types.rs`/`src/gate/verdict.rs` (C3 — опции и сборка),
+  `src/assets.rs` + `assets/rule-templates/secret-literal/**` (C3 — шаблон
+  правила для `rule_template_apply`), `config.example.toml` (C2/C3 — разделы).
+  Защищённые файлы спайна/реестра (`model/`, `ARCHITECTURE-SPINE.md`,
+  `CONSTRAINTS.yaml`) волной C не менялись.
 
 ## REMOVED
 
@@ -113,13 +131,19 @@ warn-по-умолчанию либо за флагом, краснить чуж
 - [x] B4/B5: actions по SHA, permissions, cargo deny, CODEOWNERS — под
       фитнес-правилами dogfood (сам CONSTRAINTS.yaml). — C-35…C-43, dogfood
       59/0 PASS; 56/56 пинов сверены со списком архитектора.
-- [ ] C1–C3: plugins.lock, env_allow на Critical, составляющая secrets;
-      ключ в коде → `secret_literal` в пост-гейте. — волна C, НЕ НАЧАТА.
+- [~] C1–C3: plugins.lock, env_allow на Critical, составляющая secrets;
+      ключ в коде → `secret_literal` в пост-гейте. — реализовано волной C
+      (unit/CLI-тесты: «плагин с подменённым хуком/скиллом не загружается,
+      `plugin_tampered` (RA-8)», «Critical-прогон получает только whitelist,
+      `env_inherit` — наследование с предупреждением (RA-9)»,
+      «`src/leak.go` → `secret_literal` [warn] файл:строка, severity error
+      по конфигу (RA-10)»); ожидает приёмки архитектора.
 - [~] ADR-055 (A5), ADR-056 (B3), ADR-057 (C4) приняты человеком;
       D1–D4 — ADR или docs/experiments/, код за флагами. — ADR-055
       Accepted 2026-10-03 (вариант (а)); ADR-056 Accepted 2026-10-03
       (вариант (а) GitHub-native SLSA); ADR-057 занят внеочередной фичей
       «режимы вызова кодового агента» (ACP, принято владельцем 2026-10-03) —
-      C4 (аттестация вердикта) оформится как ADR-058; волна C не начата.
+      C4 (аттестация вердикта) оформится как ADR-058. C1–C3 волны C
+      реализованы (см. выше), C4/D — открыты.
 - [x] CHANGELOG: раздел «Что может покраснеть» перечисляет новые находки.
       — [0.3.12] 2026-10-03: находки волн A и B.

@@ -1,0 +1,70 @@
+# Шаблон исполняемого правила: в исходниках нет литеральных секретов.
+#
+# Свойство: файл реализации не содержит ЛИТЕРАЛЬНЫХ креденшлов — ключей AWS,
+# GitHub-токенов, OpenAI-ключей, приватных ключей и присваиваний
+# `*_API_KEY`/`*_TOKEN`/`*_SECRET`/`*_PASSWORD`. Проверяются РЕГУЛЯРНЫЕ
+# ВЫРАЖЕНИЯ ФОРМАТОВ, а не слово «секрет»: прогон читает исходник и сканирует
+# его теми же форматами, что детекторы `src/secrets.rs` (составляющая гейта
+# `secrets`, C3). Ни сети, ни сна — проверка детерминированная.
+id: secret-literal
+version: 1
+title: "В исходниках нет литеральных секретов (хардкод-креденшлов)"
+pattern: >-
+  Конфигурация собирается из окружения/хранилища секретов, а не зашита в
+  исходник: в файле реализации нет литерального AWS-ключа, GitHub-токена,
+  OpenAI-ключа, PEM-блока и присваивания секретной переменной литералу.
+match:
+  ru:
+    - "секрет"
+    - "креденшл"
+    - "креды"
+    - "токен"
+    - "пароль"
+    - "хардкод"
+    - "литерал"
+    - "утечк"
+    - "ключ"
+  en:
+    - "secret"
+    - "credential"
+    - "hardcoded"
+    - "token"
+    - "password"
+    - "api-key"
+    - "leak"
+properties:
+  - "в исходнике реализации нет литерального AWS-ключа (AKIA…)"
+  - "в исходнике реализации нет литерального GitHub-токена (ghp_/gho_/ghs_…)"
+  - "в исходнике реализации нет литерального OpenAI-ключа (sk-…) и PEM-блока"
+  - "нет присваивания *_API_KEY/*_TOKEN/*_SECRET/*_PASSWORD литеральному значению"
+  - "проверка не проходит вхолостую: файл содержит ожидаемый класс реализации"
+rule:
+  name: secret_literal
+  type: command_succeeds
+  severity: error
+  timeout_secs: 120
+  rationale: >-
+    инвариант «секреты не зашиты в код» проверяется исполнением: исходник
+    сканируется регулярными выражениями форматов креденшлов, а не наличием
+    слова «секрет» в комментарии
+  fix_hint: >-
+    перенести проверку со скелета на настоящий код: команда правила должна
+    сканировать ваш модуль конфигурации, а чтение секретов — идти из
+    окружения/секрет-хранилища
+  skill: fitness-functions
+  commands:
+    python: "python3 -m pytest -q -p no:cacheprovider skeleton/rule_templates/secret-literal/test_secret_literal.py"
+files:
+  - lang: common
+    from: README.md
+    to: README.md
+  - lang: python
+    from: python/reference_impl.py
+    to: reference_impl.py
+  - lang: python
+    from: python/test_secret_literal.py
+    to: test_secret_literal.py
+violating:
+  - lang: python
+    to: reference_impl.py
+    from: python/violating_impl.py
