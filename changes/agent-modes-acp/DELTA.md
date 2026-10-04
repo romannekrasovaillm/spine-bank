@@ -90,3 +90,94 @@ session/prompt + стрим session/update, request_permission, cancel), но
 - [ ] Журнал прогона фиксирует режим (acp|prompt|fallback), версию
       claude-code-acp, количество request_permission.
 - [ ] CHANGELOG: раздел «Что может покраснеть» — поведение auto/fallback.
+
+## Уточнения протокола ACP (сверка со скиллом acp-integration, 2026-10-04)
+
+Выжимка скилла acp-integration (agentclientprotocol.com, индекс /llms.txt)
+уточняет обязательные детали клиента. Дизайн (вариант «а») не меняется —
+уточняются контракты хода и завершения. Обязательны к приёмке.
+
+### Хендшейк
+
+- `initialize`: клиент шлёт `protocolVersion` (целое = MAJOR),
+  `clientCapabilities` (fs=false, terminal=false, elicitation=false),
+  `clientInfo`. Агент отвечает СВОЕЙ поддерживаемой версией; версия,
+  которую клиент не поддерживает, → закрыть соединение: auto → fallback
+  headless с причиной «версия протокола не согласована», mode=acp →
+  ошибка прогона.
+- Ответ `initialize` несёт `agentCapabilities`, `agentInfo`, `authMethods`:
+  `agentInfo` (имя/версия адаптера) — в журнал прогона; непустые
+  `authMethods`/cap authenticate — клиент аутентификацию не поддерживает →
+  auto-fallback / ошибка (не притворяться, что «работает»).
+- Пропущенная capability = UNSUPPORTED: опциональные методы (loadSession,
+  resume, session/close) не зовутся без cap.
+
+### Ход и финальный ответ
+
+- `session/prompt`: `prompt` — массив ContentBlock:
+  `[{ "type": "text", "text": <задача> }]` (baseline Text).
+- Завершение хода — ОТВЕТ на `session/prompt` со `stopReason`
+  ∈ `end_turn|max_tokens|max_turn_requests|refusal|cancelled` (НЕ выход
+  процесса):
+  - `end_turn` → ход завершён (Completed);
+  - `cancelled` → прогон отменён (таймаут/abort) — не «ложная ошибка»;
+  - `max_tokens` / `max_turn_requests` → ход оборван по лимиту: частичный
+    ответ, предупреждение в итоге прогона — не тихий успех;
+  - `refusal` → ошибка прогона (агент отказался выполнять).
+- Агрегация финального текста — по `messageId`: один id = чанки одного
+  сообщения, смена id = новое сообщение; финальный ответ = ПОСЛЕДНЕЕ
+  агентское сообщение (уточнение формулировки ADR-057 «после последнего
+  tool_call» — эвристика остаётся фолбэком при отсутствии messageId).
+- `session/update` — notification: ответа нет и не ждём; неизвестные
+  варианты `sessionUpdate` (`usage_update`, `current_mode_update`,
+  `available_commands_update`, `config_option_update`,
+  `session_info_update`, …) — журналируются и игнорируются
+  (расширяемость протокола), ошибкой не считаются.
+
+### Разрешения и отмена
+
+- Ответ на `session/request_permission` — строго
+  `{ "outcome": { "outcome": "selected", "optionId": <первая allow-опция> } }`;
+  при отмене прогона с висящим permission-запросом —
+  `{ "outcome": { "outcome": "cancelled" } }` (агент не висит).
+- `session/cancel` — notification: после отправки клиент ПРОДОЛЖАЕТ читать
+  `session/update` (tool_call_update и др.) и ждёт ответ `session/prompt`
+  со `stopReason="cancelled"` в пределах graceful-окна; только потом
+  SIGKILL процессной группы (лестница TERM→KILL — последний рубеж).
+
+### Завершение сессии
+
+- После `end_turn`: при cap `sessionCapabilities.close` → `session/close`
+  (освобождение ресурсов), затем закрытие stdin → ожидание выхода
+  процесса → TERM/KILL по лестнице. Без cap — сразу stdin/лестница.
+
+### Конвенции (чек-лист ревью)
+
+- JSON-ключи camelCase; дискриминаторы значений (`sessionUpdate`) —
+  snake_case; пути абсолютные (cwd в `session/new` — канонизированный
+  абсолютный путь worktree/репо, `mcpServers: []`); номера строк 1-based.
+- Клиентский MUST `session/request_permission` — реализован (auto-allow +
+  журнал); опциональные клиентские методы (fs/*, terminal/*,
+  elicitation/*) не заявлены → -32601.
+
+### Дополнительные критерии приёмки
+
+- [ ] `stopReason` обработан всеми значениями: фикстуры end_turn /
+      cancelled / max_tokens / refusal (отражение в итог прогона).
+- [ ] Агрегация по `messageId`: фикстура с двумя агентскими сообщениями и
+      tool_call между ними — финал = второе сообщение.
+- [ ] Неизвестный `sessionUpdate` от фикстуры — прогон не рушится,
+      событие в журнале.
+- [ ] Несогласованная версия протокола (фикстура отвечает чужой MAJOR) —
+      auto → fallback с причиной; mode=acp → ошибка.
+- [ ] Непустые `authMethods` (фикстура) → auto-fallback / ошибка.
+- [ ] Висящий `request_permission` при отмене → outcome=cancelled, агент
+      не зависает (фикстура).
+- [ ] Интеграционный тест живого агента: initialize → session/new →
+      session/prompt → session/cancel, отчёт «что именно проверено»;
+      референсный клиент среды для ручной сверки —
+      `openclaw acp client --server "<cmd>" --server-args <args...>`.
+- [ ] Опционально [ТРЕБУЕТ ПРОВЕРКИ]: TCK
+      (github.com/agentclientprotocol/acp-tck, экспериментальный) против
+      тестовой фикстуры — подтверждает, что фикстура — честный ACP-агент;
+      ключи/опции — только из README репозитория.
