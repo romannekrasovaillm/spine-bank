@@ -14,7 +14,7 @@ use crate::llm::LlmProvider;
 use crate::llm::openai_compat::OpenAiCompat;
 
 /// Базовый URL coding-поверхности Kimi Code.
-const DEFAULT_BASE_URL: &str = "https://api.kimi.com/coding/v1";
+pub(crate) const DEFAULT_BASE_URL: &str = "https://api.kimi.com/coding/v1";
 
 /// Фабрика провайдера Kimi поверх [`super::openai_compat`].
 /// API-ключ читается лениво на запросе, здесь не проверяется.

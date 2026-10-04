@@ -1456,7 +1456,9 @@ pub(crate) async fn run() -> Result<()> {
                 print!("{}", arch_harness::doctor::render_host(host, &checks));
                 checks
             } else {
-                let checks = arch_harness::doctor::run_checks(&cfg);
+                let mut checks = arch_harness::doctor::run_checks(&cfg);
+                // Сетевая проба endpoint'ов моделей — явно, только в doctor.
+                checks.extend(arch_harness::doctor::run_net_checks(&cfg));
                 print!("{}", arch_harness::doctor::render(&checks));
                 checks
             };

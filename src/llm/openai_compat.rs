@@ -511,6 +511,17 @@ pub(crate) fn resolve_api_key(provider: &str, env: &str, file: &Option<String>) 
 /// к проверке, а не заменяет её. Ошибки чтения/разбора файлов — fail-fast
 /// на построении клиента (не в рантайме запроса).
 pub(crate) fn build_client(name: &str, cfg: &ModelConfig) -> Result<reqwest::Client> {
+    build_client_with_egress(name, cfg, true)
+}
+
+/// Вариант [`build_client`] с явным управлением автозапуском локального
+/// egress-шлюза: диагностические пробы (doctor) передают `false` — проба
+/// не мутирует состояние машины, даже «полезное» (поднятие шлюза).
+pub(crate) fn build_client_with_egress(
+    name: &str,
+    cfg: &ModelConfig,
+    autostart_egress: bool,
+) -> Result<reqwest::Client> {
     let mut builder = reqwest::Client::builder()
         // Общий .timeout() здесь НЕ устанавливаем сознательно: он измеряет
         // весь запрос целиком и обрывает длинный SSE-стрим посреди ответа.
@@ -550,16 +561,18 @@ pub(crate) fn build_client(name: &str, cfg: &ModelConfig) -> Result<reqwest::Cli
         .map(str::trim)
         .filter(|u| !u.is_empty())
     {
-        // Локальный egress-шлюз (напр. sing-box на loopback) поднимаем
-        // автоматически; недоступность — предупреждение, не отказ:
-        // запрос всё равно пойдёт через настроенный прокси.
-        match crate::net::ensure_local_egress(proxy_url) {
-            Ok(Some(crate::net::EgressStatus::Started)) => {
-                tracing::info!("провайдер '{name}': vpn-egress запущен автоматически");
-            }
-            Ok(Some(crate::net::EgressStatus::AlreadyRunning) | None) => {}
-            Err(e) => {
-                tracing::warn!("провайдер '{name}': {e}");
+        if autostart_egress {
+            // Локальный egress-шлюз (напр. sing-box на loopback) поднимаем
+            // автоматически; недоступность — предупреждение, не отказ:
+            // запрос всё равно пойдёт через настроенный прокси.
+            match crate::net::ensure_local_egress(proxy_url) {
+                Ok(Some(crate::net::EgressStatus::Started)) => {
+                    tracing::info!("провайдер '{name}': vpn-egress запущен автоматически");
+                }
+                Ok(Some(crate::net::EgressStatus::AlreadyRunning) | None) => {}
+                Err(e) => {
+                    tracing::warn!("провайдер '{name}': {e}");
+                }
             }
         }
         builder = builder.proxy(reqwest::Proxy::all(proxy_url).map_err(|e| {

@@ -8,7 +8,7 @@ use crate::llm::LlmProvider;
 use crate::llm::openai_compat::OpenAiCompat;
 
 /// Базовый URL `DeepSeek` API (применяется, когда в конфиге `base_url` пуст).
-const DEFAULT_BASE_URL: &str = "https://api.deepseek.com/v1";
+pub(crate) const DEFAULT_BASE_URL: &str = "https://api.deepseek.com/v1";
 
 /// Фабрика провайдера `DeepSeek` поверх [`super::openai_compat`].
 /// API-ключ читается лениво на запросе, здесь не проверяется.

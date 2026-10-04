@@ -54,7 +54,7 @@ use crate::llm::openai_compat::{
 
 /// Базовый URL `GigaChat` API (единый с 17.07.2026; применяется, когда
 /// `base_url` в конфиге пуст).
-const DEFAULT_BASE_URL: &str = "https://api.giga.chat/v1";
+pub(crate) const DEFAULT_BASE_URL: &str = "https://api.giga.chat/v1";
 
 /// URL OAuth-эндпоинта Sber по умолчанию: подставляется фабрикой, когда
 /// `oauth.token_url` в конфиге пуст (в самом конфиге дефолт не живёт).

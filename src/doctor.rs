@@ -2,10 +2,15 @@
 //! `doctor.rs`): проверки ДО того, как архитектор начнёт сессию, — ключи,
 //! каталоги, плагины, кодовые харнессы в PATH, MCP, крон. Платные
 //! chat-эндпоинты не вызываются (дорого и шумно); проверяется только то,
-//! что видно локально.
+//! что видно локально, плюс ОПЦИОНАЛЬНАЯ транспортная проба endpoint'ов
+//! моделей (см. [`run_net_checks`]).
 //!
 //! КОНТРАКТ (владелец: агент `agent`):
-//! - [`run_checks`] — чистое ядро: список [`Check`] с вердиктами;
+//! - [`run_checks`] — чистое ядро: список [`Check`] с вердиктами, без сети;
+//! - [`run_net_checks`] — сетевая проба `GET <base_url>/models` БЕЗ ключа
+//!   (любой HTTP-ответ, включая 401, — «endpoint жив»; таймаут/reset —
+//!   «модель мертва или сеть/DPI»): вызывается явно из CLI `arch-be doctor`
+//!   и `/doctor` в TUI, core-редакция отвечает честным SKIP;
 //! - [`run_host_checks`] — точечная проверка подключения `connect <host>`
 //!   (`arch-be doctor --host <host>`): бинарь arch-be в PATH, файл настроек
 //!   хоста с `mcpServers.spine`, скиллы на месте (для записываемых хостов),
@@ -74,6 +79,295 @@ pub fn run_checks(cfg: &Config) -> Vec<Check> {
         check_rule_runners(),
         check_ci_releases_url(),
     ]
+}
+
+// ---------------------------------------------------------------------
+// Сетевая проба endpoint'ов моделей («models-net»).
+// ---------------------------------------------------------------------
+
+/// Таймаут одной пробы endpoint'а (секунд). Пробы идут параллельно, поэтому
+/// это же и верхняя граница всей «models-net»: DPI-окна и мёртвые хосты не
+/// растягивают doctor дольше.
+const MODEL_PROBE_TIMEOUT_SECS: u64 = 5;
+
+/// Исход пробы одной модели.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ProbeResult {
+    /// Любой HTTP-ответ — endpoint жив (401/403 тоже: проверяется транспорт,
+    /// а не ключ). Поля: статус и латентность (мс).
+    Alive { status: u16, latency_ms: u64 },
+    /// Транспортный отказ (таймаут/reset/DNS) — «модель мертва» или
+    /// «сеть/DPI режет». Поля: причина и латентность (мс).
+    Down { reason: String, latency_ms: u64 },
+    /// Проба неприменима: kind="cli" (HTTP endpoint'а нет) или пустой
+    /// `base_url` у вендора без пресета.
+    Skipped(&'static str),
+}
+
+/// Строка пробы: имя модели + эффективный `base_url` + исход.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProbeRow {
+    name: String,
+    url: String,
+    result: ProbeResult,
+}
+
+/// Сетевая проба endpoint'ов моделей (CLI `arch-be doctor`, `/doctor`).
+/// Отделена от [`run_checks`]: трогает сеть (только транспорт — `GET
+/// <base_url>/models` БЕЗ ключа), поэтому вызывается явно.
+#[cfg(feature = "harness")]
+#[must_use]
+pub fn run_net_checks(cfg: &Config) -> Vec<Check> {
+    vec![models_net_check(cfg, &probe_models(cfg))]
+}
+
+/// Core-редакция (без сетевого стека): честная строка SKIP вместо пробы.
+#[cfg(not(feature = "harness"))]
+#[must_use]
+pub fn run_net_checks(_cfg: &Config) -> Vec<Check> {
+    vec![Check {
+        name: "models-net",
+        verdict: Verdict::Ok,
+        text: "проба endpoint'ов недоступна в core-редакции (нет сетевого стека) — SKIP".into(),
+    }]
+}
+
+/// Собирает итог «models-net» из исходов проб (чистая функция — тесты не
+/// трогают сеть). Вердикты: недоступна модель ПО УМОЛЧАНИЮ — Fail (ходы не
+/// пойдут); недоступны прочие — Warn (сеть/VPN/endpoint); все живы — Ok.
+fn models_net_check(cfg: &Config, rows: &[ProbeRow]) -> Check {
+    let fmt = |r: &ProbeRow| match &r.result {
+        ProbeResult::Alive { status, latency_ms } => format!(
+            "{} → {} — {:.1}с (HTTP {status})",
+            r.name,
+            r.url,
+            *latency_ms as f64 / 1000.0
+        ),
+        ProbeResult::Down { reason, latency_ms } => format!(
+            "{} → {} — ✗ {reason} ({:.1}с)",
+            r.name,
+            r.url,
+            *latency_ms as f64 / 1000.0
+        ),
+        ProbeResult::Skipped(_) => r.name.clone(),
+    };
+    let alive: Vec<&ProbeRow> = rows
+        .iter()
+        .filter(|r| matches!(r.result, ProbeResult::Alive { .. }))
+        .collect();
+    let down: Vec<&ProbeRow> = rows
+        .iter()
+        .filter(|r| matches!(r.result, ProbeResult::Down { .. }))
+        .collect();
+    let skipped: Vec<&ProbeRow> = rows
+        .iter()
+        .filter(|r| matches!(r.result, ProbeResult::Skipped(_)))
+        .collect();
+    let latency_span = |v: &[&ProbeRow]| -> String {
+        let (mut lo, mut hi) = (u64::MAX, 0u64);
+        for r in v {
+            if let ProbeResult::Alive { latency_ms, .. } = r.result {
+                lo = lo.min(latency_ms);
+                hi = hi.max(latency_ms);
+            }
+        }
+        if v.is_empty() {
+            String::new()
+        } else {
+            format!("{:.1}–{:.1}с", lo as f64 / 1000.0, hi as f64 / 1000.0)
+        }
+    };
+    let skipped_note = if skipped.is_empty() {
+        String::new()
+    } else {
+        let names: Vec<String> = skipped.iter().map(|r| r.name.clone()).collect();
+        format!("; без пробы ({}): {}", skipped.len(), names.join(", "))
+    };
+    if rows.is_empty() {
+        return Check {
+            name: "models-net",
+            verdict: Verdict::Ok,
+            text: "http-моделей для пробы нет".into(),
+        };
+    }
+    if down.is_empty() {
+        let slowest = alive
+            .iter()
+            .max_by_key(|r| match r.result {
+                ProbeResult::Alive { latency_ms, .. } => latency_ms,
+                _ => 0,
+            })
+            .map(|r| format!("; медленнейший — {}", fmt(r)))
+            .unwrap_or_default();
+        return Check {
+            name: "models-net",
+            verdict: Verdict::Ok,
+            text: format!(
+                "все {} доступны ({}){slowest}{skipped_note}",
+                alive.len(),
+                latency_span(&alive)
+            ),
+        };
+    }
+    let default_down = down.iter().any(|r| r.name == cfg.default_model);
+    let shown: Vec<String> = down.iter().take(5).map(|r| fmt(r)).collect();
+    let more = if down.len() > shown.len() {
+        format!("\n  … ещё {}", down.len() - shown.len())
+    } else {
+        String::new()
+    };
+    Check {
+        name: "models-net",
+        verdict: if default_down {
+            Verdict::Fail
+        } else {
+            Verdict::Warn
+        },
+        text: format!(
+            "недоступны {} из {} (сеть/VPN/endpoint):\n  {}{more}\n  доступны: {} ({}){}",
+            down.len(),
+            rows.len() - skipped.len(),
+            shown.join("\n  "),
+            alive.len(),
+            latency_span(&alive),
+            skipped_note
+        ),
+    }
+}
+
+/// Реальная параллельная проба всех http-моделей конфига.
+#[cfg(feature = "harness")]
+fn probe_models(cfg: &Config) -> Vec<ProbeRow> {
+    let mut rows: Vec<ProbeRow> = Vec::new();
+    let mut targets: Vec<(String, String, crate::config::ModelConfig)> = Vec::new();
+    for (name, mc) in &cfg.models {
+        if mc.kind.as_deref() == Some("cli") {
+            rows.push(ProbeRow {
+                name: name.clone(),
+                url: String::new(),
+                result: ProbeResult::Skipped("kind = \"cli\""),
+            });
+            continue;
+        }
+        let configured = mc.base_url.trim();
+        let base = if configured.is_empty() {
+            // Пустой base_url — рантайм применяет пресет вендора; проба
+            // обязана целиться туда же (матч — `llm::preset_base_url`).
+            if let Some(u) = crate::llm::preset_base_url(name) {
+                u
+            } else {
+                rows.push(ProbeRow {
+                    name: name.clone(),
+                    url: String::new(),
+                    result: ProbeResult::Skipped("base_url не задан"),
+                });
+                continue;
+            }
+        } else {
+            configured
+        };
+        targets.push((
+            name.clone(),
+            base.trim_end_matches('/').to_string(),
+            mc.clone(),
+        ));
+    }
+    // Отдельный поток со своим рантаймом: run_checks — синхронный контракт и
+    // вызывается и из tokio-контекста (CLI/TUI), и из чистых тестов; вложенный
+    // block_on в потоке чужого рантайма tokio запрещён.
+    let probed = std::thread::spawn(move || {
+        let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        else {
+            return Vec::new();
+        };
+        rt.block_on(async move {
+            let mut set = tokio::task::JoinSet::new();
+            for (name, url, mc) in targets {
+                set.spawn(async move { probe_one(name, url, mc).await });
+            }
+            let mut out = Vec::new();
+            while let Some(joined) = set.join_next().await {
+                // Паника пробы теряет строку, а не весь doctor.
+                if let Ok(row) = joined {
+                    out.push(row);
+                }
+            }
+            out
+        })
+    })
+    .join()
+    .unwrap_or_default();
+    rows.extend(probed);
+    rows
+}
+
+/// Одна проба: `GET <base>/models` без ключа, короткий таймаут, клиент с
+/// учётом proxy/CA/mTLS модели (автозапуск egress отключён — doctor не
+/// мутирует машину).
+#[cfg(feature = "harness")]
+async fn probe_one(name: String, base: String, mc: crate::config::ModelConfig) -> ProbeRow {
+    let client = match crate::llm::openai_compat::build_client_with_egress(&name, &mc, false) {
+        Ok(c) => c,
+        Err(e) => {
+            return ProbeRow {
+                name,
+                url: base,
+                result: ProbeResult::Down {
+                    reason: format!("сборка клиента: {e}"),
+                    latency_ms: 0,
+                },
+            };
+        }
+    };
+    let started = std::time::Instant::now();
+    let res = client
+        .get(format!("{base}/models"))
+        .timeout(std::time::Duration::from_secs(MODEL_PROBE_TIMEOUT_SECS))
+        .send()
+        .await;
+    let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    match res {
+        Ok(resp) => ProbeRow {
+            name,
+            url: base,
+            result: ProbeResult::Alive {
+                status: resp.status().as_u16(),
+                latency_ms,
+            },
+        },
+        Err(e) => {
+            let reason = probe_failure_reason(&e);
+            ProbeRow {
+                name,
+                url: base,
+                result: ProbeResult::Down { reason, latency_ms },
+            }
+        }
+    }
+}
+
+/// Короткая причина транспортного отказа пробы (без URL и цепочек reqwest):
+/// именно она отличает «модель умерла» от «сеть/DPI».
+#[cfg(feature = "harness")]
+fn probe_failure_reason(e: &reqwest::Error) -> String {
+    if e.is_timeout() {
+        return format!("таймаут >{MODEL_PROBE_TIMEOUT_SECS}с (модель мертва или сеть/DPI)");
+    }
+    let chain = crate::llm::openai_compat::error_chain(e).to_lowercase();
+    if chain.contains("connection refused") {
+        "отказ в соединении (сервис не слушает порт)".to_string()
+    } else if chain.contains("connection reset") || chain.contains("broken pipe") {
+        "соединение сброшено (сеть/DPI?)".to_string()
+    } else if chain.contains("dns") || chain.contains("resolve") || chain.contains("no such host") {
+        "DNS не разрешил хост".to_string()
+    } else if chain.contains("certificate") || chain.contains("tls") {
+        "TLS-ошибка (сертификат/прокси)".to_string()
+    } else {
+        let short: String = chain.trim().chars().take(120).collect();
+        format!("сетевой сбой ({short})")
+    }
 }
 
 /// Судья рубрик (J9, ADR-048): настроен ли `kind = "cli"`, отвечает ли
@@ -1544,5 +1838,157 @@ mod tests {
             checks.iter().all(|c| c.name != "host"),
             "у generic нет бинаря хоста: {checks:?}"
         );
+    }
+
+    // ---- «models-net»: агрегация исходов проб (сеть не трогаем) ----
+
+    fn probe_row(name: &str, url: &str, result: ProbeResult) -> ProbeRow {
+        ProbeRow {
+            name: name.into(),
+            url: url.into(),
+            result,
+        }
+    }
+
+    #[test]
+    fn models_net_all_alive_is_ok_with_latency() {
+        let cfg = Config::default();
+        let rows = vec![
+            probe_row(
+                "deepseek",
+                "https://api.deepseek.com",
+                ProbeResult::Alive {
+                    status: 401,
+                    latency_ms: 300,
+                },
+            ),
+            probe_row(
+                "glm-5.3",
+                "http://localhost:8787",
+                ProbeResult::Alive {
+                    status: 200,
+                    latency_ms: 900,
+                },
+            ),
+        ];
+        let c = models_net_check(&cfg, &rows);
+        assert_eq!(c.verdict, Verdict::Ok);
+        assert!(c.text.contains("все 2 доступны"), "{}", c.text);
+        assert!(
+            c.text.contains("0.3–0.9с"),
+            "диапазон латентности: {}",
+            c.text
+        );
+        assert!(
+            c.text
+                .contains("медленнейший — glm-5.3 → http://localhost:8787 — 0.9с (HTTP 200)"),
+            "{}",
+            c.text
+        );
+    }
+
+    #[test]
+    fn models_net_default_down_is_fail() {
+        let cfg = Config {
+            default_model: "glm-5.3".into(),
+            ..Config::default()
+        };
+        let rows = vec![
+            probe_row(
+                "deepseek",
+                "https://api.deepseek.com",
+                ProbeResult::Alive {
+                    status: 401,
+                    latency_ms: 300,
+                },
+            ),
+            probe_row(
+                "glm-5.3",
+                "https://api.z.ai/api/paas/v4",
+                ProbeResult::Down {
+                    reason: "таймаут >5с (модель мертва или сеть/DPI)".into(),
+                    latency_ms: 5000,
+                },
+            ),
+        ];
+        let c = models_net_check(&cfg, &rows);
+        assert_eq!(c.verdict, Verdict::Fail, "модель по умолчанию мертва");
+        assert!(c.text.contains("недоступны 1 из 2"), "{}", c.text);
+        assert!(
+            c.text.contains("glm-5.3") && c.text.contains("таймаут"),
+            "{}",
+            c.text
+        );
+        assert!(c.text.contains("доступны: 1"), "{}", c.text);
+    }
+
+    #[test]
+    fn models_net_non_default_down_is_warn() {
+        let cfg = Config::default(); // default_model = "deepseek"
+        let rows = vec![
+            probe_row(
+                "deepseek",
+                "https://api.deepseek.com",
+                ProbeResult::Alive {
+                    status: 401,
+                    latency_ms: 300,
+                },
+            ),
+            probe_row(
+                "glm-5.3",
+                "http://localhost:8787",
+                ProbeResult::Down {
+                    reason: "connection reset".into(),
+                    latency_ms: 120,
+                },
+            ),
+        ];
+        let c = models_net_check(&cfg, &rows);
+        assert_eq!(c.verdict, Verdict::Warn);
+        assert!(
+            c.text
+                .contains("glm-5.3 → http://localhost:8787 — ✗ connection reset")
+        );
+    }
+
+    #[test]
+    fn models_net_skipped_rows_are_counted_not_probed() {
+        let cfg = Config::default();
+        let rows = vec![
+            probe_row(
+                "deepseek",
+                "https://api.deepseek.com",
+                ProbeResult::Alive {
+                    status: 401,
+                    latency_ms: 300,
+                },
+            ),
+            probe_row("judge-cli", "", ProbeResult::Skipped("kind = \"cli\"")),
+        ];
+        let c = models_net_check(&cfg, &rows);
+        assert_eq!(c.verdict, Verdict::Ok);
+        assert!(c.text.contains("без пробы (1): judge-cli"), "{}", c.text);
+    }
+
+    #[cfg(feature = "harness")]
+    #[test]
+    fn preset_base_url_matches_vendor_presets() {
+        assert_eq!(
+            crate::llm::preset_base_url("glm-5.3"),
+            Some("https://api.z.ai/api/paas/v4")
+        );
+        assert_eq!(
+            crate::llm::preset_base_url("deepseek-pro"),
+            Some("https://api.deepseek.com/v1")
+        );
+        assert_eq!(
+            crate::llm::preset_base_url("kimi"),
+            Some("https://api.kimi.com/coding/v1")
+        );
+        assert_eq!(
+            crate::llm::preset_base_url("gigachat-max"),
+            Some("https://api.giga.chat/v1")
+        );
+        assert_eq!(crate::llm::preset_base_url("openrouter"), None);
     }
 }

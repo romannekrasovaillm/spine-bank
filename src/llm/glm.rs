@@ -10,7 +10,7 @@ use crate::llm::openai_compat::OpenAiCompat;
 /// Базовый URL GLM API (применяется, когда в конфиге `base_url` пуст).
 /// Международная площадка Z.AI; китайский аналог — open.bigmodel.cn
 /// (тот же аккаунт/ключ, но извне Китая ловит DPI-таймауты и вдвое медленнее).
-const DEFAULT_BASE_URL: &str = "https://api.z.ai/api/paas/v4";
+pub(crate) const DEFAULT_BASE_URL: &str = "https://api.z.ai/api/paas/v4";
 
 /// Фабрика провайдера GLM поверх [`super::openai_compat`].
 /// API-ключ читается лениво на запросе, здесь не проверяется.

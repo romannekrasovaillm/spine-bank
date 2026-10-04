@@ -307,6 +307,22 @@ pub trait LlmProvider: Send + Sync + fmt::Debug {
     }
 }
 
+/// Пресетный базовый URL провайдера по имени модели — зеркало матча
+/// [`LlmRegistry::build`]: у записи с ПУСТЫМ `base_url` в конфиге рантайм
+/// применяет именно этот пресет (нужно doctor-пробе доступности).
+/// Неизвестный вендор → None (generic-провайдер без пресета).
+#[cfg(feature = "harness")]
+#[must_use]
+pub(crate) fn preset_base_url(name: &str) -> Option<&'static str> {
+    match name {
+        n if n.starts_with("deepseek") => Some(deepseek::DEFAULT_BASE_URL),
+        n if n.starts_with("kimi") => Some(kimi::DEFAULT_BASE_URL),
+        n if n.starts_with("glm") => Some(glm::DEFAULT_BASE_URL),
+        n if n.starts_with("gigachat") => Some(gigachat::DEFAULT_BASE_URL),
+        _ => None,
+    }
+}
+
 /// Реестр провайдеров из конфигурации.
 #[derive(Clone)]
 pub struct LlmRegistry {

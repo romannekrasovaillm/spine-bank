@@ -100,9 +100,12 @@ pub async fn execute(
         "/control" => cmd_control(rest, ctx),
         "/score" => Ok(SlashOutcome::Handled(score_text(rest))),
         "/mcp" => cmd_mcp(rest, ctx).await,
-        "/doctor" => Ok(SlashOutcome::Handled(crate::doctor::render(
-            &crate::doctor::run_checks(&ctx.config),
-        ))),
+        "/doctor" => {
+            let mut checks = crate::doctor::run_checks(&ctx.config);
+            // Проба endpoint'ов моделей: «модель умерла» vs «сеть/DPI».
+            checks.extend(crate::doctor::run_net_checks(&ctx.config));
+            Ok(SlashOutcome::Handled(crate::doctor::render(&checks)))
+        }
         "/skills" => Ok(cmd_skills(rest, ctx)),
         "/skill" => cmd_skill(rest, session, ctx),
         "/plugins" => Ok(cmd_plugins(rest, ctx)),
