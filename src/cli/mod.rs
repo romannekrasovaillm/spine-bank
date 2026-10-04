@@ -233,9 +233,10 @@ enum Cmd {
         #[arg(long)]
         constraints: Option<PathBuf>,
         /// Формат вывода: text (дефолт) | json (конверт вердикта с
-        /// аттестацией) | sarif | junit | gitlab-codequality | markdown.
-        /// Машинные форматы — строго в stdout (артефакт CI), exit-код не
-        /// меняется (красный гейт — данные отчёта: 1; INCOMPLETE: 3).
+        /// аттестацией) | sarif | junit | gitlab-codequality |
+        /// bitbucket-insights | markdown. Машинные форматы — строго в stdout
+        /// (артефакт CI), exit-код не меняется (красный гейт — данные отчёта:
+        /// 1; INCOMPLETE: 3).
         #[arg(long, default_value = "text", value_name = "FORMAT")]
         format: String,
         /// Сверить ранее сохранённый конверт вердикта с текущим состоянием
