@@ -1,0 +1,144 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: archbe-deploy-images
+  annotations:
+    arch-be.spine/source: CONSTRAINTS.yaml
+    arch-be.spine/group: images
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: restrict-image-registry
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      validate:
+        message: "образы контейнеров должны происходить из реестра registry.example.com/bank"
+        foreach:
+          - list: request.object.spec.containers
+            pattern:
+              image: "registry.example.com/bank/*"
+          - list: request.object.spec.initContainers
+            pattern:
+              image: "registry.example.com/bank/*"
+    - name: verify-image-signature
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      verifyImages:
+        - imageReferences:
+            - "registry.example.com/bank/*"
+          attestors:
+            - entries:
+                - keys:
+                    publicKeys: "k8s://arch-be/image-signing-key"
+                    # замените на реальный публичный ключ проверки подписи (cosign)
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: archbe-deploy-nonroot
+  annotations:
+    arch-be.spine/source: CONSTRAINTS.yaml
+    arch-be.spine/group: security
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: require-run-as-non-root
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      validate:
+        message: "контейнеры должны запускаться от non-root (securityContext.runAsNonRoot: true)"
+        foreach:
+          - list: request.object.spec.containers
+            pattern:
+              securityContext:
+                runAsNonRoot: true
+          - list: request.object.spec.initContainers
+            pattern:
+              securityContext:
+                runAsNonRoot: true
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: archbe-deploy-resources
+  annotations:
+    arch-be.spine/source: CONSTRAINTS.yaml
+    arch-be.spine/group: resources
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: require-resource-limits
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      validate:
+        message: "limits контейнеров не должны превышать бюджет (cpu ≤ 500m, memory ≤ 512Mi)"
+        foreach:
+          - list: request.object.spec.containers
+            pattern:
+              resources:
+                limits:
+                  cpu: "<=500m"
+                  memory: "<=512Mi"
+          - list: request.object.spec.initContainers
+            pattern:
+              resources:
+                limits:
+                  cpu: "<=500m"
+                  memory: "<=512Mi"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: archbe-deploy-deny-images
+  annotations:
+    arch-be.spine/source: CONSTRAINTS.yaml
+    arch-be.spine/group: deny-images
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: deny-image-0
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      validate:
+        message: "образ из deny-списка развёртывания запрещён: docker.io/library/nginx"
+        foreach:
+          - list: request.object.spec.containers
+            pattern:
+              image: "!docker.io/library/nginx*"
+          - list: request.object.spec.initContainers
+            pattern:
+              image: "!docker.io/library/nginx*"
+    - name: deny-image-1
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      validate:
+        message: "образ из deny-списка развёртывания запрещён: docker.io/library/redis"
+        foreach:
+          - list: request.object.spec.containers
+            pattern:
+              image: "!docker.io/library/redis*"
+          - list: request.object.spec.initContainers
+            pattern:
+              image: "!docker.io/library/redis*"

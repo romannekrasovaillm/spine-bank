@@ -4207,3 +4207,186 @@ fn rubric_run_pack_saves_raw_answers_provenance_and_reverifies() {
     assert_eq!(artifact["author_model"], "fake-judge-1", "{artifact}");
     assert_eq!(artifact["independence"], "none", "{artifact}");
 }
+
+// ---------------------------------------------------------------------------
+// Экспорт инвариантов развёртывания (ADR-059 §D3, changes/policy-export-deployment)
+// ---------------------------------------------------------------------------
+
+/// Полный набор инвариантов `deployment:` поверх базового реестра правил.
+fn deployment_constraints() -> String {
+    format!(
+        "{}deployment:\n  images:\n    registry: \"registry.example.com/bank\"\n    \
+         signed: true\n  security:\n    run_as_non_root: true\n  resources:\n    \
+         max_cpu: \"500m\"\n    max_memory: \"512Mi\"\n  deny_images:\n    - \
+         \"docker.io/library/redis\"\n    - \"docker.io/library/nginx\"\n",
+        constraints_yaml("docs/ARCHITECTURE-SPINE.md")
+    )
+}
+
+/// Секция `deployment:` прозрачна для существующих читателей реестра:
+/// `control check` даёт байт-в-байт тот же вердикт, что без секции (гейт её
+/// игнорирует — правила кода не смешиваются с инвариантами деплоя).
+#[test]
+fn deployment_section_is_transparent_to_control_check() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let home = tmp.path();
+    let mut outputs = Vec::new();
+    for (name, body) in [
+        ("plain", constraints_yaml("docs/ARCHITECTURE-SPINE.md")),
+        ("deploy", deployment_constraints()),
+    ] {
+        let repo = home.join(name);
+        std::fs::create_dir_all(repo.join("docs")).expect("mkdir docs");
+        std::fs::write(repo.join("docs/ARCHITECTURE-SPINE.md"), "# Spine\n").expect("spine");
+        std::fs::write(repo.join("CONSTRAINTS.yaml"), body).expect("constraints");
+        let assert = arch_cmd(home)
+            .arg("control")
+            .arg("check")
+            .arg(repo.as_os_str())
+            .assert()
+            .success();
+        outputs.push(assert.get_output().stdout.clone());
+    }
+    assert_eq!(
+        outputs[0], outputs[1],
+        "секция deployment: изменила вывод fitness-гейта"
+    );
+    assert!(
+        String::from_utf8_lossy(&outputs[0]).contains("Итог: PASS"),
+        "базовый прогон не зелёный"
+    );
+}
+
+/// `policy export kyverno`: полный набор групп, детерминизм и запись в файл.
+#[test]
+fn policy_export_kyverno_is_deterministic_and_complete() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let home = tmp.path();
+    let repo = repo_with_constraints(home, &deployment_constraints());
+
+    let first = arch_cmd(home)
+        .args(["policy", "export", "kyverno"])
+        .arg("--repo")
+        .arg(repo.as_os_str())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(first.clone()).expect("utf8");
+    for marker in [
+        "kind: ClusterPolicy",
+        "archbe-deploy-images",
+        "archbe-deploy-nonroot",
+        "archbe-deploy-resources",
+        "archbe-deploy-deny-images",
+        "verifyImages:",
+        "image: \"registry.example.com/bank/*\"",
+        "cpu: \"<=500m\"",
+        "image: \"!docker.io/library/nginx*\"",
+    ] {
+        assert!(text.contains(marker), "нет маркера: {marker}\n{text}");
+    }
+
+    let second = arch_cmd(home)
+        .args(["policy", "export", "kyverno"])
+        .arg("--repo")
+        .arg(repo.as_os_str())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert_eq!(
+        first, second,
+        "повторный экспорт отличается (не детерминирован)"
+    );
+
+    let out = repo.join("policies.yaml");
+    arch_cmd(home)
+        .args(["policy", "export", "kyverno"])
+        .arg("--repo")
+        .arg(repo.as_os_str())
+        .arg("--output")
+        .arg(out.as_os_str())
+        .assert()
+        .success()
+        .stdout(contains("Экспорт kyverno"));
+    assert_eq!(
+        std::fs::read_to_string(&out).expect("файл политик"),
+        text,
+        "--output записал не тот же вывод"
+    );
+}
+
+/// `policy export rego`: пакет, группы, детерминизм.
+#[test]
+fn policy_export_rego_is_deterministic_and_complete() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let home = tmp.path();
+    let repo = repo_with_constraints(home, &deployment_constraints());
+
+    let export = || {
+        arch_cmd(home)
+            .args(["policy", "export", "rego"])
+            .arg("--repo")
+            .arg(repo.as_os_str())
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone()
+    };
+    let first = export();
+    let text = String::from_utf8(first.clone()).expect("utf8");
+    for marker in [
+        "package archbe.deployment",
+        "deny contains msg if",
+        "allow if",
+        "limits_within_budget",
+        "pod_non_root",
+        "deny_images := [",
+    ] {
+        assert!(text.contains(marker), "нет маркера: {marker}\n{text}");
+    }
+    let second = export();
+    assert_eq!(
+        first, second,
+        "повторный экспорт отличается (не детерминирован)"
+    );
+}
+
+/// Пустая/отсутствующая секция `deployment:` — сообщение и exit 0.
+#[test]
+fn policy_export_without_deployment_reports_and_exits_zero() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let home = tmp.path();
+    let repo = repo_with_constraints(home, &constraints_yaml("docs/ARCHITECTURE-SPINE.md"));
+
+    arch_cmd(home)
+        .args(["policy", "export", "kyverno"])
+        .arg("--repo")
+        .arg(repo.as_os_str())
+        .assert()
+        .success()
+        .stdout(contains(
+            "секция deployment: не найдена, экспортировать нечего",
+        ));
+
+    // Секция есть, но инвариантов нет (`signed: false` — снятое ограничение).
+    std::fs::write(
+        repo.join(".arch-handoff/CONSTRAINTS.yaml"),
+        format!(
+            "{}deployment:\n  images:\n    signed: false\n",
+            constraints_yaml("docs/ARCHITECTURE-SPINE.md")
+        ),
+    )
+    .expect("constraints");
+    arch_cmd(home)
+        .args(["policy", "export", "rego"])
+        .arg("--repo")
+        .arg(repo.as_os_str())
+        .assert()
+        .success()
+        .stdout(contains("не содержит инвариантов"));
+}

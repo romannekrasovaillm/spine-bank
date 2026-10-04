@@ -1,0 +1,17 @@
+rules:
+  - name: exists
+    type: file_exists
+    path: "Cargo.toml"
+    severity: error
+deployment:
+  images:
+    registry: "registry.example.com/bank"
+    signed: true
+  security:
+    run_as_non_root: true
+  resources:
+    max_cpu: "500m"
+    max_memory: "512Mi"
+  deny_images:
+    - "docker.io/library/redis"
+    - "docker.io/library/nginx"

@@ -88,6 +88,7 @@ pub mod passport;
 pub mod plugin;
 pub mod plugin_lock;
 pub mod policy;
+pub mod policy_export;
 pub(crate) mod proc;
 pub mod publish;
 #[cfg(feature = "harness")]

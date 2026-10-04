@@ -44,7 +44,7 @@ use fleet::{WorktreeCmd, cmd_worktree};
 use library::cmd_prompts;
 use library::{MemoryCmd, PluginsCmd, SkillsCmd, cmd_init, cmd_memory, cmd_plugins, cmd_skills};
 use mcp::{McpCmd, cmd_mcp};
-use misc::{cmd_policy, cmd_survey};
+use misc::{PolicyCmd, cmd_policy, cmd_policy_export, cmd_survey};
 use model::{ModelCmd, NfrCmd, TraceCmd, cmd_model, cmd_nfr, cmd_trace};
 use rubric::{RubricCmd, cmd_rubric};
 use rules::{RulesCmd, cmd_rules};
@@ -445,9 +445,12 @@ enum Cmd {
         #[command(subcommand)]
         cmd: PluginsCmd,
     },
-    /// Политика автономии (R-уровни): показать/проверить класс риска команды.
+    /// Политика автономии (R-уровни) и экспорт инвариантов развёртывания
+    /// (`deployment:` в `CONSTRAINTS.yaml`) в политики кластера.
     Policy {
-        /// Проверить команду: как её классифицирует политика.
+        #[command(subcommand)]
+        cmd: Option<PolicyCmd>,
+        /// Проверить команду: как её классифицирует политика автономии.
         #[arg(long)]
         check: Option<String>,
     },
@@ -1357,7 +1360,15 @@ pub(crate) async fn run() -> Result<()> {
         Some(Cmd::Nfr { cmd }) => cmd_nfr(cmd)?,
         Some(Cmd::Skills { cmd }) => cmd_skills(&cfg, cmd)?,
         Some(Cmd::Plugins { cmd }) => cmd_plugins(&cfg, cmd)?,
-        Some(Cmd::Policy { check }) => cmd_policy(&cfg, check)?,
+        Some(Cmd::Policy { cmd, check }) => match cmd {
+            Some(PolicyCmd::Export {
+                format,
+                repo,
+                constraints,
+                output,
+            }) => cmd_policy_export(format, &repo, constraints, output.as_deref())?,
+            None => cmd_policy(&cfg, check)?,
+        },
         Some(Cmd::Evidence { cmd }) => cmd_evidence(&cfg, cmd)?,
         Some(Cmd::Metrics { cost_report }) => {
             if cost_report {
