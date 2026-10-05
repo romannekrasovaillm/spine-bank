@@ -7,6 +7,19 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Самопроверка (dogfood) в CI снова зелёная.** Два нарушения, принесённые
+  фичами «длинное терпение» и «models-net»: `src/agent.rs` перевалил лимит
+  3000 строк на продовый модуль (`prod_file_length_limit`) — логика
+  `network_patience` с тестами вынесена в подмодуль `src/agent/network.rs`
+  чистым перемещением (префиксы заметок реэкспортируются, пути
+  `crate::agent::NET_*` не изменились); сетевая проба endpoint'ов жила в
+  `src/doctor.rs`, что ломало правило `core_free_of_network_and_tui_crates`
+  (core свободен от reqwest) — механика пробы переехала в `src/net.rs`
+  (harness-only модуль), чистые типы результата остались в `doctor.rs`.
+  Урок: перед пушем прогонять `control check` локально (см. AGENTS.md).
+
 ### Added
 
 - **TUI: версия Spine-BE под лого со старта.** На заставке-интро строка

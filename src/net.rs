@@ -14,6 +14,7 @@ use std::net::{IpAddr, TcpStream, ToSocketAddrs};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+use crate::doctor::{ProbeResult, ProbeRow};
 use crate::error::{HarnessError, Result};
 
 /// Таймаут TCP-пробы порта шлюза, миллисекунды.
@@ -153,6 +154,150 @@ pub fn ensure_local_egress(proxy_url: &str) -> Result<Option<EgressStatus>> {
          после запуска {EGRESS_UNIT} (диагностика: \
          systemctl --user status {EGRESS_UNIT})"
     )))
+}
+
+// ---------------------------------------------------------------------
+// Сетевая проба endpoint'ов моделей (doctor «models-net»). Живёт здесь, а
+// не в `doctor.rs`: core-редакция свободна от сетевых крейтов (правило
+// `core_free_of_network_and_tui_crates`), reqwest — только harness-фича.
+// Типы результата — чистые данные и лежат в `crate::doctor`.
+// ---------------------------------------------------------------------
+
+/// Таймаут одной пробы endpoint'а (секунды). Пробы идут параллельно, поэтому
+/// это же и верхняя граница всей «models-net»: DPI-окна и мёртвые хосты не
+/// растягивают doctor дольше.
+const MODEL_PROBE_TIMEOUT_SECS: u64 = 5;
+
+/// Реальная параллельная проба всех http-моделей конфига.
+pub(crate) fn probe_models(cfg: &crate::config::Config) -> Vec<ProbeRow> {
+    let mut rows: Vec<ProbeRow> = Vec::new();
+    let mut targets: Vec<(String, String, crate::config::ModelConfig)> = Vec::new();
+    for (name, mc) in &cfg.models {
+        if mc.kind.as_deref() == Some("cli") {
+            rows.push(ProbeRow {
+                name: name.clone(),
+                url: String::new(),
+                result: ProbeResult::Skipped("kind = \"cli\""),
+            });
+            continue;
+        }
+        let configured = mc.base_url.trim();
+        let base = if configured.is_empty() {
+            // Пустой base_url — рантайм применяет пресет вендора; проба
+            // обязана целиться туда же (матч — `llm::preset_base_url`).
+            if let Some(u) = crate::llm::preset_base_url(name) {
+                u
+            } else {
+                rows.push(ProbeRow {
+                    name: name.clone(),
+                    url: String::new(),
+                    result: ProbeResult::Skipped("base_url не задан"),
+                });
+                continue;
+            }
+        } else {
+            configured
+        };
+        targets.push((
+            name.clone(),
+            base.trim_end_matches('/').to_string(),
+            mc.clone(),
+        ));
+    }
+    // Отдельный поток со своим рантаймом: run_checks — синхронный контракт и
+    // вызывается и из tokio-контекста (CLI/TUI), и из чистых тестов; вложенный
+    // block_on в потоке чужого рантайма tokio запрещён.
+    let probed = std::thread::spawn(move || {
+        let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        else {
+            return Vec::new();
+        };
+        rt.block_on(async move {
+            let mut set = tokio::task::JoinSet::new();
+            for (name, url, mc) in targets {
+                set.spawn(async move { probe_one(name, url, mc).await });
+            }
+            let mut out = Vec::new();
+            while let Some(joined) = set.join_next().await {
+                // Паника пробы теряет строку, а не весь doctor.
+                if let Ok(row) = joined {
+                    out.push(row);
+                }
+            }
+            out
+        })
+    })
+    .join()
+    .unwrap_or_default();
+    rows.extend(probed);
+    rows
+}
+
+/// Одна проба: `GET <base>/models` без ключа, короткий таймаут, клиент с
+/// учётом proxy/CA/mTLS модели (автозапуск egress отключён — doctor не
+/// мутирует машину).
+async fn probe_one(name: String, base: String, mc: crate::config::ModelConfig) -> ProbeRow {
+    let client = match crate::llm::openai_compat::build_client_with_egress(&name, &mc, false) {
+        Ok(c) => c,
+        Err(e) => {
+            return ProbeRow {
+                name,
+                url: base,
+                result: ProbeResult::Down {
+                    reason: format!("сборка клиента: {e}"),
+                    latency_ms: 0,
+                },
+            };
+        }
+    };
+    let started = std::time::Instant::now();
+    let res = client
+        .get(format!("{base}/models"))
+        .timeout(std::time::Duration::from_secs(MODEL_PROBE_TIMEOUT_SECS))
+        .send()
+        .await;
+    let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    match res {
+        Ok(resp) => ProbeRow {
+            name,
+            url: base,
+            result: ProbeResult::Alive {
+                status: resp.status().as_u16(),
+                latency_ms,
+            },
+        },
+        Err(e) => {
+            let reason = probe_failure_reason(&e);
+            ProbeRow {
+                name,
+                url: base,
+                result: ProbeResult::Down { reason, latency_ms },
+            }
+        }
+    }
+}
+
+/// Короткая причина транспортного отказа пробы (без URL и цепочек reqwest):
+/// именно она отличает «модель умерла» от «сеть/DPI».
+fn probe_failure_reason(e: &reqwest::Error) -> String {
+    if e.is_timeout() {
+        return format!("таймаут >{MODEL_PROBE_TIMEOUT_SECS}с (модель мертва или сеть/DPI)");
+    }
+    let chain = crate::llm::openai_compat::error_chain(e).to_lowercase();
+    if chain.contains("connection refused") {
+        "отказ в соединении (сервис не слушает порт)".to_string()
+    } else if chain.contains("connection reset") || chain.contains("broken pipe") {
+        "соединение сброшено (сеть/DPI?)".to_string()
+    } else if chain.contains("dns") || chain.contains("resolve") || chain.contains("no such host") {
+        "DNS не разрешил хост".to_string()
+    } else if chain.contains("certificate") || chain.contains("tls") {
+        "TLS-ошибка (сертификат/прокси)".to_string()
+    } else {
+        let short: String = chain.trim().chars().take(120).collect();
+        format!("сетевой сбой ({short})")
+    }
 }
 
 #[cfg(test)]
