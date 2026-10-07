@@ -340,7 +340,9 @@ pub fn scan_scenarios(root: &Path) -> Result<Vec<Scenario>> {
 }
 
 /// Собирает markdown-файлы каталога (рекурсивно, детерминированный порядок).
-fn collect_md(dir: &Path) -> Vec<PathBuf> {
+/// `pub(crate)`: тот же обход читает гейт прямых правок спайна (F1, ADR-062 —
+/// дельты спек change `OpenSpec` как источник покрытия `delta guard`).
+pub(crate) fn collect_md(dir: &Path) -> Vec<PathBuf> {
     let mut files: Vec<PathBuf> = WalkDir::new(dir)
         .into_iter()
         .filter_map(std::result::Result::ok)

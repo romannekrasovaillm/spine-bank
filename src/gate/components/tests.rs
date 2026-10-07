@@ -973,7 +973,7 @@ fn gate_delta_guard_detail_shows_coverage() {
     assert!(
         component
             .detail
-            .contains("покрытие: ARCHITECTURE-SPINE.md ← 'spine-update'"),
+            .contains("покрытие: ARCHITECTURE-SPINE.md ← 'delta:spine-update'"),
         "{}",
         component.detail
     );
@@ -1665,8 +1665,11 @@ fn coverage_note_skips_empty_mentions_and_caps_entries() {
         protected_changed: mentions.iter().map(|(f, _)| f.clone()).collect(),
         covered: Vec::new(),
         violations: Vec::new(),
+        self_approved: Vec::new(),
         passed: true,
         active_deltas: 1,
+        active_changes: 0,
+        sources: vec!["spine".to_string()],
         archived_in_range: Vec::new(),
         mentions,
         reasons: Vec::new(),
@@ -2640,15 +2643,6 @@ fn hash_of(dir: &Path, rel: &str) -> String {
     crate::hash::sha256_file(&dir.join(rel)).expect("hash файла")
 }
 
-/// Записывает файл фикстуры с созданием родительских каталогов.
-fn write_fixture(dir: &Path, rel: &str, text: &str) {
-    let path = dir.join(rel);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).expect("mkdir");
-    }
-    std::fs::write(path, text).expect("write fixture");
-}
-
 /// Сценарий приёмки A3: удаление Stop-хука из запиненного
 /// `.claude/settings.json` после выдачи пакета — `exit 1` (в отчёте)
 /// с находкой `control_plane_tampered`.
@@ -2848,27 +2842,6 @@ fn control_plane_invalid_manifest_is_error() {
 }
 
 // --- A5: диапазон прогона исполнителя (ADR-055) -------------------------
-
-/// Вывод git-команды в фикстуре (тестkit даёт `git`, но не отдаёт stdout;
-/// базовый коммит нужен как SHA). Идентичность коммиттера — как в `git`.
-fn git_stdout(dir: &Path, args: &[&str]) -> String {
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .env("GIT_AUTHOR_NAME", "t")
-        .env("GIT_AUTHOR_EMAIL", "t@t")
-        .env("GIT_COMMITTER_NAME", "t")
-        .env("GIT_COMMITTER_EMAIL", "t@t")
-        .output()
-        .expect("git");
-    assert!(
-        out.status.success(),
-        "git {args:?}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8_lossy(&out.stdout).into_owned()
-}
 
 /// Заглушка A5, сценарий RA-7 (минимальный): базовый коммит — реестр с
 /// правилом `no_pan_in_logs` (error); «исполнитель» вторым коммитом создаёт

@@ -284,10 +284,16 @@ fn coverage_note(report: &delta::GuardReport) -> String {
 }
 
 /// Составляющая `delta_guard`: гейт прямых правок спайна ([`delta::guard`]).
+///
+/// С диапазоном прогона исполнителя (A5, ADR-055; передаётся только пост-
+/// гейтом `harness_run`) покрытие, созданное или изменённое в этом диапазоне,
+/// правку не узаконивает — ни дельтой Spine, ни change `OpenSpec` (F1, ADR-062):
+/// находка `self_approved` вместо тихого PASS.
 pub(super) fn component_delta_guard(
     repo: &Path,
     base: Option<&str>,
     git: &GitProbe,
+    agent_range: Option<&crate::control::AgentRange>,
 ) -> GateComponent {
     if !git.repo {
         return GateComponent::skip(
@@ -301,7 +307,11 @@ pub(super) fn component_delta_guard(
             "нет базового коммита (HEAD не существует) — дифф недоступен".to_string(),
         );
     }
-    match delta::guard(repo, base, &[]) {
+    let options = delta::GuardOptions {
+        sources: None,
+        agent_range: agent_range.cloned(),
+    };
+    match delta::guard_with(repo, base, &[], &options) {
         Ok(report) if report.passed => {
             let mut detail = format!(
                 "изменённых файлов: {}, защищённых среди них: {}",
@@ -309,40 +319,83 @@ pub(super) fn component_delta_guard(
                 report.protected_changed.len()
             );
             // Отчёт, а не галочка (D8): какие защищённые пути изменены и
-            // какой дельтой каждый покрыт.
+            // каким источником каждый покрыт (F1: дельта или change OpenSpec).
             if !report.protected_changed.is_empty() {
                 // Запись в String не может завершиться ошибкой — игнор безопасен.
                 let _ = write!(detail, " — покрытие: {}", coverage_note(&report));
             }
             GateComponent::pass("delta_guard", detail)
         }
-        Ok(report) => GateComponent::fail(
-            "delta_guard",
-            format!(
-                "правки спайна мимо дельты: {} файлов (активных дельт: {})",
-                report.violations.len(),
-                report.active_deltas
-            ),
-            report
+        Ok(report) => {
+            let mut findings: Vec<GateFinding> = report
                 .violations
                 .iter()
                 .map(|v| {
+                    let openspec_on = report.sources.iter().any(|s| s == "openspec");
                     GateFinding::file_only(
                         "error",
                         v.clone(),
-                        if report.active_deltas == 0 {
-                            "не упоминается ни в одной активной дельте — активных дельт нет"
-                                .to_string()
-                        } else {
-                            format!(
+                        match (
+                            openspec_on,
+                            report.active_deltas == 0 && report.active_changes == 0,
+                        ) {
+                            // Репозиторий без OpenSpec: формулировка прежних
+                            // версий (совместимость текста находки).
+                            (false, true) => {
+                                "не упоминается ни в одной активной дельте — активных дельт нет"
+                                    .to_string()
+                            }
+                            (false, false) => format!(
                                 "не упоминается ни в одной из {} активных дельт",
                                 report.active_deltas
-                            )
+                            ),
+                            (true, true) => "не упоминается ни в одном активном источнике \
+                                 покрытия — активных дельт и changes OpenSpec нет"
+                                .to_string(),
+                            (true, false) => format!(
+                                "не упоминается ни в одном активном источнике покрытия \
+                                 (активных дельт: {}, активных changes OpenSpec: {})",
+                                report.active_deltas, report.active_changes
+                            ),
                         },
                     )
                 })
-                .collect(),
-        ),
+                .collect();
+            // ADR-055: покрытие из диапазона исполнителя — самоодобрение.
+            for (file, sources) in &report.self_approved {
+                findings.push(GateFinding {
+                    severity: "error".into(),
+                    rule: Some("self_approved".into()),
+                    file: Some(file.clone()),
+                    line: None,
+                    message: format!(
+                        "покрытие ({}) создано или изменено в диапазоне прогона исполнителя → \
+                         перенесите оформление изменения в основной репозиторий решением \
+                         владельца (ADR-055)",
+                        sources.join(", ")
+                    ),
+                });
+            }
+            let mut detail = format!(
+                "правки спайна мимо дельты: {} файлов (активных дельт: {}{})",
+                report.violations.len(),
+                report.active_deltas,
+                if report.sources.iter().any(|s| s == "openspec") {
+                    format!(", активных changes OpenSpec: {}", report.active_changes)
+                } else {
+                    String::new()
+                }
+            );
+            if !report.self_approved.is_empty() {
+                // Запись в String не может завершиться ошибкой — игнор безопасен.
+                let _ = write!(
+                    detail,
+                    "; покрытий из диапазона исполнителя (self_approved): {}",
+                    report.self_approved.len()
+                );
+            }
+            GateComponent::fail("delta_guard", detail, findings)
+        }
         Err(e) => GateComponent::fail("delta_guard", format!("сбой выполнения: {e}"), Vec::new()),
     }
 }
@@ -1774,5 +1827,7 @@ pub(super) fn component_decision_quality(
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_delta_guard_openspec;
 #[cfg(test)]
 mod tests_secrets;

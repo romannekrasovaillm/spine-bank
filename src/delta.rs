@@ -1,4 +1,4 @@
-//! Дельта-спецификации как state machine (по OpenSpec): change-центричные
+//! Дельта-спецификации как state machine (по `OpenSpec`): change-центричные
 //! изменения `propose → (apply) → archive`; дельта описывает только изменение
 //! относительно текущей истины (ADDED/MODIFIED/REMOVED).
 //!
@@ -8,6 +8,11 @@
 //! [`guard`] — CI-гейт прямых правок спайна мимо дельты: изменённые файлы под
 //! защищёнными путями (по умолчанию `model/`, `ARCHITECTURE-SPINE.md`,
 //! `CONSTRAINTS.yaml`) обязаны упоминаться в активной дельте, иначе FAIL.
+//!
+//! Источники покрытия (F1, ADR-062): дельты Spine (`changes/<name>/DELTA.md`)
+//! и changes `OpenSpec` (`openspec/changes/<id>/` — proposal.md, design.md,
+//! tasks.md, specs/**/*.md). Состав источников — `[delta] sources` в
+//! `arch-harness.toml` кейса; дефолт — оба при наличии `openspec/`.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -245,6 +250,126 @@ fn find_delta(repo: &Path, name: &str) -> Result<PathBuf> {
 /// заменяет этот список целиком.
 pub const DEFAULT_PROTECTED: [&str; 3] = ["model/", "ARCHITECTURE-SPINE.md", "CONSTRAINTS.yaml"];
 
+/// Источник покрытия правок спайна гейтом [`guard`] (F1, ADR-062).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoverageSource {
+    /// Дельта Spine (`changes/<name>/DELTA.md`).
+    Spine,
+    /// Change `OpenSpec` (`openspec/changes/<id>/`: proposal.md, design.md,
+    /// tasks.md, specs/**/*.md). Markdown `OpenSpec` Spine не пишет — адаптер
+    /// только читает (правило 9, `docs/openspec.md`).
+    Openspec,
+}
+
+impl CoverageSource {
+    /// Имя источника в конфиге и отчётах.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Spine => "spine",
+            Self::Openspec => "openspec",
+        }
+    }
+}
+
+/// Секция `[delta]` кейсового конфига `<repo>/arch-harness.toml`. Читается
+/// точечно, отдельно от [`crate::config::Config`]: гейт прямых правок обязан
+/// видеть источники покрытия и при библиотечном вызове (MCP, тесты), где
+/// CLI-конфиг не загружается. Неизвестные ключи секции допустимы (аддитивность
+/// формата конфига).
+#[derive(Debug, Deserialize)]
+struct DeltaCaseConfig {
+    /// Секция `[delta]`.
+    #[serde(default)]
+    delta: Option<DeltaCaseTable>,
+}
+
+/// Таблица `[delta]`: состав источников покрытия.
+#[derive(Debug, Default, Deserialize)]
+struct DeltaCaseTable {
+    /// Источники покрытия: подмножество `["spine", "openspec"]`. `None` —
+    /// ключ не задан (авто-детект); `Some([])` — ошибка конфигурации.
+    #[serde(default)]
+    sources: Option<Vec<String>>,
+}
+
+/// Источники покрытия `delta guard` для репозитория (F1, ADR-062):
+/// - `[delta] sources = [...]` в `<repo>/arch-harness.toml`, если секция
+///   с ключом задана; неизвестное имя или пустой список — ошибка (опечатка
+///   в конфиге контура не должна молча отключать источник покрытия);
+/// - иначе авто-детект: оба источника при наличии каталога `openspec/`,
+///   иначе только `spine` (поведение версий до 0.3.14).
+///
+/// # Errors
+/// Конфиг кейса не читается/невалиден; список источников пуст или содержит
+/// неизвестное имя.
+pub fn coverage_sources(repo: &Path) -> Result<Vec<CoverageSource>> {
+    let cfg_path = repo.join("arch-harness.toml");
+    if cfg_path.is_file() {
+        let text =
+            std::fs::read_to_string(&cfg_path).map_err(|e| HarnessError::io(&cfg_path, e))?;
+        let parsed: DeltaCaseConfig = toml::from_str(&text).map_err(|e| {
+            HarnessError::Control(format!(
+                "{}: конфиг кейса не разбирается: {e}",
+                cfg_path.display()
+            ))
+        })?;
+        if let Some(sources) = parsed.delta.and_then(|t| t.sources) {
+            if sources.is_empty() {
+                return Err(HarnessError::Control(format!(
+                    "{}: [delta] sources пуст — гейт покрытия не признавал бы ни одного \
+                     источника; укажите хотя бы один: \"spine\", \"openspec\"",
+                    cfg_path.display()
+                )));
+            }
+            let mut out = Vec::with_capacity(sources.len());
+            for name in &sources {
+                match name.as_str() {
+                    "spine" => out.push(CoverageSource::Spine),
+                    "openspec" => out.push(CoverageSource::Openspec),
+                    other => {
+                        return Err(HarnessError::Control(format!(
+                            "{}: неизвестный источник покрытия '{other}' в [delta] sources — \
+                             допустимы \"spine\" и \"openspec\"",
+                            cfg_path.display()
+                        )));
+                    }
+                }
+            }
+            return Ok(out);
+        }
+    }
+    // Авто-детект: в репозитории с разметкой OpenSpec change равноправен
+    // дельте; без неё — только дельты (поведение прежних версий).
+    if repo.join("openspec").is_dir() {
+        Ok(vec![CoverageSource::Spine, CoverageSource::Openspec])
+    } else {
+        Ok(vec![CoverageSource::Spine])
+    }
+}
+
+/// Подсказка для `delta new`/`delta_propose` в репозитории, где единственный
+/// источник покрытия — `OpenSpec` (`[delta] sources = ["openspec"]`): `DELTA.md`
+/// не создаётся, изменение оформляется change'ом `OpenSpec` средствами самого
+/// `OpenSpec` (его markdown Spine не пишет — правило 9, `docs/openspec.md`).
+/// `None` — дельта создаётся как обычно.
+///
+/// # Errors
+/// Ошибка чтения/разбора конфига кейса (см. [`coverage_sources`]).
+pub fn openspec_only_hint(repo: &Path) -> Result<Option<String>> {
+    if coverage_sources(repo)?.as_slice() == [CoverageSource::Openspec] {
+        return Ok(Some(
+            "DELTA.md не создан: в этом репозитории источник покрытия — только OpenSpec \
+             ([delta] sources = [\"openspec\"]). Оформите изменение change'ом OpenSpec: \
+             каталог openspec/changes/<имя>/ с proposal.md и tasks.md (напр. через \
+             `openspec new change <имя>`), а правку защищённого файла упомяните в них. \
+             Markdown OpenSpec Spine не пишет (docs/openspec.md)"
+                .to_string(),
+        ));
+    }
+    Ok(None)
+}
+
 /// Отчёт гейта прямых правок спайна.
 #[derive(Debug, Clone)]
 pub struct GuardReport {
@@ -258,23 +383,40 @@ pub struct GuardReport {
     pub changed_files: Vec<String>,
     /// Изменённые защищённые файлы.
     pub protected_changed: Vec<String>,
-    /// Покрытые правки: (файл, имя активной дельты) — первая из упомянувших
-    /// (совместимость JSON-вердикта; полный список — в `mentions`).
+    /// Покрытые правки: (файл, метка первого источника покрытия) —
+    /// `delta:<name>` или `openspec:<id>` (F1, ADR-062; полный список — в
+    /// `mentions`). До 0.3.14 меткой было имя дельты без префикса.
     pub covered: Vec<(String, String)>,
-    /// Нарушения: защищённые файлы без упоминания в активных дельтах.
+    /// Нарушения: защищённые файлы без упоминания в активных источниках.
     pub violations: Vec<String>,
-    /// Гейт пройден (нет непокрытых правок защищённых путей).
+    /// Правки, чьё покрытие существует, но все его файлы-носители созданы или
+    /// изменены в диапазоне прогона исполнителя (правило владения ADR-055):
+    /// (файл, метки отклонённых источников). Самоодобрение покрытием не
+    /// считается: такие правки — тоже нарушения (`passed = false`), но с
+    /// отдельной находкой `self_approved`. Аддитивное поле 0.3.14.
+    pub self_approved: Vec<(String, Vec<String>)>,
+    /// Гейт пройден (нет непокрытых правок защищённых путей и нет
+    /// самоодобренных покрытий).
     pub passed: bool,
     /// Число активных дельт (`changes/<name>/DELTA.md` в статусе Proposed):
     /// контекст честности вывода — нарушение при нуле дельт означает
     /// «правку нечем покрыть», а не «дельта не та».
     pub active_deltas: usize,
+    /// Число активных changes `OpenSpec` (`openspec/changes/<id>/` без
+    /// `archive/`), участвовавших в покрытии (F1). 0 — источник `openspec`
+    /// выключен конфигом или changes нет. Аддитивное поле 0.3.14.
+    pub active_changes: usize,
+    /// Источники покрытия прогона после резолва (`spine`/`openspec`,
+    /// F1, ADR-062). Аддитивное поле 0.3.14.
+    pub sources: Vec<String>,
     /// Дельта, заархивированные ВНУТРИ проверяемого диапазона `base..HEAD`
     /// (T-07): архивация до merge — покрытие для правок этого диапазона.
     /// Аддитивное поле: старые читатели JSON его не знают.
+    /// С 0.3.14 — метки источников (`delta:<name>`, `openspec:<каталог>`).
     pub archived_in_range: Vec<String>,
-    /// Покрытие каждого изменённого защищённого файла: (файл, имена ВСЕХ
-    /// активных дельт, его упоминающих; пустой список — нарушение).
+    /// Покрытие каждого изменённого защищённого файла: (файл, метки ВСЕХ
+    /// легитимных источников, его упоминающих; пустой список — нарушение или
+    /// самоодобрение). С 0.3.14 метки — `delta:<name>`/`openspec:<id>`.
     pub mentions: Vec<(String, Vec<String>)>,
     /// Чем именно покрыт файл: (файл, причина) — «по пути», «по id NFR-005».
     /// Аддитивное поле (0.3.4, Н4): архитектору важно видеть, засчитано ли
@@ -507,18 +649,183 @@ pub fn changed_files(repo: &Path, base: Option<&str>) -> Result<Vec<String>> {
 
 /// Гейт прямых правок спайна мимо дельты (CI-запрет «прямых коммитов в model/
 /// мимо changes/»): каждый изменённый защищённый файл обязан упоминаться
-/// (путём или именем) в теле хотя бы одной дельты-покрытия — активной
-/// (`changes/<name>/DELTA.md`) или заархивированной ВНУТРИ проверяемого
-/// диапазона (`base..HEAD`, T-07). Дельта, заархивированная до базы, не
-/// засчитывается: правок диапазона она не описывает.
+/// (путём или именем) в теле хотя бы одного источника покрытия — активной
+/// дельты (`changes/<name>/DELTA.md`), активного change `OpenSpec`
+/// (`openspec/changes/<id>/`, F1) либо заархивированных ВНУТРИ проверяемого
+/// диапазона (`base..HEAD`, T-07). Артефакт, заархивированный до базы, не
+/// засчитывается: правок диапазона он не описывает.
+///
+/// Эквивалент `guard_with` с настройками по умолчанию (источники — из
+/// `[delta] sources` кейса или авто-детект; правило владения не применяется).
 ///
 /// Изменённые файлы — `git diff --name-only <base>` (дефолт `HEAD`: staged +
 /// unstaged рабочего дерева; untracked-файлы git-diff не показывает — для CI
 /// передавайте базу вида `origin/main...HEAD`).
 ///
 /// # Errors
-/// `git` недоступен или вернул ненулевой код (не репозиторий, плохая база).
+/// `git` недоступен или вернул ненулевой код (не репозиторий, плохая база);
+/// конфиг `[delta] sources` кейса невалиден.
 pub fn guard(repo: &Path, base: Option<&str>, protect: &[String]) -> Result<GuardReport> {
+    guard_with(repo, base, protect, &GuardOptions::default())
+}
+
+/// Настройки гейта прямых правок спайна (F1, ADR-062).
+#[derive(Debug, Clone, Default)]
+pub struct GuardOptions {
+    /// Источники покрытия: `None` — `[delta] sources` кейсового
+    /// `arch-harness.toml` или авто-детект (оба источника при наличии
+    /// `openspec/`). Явный список заменяет конфиг кейса.
+    pub sources: Option<Vec<CoverageSource>>,
+    /// Диапазон прогона исполнителя (A5, ADR-055): покрытие, чьи файлы-
+    /// носители появились или изменились в этом диапазоне, правку НЕ
+    /// узаконивает — одинаково для дельт Spine и changes `OpenSpec`
+    /// (самоодобрение, находка `self_approved`). `None` (дефолт) — обычный
+    /// гейт/CI без проверки происхождения покрытия.
+    pub agent_range: Option<crate::control::AgentRange>,
+}
+
+/// Единая записись покрытия гейта (F1): дельта Spine или change `OpenSpec`.
+struct Cover {
+    /// Метка источника: `delta:<name>` или `openspec:<id>`.
+    label: String,
+    /// Тело, в котором ищется упоминание защищённого файла ([`delta_mentions`]).
+    body: String,
+    /// Файлы-носители покрытия — маркеры правила владения (ADR-055):
+    /// `DELTA.md` дельты; proposal/design/tasks/specs change `OpenSpec`.
+    markers: Vec<PathBuf>,
+}
+
+/// Собирает покрытия из дельт Spine: активные (`changes/<id>`) и
+/// заархивированные ВНУТРИ проверяемого диапазона (T-07). Дельта,
+/// заархивированная ДО базы, — влитая истина: правок диапазона она не
+/// описывает и покрытием не считается, иначе архив стал бы универсальной
+/// отмычкой для любой последующей правки.
+fn collect_delta_covers(
+    repo: &Path,
+    base: &str,
+    covers: &mut Vec<Cover>,
+    archived_in_range: &mut Vec<String>,
+) -> Result<usize> {
+    let mut active_deltas = 0_usize;
+    for d in list(repo) {
+        match d.status {
+            DeltaStatus::Proposed => active_deltas += 1,
+            DeltaStatus::Archived if archived_within(repo, base, &d.path) => {
+                archived_in_range.push(format!("delta:{}", d.name));
+            }
+            DeltaStatus::Archived => continue,
+        }
+        let body = std::fs::read_to_string(&d.path).map_err(|e| HarnessError::io(&d.path, e))?;
+        covers.push(Cover {
+            label: format!("delta:{}", d.name),
+            body,
+            markers: vec![d.path],
+        });
+    }
+    Ok(active_deltas)
+}
+
+/// Файлы change `OpenSpec`, в которых ищется упоминание защищённого пути
+/// (F1): `proposal.md`, `design.md`, `tasks.md` и дельты спек `specs/**/*.md`.
+/// Тот же набор — маркеры правила владения: изменение любого из них в
+/// диапазоне исполнителя делает покрытие самоодобрением (ADR-055).
+fn openspec_cover_files(change_dir: &Path) -> Vec<PathBuf> {
+    let mut files: Vec<PathBuf> = ["proposal.md", "design.md", "tasks.md"]
+        .iter()
+        .map(|f| change_dir.join(f))
+        .filter(|p| p.is_file())
+        .collect();
+    files.extend(crate::openspec::collect_md(&change_dir.join("specs")));
+    files.sort();
+    files
+}
+
+/// Собирает покрытия из changes `OpenSpec` (F1, ADR-062): активные
+/// (`openspec/changes/<id>/`, без `archive/`) и заархивированные ВНУТРИ
+/// проверяемого диапазона (`openspec/changes/archive/<каталог>/` — та же
+/// логика, что у дельт, T-07). Имя каталога архива у `OpenSpec` может нести
+/// префикс даты, поэтому идентификатор — имя каталога ЦЕЛИКОМ, без выделения
+/// `<id>`. Change без файлов-носителей (ни proposal/design/tasks, ни specs)
+/// покрытием не становится — упоминанию нечем быть.
+fn collect_openspec_covers(
+    repo: &Path,
+    base: &str,
+    covers: &mut Vec<Cover>,
+    archived_in_range: &mut Vec<String>,
+) -> Result<usize> {
+    let mut active_changes = 0_usize;
+    let changes_dir = repo.join("openspec/changes");
+    let mut push_change = |dir: &Path, archived: bool| -> Result<()> {
+        let files = openspec_cover_files(dir);
+        if files.is_empty() {
+            return Ok(());
+        }
+        let id = dir
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let mut body = String::new();
+        for f in &files {
+            body.push_str(&std::fs::read_to_string(f).map_err(|e| HarnessError::io(f, e))?);
+            body.push('\n');
+        }
+        if archived {
+            archived_in_range.push(format!("openspec:{id}"));
+        } else {
+            active_changes += 1;
+        }
+        covers.push(Cover {
+            label: format!("openspec:{id}"),
+            body,
+            markers: files,
+        });
+        Ok(())
+    };
+    if changes_dir.is_dir() {
+        let mut dirs: Vec<PathBuf> = std::fs::read_dir(&changes_dir)
+            .map_err(|e| HarnessError::io(&changes_dir, e))?
+            .filter_map(std::result::Result::ok)
+            .map(|e| e.path())
+            .filter(|p| p.is_dir() && p.file_name().is_some_and(|n| n != "archive"))
+            .collect();
+        dirs.sort();
+        for dir in dirs {
+            push_change(&dir, false)?;
+        }
+    }
+    let archive_dir = changes_dir.join("archive");
+    if archive_dir.is_dir() {
+        let mut dirs: Vec<PathBuf> = std::fs::read_dir(&archive_dir)
+            .map_err(|e| HarnessError::io(&archive_dir, e))?
+            .filter_map(std::result::Result::ok)
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+            .collect();
+        dirs.sort();
+        for dir in dirs {
+            // Как у дельт (T-07): засчитывается только архивация ВНУТРИ
+            // проверяемого диапазона; признак — каталог change изменён в
+            // `base..HEAD` (архив OpenSpec переносит каталог целиком).
+            if archived_within(repo, base, &dir) {
+                push_change(&dir, true)?;
+            }
+        }
+    }
+    Ok(active_changes)
+}
+
+/// Гейт прямых правок спайна с явными настройками (F1, ADR-062) — см.
+/// [`guard`]; дополнительно к нему: состав источников покрытия и правило
+/// владения ADR-055 по диапазону прогона исполнителя.
+///
+/// # Errors
+/// Как у [`guard`]; явный пустой список источников — ошибка конфигурации.
+pub fn guard_with(
+    repo: &Path,
+    base: Option<&str>,
+    protect: &[String],
+    options: &GuardOptions,
+) -> Result<GuardReport> {
     let protected: Vec<String> = if protect.is_empty() {
         DEFAULT_PROTECTED.iter().map(|s| (*s).to_string()).collect()
     } else {
@@ -526,51 +833,78 @@ pub fn guard(repo: &Path, base: Option<&str>, protect: &[String]) -> Result<Guar
     };
     let base = base.unwrap_or("HEAD").to_string();
     let changed = changed_files(repo, Some(&base))?;
-
-    // Тела дельт-покрытий: активные (`changes/<id>`) и заархивированные ВНУТРИ
-    // проверяемого диапазона (T-07). Дельта, заархивированная ДО базы, — влитая
-    // истина: правок диапазона она не описывает и покрытием не считается, иначе
-    // архив стал бы универсальной отмычкой для любой последующей правки.
-    let mut active: Vec<(String, String)> = Vec::new();
-    let mut active_deltas = 0_usize;
-    let mut archived_in_range: Vec<String> = Vec::new();
-    for d in list(repo) {
-        match d.status {
-            DeltaStatus::Proposed => active_deltas += 1,
-            DeltaStatus::Archived if archived_within(repo, &base, &d.path) => {
-                archived_in_range.push(d.name.clone());
-            }
-            DeltaStatus::Archived => continue,
+    let sources = match &options.sources {
+        Some(s) if s.is_empty() => {
+            return Err(HarnessError::Control(
+                "список источников покрытия пуст — гейт не признавал бы ни одного; \
+                 укажите хотя бы один: spine, openspec"
+                    .to_string(),
+            ));
         }
-        let body = std::fs::read_to_string(&d.path).map_err(|e| HarnessError::io(&d.path, e))?;
-        active.push((d.name, body));
+        Some(s) => s.clone(),
+        None => coverage_sources(repo)?,
+    };
+
+    let mut covers: Vec<Cover> = Vec::new();
+    let mut active_deltas = 0_usize;
+    let mut active_changes = 0_usize;
+    let mut archived_in_range: Vec<String> = Vec::new();
+    if sources.contains(&CoverageSource::Spine) {
+        active_deltas = collect_delta_covers(repo, &base, &mut covers, &mut archived_in_range)?;
     }
+    if sources.contains(&CoverageSource::Openspec) {
+        active_changes = collect_openspec_covers(repo, &base, &mut covers, &mut archived_in_range)?;
+    }
+    archived_in_range.sort();
+
+    // Правило владения (A5, ADR-055): покрытие, чьи файлы-носители появились
+    // или изменились в диапазоне прогона исполнителя, — работа исполнителя,
+    // а не решение владельца; оно правку не узаконивает. Действует одинаково
+    // для дельт Spine и changes OpenSpec, иначе change открывал бы обход,
+    // закрытый для самодельной дельты.
+    let (in_range, legit): (Vec<Cover>, Vec<Cover>) = match &options.agent_range {
+        Some(range) => covers
+            .into_iter()
+            .partition(|c| c.markers.iter().any(|f| range.contains_file(f))),
+        None => (Vec::new(), covers),
+    };
 
     let mut protected_changed = Vec::new();
     let mut covered = Vec::new();
     let mut violations = Vec::new();
+    let mut self_approved: Vec<(String, Vec<String>)> = Vec::new();
     let mut mentions = Vec::new();
     let mut reasons = Vec::new();
     for file in changed.iter().filter(|f| is_protected(f, &protected)) {
         protected_changed.push(file.clone());
-        let by: Vec<(String, Option<String>)> = active
+        let by: Vec<(&Cover, Option<String>)> = legit
             .iter()
-            .map(|(name, body)| (name.clone(), delta_mentions(body, file)))
+            .map(|c| (c, delta_mentions(&c.body, file)))
             .filter(|(_, reason)| reason.is_some())
             .collect();
-        let by_names: Vec<String> = by.iter().map(|(name, _)| name.clone()).collect();
-        match by.first() {
-            Some((name, reason)) => {
-                covered.push((file.clone(), name.clone()));
-                if let Some(reason) = reason {
-                    reasons.push((file.clone(), reason.clone()));
-                }
+        let by_labels: Vec<String> = by.iter().map(|(c, _)| c.label.clone()).collect();
+        if let Some((cover, reason)) = by.first() {
+            covered.push((file.clone(), cover.label.clone()));
+            if let Some(reason) = reason {
+                reasons.push((file.clone(), reason.clone()));
             }
-            None => violations.push(file.clone()),
+        } else {
+            // Покрытие только из диапазона исполнителя — не «нет покрытия»,
+            // а самоодобрение: отдельная находка с именем источника.
+            let rejected: Vec<String> = in_range
+                .iter()
+                .filter(|c| delta_mentions(&c.body, file).is_some())
+                .map(|c| c.label.clone())
+                .collect();
+            if rejected.is_empty() {
+                violations.push(file.clone());
+            } else {
+                self_approved.push((file.clone(), rejected));
+            }
         }
-        mentions.push((file.clone(), by_names));
+        mentions.push((file.clone(), by_labels));
     }
-    let passed = violations.is_empty();
+    let passed = violations.is_empty() && self_approved.is_empty();
     Ok(GuardReport {
         base,
         changed: changed.len(),
@@ -578,8 +912,11 @@ pub fn guard(repo: &Path, base: Option<&str>, protect: &[String]) -> Result<Guar
         protected_changed,
         covered,
         violations,
+        self_approved,
         passed,
         active_deltas,
+        active_changes,
+        sources: sources.iter().map(|s| s.as_str().to_string()).collect(),
         archived_in_range,
         mentions,
         reasons,
@@ -615,14 +952,17 @@ fn archived_within(repo: &Path, base: &str, delta: &Path) -> bool {
         .is_ok_and(|o| o.status.success() && !o.stdout.is_empty())
 }
 
-/// Чем дельта покрывает правку: обычной активной или заархивированной внутри
-/// проверяемого диапазона (T-07). Различие называть обязательно: «покрыто
-/// архивной дельтой» — не то же самое, что «правка описана дельтой в работе».
-fn covering_kind(report: &GuardReport, name: &str) -> &'static str {
-    if report.archived_in_range.iter().any(|a| a == name) {
-        "дельтой, заархивированной в диапазоне"
-    } else {
-        "активной дельтой"
+/// Чем источник покрывает правку: активный или заархивированный внутри
+/// проверяемого диапазона (T-07), дельта Spine или change `OpenSpec` (F1).
+/// Различия называть обязательно: «покрыто архивным» — не то же самое, что
+/// «правка описана изменением в работе», а change `OpenSpec` — не дельта.
+fn covering_kind(report: &GuardReport, label: &str) -> String {
+    let archived = report.archived_in_range.iter().any(|a| a == label);
+    match (label.starts_with("openspec:"), archived) {
+        (true, true) => "change OpenSpec, заархивированным в диапазоне".to_string(),
+        (true, false) => "активным change OpenSpec".to_string(),
+        (false, true) => "дельтой, заархивированной в диапазоне".to_string(),
+        (false, false) => "активной дельтой".to_string(),
     }
 }
 
@@ -670,19 +1010,27 @@ pub fn archive_order_hint(repo: &Path) -> Option<String> {
 
 /// Текстовый рендер отчёта гейта (в стиле остальных delta-команд): сводка,
 /// по каждому изменённому защищённому файлу — статус его упоминания в
-/// дельтах-покрытиях (все дельты поимённо; при полном их отсутствии — честное
-/// «дельт нет», а не обтекаемое «не упоминается»).
+/// источниках покрытия (все поимённо; при полном их отсутствии — честное
+/// «покрытий нет», а не обтекаемое «не упоминается»). Метки источников —
+/// `delta:<name>`/`openspec:<id>` (F1); покрытие из диапазона исполнителя —
+/// отдельный блок `self_approved` (ADR-055).
 #[must_use]
 pub fn render_guard(report: &GuardReport) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
+    let openspec_on = report.sources.iter().any(|s| s == "openspec");
     let _ = writeln!(out, "Гейт прямых правок спайна (база: {})", report.base);
     let _ = writeln!(
         out,
-        "Изменённых файлов: {}, защищённых среди них: {} (активных дельт: {}{})",
+        "Изменённых файлов: {}, защищённых среди них: {} (активных дельт: {}{}{})",
         report.changed,
         report.protected_changed.len(),
         report.active_deltas,
+        if openspec_on {
+            format!(", активных changes OpenSpec: {}", report.active_changes)
+        } else {
+            String::new()
+        },
         if report.archived_in_range.is_empty() {
             String::new()
         } else {
@@ -692,32 +1040,72 @@ pub fn render_guard(report: &GuardReport) -> String {
             )
         }
     );
+    let sources_note = |active_zero: bool, archived_empty: bool| match (
+        openspec_on,
+        active_zero,
+        archived_empty,
+    ) {
+        (false, true, true) => " (активных дельт нет)".to_string(),
+        (true, true, true) => " (активных дельт и changes OpenSpec нет)".to_string(),
+        (false, false, true) => format!(" (активных дельт: {})", report.active_deltas),
+        (true, false, true) => format!(
+            " (активных дельт: {}, активных changes OpenSpec: {})",
+            report.active_deltas, report.active_changes
+        ),
+        (_, _, false) => format!(
+            " (задействовано источников: {}, заархивировано в диапазоне: {})",
+            report.sources.join("+"),
+            report.archived_in_range.join(", ")
+        ),
+    };
     if !report.protected_changed.is_empty() {
         out.push('\n');
-        for (file, deltas) in &report.mentions {
-            match deltas.as_slice() {
+        for (file, labels) in &report.mentions {
+            if let Some((_, rejected)) = report.self_approved.iter().find(|(f, _)| f == file) {
+                let quoted: Vec<String> = rejected.iter().map(|s| format!("'{s}'")).collect();
+                let _ = writeln!(
+                    out,
+                    "[error] {file} — покрытие {} создано или изменено в диапазоне прогона \
+                     исполнителя (self_approved)",
+                    quoted.join(", ")
+                );
+                let _ = writeln!(
+                    out,
+                    "  → правило владения (ADR-055): покрытие из диапазона исполнителя правку не \
+                     узаконивает — перенесите оформление изменения в основной репозиторий \
+                     решением владельца"
+                );
+                continue;
+            }
+            match labels.as_slice() {
                 [] => {
                     let _ = writeln!(
                         out,
-                        "[error] {file} — не упоминается ни в одной дельте-покрытии{}",
-                        if report.active_deltas == 0 && report.archived_in_range.is_empty() {
-                            " (активных дельт нет)".to_string()
-                        } else if report.archived_in_range.is_empty() {
-                            format!(" (активных дельт: {})", report.active_deltas)
-                        } else {
-                            format!(
-                                " (активных дельт: {}, заархивировано в диапазоне: {})",
-                                report.active_deltas,
-                                report.archived_in_range.join(", ")
-                            )
+                        "[error] {file} — не упоминается ни в одном источнике покрытия{}",
+                        sources_note(
+                            report.active_deltas == 0 && report.active_changes == 0,
+                            report.archived_in_range.is_empty()
+                        )
+                    );
+                    let hint = match (report.sources.iter().any(|s| s == "spine"), openspec_on) {
+                        (true, false) => "оформите правку дельтой: arch-be delta new <name>, \
+                             опишите изменение в changes/<name>/DELTA.md (дельта, \
+                             заархивированная до базы, покрытием не считается)"
+                            .to_string(),
+                        (true, true) => "оформите правку дельтой (arch-be delta new <name>) или \
+                             change OpenSpec (openspec/changes/<id>/: proposal.md, tasks.md — \
+                             создаётся средствами OpenSpec); источник, заархивированный до базы, \
+                             покрытием не считается"
+                            .to_string(),
+                        (false, true) => "оформите правку change OpenSpec средствами OpenSpec \
+                             (openspec/changes/<id>/: proposal.md, tasks.md) — DELTA.md в этом \
+                             репозитории покрытием не считается ([delta] sources)"
+                            .to_string(),
+                        (false, false) => {
+                            "источники покрытия не настроены ([delta] sources)".to_string()
                         }
-                    );
-                    let _ = writeln!(
-                        out,
-                        "  → оформите правку дельтой: arch-be delta new <name>, опишите изменение \
-                         в changes/<name>/DELTA.md (дельта, заархивированная до базы, покрытием \
-                         не считается)"
-                    );
+                    };
+                    let _ = writeln!(out, "  → {hint}");
                 }
                 [single] => {
                     let why = report
@@ -735,7 +1123,10 @@ pub fn render_guard(report: &GuardReport) -> String {
                     // Пока все покрытия — активные дельты, формулировка прежняя:
                     // отчёт читается человеком, и лишняя детализация там, где
                     // уточнять нечего, только мешает.
-                    if many.iter().all(|d| !report.archived_in_range.contains(d)) {
+                    let plain_deltas = many.iter().all(|d| {
+                        !report.archived_in_range.contains(d) && !d.starts_with("openspec:")
+                    });
+                    if plain_deltas {
                         let quoted: Vec<String> = many.iter().map(|d| format!("'{d}'")).collect();
                         let _ = writeln!(
                             out,
@@ -747,8 +1138,11 @@ pub fn render_guard(report: &GuardReport) -> String {
                             .iter()
                             .map(|d| format!("'{}' ({})", d, covering_kind(report, d)))
                             .collect();
-                        let _ =
-                            writeln!(out, "[ok] {file} — покрыт дельтами: {}", quoted.join(", "));
+                        let _ = writeln!(
+                            out,
+                            "[ok] {file} — покрыт источниками: {}",
+                            quoted.join(", ")
+                        );
                     }
                 }
             }
@@ -760,9 +1154,13 @@ pub fn render_guard(report: &GuardReport) -> String {
         if report.passed {
             if report.protected_changed.is_empty() {
                 "PASS — защищённые пути не затронуты"
+            } else if openspec_on {
+                "PASS — все правки спайна покрыты дельтами/changes OpenSpec"
             } else {
                 "PASS — все правки спайна покрыты активными дельтами"
             }
+        } else if !report.self_approved.is_empty() && report.violations.is_empty() {
+            "FAIL — покрытие из диапазона исполнителя (self_approved, ADR-055) (exit 1)"
         } else {
             "FAIL — правки спайна мимо дельты (exit 1)"
         }
@@ -803,9 +1201,14 @@ impl Tool for DeltaGuardTool {
             description: "Гейт прямых правок спайна мимо дельты (модель 5.2): каждый изменённый \
                           файл под защищёнными путями (по умолчанию model/, \
                           ARCHITECTURE-SPINE.md, CONSTRAINTS.yaml) обязан упоминаться в активной \
-                          дельте changes/<name>/DELTA.md. Ответ — JSON: passed + violations \
-                          (непокрытые правки) + covered + mentions (все дельты по каждому \
-                          файлу) + active_deltas + summary; passed=false — основание отказать \
+                          дельте changes/<name>/DELTA.md или change OpenSpec \
+                          (openspec/changes/<id>/: proposal.md, design.md, tasks.md, \
+                          specs/**/*.md — источники задаёт [delta] sources кейса, ADR-062). \
+                          Ответ — JSON: passed + violations \
+                          (непокрытые правки) + covered + mentions (все источники по каждому \
+                          файлу, метки delta:<name>/openspec:<id>) + active_deltas + \
+                          active_changes + sources + self_approved (покрытие из диапазона \
+                          исполнителя, ADR-055) + summary; passed=false — основание отказать \
                           изменению"
                 .into(),
             parameters: json!({
@@ -840,12 +1243,20 @@ impl Tool for DeltaGuardTool {
         };
         let summary = format!(
             "Гейт прямых правок спайна (база: {}): изменённых файлов {}, защищённых {}, \
-             непокрытых нарушений {} (активных дельт: {}, заархивировано в диапазоне: {})",
+             непокрытых нарушений {}{} (источники: {}; активных дельт: {}, активных changes \
+             OpenSpec: {}, заархивировано в диапазоне: {})",
             report.base,
             report.changed,
             report.protected_changed.len(),
             report.violations.len(),
+            if report.self_approved.is_empty() {
+                String::new()
+            } else {
+                format!(", самоодобренных покрытий {}", report.self_approved.len())
+            },
+            report.sources.join("+"),
             report.active_deltas,
+            report.active_changes,
             report.archived_in_range.len()
         );
         let verdict = json!({
@@ -854,13 +1265,20 @@ impl Tool for DeltaGuardTool {
             "base": report.base,
             "changed": report.changed,
             "protected_changed": report.protected_changed,
+            // Значение — метка источника покрытия `delta:<name>`/`openspec:<id>`
+            // (F1, ADR-062; до 0.3.14 — имя дельты без префикса).
             "covered": report.covered.iter().map(|(f, d)| json!({"file": f, "delta": d})).collect::<Vec<_>>(),
             "violations": report.violations,
             // Аддитивные поля (SDK-контракт v1): полный статус упоминания
-            // каждого защищённого файла — все активные дельты, а не первая.
+            // каждого защищённого файла — все активные источники, а не первый.
             "active_deltas": report.active_deltas,
             "archived_in_range": report.archived_in_range,
             "mentions": report.mentions.iter().map(|(f, ds)| json!({"file": f, "deltas": ds})).collect::<Vec<_>>(),
+            // Аддитивные поля 0.3.14 (F1): источники прогона, активные changes
+            // OpenSpec и покрытия, отклонённые правилом владения (ADR-055).
+            "sources": report.sources,
+            "active_changes": report.active_changes,
+            "self_approved": report.self_approved.iter().map(|(f, ss)| json!({"file": f, "sources": ss})).collect::<Vec<_>>(),
             "summary": summary,
         });
         // Сериализация собранного объекта не падает; запасной вариант — компактная форма.
@@ -911,6 +1329,14 @@ impl Tool for DeltaProposeTool {
             }
         };
         let repo = ctx.resolve(args.path.as_deref().unwrap_or("."));
+        // F1 (ADR-062): при `sources = ["openspec"]` дельта не создаётся —
+        // изменение оформляется change'ом OpenSpec (его markdown Spine не
+        // пишет, правило 9).
+        match openspec_only_hint(&repo) {
+            Ok(Some(hint)) => return Ok(ToolOutput::err(format!("delta_propose: {hint}"))),
+            Ok(None) => {}
+            Err(e) => return Ok(ToolOutput::err(format!("delta_propose: {e}"))),
+        }
         match new(&repo, &args.name) {
             Ok(path) => {
                 let verdict = json!({
@@ -1184,7 +1610,7 @@ mod tests {
             "архивация внутри диапазона обязана покрывать: {report:?}"
         );
         assert_eq!(report.active_deltas, 0, "{report:?}");
-        assert_eq!(report.archived_in_range, vec!["spine-v2".to_string()]);
+        assert_eq!(report.archived_in_range, vec!["delta:spine-v2".to_string()]);
         let text = render_guard(&report);
         assert!(
             text.contains("заархивированной в диапазоне"),
@@ -1242,7 +1668,7 @@ mod tests {
             report.covered,
             vec![(
                 "model/adr/ADR-003.md".to_string(),
-                "update-adr-003".to_string()
+                "delta:update-adr-003".to_string()
             )]
         );
         assert!(render_guard(&report).contains("PASS"));
@@ -1311,14 +1737,20 @@ mod tests {
             vec![(
                 "model/adr/ADR-003.md".to_string(),
                 // Порядок — по имени дельты (list сортирует), детерминирован.
-                vec!["adr-003-followup".to_string(), "update-adr-003".to_string()]
+                // Метка источника (F1): `delta:<name>`.
+                vec![
+                    "delta:adr-003-followup".to_string(),
+                    "delta:update-adr-003".to_string()
+                ]
             )]
         );
         // Совместимость: covered держит первую дельту.
         assert_eq!(report.covered.len(), 1);
         let text = render_guard(&report);
         assert!(
-            text.contains("покрыт активными дельтами: 'adr-003-followup', 'update-adr-003'"),
+            text.contains(
+                "покрыт активными дельтами: 'delta:adr-003-followup', 'delta:update-adr-003'"
+            ),
             "{text}"
         );
         assert!(text.contains("активных дельт: 2"), "{text}");
@@ -1342,6 +1774,421 @@ mod tests {
         let text = render_guard(&report);
         assert!(text.contains("(активных дельт нет)"), "{text}");
         assert!(text.contains("arch-be delta new"), "{text}");
+    }
+
+    // --- F1 (ADR-062): change OpenSpec как источник покрытия ----------------
+
+    /// git с выводом stdout (для rev-parse базы диапазона).
+    fn git_out(dir: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .expect("git");
+        assert!(
+            out.status.success(),
+            "git {}: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// Репо-фикстура «двойного учёта» (F1): git + защищённый model/CMP-001.md,
+    /// CONSTRAINTS.yaml и разметка `OpenSpec` (`openspec/specs/payments`).
+    /// Один коммит («base»).
+    fn make_openspec_repo(dir: &Path) {
+        std::fs::create_dir_all(dir).expect("mkdir");
+        git(dir, &["init", "-q"]);
+        std::fs::create_dir_all(dir.join("model")).expect("mkdir model");
+        std::fs::write(
+            dir.join("model/CMP-001.md"),
+            "---\nid: CMP-001\ntype: cmp\ntitle: Приём платежей\nstatus: active\n---\n",
+        )
+        .expect("model");
+        std::fs::write(dir.join("CONSTRAINTS.yaml"), "constraints: []\n").expect("constraints");
+        std::fs::create_dir_all(dir.join("openspec/specs/payments")).expect("mkdir specs");
+        std::fs::write(
+            dir.join("openspec/specs/payments/spec.md"),
+            "# payments\n\n### Requirement: Idempotent intake\n\
+             The system SHALL accept a payment at most once per idempotency key.\n",
+        )
+        .expect("spec");
+        git(dir, &["add", "."]);
+        git(dir, &["commit", "-q", "-m", "base"]);
+    }
+
+    /// Активный change `OpenSpec`, упоминающий `model/CMP-001.md` в proposal.md
+    /// и tasks.md (по репродукции «двойного учёта» из задания).
+    fn write_openspec_change(dir: &Path, id: &str) {
+        let change = dir.join("openspec/changes").join(id);
+        std::fs::create_dir_all(&change).expect("mkdir change");
+        std::fs::write(
+            change.join("proposal.md"),
+            "## Why\nНужны лимиты на приём.\n\n## What Changes\n\
+             - model/CMP-001.md: компонент получает зависимость от движка лимитов.\n",
+        )
+        .expect("proposal");
+        std::fs::write(
+            change.join("tasks.md"),
+            "- [ ] 1.1 Обновить model/CMP-001.md\n",
+        )
+        .expect("tasks");
+    }
+
+    /// Правка защищённого `model/CMP-001.md` (зависимость от движка лимитов).
+    fn edit_cmp_001(dir: &Path) {
+        std::fs::write(
+            dir.join("model/CMP-001.md"),
+            "---\nid: CMP-001\ntype: cmp\ntitle: Приём платежей\nstatus: active\n---\n\
+             depends_on:\n  - CMP-002\n",
+        )
+        .expect("edit");
+    }
+
+    /// F1 (ADR-062), репродукция «двойного учёта» 0.3.13: правка `model/` в
+    /// рамках активного change `OpenSpec` засчитывается покрытием — дублировать
+    /// описание в `DELTA.md` не нужно. До фикса: FAIL «не упоминается ни в
+    /// одной активной дельте — активных дельт нет».
+    #[test]
+    fn guard_counts_active_openspec_change() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("repo");
+        make_openspec_repo(&repo);
+        write_openspec_change(&repo, "add-limits");
+        edit_cmp_001(&repo);
+        let report = guard(&repo, None, &[]).expect("guard");
+        assert!(report.passed, "{report:?}");
+        assert_eq!(report.active_deltas, 0);
+        assert_eq!(report.active_changes, 1);
+        assert_eq!(
+            report.sources,
+            vec!["spine".to_string(), "openspec".to_string()],
+            "авто-детект: оба источника при наличии openspec/"
+        );
+        assert_eq!(
+            report.covered,
+            vec![(
+                "model/CMP-001.md".to_string(),
+                "openspec:add-limits".to_string()
+            )],
+            "источник покрытия назван в отчёте"
+        );
+        let text = render_guard(&report);
+        assert!(text.contains("openspec:add-limits"), "{text}");
+        assert!(text.contains("активным change OpenSpec"), "{text}");
+        assert!(text.contains("PASS"), "{text}");
+    }
+
+    /// F1: упоминание ищется и в дельтах спек change (`specs/**/*.md`) — той же
+    /// функцией `delta_mentions`, тем же правилом совпадения по пути.
+    #[test]
+    fn guard_finds_mention_in_openspec_specs_delta() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("repo");
+        make_openspec_repo(&repo);
+        // Change без proposal/tasks: упоминание только в дельте спеки.
+        let specs = repo.join("openspec/changes/add-limits/specs/payments");
+        std::fs::create_dir_all(&specs).expect("mkdir delta spec");
+        std::fs::write(
+            specs.join("spec.md"),
+            "# Delta: payments\n\n## MODIFIED Requirements\n\n\
+             ### Requirement: Idempotent intake\nЗатрагивает model/CMP-001.md.\n\
+             The system SHALL accept a payment at most once.\n",
+        )
+        .expect("delta spec");
+        edit_cmp_001(&repo);
+        let report = guard(&repo, None, &[]).expect("guard");
+        assert!(report.passed, "{report:?}");
+        assert_eq!(
+            report.covered,
+            vec![(
+                "model/CMP-001.md".to_string(),
+                "openspec:add-limits".to_string()
+            )]
+        );
+    }
+
+    /// F1 (T-07 для `OpenSpec`): change, заархивированный ВНУТРИ проверяемого
+    /// диапазона, покрывает правки диапазона — и метка источника строится по
+    /// каталогу архива ЦЕЛИКОМ (с префиксом даты), а не по угаданному `<id>`.
+    /// Архив до базы покрытием не является.
+    #[test]
+    fn guard_counts_openspec_change_archived_within_range_only() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("repo");
+        make_openspec_repo(&repo);
+        git(&repo, &["branch", "-M", "main"]);
+        git(&repo, &["checkout", "-q", "-b", "feature"]);
+        // Работа на ветке: правка модели + change, затем архивация до merge.
+        edit_cmp_001(&repo);
+        write_openspec_change(&repo, "add-limits");
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-q", "-m", "правка модели change'ом"]);
+        let archive = repo.join("openspec/changes/archive");
+        std::fs::create_dir_all(&archive).expect("mkdir archive");
+        // У архива OpenSpec имя каталога может нести префикс даты.
+        std::fs::rename(
+            repo.join("openspec/changes/add-limits"),
+            archive.join("2026-10-07-add-limits"),
+        )
+        .expect("archive move");
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-q", "-m", "архивация до merge"]);
+        let report = guard(&repo, Some("main"), &[]).expect("guard");
+        assert!(
+            report.passed,
+            "архивация change внутри диапазона обязана покрывать: {report:?}"
+        );
+        assert_eq!(
+            report.archived_in_range,
+            vec!["openspec:2026-10-07-add-limits".to_string()],
+            "каталог архива сопоставляется целиком, с префиксом даты"
+        );
+        assert_eq!(
+            report.covered,
+            vec![(
+                "model/CMP-001.md".to_string(),
+                "openspec:2026-10-07-add-limits".to_string()
+            )]
+        );
+        let text = render_guard(&report);
+        assert!(text.contains("заархивированным в диапазоне"), "{text}");
+        // Новая правка того же файла после архивации — уже мимо покрытия:
+        // архив описывает правки СВОЕГО диапазона, а не всё, что случится потом.
+        std::fs::write(
+            repo.join("model/CMP-001.md"),
+            "---\nid: CMP-001\ntype: cmp\ntitle: Приём платежей\nstatus: active\n---\n\
+             depends_on:\n  - CMP-003\n",
+        )
+        .expect("edit");
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-q", "-m", "правка без change"]);
+        let report = guard(&repo, Some("HEAD~1"), &[]).expect("guard");
+        assert_eq!(
+            report.violations,
+            vec!["model/CMP-001.md".to_string()],
+            "правка без покрытия обязана быть красной: {report:?}"
+        );
+    }
+
+    /// F1 + ADR-055 (обязательный тест задания): change, созданный ВНУТРИ
+    /// диапазона прогона исполнителя, правку НЕ узаконивает (`self_approved`);
+    /// change, существовавший ДО диапазона, — узаконивает. Иначе F1 открывал
+    /// бы обход правила владения, закрытый 0.3.12 для самодельной дельты.
+    #[test]
+    fn guard_ownership_rejects_change_created_inside_range() {
+        // Сценарий A: change создан в диапазоне исполнителя → FAIL по владению.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("repo");
+        make_openspec_repo(&repo);
+        let base = git_out(&repo, &["rev-parse", "HEAD"]);
+        write_openspec_change(&repo, "add-limits");
+        edit_cmp_001(&repo);
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-q", "-m", "работа исполнителя"]);
+        let range = crate::control::AgentRange::probe(&repo, &base).expect("диапазон");
+        let options = GuardOptions {
+            sources: None,
+            agent_range: Some(range),
+        };
+        let report = guard_with(&repo, Some(&base), &[], &options).expect("guard");
+        assert!(!report.passed, "{report:?}");
+        assert!(
+            report.violations.is_empty(),
+            "это не «нет покрытия», а самоодобрение: {report:?}"
+        );
+        assert_eq!(
+            report.self_approved,
+            vec![(
+                "model/CMP-001.md".to_string(),
+                vec!["openspec:add-limits".to_string()]
+            )]
+        );
+        let text = render_guard(&report);
+        assert!(text.contains("self_approved"), "{text}");
+        assert!(text.contains("openspec:add-limits"), "{text}");
+        assert!(text.contains("ADR-055"), "{text}");
+
+        // Сценарий B: change принят владельцем ДО диапазона → PASS.
+        let tmp2 = tempfile::tempdir().expect("tmp2");
+        let repo2 = tmp2.path().join("repo");
+        make_openspec_repo(&repo2);
+        write_openspec_change(&repo2, "add-limits");
+        git(&repo2, &["add", "-A"]);
+        git(&repo2, &["commit", "-q", "-m", "change владельца"]);
+        let base2 = git_out(&repo2, &["rev-parse", "HEAD"]);
+        edit_cmp_001(&repo2);
+        git(&repo2, &["add", "-A"]);
+        git(&repo2, &["commit", "-q", "-m", "правка по change"]);
+        let range2 = crate::control::AgentRange::probe(&repo2, &base2).expect("диапазон");
+        let options = GuardOptions {
+            sources: None,
+            agent_range: Some(range2),
+        };
+        let report = guard_with(&repo2, Some(&base2), &[], &options).expect("guard");
+        assert!(
+            report.passed,
+            "change вне диапазона исполнителя узаконивает правку: {report:?}"
+        );
+        assert!(report.self_approved.is_empty(), "{report:?}");
+    }
+
+    /// F1 + ADR-055, симметрия: самодельная дельта в диапазоне исполнителя —
+    /// то же самоодобрение, что и change; без диапазона поведение обычного
+    /// CI не изменилось (покрытие засчитывается).
+    #[test]
+    fn guard_ownership_rejects_delta_created_inside_range() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("repo");
+        make_guard_repo(&repo);
+        let base = git_out(&repo, &["rev-parse", "HEAD"]);
+        std::fs::write(repo.join("model/adr/ADR-003.md"), "# ADR-003 v2\n").expect("edit");
+        let path = new(&repo, "update-adr-003").expect("new");
+        let body = std::fs::read_to_string(&path).expect("read");
+        std::fs::write(&path, format!("{body}\nЗатронут ADR-003 (таймауты).\n")).expect("mention");
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-q", "-m", "работа исполнителя"]);
+        // Без диапазона — обычный гейт: покрытие засчитывается (как прежде).
+        let report = guard(&repo, Some(&base), &[]).expect("guard");
+        assert!(report.passed, "{report:?}");
+        // С диапазоном — самоодобрение.
+        let range = crate::control::AgentRange::probe(&repo, &base).expect("диапазон");
+        let options = GuardOptions {
+            sources: None,
+            agent_range: Some(range),
+        };
+        let report = guard_with(&repo, Some(&base), &[], &options).expect("guard");
+        assert!(!report.passed, "{report:?}");
+        assert_eq!(
+            report.self_approved,
+            vec![(
+                "model/adr/ADR-003.md".to_string(),
+                vec!["delta:update-adr-003".to_string()]
+            )]
+        );
+    }
+
+    /// F1: состав источников — `[delta] sources` кейсового `arch-harness.toml`;
+    /// дефолт — авто-детект по каталогу `openspec/`. Опечатка в имени источника
+    /// и пустой список — ошибка (конфиг контура не отключается молча).
+    #[test]
+    fn coverage_sources_from_case_config_and_auto_detect() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("repo");
+        make_openspec_repo(&repo);
+        assert_eq!(
+            coverage_sources(&repo).expect("sources"),
+            vec![CoverageSource::Spine, CoverageSource::Openspec],
+            "openspec/ есть — оба источника"
+        );
+        std::fs::write(
+            repo.join("arch-harness.toml"),
+            "[delta]\nsources = [\"openspec\"]\n",
+        )
+        .expect("config");
+        assert_eq!(
+            coverage_sources(&repo).expect("sources"),
+            vec![CoverageSource::Openspec]
+        );
+        std::fs::write(repo.join("arch-harness.toml"), "[delta]\nsources = []\n").expect("config");
+        assert!(
+            coverage_sources(&repo).is_err(),
+            "пустой список — ошибка конфигурации"
+        );
+        std::fs::write(
+            repo.join("arch-harness.toml"),
+            "[delta]\nsources = [\"opensec\"]\n",
+        )
+        .expect("config");
+        let err = coverage_sources(&repo).expect_err("неизвестный источник");
+        assert!(err.to_string().contains("opensec"), "{err}");
+        // Без openspec/ и без конфига — только spine (поведение до 0.3.14).
+        let tmp2 = tempfile::tempdir().expect("tmp2");
+        let repo2 = tmp2.path().join("repo");
+        make_guard_repo(&repo2);
+        assert_eq!(
+            coverage_sources(&repo2).expect("sources"),
+            vec![CoverageSource::Spine]
+        );
+    }
+
+    /// F1: `sources = ["spine"]` отключает покрытие от changes `OpenSpec`;
+    /// `sources = ["openspec"]` — от дельт (состав задаёт кейс, не гейт).
+    #[test]
+    fn guard_respects_sources_of_case_config() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("repo");
+        make_openspec_repo(&repo);
+        write_openspec_change(&repo, "add-limits");
+        edit_cmp_001(&repo);
+        // Кейс объявил: покрытие — только дельты Spine.
+        std::fs::write(
+            repo.join("arch-harness.toml"),
+            "[delta]\nsources = [\"spine\"]\n",
+        )
+        .expect("config");
+        let report = guard(&repo, None, &[]).expect("guard");
+        assert!(!report.passed, "{report:?}");
+        assert_eq!(report.violations, vec!["model/CMP-001.md".to_string()]);
+        assert_eq!(report.sources, vec!["spine".to_string()]);
+        // Кейс на чистом OpenSpec: дельта не считается, change — считается.
+        std::fs::write(
+            repo.join("arch-harness.toml"),
+            "[delta]\nsources = [\"openspec\"]\n",
+        )
+        .expect("config");
+        let report = guard(&repo, None, &[]).expect("guard");
+        assert!(report.passed, "{report:?}");
+        // …а DELTA.md при sources = ["openspec"] покрытием не является.
+        std::fs::remove_dir_all(repo.join("openspec/changes/add-limits")).expect("remove change");
+        let path = new(&repo, "cmp-001-limits").expect("new");
+        let body = std::fs::read_to_string(&path).expect("read");
+        std::fs::write(&path, format!("{body}\nПравка model/CMP-001.md.\n")).expect("mention");
+        let report = guard(&repo, None, &[]).expect("guard");
+        assert!(!report.passed, "{report:?}");
+        assert_eq!(report.violations, vec!["model/CMP-001.md".to_string()]);
+        let text = render_guard(&report);
+        assert!(
+            text.contains("DELTA.md в этом репозитории покрытием не считается"),
+            "подсказка обязана вести к change OpenSpec, а не к delta new: {text}"
+        );
+        assert!(!text.contains("arch-be delta new"), "{text}");
+    }
+
+    /// F1: в репозитории на чистом `OpenSpec` `delta new`/`delta_propose`
+    /// подсказывают change средствами `OpenSpec` вместо создания DELTA.md.
+    #[tokio::test]
+    async fn delta_propose_refused_when_sources_openspec_only() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path();
+        make_openspec_repo(repo);
+        // Без секции — подсказки нет (источник spine включён авто-детектом).
+        assert_eq!(openspec_only_hint(repo).expect("hint"), None);
+        std::fs::write(
+            repo.join("arch-harness.toml"),
+            "[delta]\nsources = [\"openspec\"]\n",
+        )
+        .expect("config");
+        let hint = openspec_only_hint(repo)
+            .expect("hint")
+            .expect("есть подсказка");
+        assert!(hint.contains("openspec/changes/"), "{hint}");
+        assert!(hint.contains("не пишет"), "{hint}");
+        // MCP-инструмент — мягкая ошибка с той же подсказкой, DELTA.md нет.
+        let ctx = tool_ctx(repo);
+        let out = DeltaProposeTool
+            .call(json!({"name": "add-limits", "path": "."}), &ctx)
+            .await
+            .expect("вызов");
+        assert!(out.is_error, "{}", out.content);
+        assert!(out.content.contains("OpenSpec"), "{}", out.content);
+        assert!(!repo.join("changes/add-limits/DELTA.md").exists());
     }
 
     // --- инструменты delta_guard / delta_propose ----------------------------

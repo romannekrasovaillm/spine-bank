@@ -161,7 +161,10 @@ pub(super) fn run_inner(
 
     let mut components = vec![
         component_fitness(repo, &constraints, &options.exec, &options.overrides),
-        component_delta_guard(repo, base, &git),
+        // F1 (ADR-062): составляющая получает диапазон исполнителя — покрытие
+        // (дельта или change OpenSpec), созданное в диапазоне, не узаконивает
+        // правку (self_approved), как и ослабления для rule_weakened.
+        component_delta_guard(repo, base, &git, agent_range.as_ref()),
         // A3: пины контрольной плоскости пакета — правка Stop-хука,
         // `arch-harness.toml` или порогов рубрики не должна зеленеть молча.
         // Кейс без MANIFEST.json / старого пакета — SKIP.
