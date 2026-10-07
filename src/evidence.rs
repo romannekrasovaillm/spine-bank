@@ -324,7 +324,14 @@ pub fn pack(change_dir: &Path, route: Route) -> Result<(EvidenceBundle, Evidence
     let mut items = Vec::new();
     let mut missing = Vec::new();
     for (key, _desc) in required_artifacts(route) {
-        match find_artifact(change_dir, key) {
+        // A1: для артефактов прогонов артефактом бандла становится машинная
+        // запись (`.arch-handoff/evidence/<kind>.json`), когда она есть;
+        // markdown-отчёт — legacy/сопровождение.
+        let found = RecordKind::for_artifact(key)
+            .map(|kind| record_path(change_dir, kind))
+            .filter(|p| p.is_file())
+            .or_else(|| find_artifact(change_dir, key));
+        match found {
             Some(path) => {
                 let (hash, size) = hash_artifact(&path, HASH_ALG_SHA256)?;
                 items.push(EvidenceItem {
@@ -363,6 +370,410 @@ pub fn pack(change_dir: &Path, route: Route) -> Result<(EvidenceBundle, Evidence
         not_verified: Vec::new(),
     };
     Ok((bundle, verdict))
+}
+
+// ---------------------------------------------------------------------------
+// Машинные записи прогонов (A1, 0.3.14): отчёт о прогоне пишет машина,
+// а не автор. По образцу `REHEARSAL.json` (`crate::rehearsal`) запись
+// `.arch-handoff/evidence/<kind>.json` фиксирует команду, её exit-код,
+// время, HEAD и хэш входов; `verify` требует запись и проверяет её свежесть.
+// ---------------------------------------------------------------------------
+
+use std::time::{Duration, Instant};
+
+/// Схема машинной записи прогона (версия формата).
+pub const RECORD_SCHEMA: &str = "arch-be/evidence-record/v1";
+
+/// Каталог записей прогонов внутри кейса/репозитория.
+pub const RECORD_DIR: &str = ".arch-handoff/evidence";
+
+/// Таймаут прогона по умолчанию, секунд: тесты и fitness могут идти минуты;
+/// зависший прогон — сам по себе находка (как шаг репетиции, ADR-049).
+pub const RECORD_TIMEOUT_SECS: u64 = 900;
+
+/// Хвост вывода прогона, попадающий в запись (символов): диагностика живёт
+/// в конце вывода.
+const RECORD_LOG_TAIL: usize = 2000;
+
+/// Каталоги и файлы, не входящие в хэш входов прогона: служебные и тяжёлые
+/// (результаты сборки/кэши) — иначе сам прогон инвалидировал бы свою запись.
+const RECORD_INPUT_SKIP_DIRS: &[&str] = &[
+    ".git",
+    ".arch-handoff",
+    "target",
+    "node_modules",
+    "__pycache__",
+    ".pytest_cache",
+];
+
+/// Вид машинной записи прогона (`arch-be evidence record <kind>`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordKind {
+    /// Прогон fitness-функций (реестр CONSTRAINTS.yaml).
+    Fitness,
+    /// Прогон тестов (валидация).
+    Tests,
+    /// Прогон walking skeleton (сквозной сценарий).
+    Skeleton,
+}
+
+impl RecordKind {
+    /// Имя вида для CLI и имени файла записи.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Fitness => "fitness",
+            Self::Tests => "tests",
+            Self::Skeleton => "skeleton",
+        }
+    }
+
+    /// Ключ артефакта бандла, который закрывает запись этого вида.
+    #[must_use]
+    pub fn artifact_key(self) -> &'static str {
+        match self {
+            Self::Fitness => "fitness_report",
+            Self::Tests => "validation",
+            Self::Skeleton => "walking_skeleton",
+        }
+    }
+
+    /// Вид записи по ключу артефакта (`None` — артефакт пишет автор).
+    #[must_use]
+    pub fn for_artifact(key: &str) -> Option<Self> {
+        match key {
+            "fitness_report" => Some(Self::Fitness),
+            "validation" => Some(Self::Tests),
+            "walking_skeleton" => Some(Self::Skeleton),
+            _ => None,
+        }
+    }
+
+    /// Команда по умолчанию: для fitness — прогон реестра правил; для тестов
+    /// и скелета универсальной команды нет — `--cmd` обязателен.
+    #[must_use]
+    pub fn default_command(self) -> Option<&'static str> {
+        match self {
+            Self::Fitness => Some("arch-be control check ."),
+            Self::Tests | Self::Skeleton => None,
+        }
+    }
+
+    /// Все виды (для подсказок и разбора CLI).
+    #[must_use]
+    pub fn all() -> [Self; 3] {
+        [Self::Fitness, Self::Tests, Self::Skeleton]
+    }
+}
+
+impl std::str::FromStr for RecordKind {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "fitness" => Ok(Self::Fitness),
+            "tests" => Ok(Self::Tests),
+            "skeleton" => Ok(Self::Skeleton),
+            other => Err(format!(
+                "неизвестный вид записи '{other}' (допустимы: fitness, tests, skeleton)"
+            )),
+        }
+    }
+}
+
+/// Машинная запись прогона (`.arch-handoff/evidence/<kind>.json`).
+///
+/// Свежесть записи (A1): запись действительна, пока совпадают и HEAD, и хэш
+/// входов. Совпадения только HEAD недостаточно — незакоммиченная правка кода
+/// обязана инвалидировать запись; вне git-репозитория (HEAD «absent») судят
+/// только входы.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunRecord {
+    /// Схема формата ([`RECORD_SCHEMA`]).
+    pub schema: String,
+    /// Вид записи (`fitness`/`tests`/`skeleton`).
+    pub kind: String,
+    /// Команда прогона (как запускалась).
+    pub command: String,
+    /// Exit-код прогона (`None` — таймаут, процесс убит).
+    pub exit_code: Option<i32>,
+    /// Прогон завершился кодом 0 до таймаута.
+    pub passed: bool,
+    /// Метка времени записи (локальная, RFC 3339).
+    pub recorded_at: String,
+    /// Длительность прогона, секунды.
+    pub duration_secs: f64,
+    /// HEAD репозитория на момент прогона (`absent` — не git-репозиторий).
+    pub head: String,
+    /// Хэш входов прогона (дерево без служебных/тяжёлых каталогов; для
+    /// `tests`/`skeleton` — без markdown-прозы; для `fitness` — всё дерево,
+    /// отпечаток реестра и команда).
+    pub inputs_hash: String,
+    /// Человеко-читаемое описание того, что вошло в хэш входов.
+    pub inputs_note: String,
+    /// Отпечаток реестра правил (SHA-256 файла CONSTRAINTS.yaml) — только
+    /// для `fitness`; `None` у остальных видов или когда реестр не найден.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registry_fingerprint: Option<String>,
+    /// Аттестация вердикта прогона: SHA-256 свёртка
+    /// `вид\0команда\0exit\0входы\0реестр` — привязывает итог к входам.
+    pub attestation: String,
+    /// Хвост вывода прогона (диагностика для читающего запись).
+    pub output_tail: String,
+}
+
+/// Имя файла записи вида (`fitness.json`).
+#[must_use]
+pub fn record_file_name(kind: RecordKind) -> String {
+    format!("{}.json", kind.as_str())
+}
+
+/// Путь записи вида в каталоге `dir` (без проверки существования).
+#[must_use]
+pub fn record_path(dir: &Path, kind: RecordKind) -> PathBuf {
+    dir.join(RECORD_DIR).join(record_file_name(kind))
+}
+
+/// HEAD репозитория, которому принадлежит `dir` (`None` — не git-репозиторий).
+fn current_head(dir: &Path) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", "HEAD"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let head = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!head.is_empty()).then_some(head)
+}
+
+/// Файлы-входы прогона: дерево `root` без служебных/тяжёлых каталогов и
+/// манифеста бандла; `exclude_markdown` — проза бандла не вход прогона
+/// тестов/скелета (правка отчёта не инвалидирует прогон тестов).
+fn record_input_files(root: &Path, exclude_markdown: bool) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in rd.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if path.is_dir() {
+                if !RECORD_INPUT_SKIP_DIRS.contains(&name.as_str()) {
+                    stack.push(path);
+                }
+            } else if path.is_file()
+                && !is_transient(&name)
+                && name != "EVIDENCE.yaml"
+                && !(exclude_markdown
+                    && Path::new(&name)
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .is_some_and(|e| e.eq_ignore_ascii_case("md")))
+            {
+                out.push(path);
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Отпечаток реестра правил кейса (для записи `fitness`): SHA-256 файла
+/// CONSTRAINTS.yaml, который резолвит движок (`control check`).
+fn registry_fingerprint(dir: &Path) -> Option<String> {
+    let resolved = crate::control::resolve_constraints_path_detailed(dir, None)?;
+    crate::hash::sha256_file(&resolved.path)
+}
+
+/// Хэш входов прогона: каноническая свёртка дерева входов, команды и (для
+/// fitness) отпечатка реестра.
+fn inputs_fingerprint(dir: &Path, kind: RecordKind, command: &str) -> (String, String) {
+    let exclude_md = kind != RecordKind::Fitness;
+    let mut acc = String::new();
+    let mut count = 0usize;
+    for file in record_input_files(dir, exclude_md) {
+        let Some(h) = crate::hash::sha256_file(&file) else {
+            continue;
+        };
+        let rel = file.strip_prefix(dir).map_or_else(
+            |_| file.display().to_string(),
+            |p| p.to_string_lossy().replace('\\', "/"),
+        );
+        // Запись в String не может завершиться ошибкой — игнор безопасен.
+        let _ = writeln!(acc, "{rel}\0{h}");
+        count += 1;
+    }
+    let registry = if kind == RecordKind::Fitness {
+        registry_fingerprint(dir)
+    } else {
+        None
+    };
+    let canonical = format!(
+        "{}\0{command}\0{}",
+        crate::hash::sha256_hex(acc.as_bytes()),
+        registry.as_deref().unwrap_or("-")
+    );
+    let note = match kind {
+        RecordKind::Fitness => format!(
+            "всё дерево кейса ({count} файлов, без {}) + отпечаток реестра + команда",
+            RECORD_INPUT_SKIP_DIRS.join("/")
+        ),
+        _ => format!(
+            "код и конфиги кейса ({count} файлов, без {} и *.md) + команда",
+            RECORD_INPUT_SKIP_DIRS.join("/")
+        ),
+    };
+    (crate::hash::sha256_hex(canonical.as_bytes()), note)
+}
+
+/// Прогоняет команду и пишет машинную запись `.arch-handoff/evidence/<kind>.json`
+/// (A1). Запись создаётся и при провале прогона: FAIL-запись — честное
+/// evidence неуспеха, а не отсутствие записи.
+///
+/// # Errors
+/// Каталог недоступен, команда не запустилась, запись не пишется.
+pub fn record_run(
+    dir: &Path,
+    kind: RecordKind,
+    command: &str,
+    timeout_secs: u64,
+) -> Result<RunRecord> {
+    let timeout = Duration::from_secs(if timeout_secs == 0 {
+        RECORD_TIMEOUT_SECS
+    } else {
+        timeout_secs
+    });
+    let (inputs_hash, inputs_note) = inputs_fingerprint(dir, kind, command);
+    let head = current_head(dir).unwrap_or_else(|| "absent".to_string());
+    let started = Instant::now();
+    let outcome = crate::proc::run_shell(dir, "bash", command, timeout)?;
+    let duration = started.elapsed().as_secs_f64();
+    let (exit_code, passed) = match outcome.status {
+        Some(s) => (s.code(), s.success()),
+        None => (None, false),
+    };
+    let mut output = String::from_utf8_lossy(&outcome.stdout).into_owned();
+    if !outcome.stderr.is_empty() {
+        output.push_str(&String::from_utf8_lossy(&outcome.stderr));
+    }
+    let output_tail: String = output
+        .chars()
+        .rev()
+        .take(RECORD_LOG_TAIL)
+        .collect::<Vec<char>>()
+        .into_iter()
+        .rev()
+        .collect();
+    let registry = if kind == RecordKind::Fitness {
+        registry_fingerprint(dir)
+    } else {
+        None
+    };
+    let attestation = crate::hash::sha256_hex(
+        format!(
+            "{}\0{}\0{}\0{}\0{}",
+            kind.as_str(),
+            command,
+            exit_code.map_or_else(|| "timeout".to_string(), |c| c.to_string()),
+            inputs_hash,
+            registry.as_deref().unwrap_or("-")
+        )
+        .as_bytes(),
+    );
+    let record = RunRecord {
+        schema: RECORD_SCHEMA.to_string(),
+        kind: kind.as_str().to_string(),
+        command: command.to_string(),
+        exit_code,
+        passed,
+        recorded_at: chrono::Local::now().to_rfc3339(),
+        duration_secs: duration,
+        head,
+        inputs_hash,
+        inputs_note,
+        registry_fingerprint: registry,
+        attestation,
+        output_tail: output_tail.trim().to_string(),
+    };
+    let path = record_path(dir, kind);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| HarnessError::io(parent, e))?;
+    }
+    let text = serde_json::to_string_pretty(&record)?;
+    std::fs::write(&path, format!("{text}\n")).map_err(|e| HarnessError::io(&path, e))?;
+    Ok(record)
+}
+
+/// Читает запись прогона из каталога `dir` (`None` — записи нет).
+///
+/// # Errors
+/// Файл есть, но не разбирается: подмена/дрейф evidence не замалчивается
+/// (тот же принцип, что у [`crate::rehearsal::load_report`]).
+pub fn load_run_record(dir: &Path, kind: RecordKind) -> Result<Option<RunRecord>> {
+    let path = record_path(dir, kind);
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let text = std::fs::read_to_string(&path).map_err(|e| HarnessError::io(&path, e))?;
+    let record = serde_json::from_str(&text).map_err(|e| {
+        HarnessError::Control(format!(
+            "{}: невалидная запись прогона ({e}) — перезапишите: \
+             `arch-be evidence record {}`",
+            path.display(),
+            kind.as_str()
+        ))
+    })?;
+    Ok(Some(record))
+}
+
+/// Находит запись прогона для бандла: в каталоге изменения, затем в
+/// родителях (бандл дельты `changes/<name>/` читает записи корня
+/// репозитория). Возвращает запись и корень, от которого она писалась
+/// (свежесть входов считается от него).
+fn find_run_record(change_dir: &Path, kind: RecordKind) -> Result<Option<(RunRecord, PathBuf)>> {
+    let mut dir = Some(change_dir);
+    let mut hops = 0;
+    while let Some(d) = dir {
+        if hops > 2 {
+            break;
+        }
+        if let Some(record) = load_run_record(d, kind)? {
+            return Ok(Some((record, d.to_path_buf())));
+        }
+        dir = d.parent();
+        hops += 1;
+    }
+    Ok(None)
+}
+
+/// Свежесть записи прогона: причины устаревания (пусто — запись свежая).
+/// Запись устаревает, когда сместился HEAD ИЛИ изменились входы: незакоммиченная
+/// правка кода обязана инвалидировать запись (приёмка A1). Вне git («absent»)
+/// судят только входы.
+fn record_stale_reasons(record: &RunRecord, kind: RecordKind, root: &Path) -> Vec<String> {
+    let mut why = Vec::new();
+    if record.head != "absent" {
+        if let Some(head) = current_head(root) {
+            if head != record.head {
+                why.push(format!(
+                    "HEAD сместился ({}… ≠ {} записи)",
+                    head.chars().take(12).collect::<String>(),
+                    record.head.chars().take(12).collect::<String>()
+                ));
+            }
+        }
+    }
+    let (now, _) = inputs_fingerprint(root, kind, &record.command);
+    if now != record.inputs_hash {
+        why.push("входы прогона изменились после записи".to_string());
+    }
+    why
 }
 
 // ---------------------------------------------------------------------------
@@ -458,20 +869,24 @@ fn field_is_empty(value: &str) -> bool {
         || crate::stubs::is_template_stub(v)
 }
 
-/// Строка итога отчёта: `Итог: PASS` либо `PASS (N из M)`.
-fn has_result_line(text: &str) -> bool {
-    text.lines().any(|l| {
-        let t = l.trim();
-        t.contains("Итог: PASS") || (t.contains("PASS (") && t.contains(" из "))
-    })
-}
-
 /// Строка итога отчёта с провалом.
 fn has_fail_line(text: &str) -> bool {
     text.lines().any(|l| {
         let t = l.trim();
         t.contains("Итог: FAIL") || t.eq_ignore_ascii_case("fail") || t.starts_with("FAIL —")
     })
+}
+
+/// Подсказка находки по отчёту о прогоне (A1): прогон закрывается машинной
+/// записью, а не дописыванием текста — подсказка обязана вести к прогону,
+/// иначе она учит обходу («добавьте строку» и зелёный — так 0.3.13 принимал
+/// рукописный PASS).
+fn record_hint(key: &str) -> String {
+    let kind = RecordKind::for_artifact(key).map_or("<kind>", RecordKind::as_str);
+    format!(
+        "запустите `arch-be evidence record {kind} [--cmd …]`: факт и свежесть \
+         прогона фиксирует машинная запись, markdown остаётся сопровождением для человека"
+    )
 }
 
 /// Вердикт состязательного ревью: `READY` / `NOT-READY` (регистр и кириллица
@@ -530,7 +945,10 @@ fn semantic_check(
     } else {
         text.len() as u64
     };
-    // Общие для всех ключей: размер-пустышка и маркеры-заглушки.
+    // Общие для всех ключей: размер-пустышка и маркеры-заглушки. У артефактов
+    // прогонов (A1) подсказка ведёт к машинной записи, а не к дописыванию
+    // текста: «заполните отчёт» у рукописного PASS — инструкция обхода.
+    let record_stub_hint = RecordKind::for_artifact(key).map(|_| record_hint(key));
     let mut stub_flagged = false;
     if size < cfg.min_bytes {
         let where_ = stub_file_of(path, cfg.min_bytes)
@@ -543,7 +961,9 @@ fn semantic_check(
                 "артефакт не написан: {size} б < порога {} б ({where_})",
                 cfg.min_bytes
             ),
-            "заполните артефакт: заглушка в бандле не удостоверяет ничего",
+            record_stub_hint
+                .as_deref()
+                .unwrap_or("заполните артефакт: заглушка в бандле не удостоверяет ничего"),
         ));
         stub_flagged = true;
     } else if let Some(file) = stub_file_of(path, cfg.min_bytes) {
@@ -552,7 +972,9 @@ fn semantic_check(
             "evidence_stub",
             severity,
             format!("артефакт содержит незаполненное место: {file}"),
-            "уберите маркеры-заглушки (TODO/TBD/<…>) — они попадут в аудиторский след",
+            record_stub_hint.as_deref().unwrap_or(
+                "уберите маркеры-заглушки (TODO/TBD/<…>) — они попадут в аудиторский след",
+            ),
         ));
         stub_flagged = true;
     } else if let Some((line, frag)) = crate::stubs::find_stub(&text, true) {
@@ -561,7 +983,9 @@ fn semantic_check(
             "evidence_stub",
             severity,
             format!("строка {line}: незаполненное место «{frag}»"),
-            "замените заглушку содержанием: артефакт обязан быть написан",
+            record_stub_hint
+                .as_deref()
+                .unwrap_or("замените заглушку содержанием: артефакт обязан быть написан"),
         ));
         stub_flagged = true;
     }
@@ -722,26 +1146,120 @@ fn semantic_check(
                 )),
             }
         }
-        "validation" | "fitness_report" | "walking_skeleton" => {
-            if has_fail_line(&text) {
-                out.push(finding(
-                    key,
-                    "evidence_reports_fail",
-                    severity,
-                    "отчёт содержит итог FAIL".to_string(),
-                    "добейтесь зелёного прогона и переупакуйте бандл",
-                ));
-            } else if !stub_flagged && !has_result_line(&text) {
-                out.push(finding(
-                    key,
-                    "evidence_stub",
-                    severity,
-                    "в отчёте нет строки итога («Итог: PASS» или «PASS (N из M)»)".to_string(),
-                    "добавьте итоговую строку прогона — без неё отчёт не читается машиной",
-                ));
-            }
+        // A1: строка итога в прозе больше не удостоверяет прогон (рукописный
+        // PASS 0.3.13) — прогон доказывает машинная запись (проверяется в
+        // `record_checks`). Markdown остаётся сопровождением для человека;
+        // единственная проза-проверка — честность итога (FAIL в тексте
+        // против записи PASS — противоречие, которое надо разрешить прогоном).
+        "validation" | "fitness_report" | "walking_skeleton" if has_fail_line(&text) => {
+            out.push(finding(
+                key,
+                "evidence_reports_fail",
+                severity,
+                "отчёт содержит итог FAIL".to_string(),
+                &record_hint(key),
+            ));
         }
         _ => {}
+    }
+    (out, notes)
+}
+
+/// Проверки машинной записи прогона (A1): для артефактов `validation` /
+/// `fitness_report` / `walking_skeleton` прогон доказывает запись
+/// `.arch-handoff/evidence/<kind>.json`, а не проза.
+///
+/// - записи нет, а markdown-отчёт есть → `evidence_report_unbound` (warn;
+///   error при `[evidence] require_records = true`): проза не доказывает прогон;
+/// - запись есть, итог не PASS → `evidence_record_failed`;
+/// - запись устарела (HEAD или входы сместились) → `evidence_record_stale`;
+/// - запись не разбирается → `evidence_record_invalid` (подмена не замалчивается).
+fn record_checks(
+    change_dir: &Path,
+    kind: RecordKind,
+    has_markdown: bool,
+    cfg: &crate::config::EvidenceConfig,
+    severity: &str,
+) -> (Vec<SemanticFinding>, Vec<String>) {
+    let key = kind.artifact_key();
+    let mut out = Vec::new();
+    let mut notes = Vec::new();
+    let found = match find_run_record(change_dir, kind) {
+        Ok(found) => found,
+        Err(e) => {
+            out.push(finding(
+                key,
+                "evidence_record_invalid",
+                severity,
+                format!("запись прогона «{}» не разбирается: {e}", kind.as_str()),
+                &format!(
+                    "перезапишите запись прогоном: `arch-be evidence record {}`",
+                    kind.as_str()
+                ),
+            ));
+            return (out, notes);
+        }
+    };
+    let Some((record, root)) = found else {
+        if has_markdown {
+            // Правило 4 (warn → error по флагу): по умолчанию находка видна,
+            // но не блокирует; проект/bank-профиль включает требование записей.
+            let sev = if cfg.require_records { "error" } else { "warn" };
+            out.push(finding(
+                key,
+                "evidence_report_unbound",
+                sev,
+                format!(
+                    "отчёт «{key}» написан прозой, машинной записи прогона нет — \
+                     строка «Итог: PASS» в тексте не доказывает, что прогон был"
+                ),
+                &record_hint(key),
+            ));
+        }
+        return (out, notes);
+    };
+    notes.push(format!(
+        "запись «{}» удостоверяет факт и свежесть прогона ({}), а не его \
+         достаточность — что прогонять, решает автор команды",
+        kind.as_str(),
+        record.command
+    ));
+    if !record.passed {
+        out.push(finding(
+            key,
+            "evidence_record_failed",
+            severity,
+            format!(
+                "запись «{}» зафиксировала провал прогона (exit {}): {}",
+                kind.as_str(),
+                record
+                    .exit_code
+                    .map_or_else(|| "таймаут".to_string(), |c| c.to_string()),
+                record.output_tail.lines().next().unwrap_or_default()
+            ),
+            &format!(
+                "добейтесь зелёного прогона и повторите `arch-be evidence record {}`",
+                kind.as_str()
+            ),
+        ));
+        return (out, notes);
+    }
+    let stale = record_stale_reasons(&record, kind, &root);
+    if !stale.is_empty() {
+        out.push(finding(
+            key,
+            "evidence_record_stale",
+            severity,
+            format!(
+                "запись прогона «{}» устарела: {}",
+                kind.as_str(),
+                stale.join("; ")
+            ),
+            &format!(
+                "повторите `arch-be evidence record {}` на текущем состоянии и переупакуйте бандл",
+                kind.as_str()
+            ),
+        ));
     }
     (out, notes)
 }
@@ -840,6 +1358,28 @@ pub fn verify_with(
     let mut not_verified = Vec::new();
     if let Some(severity) = cfg.severity_for(route) {
         for (key, _desc) in required_artifacts(route) {
+            // A1: у артефактов прогонов машинная запись закрывает ключ и без
+            // markdown — проверяется и в этом случае.
+            if let Some(kind) = RecordKind::for_artifact(key) {
+                let md = existing_artifact(change_dir, key);
+                let (found, rec_notes) =
+                    record_checks(change_dir, kind, md.is_some(), cfg, severity);
+                semantics.extend(found);
+                for n in rec_notes {
+                    if !not_verified.contains(&n) {
+                        not_verified.push(n);
+                    }
+                }
+                let Some(path) = md else { continue };
+                let (found, notes) = semantic_check(change_dir, key, &path, cfg, severity);
+                semantics.extend(found);
+                for n in notes {
+                    if !not_verified.contains(&n) {
+                        not_verified.push(n);
+                    }
+                }
+                continue;
+            }
             let Some(path) = existing_artifact(change_dir, key) else {
                 continue;
             };
@@ -1346,6 +1886,9 @@ mod tests {
     }
 
     /// Абсолютный регресс 0.3.3: бандл из заглушек проходил как «выпуск разрешён».
+    /// A1 (0.3.14): содержательный бандл зелёный, но рукописные отчёты прогонов
+    /// по умолчанию названы предупреждением `evidence_report_unbound` — проза не
+    /// доказывает прогон (error — только по флагу `require_records`).
     #[test]
     fn verify_passes_on_complete_bundle() {
         let tmp = tempfile::tempdir().expect("tmp");
@@ -1359,7 +1902,13 @@ mod tests {
             "содержательный бандл обязан быть зелёным; находки: {:?}",
             v.semantics
         );
-        assert!(v.semantics.is_empty(), "{:?}", v.semantics);
+        assert!(
+            v.semantics
+                .iter()
+                .all(|f| f.rule == "evidence_report_unbound" && f.severity == "warn"),
+            "кроме предупреждений о рукописных отчётах находок нет: {:?}",
+            v.semantics
+        );
         // Подлинность подписи A3 — заявленное, но механикой не проверяется.
         assert!(
             v.not_verified
@@ -1833,17 +2382,6 @@ mod tests {
         assert!(!field_is_empty("Вариант Б: свой шлюз"));
     }
 
-    /// Строка итога отчёта: полная форма или «PASS (N из M)»; половинчатая
-    /// форма машиной не читается.
-    #[test]
-    fn has_result_line_needs_complete_marker() {
-        assert!(has_result_line("Итог: PASS"));
-        assert!(has_result_line("  PASS (3 из 5)  "));
-        assert!(!has_result_line("PASS (3"));
-        assert!(!has_result_line("PASS 3 из 5"));
-        assert!(!has_result_line("FAIL — есть дефекты"));
-    }
-
     /// Строка провала — любая из трёх форм, включая английскую.
     #[test]
     fn has_fail_line_recognizes_each_form() {
@@ -1851,6 +2389,29 @@ mod tests {
         assert!(has_fail_line("fail"));
         assert!(has_fail_line("FAIL — есть дефекты"));
         assert!(!has_fail_line("PASS (3 из 5)"));
+    }
+
+    /// A1: строка «Итог: PASS» в прозе больше не удостоверяет прогон — у
+    /// артефактов прогонов её не требуют и ей не верят: прогон доказывает
+    /// машинная запись (`evidence_report_unbound`/`evidence_record_*`).
+    #[test]
+    fn handwritten_result_line_is_not_evidence_anymore() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        let cfg = crate::config::EvidenceConfig::default();
+        let report = dir.join("VALIDATION.md");
+        std::fs::write(
+            &report,
+            format!("# Отчёт\n\n{}\n\nИтог: PASS (8 из 8)\n", body("Прогон")),
+        )
+        .expect("write");
+        let (findings, _notes) = semantic_check(dir, "validation", &report, &cfg, "error");
+        assert!(
+            findings.is_empty(),
+            "проза-проверка не краснит написанный отчёт — её роль теперь у записи: {findings:?}"
+        );
+        // А проверка записи (без markdown-строки итога) называет отсутствие
+        // машинного подтверждения — см. verify_flags_unbound_handwritten_report.
     }
 
     /// Прогресс бандла считается по манифесту: сколько обязательных ключей
@@ -1975,8 +2536,9 @@ mod tests {
         );
     }
 
-    /// Отчёт-заглушка не требует строки итога: диагноз уже назван — «не
-    /// написан», и второго требования к тому же файлу быть не должно.
+    /// Отчёт-заглушка без машинной записи: диагноз уже назван («не написан»),
+    /// а с A1 рядом стоит `evidence_report_unbound` (на уровне verify) —
+    /// требовать ещё и строку итога у прозы — шум, прогон закрывает запись.
     #[test]
     fn semantic_stub_report_does_not_require_result_line() {
         let tmp = tempfile::tempdir().expect("tmp");
@@ -2049,6 +2611,208 @@ mod tests {
                 "{key} назван: {:?}",
                 v.missing
             );
+        }
+    }
+
+    /// A1 (0.3.14, репродукция «рукописный PASS»): отчёт о прогоне, написанный
+    /// прозой без машинной записи (`arch-be evidence record`), не доказывает
+    /// прогон — обязана быть находка `evidence_report_unbound`.
+    #[test]
+    fn verify_flags_unbound_handwritten_report() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        put_complete_critical(dir);
+        pack(dir, Route::Critical).expect("pack");
+        let v = verify(dir).expect("verify");
+        for key in ["validation", "fitness_report", "walking_skeleton"] {
+            assert!(
+                v.semantics
+                    .iter()
+                    .any(|f| f.rule == "evidence_report_unbound" && f.key == key),
+                "рукописный отчёт «{key}» без машинной записи обязан быть назван: {:?}",
+                v.semantics
+            );
+        }
+        // По умолчанию — warn (не блокирует), по флагу require_records — error.
+        assert!(v.passed, "warn не блокирует выпуск: {:?}", v.semantics);
+        let strict = crate::config::EvidenceConfig {
+            require_records: true,
+            ..crate::config::EvidenceConfig::default()
+        };
+        let v = verify_with(dir, &strict).expect("verify");
+        assert!(
+            !v.passed,
+            "с require_records=true рукописный PASS блокируется: {:?}",
+            v.semantics
+        );
+        assert!(
+            v.semantics
+                .iter()
+                .any(|f| f.rule == "evidence_report_unbound" && f.severity == "error"),
+            "{:?}",
+            v.semantics
+        );
+    }
+
+    /// Запись прогона: команда, exit-код, HEAD, хэш входов, итог — в файле
+    /// `.arch-handoff/evidence/<kind>.json`.
+    #[test]
+    fn record_run_writes_machine_record() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        put(dir, "src/main.py", "print('ok')\n");
+        let rec = record_run(dir, RecordKind::Tests, "true", 0).expect("record");
+        assert!(rec.passed);
+        assert_eq!(rec.exit_code, Some(0));
+        assert_eq!(rec.schema, RECORD_SCHEMA);
+        assert_eq!(rec.kind, "tests");
+        assert_eq!(rec.head, "absent", "не git-репозиторий");
+        assert_eq!(rec.inputs_hash.len(), 64, "sha256 hex");
+        assert_eq!(rec.attestation.len(), 64);
+        let path = record_path(dir, RecordKind::Tests);
+        assert!(path.is_file(), "запись записана: {}", path.display());
+        let loaded = load_run_record(dir, RecordKind::Tests)
+            .expect("load")
+            .expect("запись есть");
+        assert_eq!(loaded.inputs_hash, rec.inputs_hash);
+        // Детерминизм: повторный прогон на неизменном дереве — тот же хэш входов.
+        let rec2 = record_run(dir, RecordKind::Tests, "true", 0).expect("record");
+        assert_eq!(rec.inputs_hash, rec2.inputs_hash);
+    }
+
+    /// Провал прогона — тоже запись (passed=false, честный exit-код).
+    #[test]
+    fn record_run_failed_command_records_fail() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let rec = record_run(tmp.path(), RecordKind::Fitness, "false", 0).expect("record");
+        assert!(!rec.passed);
+        assert_eq!(rec.exit_code, Some(1));
+    }
+
+    /// Битая запись — ошибка разбора, а не молчание (подмена не замалчивается).
+    #[test]
+    fn load_run_record_rejects_garbage() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        put(dir, ".arch-handoff/evidence/tests.json", "{ не json");
+        assert!(load_run_record(dir, RecordKind::Tests).is_err());
+    }
+
+    /// Полный цикл A1: запись без markdown закрывает артефакт; правка кода
+    /// после записи делает её устаревшей (`evidence_record_stale`).
+    #[test]
+    fn verify_accepts_fresh_record_and_flags_stale_after_code_edit() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        put_complete_critical(dir);
+        // Мир A1: отчёты прогонов — машинные записи, markdown не пишется.
+        for rel in ["VALIDATION.md", "reports/fitness.md", "WALKING-SKELETON.md"] {
+            std::fs::remove_file(dir.join(rel)).expect("remove");
+        }
+        for kind in RecordKind::all() {
+            record_run(dir, kind, "true", 0).expect("record");
+        }
+        let (bundle, v) = pack(dir, Route::Critical).expect("pack");
+        assert!(v.passed, "missing: {:?}", v.missing);
+        // Артефактом стала сама запись, а не проза.
+        assert!(
+            bundle
+                .items
+                .iter()
+                .any(|i| i.key == "validation" && i.path.ends_with("evidence/tests.json")),
+            "{:?}",
+            bundle.items.iter().map(|i| &i.path).collect::<Vec<_>>()
+        );
+        let v = verify(dir).expect("verify");
+        assert!(
+            v.passed,
+            "свежие записи закрывают артефакты без markdown: {:?}",
+            v.semantics
+        );
+        assert!(
+            v.semantics
+                .iter()
+                .all(|f| !f.rule.starts_with("evidence_record")
+                    && f.rule != "evidence_report_unbound"),
+            "{:?}",
+            v.semantics
+        );
+        // Правка кода после записи → запись устарела (приёмка A1).
+        put(dir, "src/new_module.py", "def f(): ...\n");
+        let v = verify(dir).expect("verify");
+        assert!(
+            !v.passed,
+            "устаревшая запись обязана блокировать: {:?}",
+            v.semantics
+        );
+        assert!(
+            v.semantics
+                .iter()
+                .any(|f| f.rule == "evidence_record_stale" && f.key == "validation"),
+            "{:?}",
+            v.semantics
+        );
+    }
+
+    /// Запись с провалом прогона — находка, даже когда рядом проза говорит PASS.
+    #[test]
+    fn verify_flags_failed_record_over_prose_pass() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        put_complete_critical(dir);
+        record_run(dir, RecordKind::Tests, "false", 0).expect("record");
+        pack(dir, Route::Critical).expect("pack");
+        let v = verify(dir).expect("verify");
+        assert!(
+            v.semantics
+                .iter()
+                .any(|f| f.rule == "evidence_record_failed" && f.key == "validation"),
+            "{:?}",
+            v.semantics
+        );
+        assert!(!v.passed);
+    }
+
+    /// Ни одна находка по артефактам прогонов не советует дописать текст,
+    /// закрывающий её без прогона (приёмка A1): все подсказки ведут к
+    /// `arch-be evidence record`.
+    #[test]
+    fn report_findings_never_teach_prose_bypass() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        put_complete_critical(dir);
+        // Разносим типы находок: проза-PASS, заглушка, FAIL в тексте.
+        put(dir, "reports/fitness.md", "TODO");
+        put(
+            dir,
+            "WALKING-SKELETON.md",
+            &format!("{}\n\nИтог: FAIL\n", body("Скелет")),
+        );
+        record_run(dir, RecordKind::Fitness, "true", 0).expect("record");
+        // Устаревшая запись: код изменился после прогона.
+        put(dir, "src/changed.py", "x = 1\n");
+        pack(dir, Route::Critical).expect("pack");
+        let v = verify(dir).expect("verify");
+        let report_findings: Vec<&SemanticFinding> = v
+            .semantics
+            .iter()
+            .filter(|f| RecordKind::for_artifact(&f.key).is_some())
+            .collect();
+        assert!(
+            report_findings.len() >= 4,
+            "ожидались находки всех видов: {report_findings:?}"
+        );
+        for f in report_findings {
+            assert!(
+                f.fix_hint.contains("evidence record"),
+                "подсказка обязана вести к машинной записи, а не к тексту: {f:?}"
+            );
+            for banned in ["добавьте", "допишите", "строку итога"] {
+                assert!(
+                    !f.fix_hint.contains(banned),
+                    "подсказка не учит обходу («{banned}»): {f:?}"
+                );
+            }
         }
     }
 }

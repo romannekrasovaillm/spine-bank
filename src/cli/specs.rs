@@ -63,6 +63,24 @@ pub(crate) enum EvidenceCmd {
         /// Каталог изменения.
         dir: PathBuf,
     },
+    /// Записать машинное evidence прогона (A1): выполняет команду и пишет
+    /// `.arch-handoff/evidence/<kind>.json` (команда, exit-код, время, HEAD,
+    /// хэш входов, итог). Отчёт о прогоне пишет машина, а не автор.
+    Record {
+        /// Вид записи: fitness (прогон реестра правил), tests (тесты),
+        /// skeleton (walking skeleton).
+        kind: String,
+        /// Каталог кейса/изменения (по умолчанию — текущий).
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        /// Команда прогона. Для fitness по умолчанию `arch-be control check .`;
+        /// для tests/skeleton — обязательна.
+        #[arg(long)]
+        cmd: Option<String>,
+        /// Таймаут прогона в секундах (0 — дефолт 900).
+        #[arg(long, default_value = "0")]
+        timeout_secs: u64,
+    },
 }
 
 #[derive(Subcommand)]
@@ -302,6 +320,51 @@ pub(crate) fn cmd_evidence(cfg: &arch_harness::config::Config, cmd: EvidenceCmd)
                 arch_harness::passport::hint_command(&dir)
             );
             if !v.passed {
+                std::process::exit(1);
+            }
+        }
+        EvidenceCmd::Record {
+            kind,
+            dir,
+            cmd,
+            timeout_secs,
+        } => {
+            let kind: arch_harness::evidence::RecordKind = kind
+                .parse()
+                .map_err(|e: String| anyhow::anyhow!("evidence record: {e}"))?;
+            let dir = dir.unwrap_or_else(|| PathBuf::from("."));
+            let Some(command) = cmd.or_else(|| kind.default_command().map(str::to_string)) else {
+                anyhow::bail!(
+                    "для записи «{}» нет команды по умолчанию — укажите её: \
+                     arch-be evidence record {} --cmd \"…\"",
+                    kind.as_str(),
+                    kind.as_str()
+                );
+            };
+            let rec = arch_harness::evidence::record_run(&dir, kind, &command, timeout_secs)?;
+            println!(
+                "Запись прогона «{}»: {}",
+                kind.as_str(),
+                if rec.passed { "PASS" } else { "FAIL" }
+            );
+            println!(
+                "  команда: {} (exit {}, {:.1} с)",
+                rec.command,
+                rec.exit_code
+                    .map_or_else(|| "таймаут".to_string(), |c| c.to_string()),
+                rec.duration_secs
+            );
+            println!("  HEAD: {}", rec.head);
+            println!("  входы: {} ({})", rec.inputs_hash, rec.inputs_note);
+            if let Some(fp) = &rec.registry_fingerprint {
+                println!("  реестр: {fp}");
+            }
+            println!(
+                "  файл: {}",
+                arch_harness::evidence::record_path(&dir, kind).display()
+            );
+            if !rec.passed {
+                println!("Итог: FAIL — запись зафиксировала провал прогона");
                 std::process::exit(1);
             }
         }

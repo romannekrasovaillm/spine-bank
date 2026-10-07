@@ -312,7 +312,9 @@ fn stage_fix_hint(component: &str) -> &'static str {
         }
         "evidence_verify" => {
             "заполните артефакты бандла содержанием и переупакуйте: \
-             `arch-be evidence pack . --route critical`"
+             `arch-be evidence pack . --route critical`; отчёты прогонов \
+             (валидация, fitness, walking skeleton) закрываются машинной записью: \
+             `arch-be evidence record fitness|tests|skeleton [--cmd …]`"
         }
         "decision_quality" => {
             "прогоните рубрику судьёй, отличным от автора, и положите отчёт в \
@@ -774,13 +776,25 @@ pub fn skeleton(name: &str, domain: &str) -> Vec<(String, String)> {
     files
 }
 
-/// Конфиг проекта: закомментированные примеры того, что чаще всего нужно
+/// Конфиг проекта: почти всё закомментировано, поэтому поведение — почти
+/// дефолтное. Исключение (A1, 0.3.14): `[evidence] require_records = true`
+/// включён явно — каркас задаёт bank-профиль на маршруте Critical
+/// (ROUTE.lock), где отчёт о прогоне обязан быть машинной записью
+/// (`arch-be evidence record`), а не рукописной строкой «Итог: PASS».
+/// Здесь же — закомментированные примеры того, что чаще всего нужно
 /// кейсу, — судья-`kind = "cli"` (судейство без API-ключа) и порог
-/// независимости. Все строки закомментированы: файл ничего не меняет, пока его
-/// не отредактируют.
+/// независимости. Путь к правильному судейству должен быть короче
+/// неправильного (J9, ADR-048).
 fn project_config() -> String {
-    "# Настройки кейса. Всё закомментировано — действуют дефолты харнесса.\n\
-     # Порядок поиска: --config → ./arch-harness.toml → ~/.config/arch-harness/config.toml.\n\
+    "# Настройки кейса. Порядок поиска: --config → ./arch-harness.toml → ~/.config/arch-harness/config.toml.\n\
+     \n\
+     # Bank-профиль на маршруте Critical (A1, 0.3.14): отчёты прогонов\n\
+     # (валидация, fitness, walking skeleton) закрываются машинной записью\n\
+     # `arch-be evidence record fitness|tests|skeleton [--cmd …]`; рукописная\n\
+     # проза без записи блокирует выпуск (evidence_report_unbound — error).\n\
+     # Уберите строку, чтобы вернуть поведение по умолчанию (warn).\n\
+     [evidence]\n\
+     require_records = true\n\
      \n\
      # Судья без API-ключа: Spine запускает уже авторизованный CLI харнесса,\n\
      # каждый сэмпл — отдельный процесс (уровень «независимость обеспечена\n\
