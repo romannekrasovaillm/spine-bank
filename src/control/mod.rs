@@ -60,6 +60,8 @@ mod registry;
 pub(crate) mod report;
 mod rules;
 mod shadow;
+/// Измерение зубьев правил реестра на копии кейса (волна B 0.3.14, ADR-065).
+pub mod teeth;
 mod templates;
 mod tools;
 mod types;

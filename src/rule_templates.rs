@@ -1862,7 +1862,10 @@ fn case_copy(case: &Path, id: &str, ad: &str) -> PathBuf {
 }
 
 /// Рекурсивное копирование дерева с пропуском служебных каталогов.
-fn copy_tree(from: &Path, to: &Path, skip: &[&str]) -> std::io::Result<()> {
+///
+/// `pub(crate)`: разделяется с измерением зубьев (`crate::control::teeth`,
+/// B1) — полная копия кейса для `command_succeeds` строится одним кодом.
+pub(crate) fn copy_tree(from: &Path, to: &Path, skip: &[&str]) -> std::io::Result<()> {
     std::fs::create_dir_all(to)?;
     for entry in std::fs::read_dir(from)? {
         let entry = entry?;
