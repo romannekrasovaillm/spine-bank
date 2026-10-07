@@ -71,6 +71,9 @@ pub use diff_triggers::{
     significance_score, significance_score_with_limits, suggest_trigger, unknown_trigger_names,
     unknown_triggers_error,
 };
+// Реюз детекторов графом as-built (волна K): примитивы без смены логики
+// самих детекторов.
+pub(crate) use diff_triggers::{content_looks_like_contract, looks_like_config};
 pub(crate) use exec::glob_matches;
 pub use exec::{check, check_with_options, command_strings};
 pub use registry::{

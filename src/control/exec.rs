@@ -761,7 +761,8 @@ fn run_rule(
             for (rel, abs) in &files {
                 let bytes = std::fs::read(abs).map_err(|e| HarnessError::io(abs, e))?;
                 let content = String::from_utf8_lossy(&bytes);
-                for (module, line) in extract_imports(rel, &content)? {
+                for edge in crate::imports::extract_imports(rel, &content)? {
+                    let module = &edge.module;
                     // Относительные импорты TS/JS (`./…`) не выражаются в
                     // координатах модулей — их разрешает `context_boundary`.
                     if module.starts_with('.') {
@@ -769,12 +770,13 @@ fn run_rule(
                     }
                     match &mode {
                         DepsMode::Forbid(forbid) => {
-                            if let Some(entry) =
-                                forbid.iter().find(|e| module_prefix_match(&module, e))
+                            if let Some(entry) = forbid
+                                .iter()
+                                .find(|e| crate::imports::module_prefix_match(module, e))
                             {
                                 issue(
                                     PathBuf::from(rel),
-                                    line,
+                                    edge.line,
                                     format!(
                                         "dependency_direction: запрещённая зависимость '{module}' (forbid: '{entry}')"
                                     ),
@@ -782,10 +784,13 @@ fn run_rule(
                             }
                         }
                         DepsMode::Allow(allow) => {
-                            if !allow.iter().any(|e| module_prefix_match(&module, e)) {
+                            if !allow
+                                .iter()
+                                .any(|e| crate::imports::module_prefix_match(module, e))
+                            {
                                 issue(
                                     PathBuf::from(rel),
-                                    line,
+                                    edge.line,
                                     format!(
                                         "dependency_direction: зависимость '{module}' вне allow-списка ({})",
                                         allow.join(", ")
@@ -946,102 +951,6 @@ fn deps_mode(rule: &FitnessRule) -> Result<DepsMode<'_>> {
     }
 }
 
-/// Совпадение модуля с записью списка по префиксу пути с границей сегмента:
-/// `agent/slash` совпадает с `agent`, `agentworld` — нет.
-fn module_prefix_match(module: &str, entry: &str) -> bool {
-    module == entry
-        || module
-            .strip_prefix(entry)
-            .is_some_and(|rest| rest.starts_with('/'))
-}
-
-/// Извлечённый импорт: модуль в координатах `/` и номер строки (1-based).
-type ImportEdge = (String, usize);
-
-/// Извлекает импорты из исходного файла по его расширению (ADR-029).
-///
-/// Поддерживаемые формы:
-/// - Rust (`.rs`): `use crate::…` и инлайн-пути `crate::…::` (`::` → `/`);
-///   внешние крейты (`use std::…`) не извлекаются;
-/// - Python (`.py`): `import a.b`, `from a.b import …` (`.` → `/`);
-/// - Java/Kotlin (`.java`, `.kt`): `import a.b.C;` (`.` → `/`);
-/// - TS/JS (`.ts`, `.tsx`, `.js`, `.jsx`, `.mjs`): `from '…'`, `import '…'`,
-///   `require('…')`; относительные пути (`./…`) сохраняются как есть —
-///   их разрешает `context_boundary`, а `dependency_direction` пропускает.
-///
-/// Строки-комментарии (`//`, `///`, `//!`, `#`) игнорируются; блочные
-/// комментарии и строковые литералы не разбираются — эвристика
-/// документированно приблизительна (ложное срабатывание возможно на
-/// `crate::…` внутри строки). Для файлов неподдерживаемых расширений
-/// возвращается пустой список.
-///
-/// # Errors
-/// Внутренний regex не компилируется (инвариант кода; практически
-/// недостижимо — паттерны константны).
-fn extract_imports(rel: &str, content: &str) -> Result<Vec<ImportEdge>> {
-    let ext = Path::new(rel)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or_default();
-    let comment_prefix = match ext {
-        "rs" | "java" | "kt" | "ts" | "tsx" | "js" | "jsx" | "mjs" => "//",
-        "py" => "#",
-        _ => return Ok(Vec::new()),
-    };
-    let compile = |pat: &str| {
-        Regex::new(pat)
-            .map_err(|e| HarnessError::Control(format!("внутренний regex импортов '{pat}': {e}")))
-    };
-    let mut out = Vec::new();
-    for (idx, line) in content.lines().enumerate() {
-        if line.trim_start().starts_with(comment_prefix) {
-            continue;
-        }
-        let lineno = idx + 1;
-        match ext {
-            "rs" => {
-                let re =
-                    compile(r"\bcrate::([A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*)")?;
-                out.extend(
-                    re.captures_iter(line)
-                        .map(|c| (c[1].replace("::", "/"), lineno)),
-                );
-            }
-            "py" => {
-                let re_import = compile(r"^\s*import\s+([A-Za-z_][\w.]*)")?;
-                let re_from = compile(r"^\s*from\s+([A-Za-z_][\w.]*)\s+import\b")?;
-                out.extend(
-                    re_import
-                        .captures(line)
-                        .into_iter()
-                        .chain(re_from.captures(line))
-                        .map(|c| (c[1].replace('.', "/"), lineno)),
-                );
-            }
-            "java" | "kt" => {
-                let re = compile(r"^\s*import\s+(?:static\s+)?([A-Za-z_][\w.]*)\s*;")?;
-                if let Some(c) = re.captures(line) {
-                    out.push((c[1].replace('.', "/"), lineno));
-                }
-            }
-            _ => {
-                // ts/tsx/js/jsx/mjs: путь сохраняется сырым (включая `./…`).
-                let re_from = compile(r#"\bfrom\s+['"]([^'"]+)['"]"#)?;
-                let re_import = compile(r#"^\s*import\s+['"]([^'"]+)['"]"#)?;
-                let re_require = compile(r#"\brequire\(\s*['"]([^'"]+)['"]\s*\)"#)?;
-                out.extend(
-                    re_from
-                        .captures_iter(line)
-                        .chain(re_import.captures_iter(line))
-                        .chain(re_require.captures_iter(line))
-                        .map(|c| (c[1].to_string(), lineno)),
-                );
-            }
-        }
-    }
-    Ok(out)
-}
-
 /// Проверка `context_boundary` (ADR-030): импорты файлов не пересекают
 /// границы контекстов (CMP с `code_roots`) без объявленного `depends_on`.
 ///
@@ -1063,7 +972,15 @@ fn check_context_boundary(
         .entities
         .iter()
         .filter(|e| e.kind == crate::model::EntityKind::Cmp && !e.code_roots.is_empty())
-        .map(|e| (e, e.code_roots.iter().map(|r| normalize_root(r)).collect()))
+        .map(|e| {
+            (
+                e,
+                e.code_roots
+                    .iter()
+                    .map(|r| crate::imports::normalize_root(r))
+                    .collect(),
+            )
+        })
         .collect();
     if contexts.is_empty() {
         issue(
@@ -1079,7 +996,9 @@ fn check_context_boundary(
         for (b, roots_b) in &contexts[i + 1..] {
             for ra in roots_a {
                 for rb in roots_b {
-                    if module_prefix_match(ra, rb) || module_prefix_match(rb, ra) {
+                    if crate::imports::module_prefix_match(ra, rb)
+                        || crate::imports::module_prefix_match(rb, ra)
+                    {
                         return Err(HarnessError::Control(format!(
                             "правило '{}': code_roots пересекаются: {} ('{ra}') и {} ('{rb}')",
                             rule.name, a.id, b.id
@@ -1089,7 +1008,7 @@ fn check_context_boundary(
             }
         }
     }
-    let bases = candidate_bases(repo);
+    let bases = crate::imports::candidate_bases(repo);
     let globs = rule_globs(rule);
     let mut files = Vec::new();
     for glob in &globs {
@@ -1101,13 +1020,17 @@ fn check_context_boundary(
         files.retain(|(rel, _)| !rule.exclude_glob.iter().any(|ex| glob_matches(ex, rel)));
     }
     for (rel, abs) in &files {
-        let Some(source) = owner_by_path(&contexts, rel) else {
+        let Some(source) = crate::imports::owner_by_path(&contexts, rel).copied() else {
             continue;
         };
         let bytes = std::fs::read(abs).map_err(|e| HarnessError::io(abs, e))?;
         let content = String::from_utf8_lossy(&bytes);
-        for (module, line) in extract_imports(rel, &content)? {
-            let Some(target) = resolve_import_owner(repo, &contexts, &bases, rel, &module) else {
+        for edge in crate::imports::extract_imports(rel, &content)? {
+            let module = &edge.module;
+            let Some(target) =
+                crate::imports::resolve_import_owner_fs(repo, &contexts, &bases, rel, module)
+                    .copied()
+            else {
                 continue;
             };
             if target.id == source.id || source.depends_on.contains(&target.id) {
@@ -1115,7 +1038,7 @@ fn check_context_boundary(
             }
             issue(
                 PathBuf::from(rel),
-                line,
+                edge.line,
                 format!(
                     "context_boundary: импорт '{module}' пересекает границу контекста: {} → {} ({}) без depends_on в модели",
                     source.id, target.id, target.title
@@ -1124,123 +1047,6 @@ fn check_context_boundary(
         }
     }
     Ok(())
-}
-
-/// Контекст (CMP), которому принадлежит путь `path` по префиксу `code_roots`.
-fn owner_by_path<'m>(
-    contexts: &[(&'m crate::model::Entity, Vec<String>)],
-    path: &str,
-) -> Option<&'m crate::model::Entity> {
-    contexts
-        .iter()
-        .find(|(_, roots)| roots.iter().any(|r| module_prefix_match(path, r)))
-        .map(|(e, _)| *e)
-}
-
-/// Разрешает импорт `module` (координаты `/`) во владеющий им контекст.
-///
-/// Порядок: TS-относительный путь — от каталога файла; прямое префиксное
-/// совпадение с `code_roots`; разрешение в существующий файл репозитория
-/// (базы `candidate_bases` + модульные суффиксы). `None` — внешняя или
-/// неразрешённая зависимость.
-fn resolve_import_owner<'m>(
-    repo: &Path,
-    contexts: &[(&'m crate::model::Entity, Vec<String>)],
-    bases: &[String],
-    from_rel: &str,
-    module: &str,
-) -> Option<&'m crate::model::Entity> {
-    if let Some(stripped) = module.strip_prefix('.') {
-        // TS/JS-относительный импорт: `./foo`, `../bar` — от каталога файла.
-        let dir = Path::new(from_rel)
-            .parent()
-            .map(|p| p.to_string_lossy().replace('\\', "/"))
-            .unwrap_or_default();
-        let resolved = normalize_rel_path(&format!("{dir}/{stripped}"));
-        return owner_by_path(contexts, &resolved);
-    }
-    // Прямое совпадение в координатах импортов (Python/Java-пакеты).
-    if let Some(owner) = owner_by_path(contexts, module) {
-        return Some(owner);
-    }
-    // Разрешение модуля в файл (Rust `crate::…`, смешанные монорепо).
-    // Путь импорта включает имя элемента (`beta/core/Engine`), поэтому
-    // пробуем префиксы от длинного к короткому: `beta/core/Engine` →
-    // `beta/core` → `beta`.
-    let segments: Vec<&str> = module.split('/').collect();
-    for len in (1..=segments.len()).rev() {
-        let prefix = segments[..len].join("/");
-        for base in bases {
-            for cand in candidate_paths(base, &prefix) {
-                if repo.join(&cand).is_file() {
-                    return owner_by_path(contexts, &cand);
-                }
-            }
-        }
-    }
-    None
-}
-
-/// Базовые каталоги для разрешения модуля в файл: корень, типовые корни
-/// исходников и крейты Rust-workspace (`crates/*`).
-fn candidate_bases(repo: &Path) -> Vec<String> {
-    let mut bases = vec![
-        String::new(),
-        "src/".to_string(),
-        "src/main/java/".to_string(),
-        "src/main/kotlin/".to_string(),
-    ];
-    // Отсутствующий `crates/` — не ошибка, просто нет дополнительных баз.
-    if let Ok(rd) = std::fs::read_dir(repo.join("crates")) {
-        for entry in rd.flatten() {
-            if entry.path().is_dir() {
-                bases.push(format!("crates/{}/", entry.file_name().to_string_lossy()));
-            }
-        }
-    }
-    bases
-}
-
-/// Кандидатные пути файла для модуля `module` под базой `base`.
-fn candidate_paths(base: &str, module: &str) -> Vec<String> {
-    [
-        "{m}.rs",
-        "{m}/mod.rs",
-        "{m}.py",
-        "{m}/__init__.py",
-        "{m}.java",
-        "{m}.kt",
-        "{m}.ts",
-        "{m}/index.ts",
-        "{m}.js",
-        "{m}/index.js",
-    ]
-    .iter()
-    .map(|pat| format!("{base}{}", pat.replace("{m}", module)))
-    .collect()
-}
-
-/// Нормализует `code_root`: срезает пробелы, ведущий `./` и хвостовые `/`.
-fn normalize_root(root: &str) -> String {
-    root.trim()
-        .trim_start_matches("./")
-        .trim_end_matches('/')
-        .to_string()
-}
-
-/// Нормализует относительный путь: раскрывает `.` и `..` по сегментам.
-fn normalize_rel_path(path: &str) -> String {
-    let mut out: Vec<&str> = Vec::new();
-    for seg in path.split('/') {
-        match seg {
-            "" | "." => {}
-            ".." => {
-                out.pop();
-            }
-            s => out.push(s),
-        }
-    }
-    out.join("/")
 }
 
 /// Подготовленное content-правило: скомпилированный regex, glob-шаблон
