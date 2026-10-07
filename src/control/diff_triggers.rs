@@ -426,7 +426,8 @@ fn manifest_dependency_names(manifest: &str, content: &str) -> BTreeSet<String> 
 
 /// Файл — конфиг по эвристике: расширение из списка или «config»/«application»/
 /// «settings» в имени (для детектора `new_datastore`).
-fn looks_like_config(path: &str) -> bool {
+/// `pub(crate)`: та же эвристика отбирает конфиги в графе as-built (волна K).
+pub(crate) fn looks_like_config(path: &str) -> bool {
     let name = Path::new(path)
         .file_name()
         .and_then(|n| n.to_str())
@@ -764,9 +765,7 @@ pub fn detect_diff_triggers_with(
     let re_migration = diff_regex(r"(?i)\b(?:drop\s+table|truncate|drop\s+column)\b")?;
     // Строки подключения, а не голое слово (ДКА: `kafka` без схемы ловило
     // любое упоминание в YAML/JSON и давало ложный `new_datastore`).
-    let re_datastore = diff_regex(
-        r"(?i)(?:postgres(?:ql)?://|mysql://|mongodb(?:\+srv)?://|redis://|kafka://|bootstrap\.servers)",
-    )?;
+    let re_datastore = diff_regex(DATASTORE_PATTERN)?;
     // Цели RTO/RPO (1.7 п.3): frontmatter-поля `rto_minutes:` / `rpo_seconds:`
     // (канон типизированной модели) и инлайн-формы «RTO ≤ 15», «RPO = 0».
     let re_rto_rpo_field = diff_regex(r"(?i)^\s*(?:rto|rpo)_\w*\s*:")?;
@@ -1035,6 +1034,28 @@ pub fn detect_diff_triggers_with(
     Ok(found)
 }
 
+/// Паттерн строк подключения детектора `new_datastore` — вынесен в константу,
+/// чтобы смысл «что считать хранилищем» был адресуемым из документации
+/// графа as-built (волна K) без копирования литерала.
+const DATASTORE_PATTERN: &str = r"(?i)(?:postgres(?:ql)?://|mysql://|mongodb(?:\+srv)?://|redis://|kafka://|bootstrap\.servers)";
+
+/// Похоже ли СОДЕРЖИМОЕ на контракт по заголовку (T-05): ключ верхнего
+/// уровня `openapi:`/`asyncapi:`/`swagger:` (без отступа; комментарии и
+/// разделители YAML пропускаются). Выделено из [`file_looks_like_contract`]
+/// для графа as-built волны K — там файлы читаются из снимка ревизии,
+/// а не с диска.
+pub(crate) fn content_looks_like_contract(head: &str) -> bool {
+    // Ключ верхнего уровня: без отступа, `openapi:`/`asyncapi:`/`swagger:`
+    // (вложенные `openapi:` внутри схем и JSON-поля не в счёт).
+    head.lines().any(|line| {
+        let line = line.trim_end();
+        !line.starts_with([' ', '\t', '#'])
+            && ["openapi:", "asyncapi:", "swagger:"]
+                .iter()
+                .any(|k| line.starts_with(k))
+    })
+}
+
 /// Похож ли файл на контракт по содержимому (T-05): ключ верхнего уровня
 /// `openapi:`/`asyncapi:`/`swagger:` в первых строках (комментарии и
 /// документные разделители YAML пропускаются) либо расширение `.proto`.
@@ -1057,16 +1078,7 @@ fn file_looks_like_contract(path: &Path) -> bool {
     let Ok(n) = std::io::Read::read(&mut file, &mut buf) else {
         return false;
     };
-    let head = String::from_utf8_lossy(&buf[..n]);
-    // Ключ верхнего уровня: без отступа, `openapi:`/`asyncapi:`/`swagger:`
-    // (вложенные `openapi:` внутри схем и JSON-поля не в счёт).
-    head.lines().any(|line| {
-        let line = line.trim_end();
-        !line.starts_with([' ', '\t', '#'])
-            && ["openapi:", "asyncapi:", "swagger:"]
-                .iter()
-                .any(|k| line.starts_with(k))
-    })
+    content_looks_like_contract(&String::from_utf8_lossy(&buf[..n]))
 }
 
 /// Сколько байт файла читается при опознании контракта по содержимому (T-05).

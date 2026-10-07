@@ -59,6 +59,8 @@ pub struct Config {
     pub evidence: EvidenceConfig,
     /// Требование исполняемой проверки инвариантов (ADR-050).
     pub trace: TraceConfig,
+    /// Проверки дрейфа «модель ↔ код» (волна C: C3 за флагом).
+    pub drift: DriftConfig,
     /// Пути к ассетам, отчётам и сессиям.
     pub paths: PathsConfig,
     /// Откуда конфиг загружен (нужно `harness_run` для горячего
@@ -1483,6 +1485,21 @@ impl Default for TraceConfig {
     }
 }
 
+/// Секция `[drift]`: проверки дрейфа «модель ↔ код» (волна C 0.3.14).
+///
+/// Дефолт off — обратная совместимость: находка `nfr-metric-missing`
+/// появляется только при осознанном включении (`[drift] nfr_metric_check =
+/// true` в конфиге кейса).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DriftConfig {
+    /// C3: метрика из `verification` NFR (`snake_case` с суффиксом
+    /// `_seconds`/`_total`/`_bytes`/`_ratio`) обязана встречаться в коде CMP,
+    /// реализующих NFR (`implements`), иначе warn-находка
+    /// `nfr-metric-missing`.
+    pub nfr_metric_check: bool,
+}
+
 impl ExecutableRequired {
     /// Severity находки `ad-text-only` (`None` — находки нет).
     #[must_use]
@@ -1812,6 +1829,7 @@ impl Default for Config {
             gate: GateConfig::default(),
             evidence: EvidenceConfig::default(),
             trace: TraceConfig::default(),
+            drift: DriftConfig::default(),
             paths: PathsConfig::default(),
             loaded_from: None,
         }

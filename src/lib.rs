@@ -27,6 +27,7 @@ pub mod adr_registry;
 #[cfg(feature = "harness")]
 pub mod agent;
 pub mod agentsmd;
+pub mod arch_diff;
 pub mod archify;
 pub mod archunit;
 pub mod assets;
@@ -65,6 +66,7 @@ pub mod harness_env;
 pub mod hash;
 pub mod hook;
 pub mod hooks;
+pub mod imports;
 pub mod injection;
 pub mod judge;
 pub mod judge_cache;

@@ -4448,3 +4448,193 @@ fn policy_export_without_deployment_reports_and_exits_zero() {
         .success()
         .stdout(contains("не содержит инвариантов"));
 }
+
+// ---------------------------------------------------------------------------
+// `arch-be arch-diff` (волна K, ADR-063): демо-сценарий раздела 9 задания —
+// ветка agent/direct-ledger-write на фикстуре salary-payments-формы.
+// ---------------------------------------------------------------------------
+
+/// git в каталоге с тестовой идентичностью (изоляция AD-7, как в lib-тестах).
+fn git_fixture(dir: &Path, args: &[&str]) {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("GIT_AUTHOR_NAME", "t")
+        .env("GIT_AUTHOR_EMAIL", "t@t")
+        .env("GIT_COMMITTER_NAME", "t")
+        .env("GIT_COMMITTER_EMAIL", "t@t")
+        .env("GIT_AUTHOR_DATE", "2026-01-01T00:00:00Z")
+        .env("GIT_COMMITTER_DATE", "2026-01-01T00:00:00Z")
+        .output()
+        .expect("git");
+    assert!(
+        out.status.success(),
+        "git {}: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Пишет файл фикстуры (родители создаются).
+fn write_fixture(dir: &Path, name: &str, content: &str) {
+    let p = dir.join(name);
+    if let Some(parent) = p.parent() {
+        std::fs::create_dir_all(parent).expect("mkdir");
+    }
+    std::fs::write(&p, content).expect("write");
+}
+
+/// Кейс «зарплатные реестры»: приём (CMP-001), ядро (CMP-004), оркестратор
+/// (CMP-009); AD-2 с охранником C-007; base-коммит, затем правка «агента» —
+//  прямая запись в ядро в обход оркестратора + строка подключения к БД.
+fn arch_diff_demo_repo(home: &Path) -> PathBuf {
+    let repo = home.join("case");
+    std::fs::create_dir_all(&repo).expect("mkdir");
+    write_fixture(
+        &repo,
+        "model/CMP-001-intake.md",
+        "---\nid: CMP-001\ntype: cmp\ntitle: Приём реестров\nstatus: adopted\ncode_roots: [skeleton/intake]\ndepends_on: [CMP-009]\n---\nПриём.\n",
+    );
+    write_fixture(
+        &repo,
+        "model/CMP-004-ledger.md",
+        "---\nid: CMP-004\ntype: cmp\ntitle: \"Ядро: счета и проводки\"\nstatus: adopted\ncode_roots: [skeleton/ledger]\n---\nЯдро.\n",
+    );
+    write_fixture(
+        &repo,
+        "model/CMP-009-orchestrator.md",
+        "---\nid: CMP-009\ntype: cmp\ntitle: Оркестратор\nstatus: adopted\ncode_roots: [skeleton/orchestrator]\n---\nОркестратор.\n",
+    );
+    write_fixture(
+        &repo,
+        "model/AD-2-ledger-via-orchestrator.md",
+        "---\nid: AD-2\ntype: ad\ntitle: Проводки только через Оркестратор\nstatus: accepted\naffects: [CMP-001]\nverified_by: [C-007]\n---\nИнвариант.\n",
+    );
+    write_fixture(
+        &repo,
+        "CONSTRAINTS.yaml",
+        "rules:\n  - id: C-007\n    name: no-direct-ledger-write\n    type: must_not_contain\n    glob: 'skeleton/intake/**'\n    pattern: 'ledger_db'\n",
+    );
+    write_fixture(
+        &repo,
+        "skeleton/intake/writer.py",
+        "from skeleton.orchestrator import api\n\ndef write():\n    api.post()\n",
+    );
+    write_fixture(
+        &repo,
+        "skeleton/orchestrator/api.py",
+        "def post():\n    pass\n",
+    );
+    write_fixture(
+        &repo,
+        "skeleton/ledger/client.py",
+        "def post():\n    pass\n",
+    );
+    git_fixture(&repo, &["init", "-q", "-b", "main"]);
+    git_fixture(&repo, &["add", "-A"]);
+    git_fixture(&repo, &["commit", "-q", "-m", "base"]);
+    // Правка «агента».
+    write_fixture(
+        &repo,
+        "skeleton/intake/writer.py",
+        "from skeleton.orchestrator import api\nfrom skeleton.ledger import client\nimport ledger_db\n\ndef write():\n    client.post()\n",
+    );
+    write_fixture(
+        &repo,
+        "skeleton/intake/config.yaml",
+        "dsn: \"postgres://ledger-db:5432/ledger\"\n",
+    );
+    git_fixture(&repo, &["add", "-A"]);
+    git_fixture(&repo, &["commit", "-q", "-m", "agent/direct-ledger-write"]);
+    repo
+}
+
+/// md-экран демо-сценария: новое ребро вне модели, задетый инвариант,
+/// новое хранилище, предложение модели; информационный exit 0.
+#[test]
+fn arch_diff_md_demo_screen() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let home = tmp.path();
+    let repo = arch_diff_demo_repo(home);
+    arch_cmd(home)
+        .args(["arch-diff", "--repo"])
+        .arg(repo.as_os_str())
+        .args(["--base", "main~1"])
+        .assert()
+        .success()
+        .stdout(contains("Архитектурный дифф"))
+        .stdout(contains("в модели: НЕТ"))
+        .stdout(contains("основание: skeleton/intake/writer.py:2"))
+        .stdout(contains("store:postgres://ledger-db:5432"))
+        .stdout(contains("AD-2"))
+        .stdout(contains(
+            "1. model/CMP-001-intake.md: depends_on += CMP-004",
+        ))
+        .stdout(contains("⚠ противоречит AD-2"));
+}
+
+/// `--fail-on undeclared-edge` — exit 1 на ребре вне модели; `--fail-on
+/// breaking-contract` на том же диффе — exit 0 (контрактов нет).
+#[test]
+fn arch_diff_fail_on_exit_codes() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let home = tmp.path();
+    let repo = arch_diff_demo_repo(home);
+    arch_cmd(home)
+        .args(["arch-diff", "--repo"])
+        .arg(repo.as_os_str())
+        .args(["--base", "main~1", "--fail-on", "undeclared-edge"])
+        .assert()
+        .code(1);
+    arch_cmd(home)
+        .args(["arch-diff", "--repo"])
+        .arg(repo.as_os_str())
+        .args(["--base", "main~1", "--fail-on", "breaking-contract"])
+        .assert()
+        .success();
+    arch_cmd(home)
+        .args(["arch-diff", "--repo"])
+        .arg(repo.as_os_str())
+        .args(["--base", "main~1", "--fail-on", "nope"])
+        .assert()
+        .failure(); // неизвестное условие — ошибка использования (anyhow → exit 1)
+}
+
+/// json: контракт `arch-be/arch-diff/v1` читается машиной; mermaid — валидный
+/// flowchart; без изменений — одна строка «нет изменений» и exit 0.
+#[test]
+fn arch_diff_json_mermaid_and_empty() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let home = tmp.path();
+    let repo = arch_diff_demo_repo(home);
+
+    let out = arch_cmd(home)
+        .args(["arch-diff", "--repo"])
+        .arg(repo.as_os_str())
+        .args(["--base", "main~1", "--format", "json"])
+        .assert()
+        .success();
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.get_output().stdout).expect("json-контракт");
+    assert_eq!(v["schema"], "arch-be/arch-diff/v1");
+    assert!(v["added_edges"].is_array(), "{v}");
+
+    arch_cmd(home)
+        .args(["arch-diff", "--repo"])
+        .arg(repo.as_os_str())
+        .args(["--base", "main~1", "--format", "mermaid"])
+        .assert()
+        .success()
+        .stdout(contains("flowchart LR"))
+        .stdout(contains("CMP_001"));
+
+    // Без архитектурных изменений (base == head) — честный пустой экран.
+    arch_cmd(home)
+        .args(["arch-diff", "--repo"])
+        .arg(repo.as_os_str())
+        .args(["--base", "main"])
+        .assert()
+        .success()
+        .stdout(contains("Архитектурных изменений нет."));
+}

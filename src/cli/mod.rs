@@ -3,6 +3,7 @@
 //! обработчики групп подкоманд — в подмодулях `cli::*`).
 
 mod agent;
+mod arch_diff;
 mod archify;
 mod archunit;
 mod automation;
@@ -30,6 +31,7 @@ use arch_harness::llm::LlmRegistry;
 
 #[cfg(feature = "harness")]
 use agent::{RunOptions, cmd_run};
+use arch_diff::cmd_arch_diff;
 use archify::{ArchifyCmd, cmd_archify};
 use archunit::{ArchunitCmd, cmd_archunit};
 #[cfg(feature = "harness")]
@@ -567,6 +569,32 @@ enum Cmd {
         /// Каталог вывода (по умолчанию <repo>/docs/reverse).
         #[arg(long)]
         out: Option<PathBuf>,
+    },
+    /// Архитектурный дифф PR (волна K, ADR-063): что изменилось в системе
+    /// между ревизиями — связи компонентов, внешние системы, хранилища,
+    /// контракты, NFR, задетые инварианты, предложение правки модели.
+    /// Информационный: exit 0, кроме --fail-on (тогда exit 1).
+    ArchDiff {
+        /// Корень репозитория.
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        /// База диффа (ветка/тег/sha или диапазон A...B).
+        #[arg(long)]
+        base: String,
+        /// Голова диффа (по умолчанию HEAD).
+        #[arg(long)]
+        head: Option<String>,
+        /// Формат: md (один экран) | mermaid | json (arch-be/arch-diff/v1) | sarif.
+        #[arg(long, default_value = "md")]
+        format: String,
+        /// Заявленный триггер значимости (`имя=true`; повторяемый; словарь —
+        /// как у `control score`).
+        #[arg(long = "trigger")]
+        trigger: Vec<String>,
+        /// Красный выход (exit 1) при фактах: undeclared-edge,
+        /// breaking-contract, invariant-touched (через запятую).
+        #[arg(long, value_delimiter = ',')]
+        fail_on: Vec<String>,
     },
     /// `ArchUnit`-мост: JVM-гейты из `CONSTRAINTS.yaml` настоящим `ArchUnit`
     /// (ADR-039): генерация `JUnit`-теста, standalone-гейт, загрузка jar'ов.
@@ -1409,7 +1437,7 @@ pub(crate) async fn run() -> Result<()> {
                 std::process::exit(1);
             }
         }
-        Some(Cmd::Model { cmd }) => cmd_model(cmd)?,
+        Some(Cmd::Model { cmd }) => cmd_model(&cfg, cmd)?,
         Some(Cmd::Trace { cmd }) => cmd_trace(&cfg, cmd)?,
         Some(Cmd::Nfr { cmd }) => cmd_nfr(cmd)?,
         Some(Cmd::Skills { cmd }) => cmd_skills(&cfg, cmd)?,
@@ -1520,6 +1548,22 @@ pub(crate) async fn run() -> Result<()> {
         Some(Cmd::Worktree { cmd }) => cmd_worktree(&cfg, cmd).await?,
         Some(Cmd::Fleet { cmd }) => cmd_fleet(&cfg, cmd).await?,
         Some(Cmd::Survey { repo, out }) => cmd_survey(&repo, out.as_deref())?,
+        Some(Cmd::ArchDiff {
+            repo,
+            base,
+            head,
+            format,
+            trigger,
+            fail_on,
+        }) => cmd_arch_diff(
+            &cfg,
+            &repo,
+            &base,
+            head.as_deref(),
+            &format,
+            &trigger,
+            &fail_on,
+        )?,
         Some(Cmd::Archunit { cmd }) => cmd_archunit(cmd).await?,
         Some(Cmd::Connect {
             host,
