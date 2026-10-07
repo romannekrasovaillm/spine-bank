@@ -37,6 +37,9 @@ pub struct Anchor {
     pub evidence: String,
     /// Почему не достигнут и что закрыть (`None` — достигнут).
     pub why_not: Option<String>,
+    /// Предупреждения, не меняющие достижение якоря (схема «warn → error по
+    /// флагу», ADR-065): измеренная правда о якоре, которая пока не решает.
+    pub warnings: Vec<String>,
 }
 
 /// Положение контура на шкале доверия.
@@ -134,7 +137,7 @@ pub fn assess_with(
     let anchors = vec![
         anchor_journal(repo),
         anchor_gate_was_red(repo),
-        anchor_rules(repo),
+        anchor_rules(repo, cfg),
         anchor_redteam(repo),
         anchor_verdict(repo, &report, cfg),
     ];
@@ -165,6 +168,7 @@ fn anchor_journal(repo: &Path) -> Anchor {
                  через него — журнал вызовов и есть доказательство"
                     .to_string(),
             ),
+            warnings: Vec::new(),
         };
     }
     let entries = crate::mcp_journal::read_entries(&path);
@@ -186,6 +190,7 @@ fn anchor_journal(repo: &Path) -> Anchor {
              не пользуются (`tools/list` и `tools/call` пишутся в журнал)"
                 .to_string()
         }),
+        warnings: Vec::new(),
     }
 }
 
@@ -233,13 +238,24 @@ fn anchor_gate_was_red(repo: &Path) -> Anchor {
              начала работы"
                 .to_string()
         }),
+        warnings: Vec::new(),
     }
 }
 
 /// Якорь 3: правила сопровождаются — у каждого владелец и срок, ни одно не
 /// просрочено, и хотя бы одно проверяет ПОВЕДЕНИЕ, а не наличие текста
 /// (правило на упоминание зеленеет и когда о инварианте просто написали).
-fn anchor_rules(repo: &Path) -> Anchor {
+///
+/// Волна B (B3, ADR-065): «проверяет поведение» по ТИПУ — заявление; по
+/// измерению зубьев (`.arch-handoff/teeth.json`, пишет `arch-be rules teeth
+/// --save`) — факт. Режим по умолчанию не ломает прежнее условие ступени:
+/// измерение (или его отсутствие) показывается предупреждением якоря
+/// (`warnings`). По флагу `[trust] require_teeth = true` условие меняется на
+/// измеренное: при несущих инвариантах (`load_bearing: true` в модели)
+/// каждый обязан быть покрыт правилом с подтверждёнными зубьями; без
+/// несущих — доля таких правил не ниже `[trust] behaviour_share_min`
+/// (дефолт 0.2; порог — решение архитектора, не зашито).
+fn anchor_rules(repo: &Path, cfg: &Config) -> Anchor {
     let Some(path) = crate::control::resolve_constraints_path(repo, None) else {
         return Anchor {
             n: 3,
@@ -251,6 +267,7 @@ fn anchor_rules(repo: &Path) -> Anchor {
                  контур проверяет не инварианты, а привычки"
                     .to_string(),
             ),
+            warnings: Vec::new(),
         };
     };
     let Ok(resolved) = crate::control::load_constraints_resolved(&path) else {
@@ -264,9 +281,11 @@ fn anchor_rules(repo: &Path) -> Anchor {
                  находку"
                     .to_string(),
             ),
+            warnings: Vec::new(),
         };
     };
     let rules = &resolved.rules;
+    let rule_refs: Vec<&crate::control::FitnessRule> = rules.iter().collect();
     let total = rules.len();
     let with_owner = rules.iter().filter(|r| has_text(&r.owner)).count();
     let expired: Vec<&str> = rules
@@ -278,30 +297,118 @@ fn anchor_rules(repo: &Path) -> Anchor {
         })
         .map(|r| r.name.as_str())
         .collect();
+    // Заявлено ТИПОМ правила (поведение прежних версий; волна B: это не факт).
     let behaviour = rules
         .iter()
         .filter(|r| crate::control::BEHAVIOUR_RULE_KINDS.contains(&r.kind.as_str()))
         .count();
-    let met = total > 0 && with_owner == total && expired.is_empty() && behaviour > 0;
+    // Измерено (B1): зубья из сохранённого файла, без пересчёта.
+    let teeth = crate::control::teeth::load(repo);
+    let teeth_groups = crate::control::teeth::groups(&rule_refs, teeth.as_ref());
+    let confirmed = teeth_groups.confirmed.len();
+    // Покрытие инвариантов: по типу правила (как раньше) и по зубьям.
+    let coverage = crate::rule_templates::ad_coverage(repo).ok().flatten();
+    let uncovered_ads: Vec<String> = coverage
+        .as_ref()
+        .map(|c| ads_without_teeth(c, &rule_refs, teeth.as_ref()))
+        .unwrap_or_default();
+    let load_bearing_uncovered: Vec<String> = coverage
+        .as_ref()
+        .map(|c| {
+            c.entries
+                .iter()
+                .filter(|e| e.load_bearing && uncovered_ads.contains(&e.ad))
+                .map(|e| e.ad.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Условие ступени по измерению (B3): при несущих AD — каждый покрыт
+    // правилом с подтверждёнными зубьями; без несущих — доля не ниже порога.
+    let share_min = cfg.trust.behaviour_share_min;
+    let measured_condition: std::result::Result<(), String> = match &teeth {
+        None => Err(
+            "зубья правил не измерены (`arch-be rules teeth --save`) — «проверяют \
+             поведение» заявлено типом правила, а не измерением"
+                .to_string(),
+        ),
+        Some(_) if !load_bearing_uncovered.is_empty() => Err(format!(
+            "несущие инварианты без правила с подтверждёнными зубьями: {}",
+            load_bearing_uncovered.join(", ")
+        )),
+        Some(_) if coverage.as_ref().is_some_and(|c| c.load_bearing_defined) => Ok(()),
+        Some(_) => {
+            let share = if total == 0 {
+                0.0
+            } else {
+                confirmed as f64 / total as f64
+            };
+            if share + f64::EPSILON >= share_min {
+                Ok(())
+            } else {
+                Err(format!(
+                    "правил с подтверждёнными зубьями {confirmed} из {total} ({:.0} %) — \
+                     ниже порога [trust] behaviour_share_min = {:.0} %",
+                    share * 100.0,
+                    share_min * 100.0
+                ))
+            }
+        }
+    };
+    let strict = cfg.trust.require_teeth;
+    let base_met = total > 0 && with_owner == total && expired.is_empty();
+    let met = if strict {
+        base_met && measured_condition.is_ok()
+    } else {
+        base_met && behaviour > 0
+    };
+    // Предупреждения (warn-фаза): измеренная правда, которая пока не решает.
+    let mut warnings: Vec<String> = Vec::new();
+    if !strict {
+        match &measured_condition {
+            Err(reason) if teeth.is_some() => warnings.push(format!(
+                "замер зубьев: {reason} — в режиме [trust] require_teeth = true \
+                 ступень 3 была бы недостигнута"
+            )),
+            Err(_) => warnings.push(
+                "зубья правил не измерены: доля поведенческих заявлена типом правила, \
+                 а не измерением (`arch-be rules teeth --save`)"
+                    .to_string(),
+            ),
+            Ok(()) => {}
+        }
+    }
     let mut evidence = format!(
         "правил: {total}, с владельцем: {with_owner}, просрочено: {}; \
-         проверяют поведение: {behaviour}",
+         проверяют поведение (по типу): {behaviour}",
         expired.len()
     );
+    // Измеренная доля — рядом с заявленной, иначе «по типу» читалось бы как факт.
+    match &teeth {
+        Some(measurement) => {
+            let _ = write!(
+                evidence,
+                "; с подтверждёнными зубьями: {confirmed} из {total} (измерение {})",
+                measurement.measured_at
+            );
+        }
+        None => {
+            let _ = write!(evidence, "; зубья не измерены");
+        }
+    }
     // Регистр FP — доказательство, что правила ревизуют, а не только завели.
     let marks = crate::digest::fp_register_read(&crate::digest::fp_register_path(repo));
     let _ = write!(evidence, "; пометок FP: {}", marks.len());
-    // Покрытие инвариантов исполняемыми проверками (ADR-050): условие ступени
-    // не меняется (`behaviour > 0`), но деталь показывает, сколько инвариантов
-    // реально проверяется поведением — иначе «правила сопровождаются» читается
-    // как «инварианты проверяются», а это разные утверждения.
-    if let Ok(Some(coverage)) = crate::rule_templates::ad_coverage(repo) {
-        let total_ads = coverage.total();
+    // Покрытие инвариантов исполняемыми проверками (ADR-050): деталь
+    // показывает, сколько инвариантов реально проверяется, — иначе «правила
+    // сопровождаются» читается как «инварианты проверяются».
+    if let Some(c) = &coverage {
+        let total_ads = c.total();
         if total_ads > 0 {
             let _ = write!(
                 evidence,
                 "; инвариантов с проверкой поведения: {} из {total_ads}",
-                coverage.covered().len()
+                c.covered().len()
             );
         }
     }
@@ -316,12 +423,28 @@ fn anchor_rules(repo: &Path) -> Anchor {
         if !expired.is_empty() {
             reasons.push(format!("просрочены: {}", expired.join(", ")));
         }
-        if behaviour == 0 {
+        if strict {
+            if let Err(reason) = &measured_condition {
+                reasons.push(reason.clone());
+            }
+        } else if behaviour == 0 {
             reasons.push(
                 "ни одно правило не проверяет поведение — только наличие текста \
                  (кандидат дают `rules_suggest` и `rules-report`)"
                     .to_string(),
             );
+        }
+        // Приёмка B3: причина называет непокрытые инварианты поимённо.
+        if !uncovered_ads.is_empty() {
+            reasons.push(format!(
+                "инварианты без правила с подтверждёнными зубьями{}: {}",
+                if teeth.is_some() {
+                    ""
+                } else {
+                    " (зубья не измерены)"
+                },
+                uncovered_ads.join(", ")
+            ));
         }
         reasons.join("; ")
     });
@@ -331,7 +454,44 @@ fn anchor_rules(repo: &Path) -> Anchor {
         met,
         evidence,
         why_not,
+        warnings,
     }
+}
+
+/// Инварианты модели без правила с подтверждёнными зубьями (B3): по измерению
+/// `.arch-handoff/teeth.json`, а без него — по типу правила (тогда список —
+/// заявление по типам, а не измеренный факт). Ссылки `verified_by` и `ad:`
+/// правила сопоставляются по id/имени (канон `rule_ref_eq`).
+fn ads_without_teeth(
+    coverage: &crate::rule_templates::AdCoverage,
+    rules: &[&crate::control::FitnessRule],
+    teeth: Option<&crate::control::teeth::TeethReport>,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    for entry in &coverage.entries {
+        let covered = entry.rules.iter().any(|link| {
+            let rule = rules.iter().find(|r| {
+                crate::rule_templates::rule_ref_eq(
+                    r.id.as_deref().unwrap_or(&r.name),
+                    &link.reference,
+                ) || crate::rule_templates::rule_ref_eq(&r.name, &link.reference)
+            });
+            match (rule, teeth) {
+                (Some(rule), Some(t)) => {
+                    t.status_of(rule) == Some(crate::control::teeth::TeethStatus::Confirmed)
+                }
+                // Без измерения — заявление по типу (поведение прежних версий).
+                _ => link
+                    .kind
+                    .as_deref()
+                    .is_some_and(|k| crate::control::BEHAVIOUR_RULE_KINDS.contains(&k)),
+            }
+        });
+        if !covered {
+            out.push(entry.ad.clone());
+        }
+    }
+    out
 }
 
 /// Якорь 4: пакет защищён ИЗМЕРЕННО — доля обнаружения мутационного прогона
@@ -354,6 +514,7 @@ fn anchor_redteam(repo: &Path) -> Anchor {
                  измерения не аргумент"
                     .to_string(),
             ),
+            warnings: Vec::new(),
         };
     };
     let met = summary.passed();
@@ -393,6 +554,7 @@ fn anchor_redteam(repo: &Path) -> Anchor {
                 })
             }
         }),
+        warnings: Vec::new(),
     }
 }
 
@@ -495,6 +657,7 @@ fn anchor_verdict(repo: &Path, report: &gate::GateReport, cfg: &Config) -> Ancho
             )
         ),
         why_not: (!met).then(|| gaps.join("; ")),
+        warnings: Vec::new(),
     }
 }
 
@@ -646,6 +809,10 @@ pub fn render(trust: &Trust) -> String {
         if let Some(why) = &a.why_not {
             let _ = writeln!(out, "        → {why}");
         }
+        for warning in &a.warnings {
+            // warn-фаза (ADR-065): видно, но не решает.
+            let _ = writeln!(out, "        ⚠ {warning}");
+        }
     }
     if !trust.blockers.is_empty() {
         let _ = writeln!(out);
@@ -694,6 +861,7 @@ pub fn to_json(trust: &Trust) -> serde_json::Value {
             "met": a.met,
             "evidence": a.evidence,
             "why_not": a.why_not,
+            "warnings": a.warnings,
         })).collect::<Vec<_>>(),
     })
 }
@@ -733,6 +901,173 @@ mod tests {
             ),
         )
         .expect("отчёт");
+    }
+
+    // --- B3 (волна B 0.3.14, ADR-065): ступень 3 по измеренным зубьям --------
+
+    /// Реестр с владельцем/сроком у каждого правила (значения — в тексте
+    /// вызывающего): `extra_rules` — тела правил YAML.
+    fn repo_with_registry(dir: &Path, rules_yaml: &str) {
+        std::fs::create_dir_all(dir.join(".arch-handoff")).expect("mkdir");
+        std::fs::write(
+            dir.join(".arch-handoff/CONSTRAINTS.yaml"),
+            format!("rules:\n{rules_yaml}"),
+        )
+        .expect("constraints");
+        std::fs::write(dir.join("ARCHITECTURE-SPINE.md"), "# Spine\n").expect("spine");
+    }
+
+    /// Модель с одним инвариантом: `load_bearing` и ссылка `verified_by` —
+    /// параметры фикстуры.
+    fn model_with_ad(dir: &Path, load_bearing: bool, verified_by: &str) {
+        std::fs::create_dir_all(dir.join("model")).expect("model");
+        std::fs::write(
+            dir.join("model/AD-001-idempotentnost.md"),
+            format!(
+                "---\nid: AD-001\ntype: ad\ntitle: \"Идемпотентность\"\nstatus: \"ADOPTED\"\n\
+                 load_bearing: {load_bearing}\nverified_by: [{verified_by}]\n---\n\n\
+                 - **Binds**: Приём\n- **Prevents**: дубли\n- **Rule**: ключ обязателен\n"
+            ),
+        )
+        .expect("ad");
+    }
+
+    /// Замерить зубья фикстуры и сохранить `.arch-handoff/teeth.json` (как
+    /// `arch-be rules teeth --save`).
+    fn measure_and_save_teeth(dir: &Path) -> crate::control::teeth::TeethReport {
+        let report = crate::control::teeth::measure(dir, None).expect("измерение");
+        crate::control::teeth::save(dir, &report).expect("сохранение");
+        report
+    }
+
+    /// Режим по умолчанию (warn-фаза ADR-065): без измерения зубьев условие
+    /// ступени прежнее (тип правила), но якорь предупреждает, что доля
+    /// «поведенческих» заявлена типом, а не измерением.
+    #[test]
+    fn anchor_three_warns_but_keeps_legacy_semantics_without_measurement() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        repo_with_registry(
+            dir,
+            "  - id: C-001\n    name: ci_green\n    type: command_succeeds\n    \
+             command: 'true'\n    severity: error\n    owner: OWNER-1\n    expiry: '2099-01-01'\n",
+        );
+        let anchor = anchor_rules(dir, &Config::default());
+        // `command: 'true'` по типу «поведенческое» — наследие 0.3.13: без
+        // измерения ступень не ломается (warn → error только по флагу).
+        assert!(anchor.met, "наследие не ломается: {anchor:?}");
+        assert!(
+            anchor.warnings.iter().any(|w| w.contains("не измерены")),
+            "предупреждение про отсутствие измерения: {:?}",
+            anchor.warnings
+        );
+        assert!(anchor.evidence.contains("зубья не измерены"), "{anchor:?}");
+    }
+
+    /// Строгий режим (`[trust] require_teeth = true`): тривиальная команда не
+    /// даёт зубьев — ступень 3 недостижима и причина называет долю и порог.
+    #[test]
+    fn anchor_three_strict_mode_counts_only_confirmed_teeth() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        repo_with_registry(
+            dir,
+            "  - id: C-001\n    name: ci_green\n    type: command_succeeds\n    \
+             command: 'true'\n    severity: error\n    owner: OWNER-1\n    expiry: '2099-01-01'\n  \
+             - id: C-002\n    name: no_pan\n    type: must_not_contain\n    \
+             glob: 'skeleton/**/*.py'\n    pattern: 'PAN'\n    severity: error\n    \
+             owner: OWNER-1\n    expiry: '2099-01-01'\n",
+        );
+        let mut strict = Config::default();
+        strict.trust.require_teeth = true;
+        // Без измерения: недостигнута с честной причиной.
+        let anchor = anchor_rules(dir, &strict);
+        assert!(!anchor.met, "без измерения — не достигнута");
+        let why = anchor.why_not.clone().expect("причина");
+        assert!(why.contains("не измерены"), "{why}");
+
+        // Измерение: 'true' тривиальна, no_pan с пустым набором — glob_empty:
+        // подтверждённых 0 из 2 — ниже дефолтного порога 20 %.
+        measure_and_save_teeth(dir);
+        let anchor = anchor_rules(dir, &strict);
+        assert!(
+            !anchor.met,
+            "тривиальная команда зубьев не даёт: {anchor:?}"
+        );
+        let why = anchor.why_not.clone().expect("причина");
+        assert!(why.contains("behaviour_share_min"), "{why}");
+        assert!(why.contains("0 из 2"), "{why}");
+        // А в режиме по умолчанию тот же замер — предупреждение, не вердикт.
+        let soft = anchor_rules(dir, &Config::default());
+        assert!(soft.met, "warn-фаза не ломает: {soft:?}");
+        assert!(
+            soft.warnings.iter().any(|w| w.contains("require_teeth")),
+            "предупреждение зовёт включить строгий режим: {:?}",
+            soft.warnings
+        );
+    }
+
+    /// Несущий инвариант (`load_bearing: true`) обязан быть покрыт правилом с
+    /// ПОДТВЕРЖДЁННЫМИ зубьями: замер подтверждает — ступень взята; набор
+    /// правила пуст — ступень недостижима и причина называет инвариант.
+    #[test]
+    fn anchor_three_load_bearing_ads_need_confirmed_teeth() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        let registry = "  - id: C-100\n    name: no_pan\n    type: must_not_contain\n    \
+             glob: 'skeleton/**/*.py'\n    pattern: 'PAN'\n    severity: error\n    \
+             owner: OWNER-1\n    expiry: '2099-01-01'\n  \
+             - id: C-101\n    name: ci_green\n    type: command_succeeds\n    \
+             command: 'true'\n    severity: error\n    owner: OWNER-1\n    expiry: '2099-01-01'\n";
+        repo_with_registry(dir, registry);
+        model_with_ad(dir, true, "C-100");
+        // Файл набора есть — мутация вставкой даст находку: зубья подтверждены.
+        std::fs::create_dir_all(dir.join("skeleton")).expect("skeleton");
+        std::fs::write(dir.join("skeleton/pay.py"), "def pay():\n    return 1\n").expect("py");
+        let report = measure_and_save_teeth(dir);
+        assert_eq!(report.confirmed(), 1, "{:?}", report.entries);
+
+        let mut strict = Config::default();
+        strict.trust.require_teeth = true;
+        let anchor = anchor_rules(dir, &strict);
+        assert!(
+            anchor.met,
+            "несущий AD покрыт правилом с зубьями — ступень взята: {}",
+            anchor.why_not.clone().unwrap_or_default()
+        );
+
+        // Вариант-контраст: файлов под glob нет — зубья не подтверждены,
+        // причина называет несущий инвариант поимённо.
+        std::fs::remove_file(dir.join("skeleton/pay.py")).expect("remove");
+        let report = measure_and_save_teeth(dir);
+        assert_eq!(report.confirmed(), 0, "{:?}", report.entries);
+        let anchor = anchor_rules(dir, &strict);
+        assert!(!anchor.met, "{anchor:?}");
+        let why = anchor.why_not.clone().expect("причина");
+        assert!(why.contains("AD-001"), "несущий AD назван: {why}");
+        assert!(why.contains("несущие инварианты"), "{why}");
+    }
+
+    /// Без несущих инвариантов в строгом режиме действует доля; в причине при
+    /// недостаче — непокрытые инварианты поимённо (приёмка B3 на эталонном
+    /// кейсе: текстовый реестр + модель с AD).
+    #[test]
+    fn anchor_three_names_uncovered_ads() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        // Текстовый реестр (ни одного поведенческого типа) — как эталонные
+        // кейсы волны B: ступень 3 не выдаётся и AD названы в причине.
+        repo_with_registry(
+            dir,
+            "  - id: C-001\n    name: spine_binds\n    type: must_contain\n    \
+             glob: 'ARCHITECTURE-SPINE.md'\n    pattern: 'Binds'\n    severity: error\n    \
+             owner: OWNER-1\n    expiry: '2099-01-01'\n",
+        );
+        model_with_ad(dir, false, "C-001");
+        let anchor = anchor_rules(dir, &Config::default());
+        assert!(!anchor.met, "текстовый реестр — ступень 3 не выдаётся");
+        let why = anchor.why_not.clone().expect("причина");
+        assert!(why.contains("AD-001"), "инвариант назван в причине: {why}");
     }
 
     /// Пятая ступень называет минимальный уровень независимости по отчётам, а

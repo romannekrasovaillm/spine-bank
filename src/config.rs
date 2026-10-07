@@ -798,15 +798,31 @@ pub struct TrustConfig {
     /// Уровни: `none` < `declared` < `declared_cross_family` < `launched` <
     /// `launched_cross_family`.
     pub min_independence: String,
+    /// Минимальная доля правил с подтверждёнными зубьями для ступени 3, когда
+    /// в модели нет несущих инвариантов (`load_bearing`) — читается только в
+    /// режиме `require_teeth` (B3, ADR-065). Порог — решение архитектора
+    /// ([РЕШЕНИЕ ЧЕЛОВЕКА] задания 0.3.14): дефолт 0.2, не зашит в логику.
+    pub behaviour_share_min: f64,
+    /// Строгий режим ступени 3 (схема «warn → error», ADR-065): `false`
+    /// (дефолт) — измерение зубьев показывается предупреждением якоря, условие
+    /// ступени прежнее (поведение 0.3.13 не ломается); `true` — условие
+    /// измеренное: несущие инварианты покрыты правилами с подтверждёнными
+    /// зубьями либо доля таких правил ≥ `behaviour_share_min`.
+    pub require_teeth: bool,
 }
 
 impl Default for TrustConfig {
     fn default() -> Self {
         Self {
             min_independence: crate::judge::INDEPENDENCE_DECLARED.to_string(),
+            behaviour_share_min: DEFAULT_BEHAVIOUR_SHARE_MIN,
+            require_teeth: false,
         }
     }
 }
+
+/// Дефолт порога доли правил с зубьями для ступени 3 доверия (B3, ADR-065).
+pub const DEFAULT_BEHAVIOUR_SHARE_MIN: f64 = 0.2;
 
 /// Настройки LLM-судьи рубрик (калибровка и верификация, ADR-004).
 #[derive(Debug, Clone, Serialize, Deserialize)]
