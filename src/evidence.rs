@@ -370,6 +370,12 @@ fn hash_with_alg(path: &Path, alg: &str) -> Result<(String, u64)> {
 }
 
 /// Ищет артефакт по каноническим путям (файл или каталог с ≥1 md).
+///
+/// F5: для ключей `problem` / `spec_or_delta` / `acceptance` после
+/// канонических путей ищутся активные `OpenSpec` changes — команда на `OpenSpec`
+/// не переписывает проблему, дельту спеки и сценарии приёмки второй раз.
+/// Markdown `OpenSpec` только читается: Spine его не пишет и не переписывает
+/// (правило 9, docs/openspec.md).
 fn find_artifact(change_dir: &Path, key: &str) -> Option<PathBuf> {
     for cand in candidate_paths(key) {
         let p = change_dir.join(cand);
@@ -387,7 +393,120 @@ fn find_artifact(change_dir: &Path, key: &str) -> Option<PathBuf> {
             }
         }
     }
+    if matches!(key, "problem" | "spec_or_delta" | "acceptance") {
+        return openspec_artifact(change_dir, key);
+    }
     None
+}
+
+// ---------------------------------------------------------------------------
+// F5: артефакты бандла из активных OpenSpec changes (только чтение)
+// ---------------------------------------------------------------------------
+
+/// Активные `OpenSpec` changes, видимые из каталога бандла: `openspec/changes/*`
+/// самого каталога и до двух предков выше (бандл дельты `changes/<name>/`
+/// читает change из корня репозитория); `archive/` пропускается — он уже
+/// выпущен. Порядок детерминирован: ближний корень, затем имя change.
+fn openspec_change_dirs(change_dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut dir = Some(change_dir);
+    let mut hops = 0;
+    while let Some(d) = dir {
+        if hops > 2 {
+            break;
+        }
+        if let Ok(rd) = std::fs::read_dir(d.join("openspec/changes")) {
+            let mut names: Vec<PathBuf> = rd
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.is_dir() && p.file_name().is_some_and(|n| n != "archive"))
+                .collect();
+            names.sort();
+            out.extend(names);
+        }
+        dir = d.parent();
+        hops += 1;
+    }
+    out
+}
+
+/// Есть ли в proposal секция `## Why` — без неё proposal не является
+/// формулировкой проблемы.
+fn has_why_section(text: &str) -> bool {
+    text.lines().any(|l| l.trim_start().starts_with("## Why"))
+}
+
+/// Есть ли в дельте спеки сценарии приёмки (`#### Scenario:`).
+fn has_scenarios(text: &str) -> bool {
+    text.lines()
+        .any(|l| l.trim_start().starts_with("#### Scenario:"))
+}
+
+/// Дельта-спеки change (`specs/**/spec.md`), порядок детерминирован.
+fn change_spec_files(change: &Path) -> Vec<PathBuf> {
+    dir_files(&change.join("specs"))
+        .into_iter()
+        .filter(|p| p.file_name().is_some_and(|n| n == "spec.md"))
+        .collect()
+}
+
+/// Артефакт бандла из активных `OpenSpec` changes (F5): `problem` —
+/// `proposal.md` с секцией Why; `spec_or_delta` — дельта-спека change;
+/// `acceptance` — дельта-спека со сценариями `#### Scenario:`. Первый
+/// подходящий по детерминированному порядку; `None` — подходящего нет.
+fn openspec_artifact(change_dir: &Path, key: &str) -> Option<PathBuf> {
+    for change in openspec_change_dirs(change_dir) {
+        match key {
+            "problem" => {
+                let proposal = change.join("proposal.md");
+                if proposal.is_file()
+                    && std::fs::read_to_string(&proposal).is_ok_and(|t| has_why_section(&t))
+                {
+                    return Some(proposal);
+                }
+            }
+            "spec_or_delta" => {
+                if let Some(spec) = change_spec_files(&change).into_iter().next() {
+                    return Some(spec);
+                }
+            }
+            "acceptance" => {
+                for spec in change_spec_files(&change) {
+                    let ok = std::fs::read_to_string(&spec).is_ok_and(|t| has_scenarios(&t));
+                    if ok {
+                        return Some(spec);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Путь артефакта относительно каталога бандла (для манифеста): артефакт
+/// может лежать ВЫШЕ каталога (`OpenSpec` change живёт в корне репозитория,
+/// а бандл — в `changes/<name>/`), тогда путь записывается через `..` —
+/// абсолютный путь привязывал бы манифест к машине.
+fn rel_artifact_path(change_dir: &Path, path: &Path) -> String {
+    if let Ok(rel) = path.strip_prefix(change_dir) {
+        return rel.display().to_string();
+    }
+    let change: Vec<_> = change_dir.components().collect();
+    let target: Vec<_> = path.components().collect();
+    let common = change
+        .iter()
+        .zip(target.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let mut rel = PathBuf::new();
+    for _ in common..change.len() {
+        rel.push("..");
+    }
+    for comp in &target[common..] {
+        rel.push(comp);
+    }
+    rel.display().to_string()
 }
 
 /// Собирает Evidence Bundle: манифест `EVIDENCE.yaml` в каталоге изменения.
@@ -428,9 +547,7 @@ pub fn pack_with(
                 let (hash, size) = hash_artifact(&path, HASH_ALG_SHA256)?;
                 items.push(EvidenceItem {
                     key: key.into(),
-                    path: path
-                        .strip_prefix(change_dir)
-                        .map_or_else(|_| path.display().to_string(), |p| p.display().to_string()),
+                    path: rel_artifact_path(change_dir, &path),
                     hash,
                     size,
                 });

@@ -81,3 +81,28 @@ arch-be gate --repo . --route critical          # PASS
 - Подсказка следующего шага проводника для машинного ключа ведёт к прогону
   (`evidence record` / `control gate A4 --rehearse` / `evidence pack`), а не
   к «создайте файл руками».
+
+### F5. Бандл доказательств из OpenSpec change
+
+**До фикса:** профиль бандла искал проблему/спеку/приёмку только в
+`PROBLEM.md`, `SPEC.md`, `ACCEPTANCE.md`, `DELTA.md` — команда на OpenSpec
+писала их второй раз.
+
+**После фикса:** `problem` читается и из `openspec/changes/<id>/proposal.md`
+(обязательна секция `## Why`), `spec_or_delta` — из дельты
+`openspec/changes/<id>/specs/**/spec.md`, `acceptance` — из той же дельты,
+если в ней есть сценарии `#### Scenario:`. Архив (`changes/archive/`) не
+читается; канонические файлы приоритетнее (совместимость). Spine только
+читает markdown OpenSpec — не пишет и не переписывает его. Бандл дельты
+`changes/<name>/` видит change корня репозитория; путь в манифесте — через
+`..` (без привязки к машине).
+
+```bash
+# кейс с openspec/changes/add-limits/{proposal.md, specs/payments/spec.md},
+# без PROBLEM.md/SPEC.md/ACCEPTANCE.md:
+arch-be evidence pack . --route fast
+#   + problem        openspec/changes/add-limits/proposal.md
+#   + spec_or_delta  openspec/changes/add-limits/specs/payments/spec.md
+#   + acceptance     openspec/changes/add-limits/specs/payments/spec.md
+arch-be evidence verify .   # Итог: PASS
+```

@@ -1346,3 +1346,136 @@ fn significance_record_captures_triggers_with_sources() {
     );
     assert_eq!(rec.score, rec.triggers.len());
 }
+
+// --- F5: бандл из OpenSpec change (только чтение) ----------------------------
+
+/// `OpenSpec` change-фикстура: proposal с секцией Why и дельта-спека со
+/// сценарием приёмки (содержательные — выше порога пустышки).
+fn put_openspec_change(root: &Path, change: &str) {
+    put(
+        root,
+        &format!("openspec/changes/{change}/proposal.md"),
+        &format!(
+            "# Change: {change}\n\n## Why\n\n{}\n\n## What Changes\n\n- model/CMP-001.md: компонент получает лимиты приёма платежей, чтобы повторная доставка не давала повторный эффект.\n",
+            body("Нужны лимиты на приём")
+        ),
+    );
+    put(
+        root,
+        &format!("openspec/changes/{change}/specs/payments/spec.md"),
+        &format!(
+            "# payments (delta)\n\n{}\n\n### Requirement: Idempotent intake\nThe system SHALL accept a payment at most once per idempotency key.\n\n#### Scenario: repeated delivery\n- WHEN the same request is delivered twice\n- THEN exactly one payment is created\n",
+            body("Дельта приёма")
+        ),
+    );
+}
+
+/// F5: кейс с активным `OpenSpec` change проходит бандл без
+/// PROBLEM.md/SPEC.md/ACCEPTANCE.md — проблема, дельта и приёмка читаются из
+/// change, рукой второй раз не пишутся.
+#[test]
+fn bundle_uses_openspec_change_artifacts() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let dir = tmp.path();
+    put_complete_critical(dir);
+    // Убираем дубли: у команды на OpenSpec их нет.
+    std::fs::remove_file(dir.join("PROBLEM.md")).expect("remove");
+    std::fs::remove_file(dir.join("SPEC.md")).expect("remove");
+    put_openspec_change(dir, "add-limits");
+
+    let (bundle, verdict) = pack(dir, Route::Critical).expect("pack");
+    assert!(
+        verdict.passed,
+        "бандл полон из OpenSpec change: {:?}",
+        verdict.missing
+    );
+    let by_key = |key: &str| {
+        bundle
+            .items
+            .iter()
+            .find(|i| i.key == key)
+            .map(|i| i.path.clone())
+    };
+    assert_eq!(
+        by_key("problem").as_deref(),
+        Some("openspec/changes/add-limits/proposal.md"),
+        "{:?}",
+        bundle.items
+    );
+    assert_eq!(
+        by_key("spec_or_delta").as_deref(),
+        Some("openspec/changes/add-limits/specs/payments/spec.md")
+    );
+    assert_eq!(
+        by_key("acceptance").as_deref(),
+        Some("openspec/changes/add-limits/specs/payments/spec.md"),
+        "приёмка — сценарии #### Scenario: дельты"
+    );
+    let v = verify(dir).expect("verify");
+    assert!(
+        v.passed,
+        "verify тоже читает артефакты из change: {:?} {:?}",
+        v.missing, v.tampered
+    );
+}
+
+/// F5: proposal без секции `## Why` — не формулировка проблемы; change в
+/// `archive/` (уже выпущен) не читается.
+#[test]
+fn openspec_artifact_requires_why_and_skips_archive() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let dir = tmp.path();
+    put(
+        dir,
+        "openspec/changes/no-why/proposal.md",
+        &body("Без секции Why"),
+    );
+    put_openspec_change(dir, "archive/2026-10-done");
+    assert!(
+        openspec_artifact(dir, "problem").is_none(),
+        "ни proposal без Why, ни архивный change не закрывают problem"
+    );
+    // А spec/acceptance у архивного change тоже не читаются.
+    assert!(openspec_artifact(dir, "spec_or_delta").is_none());
+    assert!(openspec_artifact(dir, "acceptance").is_none());
+}
+
+/// F5: канонический файл приоритетнее `OpenSpec` change (обратная
+/// совместимость: существующие кейсы не меняют артефакт).
+#[test]
+fn static_artifact_wins_over_openspec_change() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let dir = tmp.path();
+    put(dir, "PROBLEM.md", &body("Каноническая проблема"));
+    put_openspec_change(dir, "add-limits");
+    let found = find_artifact(dir, "problem").expect("проблема найдена");
+    assert_eq!(found, dir.join("PROBLEM.md"), "{found:?}");
+}
+
+/// F5: бандл дельты `changes/<name>/` читает `OpenSpec` change из корня
+/// репозитория; путь в манифесте — относительный через `..` (без привязки
+/// к машине).
+#[test]
+fn delta_bundle_reads_openspec_from_repo_root() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let repo = tmp.path();
+    put_openspec_change(repo, "add-limits");
+    let delta = repo.join("changes/add-limits-delta");
+    put(&delta, "RISK.md", &body("Риск"));
+    put(&delta, "ROLLBACK.md", &body("Откат"));
+    // Fast-профиль: problem/spec_or_delta/acceptance — из openspec корня.
+    let (bundle, verdict) = pack(&delta, Route::Fast).expect("pack");
+    assert!(verdict.passed, "missing: {:?}", verdict.missing);
+    let problem = bundle
+        .items
+        .iter()
+        .find(|i| i.key == "problem")
+        .expect("problem");
+    assert_eq!(
+        problem.path, "../../openspec/changes/add-limits/proposal.md",
+        "путь через `..` от каталога дельты: {:?}",
+        bundle.items
+    );
+    let v = verify(&delta).expect("verify");
+    assert!(v.passed, "{:?} {:?}", v.missing, v.tampered);
+}
