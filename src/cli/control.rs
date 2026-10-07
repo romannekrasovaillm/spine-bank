@@ -81,6 +81,19 @@ pub(crate) enum ControlCmd {
         /// принимается как есть).
         #[arg(long, num_args = 0..=1, default_missing_value = "HEAD", value_name = "GIT_REF")]
         from_diff: Option<String>,
+        /// Реплей истории (D4): маршрут и триггеры по КАЖДОМУ коммиту
+        /// диапазона (например, `v0.3.12..HEAD`). Информационный режим
+        /// измерения детектора — exit 0; несовместим с --trigger/--from-diff.
+        #[arg(
+            long,
+            value_name = "REV_RANGE",
+            conflicts_with = "trigger",
+            conflicts_with = "from_diff"
+        )]
+        replay: Option<String>,
+        /// Машиночитаемый вывод реплея (`arch-be/significance-replay/v1`).
+        #[arg(long, requires = "replay")]
+        json: bool,
     },
     /// Отчёт по реестру правил `CONSTRAINTS.yaml` (сводка, таблица карточек,
     /// находки: без owner/expiry, просроченные, `exclude_glob`, git-прокси
@@ -394,13 +407,37 @@ pub(crate) fn cmd_control(cfg: &arch_harness::config::Config, cmd: ControlCmd) -
                 std::process::exit(1);
             }
         }
-        ControlCmd::Score { trigger, from_diff } => {
+        ControlCmd::Score {
+            trigger,
+            from_diff,
+            replay,
+            json,
+        } => {
             // Пороги маршрутов — из конфига ([significance], ADR-034);
             // невалидные границы — понятная ошибка при чтении.
             let (fast_max, standard_max) = cfg
                 .significance
                 .limits()
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
+            if let Some(range) = replay {
+                // D4: реплей истории — маршрут и триггеры по каждому коммиту.
+                // Информационный режим (измерение детектора), exit 0.
+                let report = arch_harness::control::replay_significance(
+                    std::path::Path::new("."),
+                    &range,
+                    &cfg.significance.diff_globs(),
+                    (fast_max, standard_max),
+                )?;
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string(&report).expect("ReplayReport сериализуется")
+                    );
+                } else {
+                    print!("{}", arch_harness::control::render_replay(&report));
+                }
+                return Ok(());
+            }
             let mut answers = std::collections::BTreeMap::new();
             for t in &trigger {
                 let (k, v) = t
@@ -451,6 +488,11 @@ pub(crate) fn cmd_control(cfg: &arch_harness::config::Config, cmd: ControlCmd) -
                 );
                 for e in &diff.evidence {
                     println!("  diff: {e}");
+                }
+                // D3: контекст, не поднимающий маршрут (обновления версий,
+                // классификация контрактов) — виден рядом с основаниями.
+                for n in &diff.notes {
+                    println!("  заметка: {n}");
                 }
                 if !scored.undeclared.is_empty() {
                     println!(

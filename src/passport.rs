@@ -22,6 +22,7 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
+use crate::control;
 use crate::gate::{GateReport, GateStatus};
 
 /// Составляющая в блоке «Проверено»: имя, статус, сводка с числами и счёт
@@ -77,6 +78,10 @@ pub struct Passport {
     pub exit_code: i32,
     /// Заметка о маршруте (score и триггеры из диффа либо причина fail-safe).
     pub route_note: String,
+    /// Недетектируемые триггеры значимости, НЕ сработавшие в прогоне (D1):
+    /// блок маршрута обязан их назвать — иначе маршрут выглядит всевидящим,
+    /// а недобор Critical по слепому классу остаётся невидимым.
+    pub route_blind: Vec<String>,
     /// Блок 1: что проверено.
     pub checked: Vec<Checked>,
     /// Блок 2: что заявлено, но механикой не проверяется.
@@ -130,6 +135,12 @@ impl Passport {
             outcome: report.outcome.label().to_string(),
             exit_code: report.outcome.exit_code(),
             route_note: report.route_note.clone(),
+            route_blind: control::blind_triggers_unfired(
+                report.route_triggers.iter().map(String::as_str),
+            )
+            .iter()
+            .map(|t| (*t).to_string())
+            .collect(),
             checked,
             claimed: collect_claims(repo, report),
             not_checked,
@@ -184,6 +195,7 @@ impl Passport {
             "repo": self.repo,
             "route": self.route,
             "route_note": self.route_note,
+            "route_blind_triggers": self.route_blind,
             "verdict": self.outcome,
             "exit_code": self.exit_code,
             "checked": checked,
@@ -210,6 +222,22 @@ impl Passport {
             repo = self.repo,
         );
         let _ = writeln!(out, "Маршрут: {}", self.route_note);
+        // D1: слепая зона маршрута — триггеры, которые детектор диффа не
+        // умеет видеть и которые в этом прогоне не сработали. Их отсутствие
+        // в счёте — главный риск недобора Critical, и молчать о нём нельзя.
+        if self.route_blind.is_empty() {
+            let _ = writeln!(
+                out,
+                "Не проверено детектором: нет — все недетектируемые триггеры сработали"
+            );
+        } else {
+            let _ = writeln!(
+                out,
+                "Не проверено детектором: {} — видны только по заявлению автора, \
+                 их отсутствие маршрут не показывает",
+                self.route_blind.join(", ")
+            );
+        }
         let _ = writeln!(out);
         // Вступление зависит от итога: на красном «зелёный означает…» было бы
         // ложью. Красный тоже не всесилен — блоки 2 и 3 называют то, что не
@@ -526,7 +554,7 @@ pub fn summary_line(passport: &Passport) -> String {
 mod tests {
     use super::*;
     use crate::control::Route;
-    use crate::gate::{GateRequirements, run_with};
+    use crate::gate::{GateOutcome, GateRequirements, run_with};
     use std::process::Command;
 
     /// git в каталоге с тестовой идентичностью коммиттера (образец —
@@ -633,6 +661,7 @@ mod tests {
 
 **PASS** (exit 0) · маршрут Fast · репозиторий `кейс`  
 Маршрут: явный --route Fast
+Не проверено детектором: security_boundary_change, criticality_or_exception, trust_zone_change, data_contract_change, domain_ownership_change, consistency_model_change, financial_impact — видны только по заявлению автора, их отсутствие маршрут не показывает
 
 Зелёный здесь означает: механика проверила перечисленное в блоке 1 и нарушений не нашла. Он НЕ означает «выпускать» — блоки 2 и 3 говорят, на что зелёный не распространяется.
 
@@ -698,6 +727,7 @@ arch-be gate --repo кейс --format json > verdict.json && arch-be gate --repo
 
 **FAIL** (exit 1) · маршрут Fast · репозиторий `кейс`  
 Маршрут: явный --route Fast
+Не проверено детектором: security_boundary_change, criticality_or_exception, trust_zone_change, data_contract_change, domain_ownership_change, consistency_model_change, financial_impact — видны только по заявлению автора, их отсутствие маршрут не показывает
 
 Красный здесь означает: механика нашла перечисленное в блоке 1. Блоки 2 и 3 говорят, чего не поймала и она, — на это не распространяется и красный.
 
@@ -939,6 +969,142 @@ arch-be gate --repo кейс --format json > verdict.json && arch-be gate --repo
         assert!(
             hint.contains("gate") && hint.contains("--explain"),
             "{hint}"
+        );
+    }
+
+    /// D2: глоб кейса зажигает ранее слепой триггер — паспорт перестаёт
+    /// называть его непроверенным, а маршрут форсируется в Critical.
+    #[test]
+    fn passport_drops_glob_fired_blind_trigger() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        make_repo(dir, "ARCHITECTURE-SPINE.md");
+        // Новый auth-конфиг в рабочем дереве (untracked) — детектор D2 по
+        // глобу `auth/**` из настроек гейта (конфиг кейса [significance]).
+        std::fs::create_dir_all(dir.join("auth")).expect("mkdir auth");
+        std::fs::write(dir.join("auth/policy.yaml"), "allow: all\n").expect("policy");
+        let options = crate::gate::GateOptions {
+            diff_globs: crate::control::DiffGlobs {
+                security: vec!["auth/**".to_string()],
+                ..crate::control::DiffGlobs::default()
+            },
+            ..crate::gate::GateOptions::default()
+        };
+        let report = crate::gate::run_opts(
+            dir,
+            None,
+            None,
+            None,
+            (1, 4),
+            &GateRequirements::default(),
+            &options,
+        )
+        .expect("гейт");
+        assert_eq!(
+            report.route,
+            Route::Critical,
+            "security_boundary_change форсирует Critical: {}",
+            report.route_note
+        );
+        assert!(
+            report
+                .route_triggers
+                .iter()
+                .any(|t| t == "security_boundary_change"),
+            "{:?}",
+            report.route_triggers
+        );
+        let passport = Passport::build_labelled(&report, dir, "кейс");
+        assert!(
+            !passport
+                .route_blind
+                .iter()
+                .any(|t| t == "security_boundary_change"),
+            "зажжённый глобом триггер больше не слепой: {:?}",
+            passport.route_blind
+        );
+        // Остальная слепая зона на месте (financial_impact глобом не ловится).
+        assert!(
+            passport.route_blind.iter().any(|t| t == "financial_impact"),
+            "{:?}",
+            passport.route_blind
+        );
+        let page = passport.render();
+        assert!(page.contains("financial_impact"), "{page}");
+        assert!(
+            !page.contains("Не проверено детектором: security_boundary_change"),
+            "{page}"
+        );
+    }
+
+    /// D1: при явном маршруте (`--route`, без детектора диффа) все семь
+    /// недетектируемых триггеров названы в блоке маршрута — маршрут не имеет
+    /// права выглядеть всевидящим. На exit-код строка не влияет (отчёт).
+    #[test]
+    fn passport_lists_blind_triggers_of_an_explicit_route() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        make_repo(dir, "ARCHITECTURE-SPINE.md");
+        let passport = passport_of(dir);
+        assert_eq!(
+            passport.route_blind.len(),
+            control::DIFF_BLIND_TRIGGERS.len(),
+            "явный маршрут: детектор не запускался — слепы все семь"
+        );
+        let page = passport.render();
+        assert!(page.contains("Не проверено детектором: "), "{page}");
+        assert!(page.contains("security_boundary_change"), "{page}");
+        assert!(page.contains("financial_impact"), "{page}");
+        // Отчёт, не вердикт: тот же прогон, тот же exit-код.
+        assert_eq!(passport.exit_code, 0);
+        assert_eq!(passport.outcome, "PASS");
+    }
+
+    /// D1: сработавший недетектируемый триггер (заявление автора или глоб
+    /// кейса) выпадает из списка слепых — названы только оставшиеся невидимыми.
+    #[test]
+    fn passport_drops_fired_blind_triggers_from_the_list() {
+        let report = GateReport {
+            repo: std::path::PathBuf::from("."),
+            route: Route::Critical,
+            route_auto: true,
+            route_note: "auto: score 2 (security_boundary_change, new_component)".to_string(),
+            route_triggers: vec![
+                "security_boundary_change".to_string(),
+                "new_component".to_string(),
+            ],
+            components: Vec::new(),
+            outcome: GateOutcome::Pass,
+            required: Vec::new(),
+            not_checked: Vec::new(),
+            inputs: Vec::new(),
+            attestation: "abc123".to_string(),
+            passed: true,
+        };
+        let tmp = tempfile::tempdir().expect("tmp");
+        let passport = Passport::build_labelled(&report, tmp.path(), "кейс");
+        assert!(
+            !passport
+                .route_blind
+                .iter()
+                .any(|t| t == "security_boundary_change"),
+            "сработавший — не слепой: {:?}",
+            passport.route_blind
+        );
+        assert_eq!(
+            passport.route_blind.len(),
+            control::DIFF_BLIND_TRIGGERS.len() - 1,
+            "слепы шесть из семи: {:?}",
+            passport.route_blind
+        );
+        let page = passport.render();
+        assert!(!page.contains("Не проверено детектором: нет"), "{page}");
+        assert!(page.contains("trust_zone_change"), "{page}");
+        let json = passport.to_json();
+        assert_eq!(
+            json["route_blind_triggers"].as_array().map(Vec::len),
+            Some(passport.route_blind.len()),
+            "json несёт тот же список: {json}"
         );
     }
 }

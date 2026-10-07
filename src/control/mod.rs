@@ -59,17 +59,18 @@ mod exec;
 mod registry;
 pub(crate) mod report;
 mod rules;
+mod score;
 mod shadow;
 mod templates;
 mod tools;
 mod types;
 
 pub use diff_triggers::{
-    CONNECT_MANIFEST_PATH, DEFAULT_FAST_MAX, DEFAULT_STANDARD_MAX, DiffGlobs, DiffTriggers,
-    SIGNIFICANCE_TRIGGERS, SPINEIGNORE_PATH, ScoredTriggers, TriggerSource, base_rev,
-    detect_diff_triggers, detect_diff_triggers_with, normalize_base_range, score_with_sources,
-    significance_score, significance_score_with_limits, suggest_trigger, unknown_trigger_names,
-    unknown_triggers_error,
+    CONNECT_MANIFEST_PATH, DEFAULT_FAST_MAX, DEFAULT_STANDARD_MAX, DIFF_BLIND_TRIGGERS, DiffGlobs,
+    DiffTriggers, SIGNIFICANCE_TRIGGERS, SPINEIGNORE_PATH, ScoredTriggers, TriggerSource, base_rev,
+    blind_triggers_unfired, detect_diff_triggers, detect_diff_triggers_with, normalize_base_range,
+    score_with_sources, significance_score, significance_score_with_limits, suggest_trigger,
+    unknown_trigger_names, unknown_triggers_error,
 };
 pub(crate) use exec::glob_matches;
 pub use exec::{check, check_with_options, command_strings};
@@ -87,6 +88,9 @@ pub use rules::{
     ConstraintsPathResolution, HANDOFF_CONSTRAINTS_PATH, ROOT_CONSTRAINTS_PATH,
     constraints_drift_note, load_fitness_rules, load_fitness_rules_with_skips,
     resolve_constraints_path, resolve_constraints_path_detailed, rule_cards,
+};
+pub use score::{
+    MAX_REPLAY_COMMITS, ReplayEntry, ReplayReport, render_replay, replay_significance,
 };
 pub use shadow::{
     SHADOW_RECORD_PATH, SHADOW_RECORD_SCHEMA, ShadowChange, ShadowFleet, ShadowFleetChange,

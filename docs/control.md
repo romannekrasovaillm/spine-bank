@@ -52,6 +52,14 @@ standard_max = 4   # fast_max < score ≤ standard_max → Standard; выше �
 contract_globs    = ["docs/contracts/**", "contracts/**"]
 component_globs   = ["model/CMP-*"]
 integration_globs = ["model/INT-*"]
+# Глобы слепой зоны (D2): правка файла под глобом зажигает соответствующий
+# триггер. ПУСТЫ по умолчанию — без настройки эти триггеры детектор не видит
+# (паспорт вердикта называет их «не проверено детектором», D1). Шаблон —
+# плагин arch-governance, скилл fitness-rule-authoring. Глобы якорятся от
+# корня репозитория; ведущий `**/` не поддерживается (совпадёт со всем).
+security_globs       = []  # напр. ["auth/**", "deploy/network-policies/**"]
+trust_zone_globs     = []  # напр. ["deploy/mesh/**"]
+data_contract_globs  = []  # напр. ["schemas/events/**"]
 ```
 
 Контракт распознаётся и **по содержимому** (ключ верхнего уровня
@@ -98,13 +106,16 @@ git-репозитория — ошибка с понятным текстом.
 | Триггер | Механика |
 |---|---|
 | `new_component` | добавлен каталог верхнего/второго уровня с манифестом (`Cargo.toml`/`pom.xml`/`package.json`/`go.mod`), `src/` или сущность модели по `component_globs` |
-| `new_vendor` | в диффе манифеста зависимостей добавлена строка зависимости |
-| `api_contract_change` | контракт изменён, добавлен или УДАЛЁН: по содержимому (ключ верхнего уровня `openapi:`/`asyncapi:`/`swagger:`, расширение `.proto`), по `contract_globs` или по `openapi`/`asyncapi` в имени (T-05) |
+| `new_vendor` | в диффе манифеста зависимостей добавлена строка с НОВЫМ именем пакета (D3, ADR-061); смена версии существующего пакета — заметка «обновление», маршрут не поднимает |
+| `api_contract_change` | контракт изменён, добавлен или УДАЛЁН: по содержимому (ключ верхнего уровня `openapi:`/`asyncapi:`/`swagger:`, расширение `.proto`), по `contract_globs` или по `openapi`/`asyncapi` в имени (T-05); у изменённого контракта основание несёт класс `contract_diff`: ломающее/аддитивное (D3) |
 | `cross_domain_integration` | появилась или изменена сущность интеграции модели по `integration_globs` (T-05) |
 | `significant_nfr` | появилась или изменена NFR-сущность модели по `nfr_globs` (1.7 п.3) |
 | `rto_rpo_targets` | в добавленных строках файлов `model/` изменились цели RTO/RPO: поля `rto_minutes:`/`rpo_seconds:` или инлайн-формы «RTO ≤ 15»/«RPO = 0» (1.7 п.3; упоминание в ADR/прозе — не цель) |
 | `irreversible_migration` | в диффе файла миграций (`migrations/` или `*.sql`) есть `DROP TABLE`/`TRUNCATE`/`DROP COLUMN` |
 | `new_datastore` | в конфигах добавлены строки подключения `postgres://`/`mysql://`/`kafka`/`mongodb`/`redis://` |
+| `security_boundary_change` (D2) | изменён файл под глобом кейса `security_globs` (пуст по умолчанию) |
+| `trust_zone_change` (D2) | изменён файл под глобом кейса `trust_zone_globs` (пуст по умолчанию) |
+| `data_contract_change` (D2) | изменён файл под глобом кейса `data_contract_globs` (пуст по умолчанию) |
 
 В выводе у каждого сработавшего триггера — источник: `(declared)`,
 `(diff)` или `(declared+diff)`. Триггер, найденный диффом, но не заявленный
@@ -114,9 +125,33 @@ git-репозитория — ошибка с понятным текстом.
 ```bash
 arch-be control score --trigger new_component=true --from-diff
 # Score: 2 (new_component (declared), new_vendor (diff) триггеров) → маршрут Standard
-#   diff: new_vendor: зависимость в Cargo.toml: serde = "1.0"
+#   diff: new_vendor: новые зависимости в Cargo.toml: serde
 # ВНИМАНИЕ — расхождение: заявлено флагами vs видно по диффу: new_vendor
 ```
+
+Строки `заметка:` (D3) — контекст, не поднимающий маршрут: обновления версий
+существующих зависимостей и классификация изменённых контрактов
+(`contract_diff: ломающее/аддитивное`).
+
+### Реплей истории: `--replay` (D4)
+
+`arch-be control score --replay <REV_RANGE>` прогоняет детектор по КАЖДОМУ
+коммиту диапазона (`родитель..коммит`) и печатает маршрут, счёт и триггеры
+покоммитно плюс сводку: распределение маршрутов, частоту триггеров, счётчики
+заметок D3 (обновления зависимостей, ломающие контракты). `--json` отдаёт
+машинный отчёт `arch-be/significance-replay/v1`. Это инструмент измерения
+детектора (exit 0, на гейт не влияет): им калибруют маршрут по реальной
+истории, а не по ощущениям — см. `docs/experiments/significance-replay.md`.
+
+```bash
+arch-be control score --replay v0.3.12..HEAD
+arch-be control score --replay v0.3.12..HEAD --json > replay.json
+```
+
+Ограничения: потолок 5000 коммитов на прогон (сужайте диапазон); у корневого
+коммита база — пустое дерево; опознание контракта «по содержимому» читает
+текущее рабочее дерево (исторический контракт без «openapi» в имени виден по
+глобу/имени, по содержимому — только если путь существует сейчас).
 
 ## Линтер spine (`control spine`)
 

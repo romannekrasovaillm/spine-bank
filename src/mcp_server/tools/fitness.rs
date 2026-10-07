@@ -311,6 +311,7 @@ impl McpServe {
             "sources": sources,
             "undeclared": undeclared,
             "unknown_triggers": unknown,
+            "notes": diff.notes,
             "summary": summary,
         }))
     }

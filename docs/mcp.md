@@ -256,12 +256,17 @@ false`; `evidence_pack`/`delta_propose` политика R-уровней кла
   "fired": ["new_component", "new_vendor"],
   "sources": {"new_component": "declared+diff", "new_vendor": "diff"},
   "undeclared": [
-    {"trigger": "new_vendor", "evidence": ["зависимость в services/risk/Cargo.toml: serde = \"1.0\""]}
+    {"trigger": "new_vendor", "evidence": ["новые зависимости в services/risk/Cargo.toml: serde"]}
   ],
   "unknown_triggers": [],
+  "notes": ["обновление зависимости serde в Cargo.toml (смена версии, не новый вендор)"],
   "summary": "Score: 2 (new_component (declared+diff), new_vendor (diff)) → маршрут Standard; ВНИМАНИЕ — не заявлены, но видны по диффу: new_vendor"
 }
 ```
+
+`notes` (D3, ADR-061) — контекст, не поднимающий маршрут: обновления версий
+существующих зависимостей и пофайловая классификация изменённых контрактов
+(`contract_diff`: ломающее/аддитивное/без классификации).
 
 `undeclared` — anti-bypass сигнал «заявлено агентом vs видно по диффу»:
 на маршрут влияет через объединённое множество (детектор только добавляет),
