@@ -16,10 +16,16 @@
 //! маршрут значимости — [`crate::control::score_with_sources`].
 
 mod as_built;
+mod diff;
 mod snapshot;
 mod types;
 
 pub use as_built::{as_built, as_built_with};
+pub use diff::{
+    ArchDiff, ArchDiffInput, ContractChange, ContractClass, DeclaredEdge, EdgeChange, InvariantHit,
+    ModelProposal, ModelStatus, NfrShift, ProposalKind, RouteInfo, RuleGuard, TeethClass,
+    TriggerHit, arch_diff,
+};
 pub use snapshot::{Snapshot, resolve_rev, snapshot_at};
 pub use types::{
     ARCH_DIFF_SCHEMA, ArchEdge, ArchGraph, ArchNode, EdgeKind, MAX_EDGE_EVIDENCE, NodeKind,

@@ -61,39 +61,89 @@ pub fn as_built(repo: &Path, rev: &str) -> Result<ArchGraph> {
 /// # Errors
 /// Как у [`snapshot_at`]; плюс ошибки чтения модели снимка.
 pub fn as_built_with(repo: &Path, rev: &str, globs: &DiffGlobs) -> Result<ArchGraph> {
-    let snap = snapshot_at(repo, rev)?;
-    let model = load_snapshot_model(&snap)?;
-    build_graph(&snap, model.as_ref(), globs)
+    Ok(scan_revision(repo, rev, globs)?.graph)
 }
 
-/// Читает модель снимка: файлы `model/*.md` материализуются во временный
-/// каталог (снимок живёт в памяти, а загрузчик модели — файловый). Каталог
-/// умирает вместе с функцией: сущности дальше читаются только как данные
-/// (поля), их `file`-пути за пределами функции не используются.
-fn load_snapshot_model(snap: &Snapshot) -> Result<Option<Model>> {
-    let mut files: Vec<(&str, &str)> = Vec::new();
+/// Результат сканирования одной ревизии: снимок файлов, граф as-built и
+/// модель (дифф K2 пользуется всеми тремя; `as_built` — только графом).
+pub(crate) struct RevisionScan {
+    /// Снимок файлов ревизии.
+    pub snapshot: Snapshot,
+    /// Граф «как построено».
+    pub graph: ArchGraph,
+    /// Модель ревизии (если в снимке есть `model/*.md`).
+    pub model: Option<Model>,
+    /// Материализация `model/` и реестра правил ревизии: держит файлы,
+    /// пока жива модель (её `file`-пути указывают сюда).
+    case: Option<tempfile::TempDir>,
+}
+
+impl RevisionScan {
+    /// Каталог материализации кейса ревизии (`model/`, `CONSTRAINTS.yaml`) —
+    /// вход для NFR-проверок и чтения правил (K2).
+    pub(crate) fn case_dir(&self) -> Option<&Path> {
+        self.case.as_ref().map(tempfile::TempDir::path)
+    }
+
+    /// Путь файла сущности модели относительно корня кейса
+    /// (`model/CMP-001-intake.md`) — для предложений правки модели.
+    pub(crate) fn model_file_rel(&self, abs: &Path) -> Option<String> {
+        let case = self.case.as_ref()?;
+        abs.strip_prefix(case.path())
+            .ok()
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+    }
+}
+
+/// Сканирует ревизию: снимок + материализация `model/` и реестра правил
+/// во временный каталог + граф.
+pub(crate) fn scan_revision(repo: &Path, rev: &str, globs: &DiffGlobs) -> Result<RevisionScan> {
+    let snap = snapshot_at(repo, rev)?;
+    let (case, model) = materialize_case(&snap)?;
+    let graph = build_graph(&snap, model.as_ref(), globs)?;
+    Ok(RevisionScan {
+        snapshot: snap,
+        graph,
+        model,
+        case,
+    })
+}
+
+/// Материализует из снимка файлы модели (`model/*.md`) и реестр правил
+/// (`CONSTRAINTS.yaml` / `.arch-handoff/CONSTRAINTS.yaml`) во временный
+/// каталог-кейс и загружает модель толерантно (E3). Без модели и реестра
+/// каталог не создаётся.
+fn materialize_case(snap: &Snapshot) -> Result<(Option<tempfile::TempDir>, Option<Model>)> {
+    let mut payloads: Vec<(&str, &str)> = Vec::new();
     for (path, content) in &snap.contents {
         let is_model_doc = path.starts_with("model/")
             && Path::new(path)
                 .extension()
                 .is_some_and(|e| e.eq_ignore_ascii_case("md"));
-        if is_model_doc {
-            files.push((path, content));
+        let is_constraints = path == "CONSTRAINTS.yaml" || path == ".arch-handoff/CONSTRAINTS.yaml";
+        if is_model_doc || is_constraints {
+            payloads.push((path, content));
         }
     }
-    if files.is_empty() {
-        return Ok(None);
+    if payloads.is_empty() {
+        return Ok((None, None));
     }
     let tmp = tempfile::tempdir().map_err(|e| HarnessError::io(Path::new("arch-diff"), e))?;
-    for (path, content) in files {
+    let mut has_model = false;
+    for (path, content) in payloads {
+        has_model |= path.starts_with("model/");
         let target = tmp.path().join(path);
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent).map_err(|e| HarnessError::io(parent, e))?;
         }
         std::fs::write(&target, content).map_err(|e| HarnessError::io(&target, e))?;
     }
-    let model = load_model_tolerant(&tmp.path().join("model"))?;
-    Ok(Some(model))
+    let model = if has_model {
+        Some(load_model_tolerant(&tmp.path().join("model"))?)
+    } else {
+        None
+    };
+    Ok((Some(tmp), model))
 }
 
 /// Собирает компоненты графа: CMP модели с `code_roots` плюс каталоги с
@@ -343,6 +393,15 @@ fn is_contract_path(snap: &Snapshot, globs: &DiffGlobs, path: &str) -> bool {
         let head = content.get(..CONTRACT_PROBE_BYTES).unwrap_or(content);
         content_looks_like_contract(head)
     })
+}
+
+/// Все контрактные пути снимка (дифф K2 сравнивает их между ревизиями).
+pub(crate) fn contract_paths(snap: &Snapshot, globs: &DiffGlobs) -> BTreeSet<String> {
+    snap.files
+        .iter()
+        .filter(|p| is_contract_path(snap, globs, p))
+        .cloned()
+        .collect()
 }
 
 /// Узлы контрактов и рёбра «компонент реализует/публикует контракт» (файл
