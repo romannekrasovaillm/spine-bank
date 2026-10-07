@@ -1319,7 +1319,9 @@ fn rule_globs(rule: &FitnessRule) -> Vec<String> {
 /// `.arch-handoff` — fitness-правила целятся в АРТЕФАКТЫ РЕАЛИЗАЦИИ, а не в
 /// документы решения: пакет handoff содержит текст spine/TASK.md, и правило
 /// `must_not_contain` срабатывало на собственные цитаты контракта (кейс 1).
-fn collect_files(repo: &Path, glob: &str) -> Result<Vec<(String, PathBuf)>> {
+///
+/// `pub(crate)`: разделяется с измерением зубьев (`crate::control::teeth`, B1).
+pub(crate) fn collect_files(repo: &Path, glob: &str) -> Result<Vec<(String, PathBuf)>> {
     const SKIP: [&str; 8] = [
         ".git",
         "target",
@@ -1361,7 +1363,9 @@ fn collect_files(repo: &Path, glob: &str) -> Result<Vec<(String, PathBuf)>> {
 /// Возвращает относительные пути каталогов (с `/`-разделителями),
 /// отсортированные. Служебные каталоги исключены тем же списком, что и в
 /// [`collect_files`]; корень репозитория в выборку не входит.
-fn collect_dirs(repo: &Path, glob: &str) -> Result<Vec<String>> {
+///
+/// `pub(crate)`: разделяется с измерением зубьев (`crate::control::teeth`, B1).
+pub(crate) fn collect_dirs(repo: &Path, glob: &str) -> Result<Vec<String>> {
     const SKIP: [&str; 8] = [
         ".git",
         "target",

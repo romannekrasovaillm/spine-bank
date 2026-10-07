@@ -45,6 +45,8 @@ pub struct Config {
     pub judge: JudgeConfig,
     /// Порог независимости судьи для метрики доверия (ADR-048).
     pub trust: TrustConfig,
+    /// Настройки мутационного прогона redteam (волна E 0.3.14, ADR-065).
+    pub redteam: RedteamConfig,
     /// Настройки флота прогонов кодовых харнессов (изоляция и гейт мерджа).
     pub fleet: FleetConfig,
     /// Пороги маршрутизации значимости (Architecture Significance Score).
@@ -798,14 +800,42 @@ pub struct TrustConfig {
     /// Уровни: `none` < `declared` < `declared_cross_family` < `launched` <
     /// `launched_cross_family`.
     pub min_independence: String,
+    /// Минимальная доля правил с подтверждёнными зубьями для ступени 3, когда
+    /// в модели нет несущих инвариантов (`load_bearing`) — читается только в
+    /// режиме `require_teeth` (B3, ADR-065). Порог — решение архитектора
+    /// ([РЕШЕНИЕ ЧЕЛОВЕКА] задания 0.3.14): дефолт 0.2, не зашит в логику.
+    pub behaviour_share_min: f64,
+    /// Строгий режим ступени 3 (схема «warn → error», ADR-065): `false`
+    /// (дефолт) — измерение зубьев показывается предупреждением якоря, условие
+    /// ступени прежнее (поведение 0.3.13 не ломается); `true` — условие
+    /// измеренное: несущие инварианты покрыты правилами с подтверждёнными
+    /// зубьями либо доля таких правил ≥ `behaviour_share_min`.
+    pub require_teeth: bool,
 }
 
 impl Default for TrustConfig {
     fn default() -> Self {
         Self {
             min_independence: crate::judge::INDEPENDENCE_DECLARED.to_string(),
+            behaviour_share_min: DEFAULT_BEHAVIOUR_SHARE_MIN,
+            require_teeth: false,
         }
     }
+}
+
+/// Дефолт порога доли правил с зубьями для ступени 3 доверия (B3, ADR-065).
+pub const DEFAULT_BEHAVIOUR_SHARE_MIN: f64 = 0.2;
+
+/// Настройки мутационного прогона (`arch-be redteam`, волна E 0.3.14).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RedteamConfig {
+    /// Порог доли обнаружения КОДОВЫХ дефектов (слой code: мутаторы D11, D11b,
+    /// D15, D18–D24), ниже которого прогон красный (E2, ADR-065). `None`
+    /// (дефолт) — кодовая доля только показывается; порог суммарной доли
+    /// (`--min-detection`, дефолт 0.78) не меняется. Значение порога —
+    /// решение архитектора ([РЕШЕНИЕ ЧЕЛОВЕКА] задания 0.3.14).
+    pub min_code_detection: Option<f64>,
 }
 
 /// Настройки LLM-судьи рубрик (калибровка и верификация, ADR-004).
@@ -1776,6 +1806,7 @@ impl Default for Config {
             cron: CronSettings::default(),
             judge: JudgeConfig::default(),
             trust: TrustConfig::default(),
+            redteam: RedteamConfig::default(),
             fleet: FleetConfig::default(),
             significance: SignificanceConfig::default(),
             gate: GateConfig::default(),
