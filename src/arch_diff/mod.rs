@@ -17,15 +17,17 @@
 
 mod as_built;
 mod diff;
+mod report;
 mod snapshot;
 mod types;
 
 pub use as_built::{as_built, as_built_with};
 pub use diff::{
-    ArchDiff, ArchDiffInput, ContractChange, ContractClass, DeclaredEdge, EdgeChange, InvariantHit,
-    ModelProposal, ModelStatus, NfrShift, ProposalKind, RouteInfo, RuleGuard, TeethClass,
-    TriggerHit, arch_diff,
+    ArchDiff, ArchDiffInput, ContractChange, ContractClass, DeclaredEdge, EdgeChange, FailOn,
+    InvariantHit, ModelProposal, ModelStatus, NfrShift, ProposalKind, RouteInfo, RuleGuard,
+    TeethClass, TriggerHit, arch_diff, matched_failures,
 };
+pub use report::{render_json, render_md, render_mermaid, render_sarif};
 pub use snapshot::{Snapshot, resolve_rev, snapshot_at};
 pub use types::{
     ARCH_DIFF_SCHEMA, ArchEdge, ArchGraph, ArchNode, EdgeKind, MAX_EDGE_EVIDENCE, NodeKind,

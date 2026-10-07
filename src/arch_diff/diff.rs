@@ -263,6 +263,62 @@ impl ArchDiff {
     }
 }
 
+/// Условие `--fail-on` (K3): какой факт диффа превращает информационный
+/// прогон в красный (exit 1). Имена — значения CLI-флага.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailOn {
+    /// Добавленное ребро вне модели.
+    UndeclaredEdge,
+    /// Ломающее изменение контракта (включая удаление).
+    BreakingContract,
+    /// Задет инвариант AD.
+    InvariantTouched,
+}
+
+impl FailOn {
+    /// Допустимые имена (для сообщения об ошибке CLI).
+    pub const NAMES: [&str; 3] = ["undeclared-edge", "breaking-contract", "invariant-touched"];
+
+    /// Разбор имени флага.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name.trim() {
+            "undeclared-edge" => Some(Self::UndeclaredEdge),
+            "breaking-contract" => Some(Self::BreakingContract),
+            "invariant-touched" => Some(Self::InvariantTouched),
+            _ => None,
+        }
+    }
+
+    /// Каноническое имя.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::UndeclaredEdge => "undeclared-edge",
+            Self::BreakingContract => "breaking-contract",
+            Self::InvariantTouched => "invariant-touched",
+        }
+    }
+}
+
+/// Сработавшие условия `--fail-on` (в каноническом порядке имён): по ним CLI
+/// завершается exit 1. Без флагов дифф информационный (exit 0).
+#[must_use]
+pub fn matched_failures(diff: &ArchDiff, fail_on: &[FailOn]) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    for f in fail_on {
+        let hit = match f {
+            FailOn::UndeclaredEdge => diff.has_undeclared_edges(),
+            FailOn::BreakingContract => diff.has_breaking_contracts(),
+            FailOn::InvariantTouched => diff.has_invariant_touched(),
+        };
+        if hit {
+            out.push(f.name());
+        }
+    }
+    out
+}
+
 /// Вход диффа: база (ссылка или диапазон `A...B` — берётся левая ревизия),
 /// голова (по умолчанию `HEAD`), заявленные триггеры и пороги маршрута.
 pub struct ArchDiffInput<'a> {
@@ -944,18 +1000,18 @@ pub fn arch_diff(repo: &Path, input: &ArchDiffInput) -> Result<ArchDiff> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::super::snapshot::tests::{git_in, git_repo, write_file};
     use super::*;
 
     /// Коммит поверх текущего состояния фикстуры (пустой — тоже коммит).
-    fn commit_all(repo: &Path, msg: &str) {
+    pub(crate) fn commit_all(repo: &Path, msg: &str) {
         git_in(repo, &["add", "-A"]);
         git_in(repo, &["commit", "-q", "--allow-empty", "-m", msg]);
     }
 
     /// Вход по умолчанию: без заявленных триггеров, дефолтные пороги/глобы.
-    fn input<'a>(globs: &'a DiffGlobs, base: &'a str) -> ArchDiffInput<'a> {
+    pub(crate) fn input<'a>(globs: &'a DiffGlobs, base: &'a str) -> ArchDiffInput<'a> {
         ArchDiffInput {
             base,
             head: None,
@@ -968,7 +1024,7 @@ mod tests {
     /// Кейс в духе демо-сценария раздела 9 (salary-payments): приём реестров,
     /// ядро проводок, оркестратор; AD-2 «Проводки только через Оркестратор»
     /// с охранником C-007; ADR-003 затрагивает CMP-001.
-    fn fixture_case(repo: &Path) {
+    pub(crate) fn fixture_case(repo: &Path) {
         write_file(
             repo,
             "model/CMP-001-intake.md",
@@ -1015,7 +1071,7 @@ mod tests {
     }
 
     /// Демо-правка агента: прямая запись в ядро в обход оркестратора.
-    fn fixture_agent_change(repo: &Path) {
+    pub(crate) fn fixture_agent_change(repo: &Path) {
         write_file(
             repo,
             "skeleton/intake/writer.py",
@@ -1429,5 +1485,46 @@ mod tests {
             .expect("AD-2");
         let rule = ad.rules.iter().find(|r| r.id == "C-007").expect("C-007");
         assert_eq!(rule.teeth, TeethClass::Confirmed);
+    }
+
+    /// `--fail-on` (K3): срабатывают только названные условия; пустой список
+    /// — всегда зелёный (информационный дифф).
+    #[test]
+    fn fail_on_matched_failures() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let repo = dir.path().join("case");
+        std::fs::create_dir_all(&repo).expect("mkdir");
+        fixture_case(&repo);
+        git_repo(&repo);
+        fixture_agent_change(&repo);
+        commit_all(&repo, "change");
+        let globs = DiffGlobs::default();
+        let diff = arch_diff(&repo, &input(&globs, "main~1")).expect("дифф");
+
+        assert_eq!(matched_failures(&diff, &[]), Vec::<&str>::new());
+        assert_eq!(
+            matched_failures(&diff, &[FailOn::UndeclaredEdge]),
+            vec!["undeclared-edge"]
+        );
+        assert_eq!(
+            matched_failures(&diff, &[FailOn::InvariantTouched]),
+            vec!["invariant-touched"]
+        );
+        assert_eq!(
+            matched_failures(&diff, &[FailOn::BreakingContract]),
+            Vec::<&str>::new(),
+            "контрактов нет — breaking-contract не срабатывает"
+        );
+        assert_eq!(
+            matched_failures(&diff, &[FailOn::BreakingContract, FailOn::UndeclaredEdge]),
+            vec!["undeclared-edge"]
+        );
+        // Разбор имён флага.
+        assert_eq!(
+            FailOn::from_name("undeclared-edge"),
+            Some(FailOn::UndeclaredEdge)
+        );
+        assert_eq!(FailOn::from_name("nope"), None);
+        assert_eq!(FailOn::NAMES.len(), 3);
     }
 }
