@@ -171,7 +171,16 @@ pub struct Mutator {
 /// по составу правил кейса: `Semantic`, если инвариант охраняет только
 /// `must_contain` (слово на месте — правило зелёное), `Caught` для правила из
 /// шаблона (тест падает на отсутствующей проверке).
-pub const MUTATORS: [Mutator; 20] = [
+///
+/// `D19`–`D24` (волна E, E1) — кодовые классы корпуса реальных нарушений
+/// агентов (`experiments/openspec-vs-spine/`, 180 генераций, разрез по
+/// правилам): f64 для денег, `unwrap` в денежном пути, ошибки строками,
+/// персональные данные в логах, секрет литералом, обработчик без ключа
+/// идемпотентности. Ожидание динамическое: правило класса есть в реестре и
+/// покрывает файл — `Caught`, нет — `Semantic` (не вина механики). Все —
+/// отдельные строки вне знаменателя доли (как `D15`): они меряют кодовый
+/// слой (E2), а не набор раздела 7.
+pub const MUTATORS: [Mutator; 26] = [
     Mutator {
         id: "D1",
         title: "бюджет hop'а больше цели p99",
@@ -411,6 +420,72 @@ pub const MUTATORS: [Mutator; 20] = [
         layer: Layer::Code,
         expected_in: Some(expect_d18),
         apply: mutate_d18,
+    },
+    Mutator {
+        id: "D19",
+        title: "деньги в f64 (корпус S-01)",
+        by: "must_not_contain \\bf(64|32)\\b",
+        expected: Expectation::Semantic,
+        in_ratio: false,
+        semantic: None,
+        layer: Layer::Code,
+        expected_in: Some(expect_d19),
+        apply: mutate_d19,
+    },
+    Mutator {
+        id: "D20",
+        title: "unwrap в денежном пути (корпус S-03)",
+        by: "must_not_contain unwrap/expect/panic",
+        expected: Expectation::Semantic,
+        in_ratio: false,
+        semantic: None,
+        layer: Layer::Code,
+        expected_in: Some(expect_d20),
+        apply: mutate_d20,
+    },
+    Mutator {
+        id: "D21",
+        title: "ошибки строками вместо типизированных (корпус S-05)",
+        by: "must_not_contain Err(\"…\")",
+        expected: Expectation::Semantic,
+        in_ratio: false,
+        semantic: None,
+        layer: Layer::Code,
+        expected_in: Some(expect_d21),
+        apply: mutate_d21,
+    },
+    Mutator {
+        id: "D22",
+        title: "ПДн в логах: номер карты (корпус S-04)",
+        by: "must_not_contain card_number в log",
+        expected: Expectation::Semantic,
+        in_ratio: false,
+        semantic: None,
+        layer: Layer::Code,
+        expected_in: Some(expect_d22),
+        apply: mutate_d22,
+    },
+    Mutator {
+        id: "D23",
+        title: "секрет литералом в коде (корпус S-08)",
+        by: "must_not_contain api_key = \"…\"",
+        expected: Expectation::Semantic,
+        in_ratio: false,
+        semantic: None,
+        layer: Layer::Code,
+        expected_in: Some(expect_d23),
+        apply: mutate_d23,
+    },
+    Mutator {
+        id: "D24",
+        title: "обработчик без ключа идемпотентности (корпус S-02)",
+        by: "each_file_must_contain idempotency",
+        expected: Expectation::Semantic,
+        in_ratio: false,
+        semantic: None,
+        layer: Layer::Code,
+        expected_in: Some(expect_d24),
+        apply: mutate_d24,
     },
 ];
 
@@ -944,6 +1019,137 @@ fn mutate_d17(root: &Path) -> std::result::Result<(), String> {
         rel.as_str(),
         &format!("{head}\n- Модель-автор: claude-opus-4\n\n{tail}"),
     )
+}
+
+// ---------------------------------------------------------------------------
+// D19–D24 (волна E, E1): кодовые классы корпуса openspec-vs-spine
+// ---------------------------------------------------------------------------
+//
+// Корпус `experiments/openspec-vs-spine/` (180 генераций, разрез по правилам
+// CONSTRAINTS.massrun.yaml): классы нарушений, которые агенты реально пишут в
+// код: f64 для денег (S-01/M-01), unwrap в денежном пути (S-03/M-03),
+// отсутствие ключа идемпотентности (S-02/M-02), ошибки строками (S-05/M-09),
+// ПДн в логах (S-04/M-04), секрет литералом (S-08/M-08). Каждый мутатор
+// кладёт в скелет файл с дефектом того же вида; ожидание динамическое
+// (`expected_in`): правило класса есть в реестре с severity error и покрывает
+// файл — `Caught`, иначе — `Semantic` (не вина механики гейта).
+
+/// Путь и содержимое файла-мутанта кодового класса (E1).
+struct CodeDefect {
+    /// Относительный путь в скелете кейса.
+    rel: &'static str,
+    /// Содержимое с одним засеянным дефектом класса.
+    content: &'static str,
+}
+
+/// D19: деньги в f64 — дрейф округления в денежном пути (S-01 корпуса).
+const D19: CodeDefect = CodeDefect {
+    rel: "skeleton/redteam/d19_money_f64.rs",
+    content: "// D19: сумма платежа в f64 — дрейф округления в денежном пути (класс S-01).\n\
+              /// Итог по частям платежа в рублях.\n\
+              pub fn total_rub(parts: &[f64]) -> f64 {\n    parts.iter().sum()\n}\n",
+};
+
+/// D20: unwrap в денежном пути — паника вместо типизированной ошибки (S-03).
+const D20: CodeDefect = CodeDefect {
+    rel: "skeleton/redteam/d20_unwrap_money.rs",
+    content: "// D20: unwrap в денежном пути — паника на вводе вместо отказа (класс S-03).\n\
+              /// Разбор суммы поручения в копейках.\n\
+              pub fn parse_minor_units(raw: &str) -> u64 {\n    raw.trim().parse().unwrap()\n}\n",
+};
+
+/// D21: ошибка строкой — вызывающий не может различить отказы (S-05/M-09).
+const D21: CodeDefect = CodeDefect {
+    rel: "skeleton/redteam/d21_string_errors.rs",
+    content: "// D21: ошибка строкой — отказ не разобрать машинно (класс S-05).\n\
+              pub fn authorize(limit: u64) -> Result<u64, String> {\n    \
+              if limit == 0 {\n        return Err(\"лимит исчерпан\".to_string());\n    }\n    \
+              Ok(limit)\n}\n",
+};
+
+/// D22: персональные данные в логах — номер карты в журнале приложения (S-04/M-04).
+const D22: CodeDefect = CodeDefect {
+    rel: "skeleton/redteam/d22_pii_in_logs.rs",
+    content: "// D22: ПДн в логах: номер карты в журнале приложения (класс S-04).\n\
+              pub fn log_auth_attempt(card_number: &str) {\n    \
+              log::info!(\"auth attempt card_number={card_number}\");\n}\n",
+};
+
+/// D23: секрет литералом в коде (S-08/M-08).
+const D23: CodeDefect = CodeDefect {
+    rel: "skeleton/redteam/d23_hardcoded_secret.rs",
+    content: "// D23: секрет литералом в коде (класс S-08).\n\
+              pub const PLATFORM_API_KEY: &str = \"sk-live-0123456789abcdef\";\n",
+};
+
+/// D24: обработчик уведомления без ключа идемпотентности — повторная доставка
+/// создаёт второй эффект (S-02). Ловится `each_file_must_contain` по
+/// обязательному маркеру в каждом обработчике; `must_contain` новый файл без
+/// маркера не видит (остальные файлы совпадают) — это и есть слепая зона.
+const D24: CodeDefect = CodeDefect {
+    rel: "skeleton/redteam/d24_no_idempotency_key.rs",
+    content: "// D24: обработчик уведомления о платеже: дедупликации нет — повторная\n\
+              // доставка создаёт второй эффект (класс S-02).\n\
+              pub struct Notification {\n    pub payment_id: String,\n    pub amount_minor: u64,\n}\n\n\
+              pub fn on_payment_notify(n: &Notification) -> u64 {\n    \
+              ledger::append(&n.payment_id, n.amount_minor)\n}\n",
+};
+
+/// Правка кодового мутатора корпуса: файл с дефектом кладётся в скелет.
+fn mutate_code_defect(root: &Path, defect: &CodeDefect) -> std::result::Result<(), String> {
+    write(root, defect.rel, defect.content)
+}
+
+/// Ожидание кодового мутатора корпуса по составу правил кейса: правило
+/// класса (error-severity `must_not_contain` по содержимому либо
+/// `each_file_must_contain` по отсутствию маркера) покрывает файл → `Caught`.
+fn expect_code_defect(root: &Path, defect: &CodeDefect) -> Expectation {
+    match crate::control::teeth::catching_rule(root, defect.rel, defect.content) {
+        Some(_) => Expectation::Caught,
+        None => Expectation::Semantic,
+    }
+}
+
+fn mutate_d19(root: &Path) -> std::result::Result<(), String> {
+    mutate_code_defect(root, &D19)
+}
+fn expect_d19(root: &Path) -> Expectation {
+    expect_code_defect(root, &D19)
+}
+
+fn mutate_d20(root: &Path) -> std::result::Result<(), String> {
+    mutate_code_defect(root, &D20)
+}
+fn expect_d20(root: &Path) -> Expectation {
+    expect_code_defect(root, &D20)
+}
+
+fn mutate_d21(root: &Path) -> std::result::Result<(), String> {
+    mutate_code_defect(root, &D21)
+}
+fn expect_d21(root: &Path) -> Expectation {
+    expect_code_defect(root, &D21)
+}
+
+fn mutate_d22(root: &Path) -> std::result::Result<(), String> {
+    mutate_code_defect(root, &D22)
+}
+fn expect_d22(root: &Path) -> Expectation {
+    expect_code_defect(root, &D22)
+}
+
+fn mutate_d23(root: &Path) -> std::result::Result<(), String> {
+    mutate_code_defect(root, &D23)
+}
+fn expect_d23(root: &Path) -> Expectation {
+    expect_code_defect(root, &D23)
+}
+
+fn mutate_d24(root: &Path) -> std::result::Result<(), String> {
+    mutate_code_defect(root, &D24)
+}
+fn expect_d24(root: &Path) -> Expectation {
+    expect_code_defect(root, &D24)
 }
 
 // ---------------------------------------------------------------------------
@@ -2426,6 +2632,157 @@ mod corner_tests {
         write(case, "CONSTRAINTS.yaml", "rules: []\n").expect("реестр");
         let reason = mutate_d18(case).expect_err("цели нет");
         assert!(reason.contains("нет цели"), "{reason}");
+    }
+
+    // --- E1: кодовые мутаторы корпуса openspec-vs-spine (D19–D24) -----------
+
+    /// Шесть классов корпуса в каталоге: кодовый слой, вне знаменателя доли,
+    /// динамическое ожидание (честно по составу правил кейса).
+    #[test]
+    fn corpus_mutators_are_in_the_catalog_with_dynamic_expectation() {
+        for id in ["D19", "D20", "D21", "D22", "D23", "D24"] {
+            let m = MUTATORS.iter().find(|m| m.id == id).expect("мутатор");
+            assert_eq!(m.layer, Layer::Code, "{id}");
+            assert!(!m.in_ratio, "{id} — отдельная строка, не знаменатель");
+            assert!(m.expected_in.is_some(), "{id}: ожидание по правилам кейса");
+            assert_eq!(m.expected, Expectation::Semantic, "{id}: дефолт честный");
+        }
+    }
+
+    /// Кейс с одним правилом (паттерны зеркалят замороженный
+    /// `experiments/openspec-vs-spine/CONSTRAINTS.massrun.yaml`).
+    fn corpus_case(rules_yaml: &str) -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().expect("tmp");
+        write(tmp.path(), "CONSTRAINTS.yaml", rules_yaml).expect("реестр");
+        tmp
+    }
+
+    /// (мутатор, pattern правила класса, тип правила) — pattern `None` у D24:
+    /// дефект «нет ключа идемпотентности» ловится ОТСУТСТВИЕМ маркера.
+    const CORPUS: [(&str, Option<&str>, &str); 6] = [
+        ("D19", Some(r"\bf(64|32)\b"), "must_not_contain"),
+        (
+            "D20",
+            Some(r"\.unwrap\(\)|\.expect\(|panic!|unreachable!|todo!|unimplemented!"),
+            "must_not_contain",
+        ),
+        (
+            "D21",
+            Some(r#"Err\(\s*"|Box<dyn\s+(std::)?error::Error"#),
+            "must_not_contain",
+        ),
+        (
+            "D22",
+            Some(
+                r"(?i)(println!|print!|log::(info|debug|warn|error|trace)!|tracing::(info|debug|warn|error)!|eprintln!)[^\n]*(card_number|full_pan|\bpan\b|holder|cardholder|фио|full_name|card_num)",
+            ),
+            "must_not_contain",
+        ),
+        (
+            "D23",
+            Some(
+                r#"(?i)(password|api_key|secret_key|secret|token)\s*(:\s*&str)?\s*=\s*"[^"]{6,}""#,
+            ),
+            "must_not_contain",
+        ),
+        ("D24", None, "each_file_must_contain"),
+    ];
+
+    /// Каждый мутатор сеет дефект ровно своего класса корпуса: содержимое
+    /// совпадает с шаблоном класса (D24 — наоборот: маркера в файле нет).
+    #[test]
+    fn corpus_mutants_seed_their_corpus_class() {
+        for (id, pattern, _) in CORPUS {
+            let m = MUTATORS.iter().find(|m| m.id == id).expect("мутатор");
+            let tmp = tempfile::tempdir().expect("tmp");
+            (m.apply)(tmp.path()).expect("мутация применима");
+            let rel = match id {
+                "D19" => D19.rel,
+                "D20" => D20.rel,
+                "D21" => D21.rel,
+                "D22" => D22.rel,
+                "D23" => D23.rel,
+                _ => D24.rel,
+            };
+            let content = std::fs::read_to_string(tmp.path().join(rel)).expect("файл мутанта");
+            let class_pattern = match id {
+                "D24" => "(?i)idempotenc",
+                _ => pattern.expect("pattern класса"),
+            };
+            let re = regex::Regex::new(class_pattern).expect("regex класса");
+            if id == "D24" {
+                assert!(
+                    !re.is_match(&content),
+                    "{id}: маркера в обработчике быть не должно"
+                );
+            } else {
+                assert!(
+                    re.is_match(&content),
+                    "{id}: дефект обязан совпадать с классом {class_pattern}"
+                );
+            }
+        }
+    }
+
+    /// Ожидание честно по составу правил кейса: с правилом класса (severity
+    /// error, glob покрывает файл) — `Caught` и гейт красный; без правила —
+    /// `Semantic` и гейт зелёный.
+    #[test]
+    fn corpus_mutants_expectation_follows_the_registry() {
+        for (id, pattern, kind) in CORPUS {
+            let m = MUTATORS.iter().find(|m| m.id == id).expect("мутатор");
+            let class_pattern = pattern.unwrap_or("(?i)idempotenc");
+            // Кейс с правилом класса: severity error, glob покрывает скелет.
+            let with = corpus_case(&format!(
+                "rules:\n  - id: C-100\n    name: corpus_guard\n    type: {kind}\n    \
+                 glob: '**/*.rs'\n    pattern: '{class_pattern}'\n    severity: error\n"
+            ));
+            let expect = m.expected_in.expect("динамическое ожидание");
+            // Ожидание вычисляется на мутанте ПОСЛЕ правки (как в прогоне).
+            (m.apply)(with.path()).expect("мутация применима");
+            assert_eq!(expect(with.path()), Expectation::Caught, "{id} с правилом");
+            let report = crate::control::check(with.path(), &with.path().join("CONSTRAINTS.yaml"))
+                .expect("гейт");
+            assert!(
+                !report.passed && report.issues.iter().any(|i| i.rule == "corpus_guard"),
+                "{id}: правило класса обязано покраснеть: {:?}",
+                report.issues
+            );
+
+            // Кейс без правила класса: честный Semantic, гейт зелёный.
+            let without = corpus_case(
+                "rules:\n  - id: C-101\n    name: readme_present\n    type: file_exists\n    \
+                 path: 'README.md'\n    severity: error\n",
+            );
+            write(without.path(), "README.md", "x\n").expect("readme");
+            (m.apply)(without.path()).expect("мутация применима");
+            assert_eq!(
+                expect(without.path()),
+                Expectation::Semantic,
+                "{id} без правила"
+            );
+            let report =
+                crate::control::check(without.path(), &without.path().join("CONSTRAINTS.yaml"))
+                    .expect("гейт");
+            assert!(report.passed, "{id}: гейт зелёный — дефект никто не ловит");
+        }
+    }
+
+    /// warn-правило класса дефекта поимкой не считается: оно не краснит гейт.
+    #[test]
+    fn corpus_mutants_warn_rule_does_not_count_as_catching() {
+        let m = MUTATORS.iter().find(|m| m.id == "D19").expect("мутатор");
+        let case = corpus_case(
+            "rules:\n  - id: C-102\n    name: soft_guard\n    type: must_not_contain\n    \
+             glob: '**/*.rs'\n    pattern: '\\bf(64|32)\\b'\n    severity: warn\n",
+        );
+        (m.apply)(case.path()).expect("мутация применима");
+        let expect = m.expected_in.expect("динамическое ожидание");
+        assert_eq!(
+            expect(case.path()),
+            Expectation::Semantic,
+            "warn-правило не краснит гейт — поимкой не считается"
+        );
     }
 }
 

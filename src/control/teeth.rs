@@ -1510,6 +1510,51 @@ fn is_code_file(rel: &str) -> bool {
     )
 }
 
+/// Правило реестра кейса, которое обязано среагировать на файл `rel` с
+/// содержимым `content` (E1 — динамическое ожидание кодовых мутаторов
+/// redteam: ожидание задаётся честно, по составу правил кейса):
+/// - `must_not_contain`: glob покрывает файл и pattern совпадает с содержимым;
+/// - `each_file_must_contain`: glob покрывает файл, а pattern НЕ совпадает —
+///   новый файл без обязательного маркера обязан покраснеть.
+///
+/// Считаются только правила с severity error: warn-находка не краснит гейт
+/// (`FitnessReport.passed` по error-находкам), и называть её поимкой —
+/// завысить защищённость. Возвращается имя первого правила (порядок реестра
+/// детерминирован); `None` — дефект этого вида реестром не ловится.
+#[must_use]
+pub(crate) fn catching_rule(case: &Path, rel: &str, content: &str) -> Option<String> {
+    let constraints = super::resolve_constraints_path(case, None)?;
+    let resolved = super::load_constraints_resolved(&constraints).ok()?;
+    resolved
+        .rules
+        .iter()
+        .filter(|r| !r.unverifiable)
+        .find_map(|rule| {
+            let severity = super::types::normalize_severity(&rule.severity, &rule.name).ok()?;
+            if severity != "error" {
+                return None;
+            }
+            let globs: Vec<String> = if rule.glob.is_empty() {
+                vec!["**/*".to_string()]
+            } else {
+                rule.glob.clone()
+            };
+            if !globs.iter().any(|g| glob_matches(g, rel))
+                || rule.exclude_glob.iter().any(|ex| glob_matches(ex, rel))
+            {
+                return None;
+            }
+            let pattern = rule.pattern.as_deref()?;
+            let re = Regex::new(pattern).ok()?;
+            let catches = match rule.kind {
+                RuleKind::MustNotContain => re.is_match(content),
+                RuleKind::EachFileMustContain => !re.is_match(content),
+                _ => false,
+            };
+            catches.then(|| rule.name.clone())
+        })
+}
+
 /// Доля правил с подтверждёнными зубьями (числитель, знаменатель) по
 /// сохранённому измерению. Без измерения — (0, все): «не измерено» ≠
 /// «с зубьями» (волна B: тип правила — не доказательство).

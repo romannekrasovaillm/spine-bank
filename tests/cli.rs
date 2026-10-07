@@ -3265,13 +3265,14 @@ fn redteam_json_format_reports_detections() {
     assert_eq!(value["passed"], true);
     assert_eq!(value["control_ok"], true);
     let detections = value["detections"].as_array().expect("detections");
-    // 20 = 17 строк релиза 0.3.5 (14 долевых мутантов + R, D14, D15-скелет)
+    // 26 = 17 строк релиза 0.3.5 (14 долевых мутантов + R, D14, D15-скелет)
     // + красный угол среза происхождения: D16 (поднятый рукой балл) и
     // D17 (подменённая метка автора, ADR-048) + D18 — лексический обход
-    // «слово на месте, логики нет» (B2 волны B, ADR-065).
-    assert_eq!(detections.len(), 20);
+    // «слово на месте, логики нет» (B2 волны B, ADR-065) + D19–D24 —
+    // кодовые классы корпуса openspec-vs-spine (E1 волны E).
+    assert_eq!(detections.len(), 26);
     let ids: Vec<&str> = detections.iter().filter_map(|d| d["id"].as_str()).collect();
-    for extra in ["D16", "D17", "D18"] {
+    for extra in ["D16", "D17", "D18", "D24"] {
         assert!(ids.contains(&extra), "нет мутатора {extra}: {ids:?}");
     }
     // 19 = 14 долевых мутантов + контрольные строки (R, D14) + D15 (нарушение
