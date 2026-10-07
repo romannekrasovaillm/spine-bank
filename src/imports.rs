@@ -57,6 +57,16 @@ pub const IMPORT_EXTENSIONS: [&str; 10] = [
 /// Внутренний regex не компилируется (инвариант кода; практически
 /// недостижимо — паттерны константны).
 pub fn extract_imports(rel: &str, content: &str) -> Result<Vec<ImportEdge>> {
+    // Паттерны языка компилируются ОДИН раз на файл (а не на строку — ранняя
+    // версия компилировала в цикле строк: ~1 мс на строку, на репозитории
+    // в сотни тысяч строк это минуты).
+    enum Matchers {
+        Rust(Regex),
+        Python(Regex, Regex),
+        Java(Regex),
+        Go(Regex, Regex),
+        Ts(Regex, Regex, Regex),
+    }
     let ext = Path::new(rel)
         .extension()
         .and_then(|e| e.to_str())
@@ -70,6 +80,27 @@ pub fn extract_imports(rel: &str, content: &str) -> Result<Vec<ImportEdge>> {
         Regex::new(pat)
             .map_err(|e| HarnessError::Control(format!("внутренний regex импортов '{pat}': {e}")))
     };
+    let matchers = match ext {
+        "rs" => Matchers::Rust(compile(
+            r"\bcrate::([A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*)",
+        )?),
+        "py" => Matchers::Python(
+            compile(r"^\s*import\s+([A-Za-z_][\w.]*)")?,
+            compile(r"^\s*from\s+([A-Za-z_][\w.]*)\s+import\b")?,
+        ),
+        "java" | "kt" => Matchers::Java(compile(
+            r"^\s*import\s+(?:static\s+)?([A-Za-z_][\w.]*)\s*;",
+        )?),
+        "go" => Matchers::Go(
+            compile(r#"^\s*import\s+(?:[A-Za-z_][\w.]*\s+)?"([^"]+)""#)?,
+            compile(r#"^\s*(?:[A-Za-z_][\w.]*\s+)?"([^"]+)""#)?,
+        ),
+        _ => Matchers::Ts(
+            compile(r#"\bfrom\s+['"]([^'"]+)['"]"#)?,
+            compile(r#"^\s*import\s+['"]([^'"]+)['"]"#)?,
+            compile(r#"\brequire\(\s*['"]([^'"]+)['"]\s*\)"#)?,
+        ),
+    };
     let mut out = Vec::new();
     // Состояние блочной формы Go: между `import (` и `)` каждая строка с
     // путём в кавычках — импорт.
@@ -80,17 +111,13 @@ pub fn extract_imports(rel: &str, content: &str) -> Result<Vec<ImportEdge>> {
         }
         let lineno = idx + 1;
         let mut push = |module: String, line: usize| out.push(ImportEdge { module, line });
-        match ext {
-            "rs" => {
-                let re =
-                    compile(r"\bcrate::([A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*)")?;
+        match &matchers {
+            Matchers::Rust(re) => {
                 for c in re.captures_iter(line) {
                     push(c[1].replace("::", "/"), lineno);
                 }
             }
-            "py" => {
-                let re_import = compile(r"^\s*import\s+([A-Za-z_][\w.]*)")?;
-                let re_from = compile(r"^\s*from\s+([A-Za-z_][\w.]*)\s+import\b")?;
+            Matchers::Python(re_import, re_from) => {
                 for c in re_import
                     .captures(line)
                     .into_iter()
@@ -99,13 +126,12 @@ pub fn extract_imports(rel: &str, content: &str) -> Result<Vec<ImportEdge>> {
                     push(c[1].replace('.', "/"), lineno);
                 }
             }
-            "java" | "kt" => {
-                let re = compile(r"^\s*import\s+(?:static\s+)?([A-Za-z_][\w.]*)\s*;")?;
+            Matchers::Java(re) => {
                 if let Some(c) = re.captures(line) {
                     push(c[1].replace('.', "/"), lineno);
                 }
             }
-            "go" => {
+            Matchers::Go(re_single, re_block) => {
                 let trimmed = line.trim_start();
                 if go_import_block {
                     if trimmed.starts_with(')') {
@@ -113,8 +139,7 @@ pub fn extract_imports(rel: &str, content: &str) -> Result<Vec<ImportEdge>> {
                         continue;
                     }
                     // Строка блока: `"path"` или `alias "path"`.
-                    let re = compile(r#"^\s*(?:[A-Za-z_][\w.]*\s+)?"([^"]+)""#)?;
-                    if let Some(c) = re.captures(line) {
+                    if let Some(c) = re_block.captures(line) {
                         push(c[1].to_string(), lineno);
                     }
                     continue;
@@ -129,17 +154,13 @@ pub fn extract_imports(rel: &str, content: &str) -> Result<Vec<ImportEdge>> {
                         continue;
                     }
                     // Одиночный импорт: `import "path"` / `import a "path"`.
-                    let re = compile(r#"^\s*import\s+(?:[A-Za-z_][\w.]*\s+)?"([^"]+)""#)?;
-                    if let Some(c) = re.captures(line) {
+                    if let Some(c) = re_single.captures(line) {
                         push(c[1].to_string(), lineno);
                     }
                 }
             }
-            _ => {
+            Matchers::Ts(re_from, re_import, re_require) => {
                 // ts/tsx/js/jsx/mjs: путь сохраняется сырым (включая `./…`).
-                let re_from = compile(r#"\bfrom\s+['"]([^'"]+)['"]"#)?;
-                let re_import = compile(r#"^\s*import\s+['"]([^'"]+)['"]"#)?;
-                let re_require = compile(r#"\brequire\(\s*['"]([^'"]+)['"]\s*\)"#)?;
                 for c in re_from
                     .captures_iter(line)
                     .chain(re_import.captures_iter(line))
