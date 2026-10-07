@@ -1292,6 +1292,9 @@ pub(crate) async fn run() -> Result<()> {
                 &case,
                 &arch_harness::redteam::RedteamOptions {
                     min_detection,
+                    // E2: порог кодовой доли — из конфига, по умолчанию не задан
+                    // ([РЕШЕНИЕ ЧЕЛОВЕКА] задания 0.3.14).
+                    min_code_detection: cfg.redteam.min_code_detection,
                     decision_quality: !no_decision_quality,
                     keep_semantic: keep_semantic.clone(),
                 },

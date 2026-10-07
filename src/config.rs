@@ -45,6 +45,8 @@ pub struct Config {
     pub judge: JudgeConfig,
     /// Порог независимости судьи для метрики доверия (ADR-048).
     pub trust: TrustConfig,
+    /// Настройки мутационного прогона redteam (волна E 0.3.14, ADR-065).
+    pub redteam: RedteamConfig,
     /// Настройки флота прогонов кодовых харнессов (изоляция и гейт мерджа).
     pub fleet: FleetConfig,
     /// Пороги маршрутизации значимости (Architecture Significance Score).
@@ -823,6 +825,18 @@ impl Default for TrustConfig {
 
 /// Дефолт порога доли правил с зубьями для ступени 3 доверия (B3, ADR-065).
 pub const DEFAULT_BEHAVIOUR_SHARE_MIN: f64 = 0.2;
+
+/// Настройки мутационного прогона (`arch-be redteam`, волна E 0.3.14).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RedteamConfig {
+    /// Порог доли обнаружения КОДОВЫХ дефектов (слой code: мутаторы D11, D11b,
+    /// D15, D18–D24), ниже которого прогон красный (E2, ADR-065). `None`
+    /// (дефолт) — кодовая доля только показывается; порог суммарной доли
+    /// (`--min-detection`, дефолт 0.78) не меняется. Значение порога —
+    /// решение архитектора ([РЕШЕНИЕ ЧЕЛОВЕКА] задания 0.3.14).
+    pub min_code_detection: Option<f64>,
+}
 
 /// Настройки LLM-судьи рубрик (калибровка и верификация, ADR-004).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1762,6 +1776,7 @@ impl Default for Config {
             cron: CronSettings::default(),
             judge: JudgeConfig::default(),
             trust: TrustConfig::default(),
+            redteam: RedteamConfig::default(),
             fleet: FleetConfig::default(),
             significance: SignificanceConfig::default(),
             gate: GateConfig::default(),

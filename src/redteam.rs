@@ -174,12 +174,12 @@ pub struct Mutator {
 ///
 /// `D19`–`D24` (волна E, E1) — кодовые классы корпуса реальных нарушений
 /// агентов (`experiments/openspec-vs-spine/`, 180 генераций, разрез по
-/// правилам): f64 для денег, `unwrap` в денежном пути, ошибки строками,
-/// персональные данные в логах, секрет литералом, обработчик без ключа
-/// идемпотентности. Ожидание динамическое: правило класса есть в реестре и
-/// покрывает файл — `Caught`, нет — `Semantic` (не вина механики). Все —
-/// отдельные строки вне знаменателя доли (как `D15`): они меряют кодовый
-/// слой (E2), а не набор раздела 7.
+/// правилам): f64 для денег, `unwrap` в денежном пути, ошибки строками, персональные данные
+/// в логах, секрет литералом, обработчик без ключа идемпотентности. Ожидание
+/// динамическое: правило класса есть в реестре и покрывает файл — `Caught`,
+/// нет — `Semantic` (не вина механики). Все — отдельные строки вне
+/// знаменателя доли (как `D15`): они меряют кодовый слой (E2), а не набор
+/// раздела 7.
 pub const MUTATORS: [Mutator; 26] = [
     Mutator {
         id: "D1",
@@ -1437,6 +1437,10 @@ pub struct RedteamReport {
     pub detections: Vec<Detection>,
     /// Порог доли обнаружения, ниже которого прогон красный.
     pub min_detection: f64,
+    /// Порог доли обнаружения КОДОВОГО слоя (E2, `[redteam]
+    /// min_code_detection`): `None` — кодовая доля только показывается
+    /// (дефолт; порог — решение архитектора, не зашит).
+    pub min_code_detection: Option<f64>,
     /// Контрольный мутатор D14: аттестация изменилась при том же вердикте.
     pub control_ok: bool,
     /// Почему контроль не прошёл — с различием двух исходов, у которых разные
@@ -1476,13 +1480,44 @@ pub struct RedteamSummary {
     /// показывает ИМЕННО её, а не свою догадку о причине.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control_note: Option<String>,
+    /// Доля обнаружения слоя «документы+модель» (E2; аддитивные поля схемы
+    /// v1: файлы прежних редакций читаются, доли просто неизвестны).
+    /// Считается по дефектам слоя, которые обязаны ловиться (ожидание
+    /// `Caught`) и не пропущены; `None` — ловимых дефектов слоя не было.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub docs_model_ratio: Option<f64>,
+    /// Поймано в слое «документы+модель».
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub docs_model_caught: Option<usize>,
+    /// Ловимых дефектов в слое «документы+модель».
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub docs_model_total: Option<usize>,
+    /// Доля обнаружения слоя «код» (E2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_ratio: Option<f64>,
+    /// Поймано в слое «код».
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_caught: Option<usize>,
+    /// Ловимых дефектов в слое «код».
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_total: Option<usize>,
+    /// Порог кодовой доли из конфига на момент измерения (`None` — не задан).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_code_detection: Option<f64>,
 }
 
 impl RedteamSummary {
-    /// Прогон прошёл порог и контроль аттестации.
+    /// Прогон прошёл порог суммарной доли, контроль аттестации и — если
+    /// задан — порог кодовой доли (E2): заданный порог при неизмеренной
+    /// кодовой доле не проходит (требование не подтверждено).
     #[must_use]
     pub fn passed(&self) -> bool {
-        self.ratio >= self.min_detection && self.control_ok
+        let code_ok = match (self.min_code_detection, self.code_ratio) {
+            (Some(min), Some(code)) => code + f64::EPSILON >= min,
+            (Some(_), None) => false,
+            (None, _) => true,
+        };
+        self.ratio >= self.min_detection && self.control_ok && code_ok
     }
 }
 
@@ -1751,6 +1786,8 @@ pub fn save_summary(case: &Path, report: &RedteamReport) -> Result<PathBuf> {
     let dir = case.join(".arch-handoff");
     std::fs::create_dir_all(&dir).map_err(|e| crate::error::HarnessError::io(&dir, e))?;
     let path = dir.join("redteam.json");
+    let (docs_model_caught, docs_model_total) = report.layer_counts(Layer::DocsModel);
+    let (code_caught, code_total) = report.layer_counts(Layer::Code);
     let summary = RedteamSummary {
         schema: "arch-be/redteam/v1".to_string(),
         case: case.display().to_string(),
@@ -1761,6 +1798,14 @@ pub fn save_summary(case: &Path, report: &RedteamReport) -> Result<PathBuf> {
         min_detection: report.min_detection,
         control_ok: report.control_ok,
         control_note: report.control_note.clone(),
+        // E2: доли по слоям — отдельно, порог 0.78 применяется к сумме.
+        docs_model_ratio: report.layer_ratio(Layer::DocsModel),
+        docs_model_caught: (docs_model_total > 0).then_some(docs_model_caught),
+        docs_model_total: (docs_model_total > 0).then_some(docs_model_total),
+        code_ratio: report.layer_ratio(Layer::Code),
+        code_caught: (code_total > 0).then_some(code_caught),
+        code_total: (code_total > 0).then_some(code_total),
+        min_code_detection: report.min_code_detection,
     };
     let text = serde_json::to_string_pretty(&summary)
         .map_err(|e| crate::error::HarnessError::Config(format!("redteam: {e}")))?;
@@ -1815,10 +1860,89 @@ impl RedteamReport {
         self.scored_caught() as f64 / total as f64
     }
 
-    /// Прогон прошёл порог и контроль аттестации.
+    /// Числа по слою (E2): (поймано, ловимых) среди дефектов слоя с
+    /// ожиданием `Caught` без пропуска входа. Семантические и контрольные
+    /// позиции в слоевые доли не входят (они в карте отдельно), поэтому
+    /// кодовая доля измеряет именно ловлю кодовых дефектов.
+    #[must_use]
+    pub fn layer_counts(&self, layer: Layer) -> (usize, usize) {
+        let scoped: Vec<&Detection> = self
+            .detections
+            .iter()
+            .filter(|d| {
+                d.layer == layer && d.expected == Expectation::Caught && d.skipped.is_none()
+            })
+            .collect();
+        let total = scoped.len();
+        let caught = scoped.iter().filter(|d| d.caught()).count();
+        (caught, total)
+    }
+
+    /// Доля обнаружения слоя; `None` — ловимых дефектов слоя в прогоне не
+    /// было (честное «не измерялось», а не 100 %).
+    #[must_use]
+    pub fn layer_ratio(&self, layer: Layer) -> Option<f64> {
+        let (caught, total) = self.layer_counts(layer);
+        (total > 0).then(|| caught as f64 / total as f64)
+    }
+
+    /// Прогон прошёл порог суммарной доли, контроль аттестации и — если задан
+    /// (E2, `[redteam] min_code_detection`) — порог кодовой доли.
     #[must_use]
     pub fn passed(&self) -> bool {
-        self.detection_ratio() >= self.min_detection && self.control_ok
+        let code_ok = match (self.min_code_detection, self.layer_ratio(Layer::Code)) {
+            (Some(min), Some(code)) => code + f64::EPSILON >= min,
+            // Порог задан, а измерения кодового слоя нет — требование не
+            // подтверждено: не проходим.
+            (Some(_), None) => false,
+            (None, _) => true,
+        };
+        self.detection_ratio() >= self.min_detection && self.control_ok && code_ok
+    }
+
+    /// Строки долей по слоям (E2): документы+модель и код раздельно, с
+    /// порогом кодовой доли, если он задан конфигом.
+    #[must_use]
+    pub fn render_layers(&self) -> String {
+        let mut out = String::new();
+        // Запись в String не может завершиться ошибкой — игноры безопасны.
+        for layer in [Layer::DocsModel, Layer::Code] {
+            match self.layer_ratio(layer) {
+                Some(ratio) => {
+                    let (caught, total) = self.layer_counts(layer);
+                    let _ = writeln!(
+                        out,
+                        "  доля по слою «{}»: {caught}/{total} = {:.0}%",
+                        layer.label(),
+                        ratio * 100.0
+                    );
+                }
+                None => {
+                    let _ = writeln!(
+                        out,
+                        "  доля по слою «{}»: не измерялась (нет ловимых дефектов слоя)",
+                        layer.label()
+                    );
+                }
+            }
+        }
+        match self.min_code_detection {
+            Some(min) => {
+                let _ = writeln!(
+                    out,
+                    "  порог кодовой доли ([redteam] min_code_detection): {:.0}%",
+                    min * 100.0
+                );
+            }
+            None => {
+                let _ = writeln!(
+                    out,
+                    "  порог кодовой доли: не задан (порог {:.0}% — к сумме, как прежде)",
+                    self.min_detection * 100.0
+                );
+            }
+        }
+        out
     }
 
     /// Текстовый рендер «карты обнаружения».
@@ -1872,6 +1996,8 @@ impl RedteamReport {
             self.min_detection * 100.0,
             if self.control_ok { "да" } else { "нет" }
         );
+        // E2: две доли вместо одной — документы+модель и код раздельно.
+        out.push_str(&self.render_layers());
         let _ = writeln!(out, "Итог: {}", if self.passed() { "PASS" } else { "FAIL" });
         out
     }
@@ -1887,12 +2013,28 @@ impl RedteamReport {
                     "id": d.id,
                     "title": d.title,
                     "expected": d.expected.label(),
+                    "layer": d.layer.as_str(),
                     "caught": d.caught(),
                     "caught_by": d.caught_by,
                     "skipped": d.skipped,
                 })
             })
             .collect();
+        // E2: доли по слоям — аддитивный ключ; суммарный порог не меняется.
+        let layers = [Layer::DocsModel, Layer::Code]
+            .into_iter()
+            .map(|layer| {
+                let (caught, total) = self.layer_counts(layer);
+                (
+                    layer.as_str().to_string(),
+                    serde_json::json!({
+                        "caught": caught,
+                        "total": total,
+                        "ratio": self.layer_ratio(layer),
+                    }),
+                )
+            })
+            .collect::<serde_json::Map<String, serde_json::Value>>();
         serde_json::json!({
             "schema": "arch-be/redteam-report/v1",
             "case": self.case.display().to_string(),
@@ -1901,6 +2043,8 @@ impl RedteamReport {
             "caught": self.scored_caught(),
             "total": self.scored_total(),
             "min_detection": self.min_detection,
+            "layers": layers,
+            "min_code_detection": self.min_code_detection,
             "control_ok": self.control_ok,
             "control_note": self.control_note,
             "passed": self.passed(),
@@ -1927,6 +2071,27 @@ pub fn render_markdown(report: &RedteamReport) -> String {
             "не пройден"
         }
     );
+    // E2: доли по слоям — отдельными строками, порог суммарной доли не меняется.
+    for layer in [Layer::DocsModel, Layer::Code] {
+        match report.layer_ratio(layer) {
+            Some(ratio) => {
+                let (caught, total) = report.layer_counts(layer);
+                let _ = writeln!(
+                    out,
+                    "Доля по слою «{}»: **{caught}/{total} = {:.0}%**\n",
+                    layer.label(),
+                    ratio * 100.0
+                );
+            }
+            None => {
+                let _ = writeln!(
+                    out,
+                    "Доля по слою «{}»: не измерялась (нет ловимых дефектов слоя)\n",
+                    layer.label()
+                );
+            }
+        }
+    }
     let _ = writeln!(
         out,
         "| № | Дефект | Ожидание | Результат | Смысловая рубрика |\n|---|---|---|---|---|"
@@ -2213,6 +2378,9 @@ fn gate_report(root: &Path, decision_quality: bool) -> Result<GateReport> {
 pub struct RedteamOptions {
     /// Порог доли обнаружения, ниже которого прогон красный.
     pub min_detection: f64,
+    /// Порог доли обнаружения кодового слоя (E2): `None` — кодовая доля
+    /// только показывается. CLI заполняет из `[redteam] min_code_detection`.
+    pub min_code_detection: Option<f64>,
     /// Учитывать ли составляющую `decision_quality` при прогоне гейта.
     pub decision_quality: bool,
     /// Куда сохранить клоны смысловых мутантов (ADR-051, S5): `None` — клоны
@@ -2224,6 +2392,7 @@ impl Default for RedteamOptions {
     fn default() -> Self {
         Self {
             min_detection: 0.78,
+            min_code_detection: None,
             decision_quality: true,
             keep_semantic: None,
         }
@@ -2240,7 +2409,7 @@ pub fn run(case: &Path, min_detection: f64, decision_quality: bool) -> Result<Re
         &RedteamOptions {
             min_detection,
             decision_quality,
-            keep_semantic: None,
+            ..RedteamOptions::default()
         },
     )
 }
@@ -2402,6 +2571,7 @@ pub fn run_with_options(case: &Path, options: &RedteamOptions) -> Result<Redteam
         case: case.to_path_buf(),
         detections,
         min_detection,
+        min_code_detection: options.min_code_detection,
         control_ok,
         control_note,
         semantic_kept: kept,
@@ -2784,6 +2954,149 @@ mod corner_tests {
             "warn-правило не краснит гейт — поимкой не считается"
         );
     }
+
+    // --- E2: две доли вместо одной ---------------------------------------------
+
+    /// Детекция для фикстуры долей.
+    fn det(id: &str, layer: Layer, expected: Expectation, caught: bool) -> Detection {
+        Detection {
+            id: id.into(),
+            title: id.into(),
+            expected,
+            layer,
+            caught_by: caught.then(|| "fitness".to_string()),
+            skipped: None,
+            expected_by: "fitness".into(),
+            in_ratio: true,
+        }
+    }
+
+    /// Доли по слоям считаются раздельно: документы+модель и код — по своим
+    /// знаменателям; семантические позиции в слоевые доли не входят.
+    #[test]
+    fn layer_ratios_are_computed_separately() {
+        let report = RedteamReport {
+            case: PathBuf::from("case"),
+            detections: vec![
+                det("D1", Layer::DocsModel, Expectation::Caught, true),
+                det("D2", Layer::DocsModel, Expectation::Caught, true),
+                det("D11", Layer::Code, Expectation::Semantic, false),
+                det("D11b", Layer::Code, Expectation::Caught, true),
+                det("D19", Layer::Code, Expectation::Caught, false),
+            ],
+            min_detection: 0.5,
+            min_code_detection: None,
+            control_ok: true,
+            control_note: None,
+            semantic_kept: Vec::new(),
+        };
+        assert_eq!(report.layer_counts(Layer::DocsModel), (2, 2));
+        assert_eq!(
+            report.layer_counts(Layer::Code),
+            (1, 2),
+            "D11 — семантика, не в знаменателе"
+        );
+        assert_eq!(report.layer_ratio(Layer::DocsModel), Some(1.0));
+        assert_eq!(report.layer_ratio(Layer::Code), Some(0.5));
+        // Суммарная доля — по набору раздела 7, как прежде.
+        let rendered = report.render();
+        assert!(
+            rendered.contains("доля по слою «документы+модель»: 2/2 = 100%"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("доля по слою «код»: 1/2 = 50%"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("порог кодовой доли: не задан"),
+            "{rendered}"
+        );
+        // JSON несёт обе доли аддитивным ключом.
+        let json = report.to_json();
+        assert_eq!(json["layers"]["code"]["ratio"], 0.5);
+        assert_eq!(json["layers"]["docs_model"]["caught"], 2);
+        assert_eq!(json["detections"][0]["layer"], "docs_model");
+    }
+
+    /// Слой без ловимых дефектов — «не измерялось», а не 100 %; заданный порог
+    /// кодовой доли при неизмеренном слое не проходит.
+    #[test]
+    fn code_threshold_gates_only_when_configured() {
+        let mut report = RedteamReport {
+            case: PathBuf::from("case"),
+            detections: vec![det("D1", Layer::DocsModel, Expectation::Caught, true)],
+            min_detection: 0.5,
+            min_code_detection: None,
+            control_ok: true,
+            control_note: None,
+            semantic_kept: Vec::new(),
+        };
+        assert_eq!(report.layer_ratio(Layer::Code), None);
+        assert!(report.passed(), "без порога кодовой доли — как прежде");
+        report.min_code_detection = Some(0.5);
+        assert!(
+            !report.passed(),
+            "порог задан, а кодовый слой не измерен — требование не подтверждено"
+        );
+        // С измеренным слоем: порог решает по кодовой доле.
+        report
+            .detections
+            .push(det("D11b", Layer::Code, Expectation::Caught, true));
+        assert!(report.passed(), "кодовая доля 100 % ≥ 50 %");
+        report.min_code_detection = Some(0.75);
+        report
+            .detections
+            .push(det("D19", Layer::Code, Expectation::Caught, false));
+        assert!(
+            !report.passed(),
+            "кодовая доля 50 % ниже порога 75 % — прогон красный"
+        );
+    }
+
+    /// `--save` пишет обе доли; файл прежней редакции (без них) читается —
+    /// доли просто неизвестны (аддитивная схема, обратная совместимость).
+    #[test]
+    fn summary_carries_layer_ratios_and_reads_old_files() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let case = tmp.path().join("case");
+        std::fs::create_dir_all(&case).expect("mkdir");
+        let report = RedteamReport {
+            case: case.clone(),
+            detections: vec![
+                det("D1", Layer::DocsModel, Expectation::Caught, true),
+                det("D11b", Layer::Code, Expectation::Caught, true),
+                det("D19", Layer::Code, Expectation::Caught, false),
+            ],
+            min_detection: 0.5,
+            min_code_detection: None,
+            control_ok: true,
+            control_note: None,
+            semantic_kept: Vec::new(),
+        };
+        let path = save_summary(&case, &report).expect("сохранение");
+        let back = load_summary(&path).expect("чтение");
+        assert_eq!(back.docs_model_ratio, Some(1.0));
+        assert_eq!(back.code_ratio, Some(0.5));
+        assert_eq!(back.code_caught, Some(1));
+        assert_eq!(back.code_total, Some(2));
+        assert!(back.min_code_detection.is_none());
+
+        // Файл прежней редакции (полей слоёв нет): читается, доли None.
+        std::fs::write(
+            &path,
+            "{\"schema\":\"arch-be/redteam/v1\",\"case\":\"кейс\",\
+             \"measured_at\":\"2026-10-01T00:00:00+00:00\",\"caught\":11,\"total\":14,\
+             \"ratio\":0.79,\"min_detection\":0.78,\"control_ok\":true}",
+        )
+        .expect("старая редакция");
+        let old = load_summary(&path).expect("старая редакция читается");
+        assert!(old.docs_model_ratio.is_none() && old.code_ratio.is_none());
+        assert!(
+            old.passed(),
+            "старая редакция: вердикт по сумме, как прежде"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -2866,6 +3179,7 @@ mod tests {
             case: measured,
             detections: Vec::new(),
             min_detection: 0.78,
+            min_code_detection: None,
             control_ok: true,
             control_note: None,
             semantic_kept: Vec::new(),
@@ -3086,6 +3400,7 @@ mod tests {
                 },
             ],
             min_detection: 0.5,
+            min_code_detection: None,
             control_ok: true,
             control_note: None,
             semantic_kept: Vec::new(),
@@ -3401,6 +3716,7 @@ mod tests {
                 in_ratio: true,
             }],
             min_detection: 0.78,
+            min_code_detection: None,
             control_ok: true,
             control_note: None,
             semantic_kept: Vec::new(),

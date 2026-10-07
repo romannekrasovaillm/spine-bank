@@ -523,13 +523,23 @@ fn anchor_redteam(repo: &Path) -> Anchor {
     // E6.3), но шкала доверия обязана её называть: «доля обнаружения» без неё
     // описывает только механику.
     let semantic = semantic_detection_map(repo);
+    // E2: доли по слоям (документы+модель / код) — из измерения, если оно их
+    // несёт; файлы прежних редакций их не имеют, и шкала молчать не будет.
+    let layers = match (summary.docs_model_ratio, summary.code_ratio) {
+        (Some(docs), Some(code)) => format!(
+            "; по слоям: документы+модель {:.0} %, код {:.0} %",
+            docs * 100.0,
+            code * 100.0
+        ),
+        _ => "; доли по слоям: не измерены (прогон прежней редакции)".to_string(),
+    };
     Anchor {
         n: 4,
         title: "Пакет защищён измеренно",
         met,
         evidence: format!(
             "{REDTEAM_RESULT_REL}: доля обнаружения {}/{} = {:.0} % (порог {:.0} %), \
-             контроль аттестации: {}; {semantic}",
+             контроль аттестации: {}{layers}; {semantic}",
             summary.caught,
             summary.total,
             summary.ratio * 100.0,
@@ -1259,6 +1269,39 @@ mod tests {
         let trust = assess(dir, &Config::default()).expect("trust");
         assert!(trust.anchors[3].met, "{}", trust.anchors[3].evidence);
         assert!(trust.anchors[3].evidence.contains("11/14"));
+    }
+
+    /// E2: якорь 4 показывает обе доли (документы+модель и код), когда
+    /// измерение их несёт; файл прежней редакции — честное «не измерены».
+    #[test]
+    fn anchor_four_shows_both_layer_ratios() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        repo_with_rules(dir, true);
+        std::fs::write(
+            dir.join(REDTEAM_RESULT_REL),
+            "{\"schema\":\"arch-be/redteam/v1\",\"case\":\"кейс\",\
+             \"measured_at\":\"2026-10-07T00:00:00+00:00\",\"caught\":11,\"total\":14,\
+             \"ratio\":0.79,\"min_detection\":0.78,\"control_ok\":true,\
+             \"docs_model_ratio\":1.0,\"code_ratio\":0.5}",
+        )
+        .expect("redteam.json");
+        let trust = assess(dir, &Config::default()).expect("trust");
+        let evidence = &trust.anchors[3].evidence;
+        assert!(evidence.contains("документы+модель 100 %"), "{evidence}");
+        assert!(evidence.contains("код 50 %"), "{evidence}");
+
+        // Прежняя редакция файла (без долей слоёв): шкала не молчит.
+        std::fs::write(
+            dir.join(REDTEAM_RESULT_REL),
+            "{\"schema\":\"arch-be/redteam/v1\",\"case\":\"кейс\",\
+             \"measured_at\":\"2026-10-01T00:00:00+00:00\",\"caught\":11,\"total\":14,\
+             \"ratio\":0.79,\"min_detection\":0.78,\"control_ok\":true}",
+        )
+        .expect("старая редакция");
+        let trust = assess(dir, &Config::default()).expect("trust");
+        let evidence = &trust.anchors[3].evidence;
+        assert!(evidence.contains("не измерены"), "{evidence}");
     }
 
     /// Контроль аттестации — часть якоря: без него измерение не значит ничего
