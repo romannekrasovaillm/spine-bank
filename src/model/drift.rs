@@ -186,6 +186,14 @@ fn rule_card(rule: &str) -> RuleCard {
                        источника, либо пересмотрите depends_on решением архитектора \
                        (связь могла устареть после рефакторинга)",
         },
+        "nfr-metric-missing" => RuleCard {
+            adr: "ADR-007",
+            rationale: "verification заявляет метрику, которой нет в коде затронутых \
+                        компонентов: проверка NFR упрётся в несуществующий измеритель",
+            fix_hint: "добавьте эмиссию метрики в код затронутого компонента либо \
+                       согласуйте имя в verification с именем в коде; структурное поле \
+                       verification_metric не вводится — решение о формате за архитектором",
+        },
         _ => RuleCard {
             adr: "ADR-035",
             rationale: "внешняя интеграция без артефакта в репозитории легитимна, но обязана \
@@ -319,7 +327,104 @@ fn declared_unused_edges(
     Ok(out)
 }
 
-/// Проверяет дрейф «модель ↔ код» для кейса `case_dir`.
+/// Опции проверки дрейфа (флаги конфига кейса, `[drift]`).
+#[derive(Debug, Clone, Default)]
+pub struct DriftOptions {
+    /// C3: метрики из `verification` NFR обязаны встречаться в коде
+    /// затронутых CMP (находка `nfr-metric-missing`, warn). Дефолт off —
+    /// обратная совместимость: проверка включается осознанно.
+    pub check_nfr_metrics: bool,
+}
+
+/// Метрики из `verification` NFR, которых нет в коде затронутых CMP (C3).
+///
+/// Метрика — идентификатор `snake_case` с суффиксом `_seconds`/`_total`/
+/// `_bytes`/`_ratio`. Затронутые CMP — компоненты с `implements` на этот NFR
+/// и непустыми `code_roots`; без таких CMP проверка честно пропускается
+/// (нечем сверять). Поиск — подстрокой по исходникам под корнями (те же
+/// расширения, что у извлечения импортов [`crate::imports`]).
+///
+/// Возвращает (nfr, метрика, файл NFR), отсортировано.
+fn missing_nfr_metrics(
+    case_dir: &Path,
+    model: &crate::model::Model,
+) -> Result<Vec<(String, String, PathBuf)>> {
+    let re = regex::Regex::new(r"\b[a-z][a-z0-9_]*_(?:seconds|total|bytes|ratio)\b")
+        .map_err(|e| crate::error::HarnessError::Model(format!("внутренний regex метрик: {e}")))?;
+    let mut out = Vec::new();
+    for nfr in model.entities.iter().filter(|e| e.kind == EntityKind::Nfr) {
+        let Some(verification) = &nfr.verification else {
+            continue;
+        };
+        let metrics: BTreeSet<&str> = re.find_iter(verification).map(|m| m.as_str()).collect();
+        if metrics.is_empty() {
+            continue;
+        }
+        let touched: Vec<&crate::model::Entity> = model
+            .entities
+            .iter()
+            .filter(|e| {
+                e.kind == EntityKind::Cmp
+                    && !e.code_roots.is_empty()
+                    && e.implements.contains(&nfr.id)
+            })
+            .collect();
+        if touched.is_empty() {
+            continue;
+        }
+        // Корпус кода затронутых CMP: содержимое исходников под их корнями.
+        let mut corpus = String::new();
+        for cmp in &touched {
+            for raw in &cmp.code_roots {
+                let root = case_dir.join(normalize_root(raw));
+                if !root.is_dir() {
+                    continue;
+                }
+                let walker = WalkDir::new(&root).follow_links(false).into_iter();
+                for entry in walker.filter_entry(|e| {
+                    if e.depth() > 0 && e.file_type().is_dir() {
+                        let name = e.file_name().to_string_lossy();
+                        !(name.starts_with('.')
+                            || crate::survey::SKIP_DIRS.contains(&name.as_ref()))
+                    } else {
+                        true
+                    }
+                }) {
+                    let entry = entry.map_err(|e| {
+                        crate::error::HarnessError::Model(format!("обход {}: {e}", root.display()))
+                    })?;
+                    if !entry.file_type().is_file()
+                        || entry.metadata().map_or(0, |m| m.len()) > MAX_SOURCE_BYTES
+                    {
+                        continue;
+                    }
+                    let ext_ok = entry
+                        .path()
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .is_some_and(|e| crate::imports::IMPORT_EXTENSIONS.contains(&e));
+                    if !ext_ok {
+                        continue;
+                    }
+                    if let Ok(text) = std::fs::read_to_string(entry.path()) {
+                        corpus.push_str(&text);
+                        corpus.push('\n');
+                    }
+                }
+            }
+        }
+        for metric in metrics {
+            if !corpus.contains(metric) {
+                out.push((nfr.id.clone(), metric.to_string(), nfr.file.clone()));
+            }
+        }
+    }
+    out.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
+    Ok(out)
+}
+
+/// Проверяет дрейф «модель ↔ код» для кейса `case_dir` (дефолтные опции —
+/// проверка C3 выключена, обратная совместимость).
 ///
 /// Толерантная загрузка модели (E3): битые сущности — warn-находки
 /// `model-load-skip`, проверки идут по валидному подмножеству; полный отказ
@@ -329,6 +434,14 @@ fn declared_unused_edges(
 /// Каталог недоступен, `model/` внутри него отсутствует, ни один файл
 /// модели не разбирается, ошибка обхода репозитория.
 pub fn drift_check(case_dir: &Path) -> Result<DriftReport> {
+    drift_check_with(case_dir, &DriftOptions::default())
+}
+
+/// Полный вариант [`drift_check`] с опциями кейса ([`DriftOptions`]).
+///
+/// # Errors
+/// Как у [`drift_check`].
+pub fn drift_check_with(case_dir: &Path, options: &DriftOptions) -> Result<DriftReport> {
     let model_dir = case_dir.join("model");
     let model = load_model_tolerant(&model_dir)?;
     let mut issues = Vec::new();
@@ -449,6 +562,23 @@ pub fn drift_check(case_dir: &Path) -> Result<DriftReport> {
         );
     }
 
+    // 5. C3 (по флагу `[drift] nfr_metric_check`): метрика из verification
+    //    NFR обязана встречаться в коде затронутых CMP.
+    if options.check_nfr_metrics {
+        for (nfr, metric, file) in missing_nfr_metrics(case_dir, &model)? {
+            push_issue(
+                &mut issues,
+                "warn",
+                file,
+                "nfr-metric-missing",
+                format!(
+                    "{nfr}: метрика '{metric}' из verification не найдена в коде \
+                     затронутых компонентов (implements)"
+                ),
+            );
+        }
+    }
+
     issues.sort_by(|a, b| {
         a.file
             .cmp(&b.file)
@@ -546,7 +676,10 @@ impl Tool for ModelDriftTool {
         // Аргумент принимает и корень кейса, и каталог `model/` (T-13):
         // дрейф считается от корня, каталог модели разворачивается в родителя.
         let dir = crate::model::case_root_from(&ctx.resolve(args.dir.as_deref().unwrap_or(".")));
-        let report = match drift_check(&dir) {
+        let options = DriftOptions {
+            check_nfr_metrics: ctx.config.drift.nfr_metric_check,
+        };
+        let report = match drift_check_with(&dir, &options) {
             Ok(r) => r,
             Err(e) => return Ok(ToolOutput::err(format!("model_drift: {e}"))),
         };
@@ -870,6 +1003,120 @@ mod tests {
                 .any(|i| i.rule == "declared-edge-unused"),
             "{}",
             report.summary()
+        );
+    }
+
+    /// Фикстура C3: NFR-001 с метрикой в `verification`; CMP-001 реализует
+    /// её (`implements`), метрика в коде — по параметру.
+    fn fixture_nfr_metric(dir: &Path, with_metric: bool) -> PathBuf {
+        let case = dir.join("case");
+        write_file(
+            &case,
+            "model/NFR-001-p99.md",
+            "---\nid: NFR-001\ntype: nfr\ntitle: p99 приёма\nstatus: accepted\np99_target_ms: 1000\nverification: замер по метрике payout_intake_duration_seconds\n---\n",
+        );
+        write_file(
+            &case,
+            "model/CMP-001-intake.md",
+            "---\nid: CMP-001\ntype: cmp\ntitle: Приём\nstatus: adopted\ncode_roots: [services/intake]\nimplements: [NFR-001]\n---\nПриём.\n",
+        );
+        let code = if with_metric {
+            "fn write() {\n    let _m = \"payout_intake_duration_seconds\";\n}\n"
+        } else {
+            "fn write() {}\n"
+        };
+        write_file(&case, "services/intake/writer.rs", code);
+        case
+    }
+
+    /// C3: без флага конфига проверки нет (обратная совместимость).
+    #[test]
+    fn nfr_metric_check_off_by_default() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let case = fixture_nfr_metric(dir.path(), false);
+        let report = drift_check(&case).expect("drift");
+        assert!(
+            !report.issues.iter().any(|i| i.rule == "nfr-metric-missing"),
+            "{}",
+            report.summary()
+        );
+    }
+
+    /// C3: с флагом метрика, отсутствующая в коде затронутого CMP, — warn.
+    #[test]
+    fn nfr_metric_missing_warn_with_flag() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let case = fixture_nfr_metric(dir.path(), false);
+        let options = DriftOptions {
+            check_nfr_metrics: true,
+        };
+        let report = drift_check_with(&case, &options).expect("drift");
+        let found: Vec<&LintIssue> = report
+            .issues
+            .iter()
+            .filter(|i| i.rule == "nfr-metric-missing")
+            .collect();
+        assert_eq!(found.len(), 1, "{}", report.summary());
+        assert_eq!(found[0].severity, "warn");
+        assert!(found[0].message.contains("NFR-001"), "{}", found[0].message);
+        assert!(
+            found[0].message.contains("payout_intake_duration_seconds"),
+            "{}",
+            found[0].message
+        );
+        assert_eq!(found[0].adr.as_deref(), Some("ADR-007"));
+        assert!(!report.has_errors(), "warn не ломает итог");
+    }
+
+    /// C3: метрика, присутствующая в коде, — не находка.
+    #[test]
+    fn nfr_metric_present_is_clean() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let case = fixture_nfr_metric(dir.path(), true);
+        let options = DriftOptions {
+            check_nfr_metrics: true,
+        };
+        let report = drift_check_with(&case, &options).expect("drift");
+        assert!(
+            !report.issues.iter().any(|i| i.rule == "nfr-metric-missing"),
+            "{}",
+            report.summary()
+        );
+    }
+
+    /// C3: NFR без реализующих CMP с `code_roots` — честный пропуск (нечем
+    /// сверять), а не находка.
+    #[test]
+    fn nfr_without_implementers_skipped() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let case = fixture_nfr_metric(dir.path(), false);
+        // CMP теряет implements — затронутых компонентов нет.
+        write_file(
+            &case,
+            "model/CMP-001-intake.md",
+            "---\nid: CMP-001\ntype: cmp\ntitle: Приём\nstatus: adopted\ncode_roots: [services/intake]\n---\nПриём.\n",
+        );
+        let options = DriftOptions {
+            check_nfr_metrics: true,
+        };
+        let report = drift_check_with(&case, &options).expect("drift");
+        assert!(
+            !report.issues.iter().any(|i| i.rule == "nfr-metric-missing"),
+            "{}",
+            report.summary()
+        );
+    }
+
+    /// C3: флаг конфига кейса разбирается (`[drift] nfr_metric_check`).
+    #[test]
+    fn drift_config_flag_parses() {
+        let cfg: crate::config::Config =
+            toml::from_str("[drift]\nnfr_metric_check = true\n").expect("конфиг");
+        assert!(cfg.drift.nfr_metric_check);
+        let default = crate::config::Config::default();
+        assert!(
+            !default.drift.nfr_metric_check,
+            "дефолт off (совместимость)"
         );
     }
 

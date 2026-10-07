@@ -1432,7 +1432,7 @@ pub(crate) async fn run() -> Result<()> {
                 std::process::exit(1);
             }
         }
-        Some(Cmd::Model { cmd }) => cmd_model(cmd)?,
+        Some(Cmd::Model { cmd }) => cmd_model(&cfg, cmd)?,
         Some(Cmd::Trace { cmd }) => cmd_trace(&cfg, cmd)?,
         Some(Cmd::Nfr { cmd }) => cmd_nfr(cmd)?,
         Some(Cmd::Skills { cmd }) => cmd_skills(&cfg, cmd)?,

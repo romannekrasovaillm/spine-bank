@@ -191,7 +191,7 @@ pub(crate) enum NfrCmd {
 /// её error-находкой, show/graph работают по валидному подмножеству с
 /// warn-пометкой. Пишущие/обменные (project/export/import) — строгие:
 /// частичная модель молча потеряла бы сущности в артефактах.
-pub(crate) fn cmd_model(cmd: ModelCmd) -> Result<()> {
+pub(crate) fn cmd_model(cfg: &Config, cmd: ModelCmd) -> Result<()> {
     match cmd {
         ModelCmd::Validate { dir } => {
             // Аргумент принимает и корень кейса, и каталог `model/` (T-13).
@@ -357,7 +357,11 @@ pub(crate) fn cmd_model(cmd: ModelCmd) -> Result<()> {
         }
         ModelCmd::Drift { dir, json } => {
             let dir = arch_harness::model::case_root_from(&dir);
-            let report = arch_harness::model::drift_check(&dir)
+            // C3 за флагом конфига кейса ([drift] nfr_metric_check).
+            let options = arch_harness::model::DriftOptions {
+                check_nfr_metrics: cfg.drift.nfr_metric_check,
+            };
+            let report = arch_harness::model::drift_check_with(&dir, &options)
                 .with_context(|| format!("дрейф «модель ↔ код» кейса {}", dir.display()))?;
             if json {
                 let verdict = arch_harness::model::drift::verdict_json(&report);

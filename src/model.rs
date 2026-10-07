@@ -49,7 +49,7 @@ use crate::error::{HarnessError, Result};
 use crate::llm::ToolSpec;
 use crate::tool::{Tool, ToolContext, ToolOutput};
 
-pub use drift::{DriftReport, ModelDriftTool, drift_check};
+pub use drift::{DriftOptions, DriftReport, ModelDriftTool, drift_check, drift_check_with};
 pub use exchange::{ExportFormat, ImportReport, export_model, import_structurizr};
 pub use graph::{find_cycle, graph_mermaid, graph_text};
 pub use parse::{
