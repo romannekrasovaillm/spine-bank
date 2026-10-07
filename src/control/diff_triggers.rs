@@ -481,6 +481,17 @@ pub struct DiffGlobs {
     pub integrations: Vec<String>,
     /// Файлы NFR-сущностей модели (1.7 п.3).
     pub nfr: Vec<String>,
+    /// Глобы границы безопасности (D2): auth-конфиги, сетевые политики,
+    /// IAM. ПУСТ по умолчанию — без явной настройки кейса поведение прежнее
+    /// (триггер `security_boundary_change` остаётся заявляемым); глобальных
+    /// эвристик нет, соглашения не зашиваются в бинарь.
+    pub security: Vec<String>,
+    /// Глобы зон доверия (D2): границы контуров, mesh-политики. Пусто по
+    /// умолчанию, как у [`DiffGlobs::security`].
+    pub trust_zone: Vec<String>,
+    /// Глобы контрактов данных (D2): схемы событий, топиков, Avro-схемы.
+    /// Пусто по умолчанию, как у [`DiffGlobs::security`].
+    pub data_contract: Vec<String>,
 }
 
 impl Default for DiffGlobs {
@@ -490,6 +501,9 @@ impl Default for DiffGlobs {
             components: vec!["model/CMP-*".to_string()],
             integrations: vec!["model/INT-*".to_string()],
             nfr: vec!["model/NFR-*".to_string()],
+            security: Vec::new(),
+            trust_zone: Vec::new(),
+            data_contract: Vec::new(),
         }
     }
 }
@@ -534,6 +548,12 @@ pub fn detect_diff_triggers(repo: &Path, git_ref: Option<&str>) -> Result<DiffTr
 /// - `new_datastore` — в конфигах добавлены строки подключения
 ///   (`postgres://`/`postgresql://`/`mysql://`/`mongodb://`/`redis://`/
 ///   `kafka://`/`bootstrap.servers`), а не голое слово.
+/// - `security_boundary_change` / `trust_zone_change` /
+///   `data_contract_change` (D2) — изменён файл под глобом кейса
+///   [`DiffGlobs::security`] / [`DiffGlobs::trust_zone`] /
+///   [`DiffGlobs::data_contract`]. Глобы по умолчанию пусты: без настройки
+///   `[significance] *_globs` эти триггеры детектор не видит (слепая зона
+///   паспорта, D1) — глобальные эвристики намеренно не вводятся.
 ///
 /// # Errors
 /// Не git-репозиторий, git недоступен, некорректный `GIT_REF`.
@@ -808,6 +828,36 @@ pub fn detect_diff_triggers_with(
                         ),
                     );
                 }
+            }
+        }
+
+        // Глобы кейса для недетектируемых триггеров (D2): изменение файла
+        // под явно настроенным глобом зажигает триггер (любой статус правки:
+        // добавление, изменение, удаление файла границы безопасности значимо
+        // одинаково). Глобальных эвристик нет: без `[significance] *_globs`
+        // в конфиге кейса эти детекторы молчат, и триггеры остаются
+        // заявляемыми (слепая зона паспорта, D1).
+        for (key_globs, trigger, what) in [
+            (
+                &globs.security,
+                "security_boundary_change",
+                "границы безопасности",
+            ),
+            (&globs.trust_zone, "trust_zone_change", "зоны доверия"),
+            (
+                &globs.data_contract,
+                "data_contract_change",
+                "контракта данных",
+            ),
+        ] {
+            if key_globs.iter().any(|g| glob_match(g, path.as_str())) {
+                let verb = match code {
+                    'A' => "добавлен",
+                    'D' => "удалён",
+                    'R' | 'C' => "переименован",
+                    _ => "изменён",
+                };
+                found.fire(trigger, &format!("{verb} файл {what} {path} (глоб кейса)"));
             }
         }
     }
@@ -1310,6 +1360,103 @@ mod tests {
             !default_globs.triggers.contains("new_component"),
             "дефолтный глоб REQ-* не покрывает: {default_globs:?}"
         );
+    }
+
+    /// D2: глобы кейса зажигают ранее недетектируемые триггеры —
+    /// `security_boundary_change`, `trust_zone_change`, `data_contract_change`.
+    /// Без настройки (`DiffGlobs::default()` — эти списки пусты) те же файлы
+    /// триггеров не дают: глобальных эвристик не введено, поведение прежнее.
+    #[test]
+    fn case_globs_fire_formerly_blind_triggers() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = git_repo(dir.path());
+        write_file(&repo, "auth/policy.yaml", "allow: all\n");
+        write_file(&repo, "deploy/mesh/peer-authentication.yaml", "mtls: {}\n");
+        write_file(&repo, "schemas/events/payment.yaml", "type: record\n");
+        git_in(&repo, &["add", "."]);
+        git_in(&repo, &["commit", "-q", "-m", "контур безопасности"]);
+
+        let globs = DiffGlobs {
+            security: vec!["auth/**".to_string()],
+            trust_zone: vec!["deploy/mesh/**".to_string()],
+            data_contract: vec!["schemas/events/**".to_string()],
+            ..DiffGlobs::default()
+        };
+        let found = detect_diff_triggers_with(&repo, Some("HEAD~1"), &globs).unwrap();
+        for t in [
+            "security_boundary_change",
+            "trust_zone_change",
+            "data_contract_change",
+        ] {
+            assert!(found.triggers.contains(t), "нет {t}: {:?}", found.triggers);
+        }
+        let ev = found.evidence.join("\n");
+        assert!(ev.contains("глоб кейса"), "{ev}");
+        // security_boundary_change — форсирующий: маршрут Critical.
+        let scored = score_with_sources(
+            &BTreeMap::new(),
+            &found,
+            DEFAULT_FAST_MAX,
+            DEFAULT_STANDARD_MAX,
+        );
+        assert_eq!(scored.significance.route, Route::Critical);
+
+        // Дефолт: списки пусты — те же файлы слепой зоны не зажигают.
+        let default_globs = DiffGlobs::default();
+        assert_eq!(default_globs.security, Vec::<String>::new());
+        assert_eq!(default_globs.trust_zone, Vec::<String>::new());
+        assert_eq!(default_globs.data_contract, Vec::<String>::new());
+        let plain = detect_diff_triggers(&repo, Some("HEAD~1")).unwrap();
+        for t in [
+            "security_boundary_change",
+            "trust_zone_change",
+            "data_contract_change",
+        ] {
+            assert!(
+                !plain.triggers.contains(t),
+                "без глобов {t} не зажигается: {:?}",
+                plain.triggers
+            );
+        }
+    }
+
+    /// D2: зажигает ЛЮБАЯ правка файла под глобом — не только добавление:
+    /// изменение и удаление auth-конфига значимы так же, как его появление.
+    #[test]
+    fn case_globs_fire_on_modification_and_deletion() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = git_repo(dir.path());
+        write_file(&repo, "auth/policy.yaml", "allow: all\n");
+        git_in(&repo, &["add", "."]);
+        git_in(&repo, &["commit", "-q", "-m", "baseline auth"]);
+        let globs = DiffGlobs {
+            security: vec!["auth/**".to_string()],
+            ..DiffGlobs::default()
+        };
+
+        write_file(&repo, "auth/policy.yaml", "allow: none\n");
+        git_in(&repo, &["add", "."]);
+        git_in(&repo, &["commit", "-q", "-m", "ужесточение политики"]);
+        let modified = detect_diff_triggers_with(&repo, Some("HEAD~1"), &globs).unwrap();
+        assert!(
+            modified.triggers.contains("security_boundary_change"),
+            "правка под глобом: {:?}",
+            modified.triggers
+        );
+        let ev = modified.evidence.join("\n");
+        assert!(ev.contains("изменён файл границы безопасности"), "{ev}");
+
+        std::fs::remove_file(repo.join("auth/policy.yaml")).unwrap();
+        git_in(&repo, &["add", "-A"]);
+        git_in(&repo, &["commit", "-q", "-m", "удаление политики"]);
+        let deleted = detect_diff_triggers_with(&repo, Some("HEAD~1"), &globs).unwrap();
+        assert!(
+            deleted.triggers.contains("security_boundary_change"),
+            "удаление под глобом: {:?}",
+            deleted.triggers
+        );
+        let ev = deleted.evidence.join("\n");
+        assert!(ev.contains("удалён файл границы безопасности"), "{ev}");
     }
 
     #[test]

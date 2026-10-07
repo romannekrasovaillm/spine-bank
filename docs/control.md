@@ -52,6 +52,14 @@ standard_max = 4   # fast_max < score ≤ standard_max → Standard; выше �
 contract_globs    = ["docs/contracts/**", "contracts/**"]
 component_globs   = ["model/CMP-*"]
 integration_globs = ["model/INT-*"]
+# Глобы слепой зоны (D2): правка файла под глобом зажигает соответствующий
+# триггер. ПУСТЫ по умолчанию — без настройки эти триггеры детектор не видит
+# (паспорт вердикта называет их «не проверено детектором», D1). Шаблон —
+# плагин arch-governance, скилл fitness-rule-authoring. Глобы якорятся от
+# корня репозитория; ведущий `**/` не поддерживается (совпадёт со всем).
+security_globs       = []  # напр. ["auth/**", "deploy/network-policies/**"]
+trust_zone_globs     = []  # напр. ["deploy/mesh/**"]
+data_contract_globs  = []  # напр. ["schemas/events/**"]
 ```
 
 Контракт распознаётся и **по содержимому** (ключ верхнего уровня
@@ -105,6 +113,9 @@ git-репозитория — ошибка с понятным текстом.
 | `rto_rpo_targets` | в добавленных строках файлов `model/` изменились цели RTO/RPO: поля `rto_minutes:`/`rpo_seconds:` или инлайн-формы «RTO ≤ 15»/«RPO = 0» (1.7 п.3; упоминание в ADR/прозе — не цель) |
 | `irreversible_migration` | в диффе файла миграций (`migrations/` или `*.sql`) есть `DROP TABLE`/`TRUNCATE`/`DROP COLUMN` |
 | `new_datastore` | в конфигах добавлены строки подключения `postgres://`/`mysql://`/`kafka`/`mongodb`/`redis://` |
+| `security_boundary_change` (D2) | изменён файл под глобом кейса `security_globs` (пуст по умолчанию) |
+| `trust_zone_change` (D2) | изменён файл под глобом кейса `trust_zone_globs` (пуст по умолчанию) |
+| `data_contract_change` (D2) | изменён файл под глобом кейса `data_contract_globs` (пуст по умолчанию) |
 
 В выводе у каждого сработавшего триггера — источник: `(declared)`,
 `(diff)` или `(declared+diff)`. Триггер, найденный диффом, но не заявленный

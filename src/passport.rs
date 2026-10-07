@@ -972,6 +972,71 @@ arch-be gate --repo кейс --format json > verdict.json && arch-be gate --repo
         );
     }
 
+    /// D2: глоб кейса зажигает ранее слепой триггер — паспорт перестаёт
+    /// называть его непроверенным, а маршрут форсируется в Critical.
+    #[test]
+    fn passport_drops_glob_fired_blind_trigger() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        make_repo(dir, "ARCHITECTURE-SPINE.md");
+        // Новый auth-конфиг в рабочем дереве (untracked) — детектор D2 по
+        // глобу `auth/**` из настроек гейта (конфиг кейса [significance]).
+        std::fs::create_dir_all(dir.join("auth")).expect("mkdir auth");
+        std::fs::write(dir.join("auth/policy.yaml"), "allow: all\n").expect("policy");
+        let options = crate::gate::GateOptions {
+            diff_globs: crate::control::DiffGlobs {
+                security: vec!["auth/**".to_string()],
+                ..crate::control::DiffGlobs::default()
+            },
+            ..crate::gate::GateOptions::default()
+        };
+        let report = crate::gate::run_opts(
+            dir,
+            None,
+            None,
+            None,
+            (1, 4),
+            &GateRequirements::default(),
+            &options,
+        )
+        .expect("гейт");
+        assert_eq!(
+            report.route,
+            Route::Critical,
+            "security_boundary_change форсирует Critical: {}",
+            report.route_note
+        );
+        assert!(
+            report
+                .route_triggers
+                .iter()
+                .any(|t| t == "security_boundary_change"),
+            "{:?}",
+            report.route_triggers
+        );
+        let passport = Passport::build_labelled(&report, dir, "кейс");
+        assert!(
+            !passport
+                .route_blind
+                .iter()
+                .any(|t| t == "security_boundary_change"),
+            "зажжённый глобом триггер больше не слепой: {:?}",
+            passport.route_blind
+        );
+        // Остальная слепая зона на месте (financial_impact глобом не ловится).
+        assert!(
+            passport.route_blind.iter().any(|t| t == "financial_impact"),
+            "{:?}",
+            passport.route_blind
+        );
+        let page = passport.render();
+        assert!(page.contains("financial_impact"), "{page}");
+        assert!(
+            !page.contains("Не проверено детектором: security_boundary_change"),
+            "{page}"
+        );
+    }
+
     /// D1: при явном маршруте (`--route`, без детектора диффа) все семь
     /// недетектируемых триггеров названы в блоке маршрута — маршрут не имеет
     /// права выглядеть всевидящим. На exit-код строка не влияет (отчёт).

@@ -941,6 +941,20 @@ pub struct SignificanceConfig {
     /// или правка которых поднимает `significant_nfr`.
     #[serde(default = "default_nfr_globs")]
     pub nfr_globs: Vec<String>,
+    /// Глобы границы безопасности (D2): auth-конфиги, сетевые политики, IAM —
+    /// правка файла под глобом зажигает `security_boundary_change`.
+    /// ПУСТ по умолчанию: глобальных эвристик нет, соглашения репозитория не
+    /// зашиты в бинарь; без настройки триггер остаётся заявляемым (D1).
+    #[serde(default)]
+    pub security_globs: Vec<String>,
+    /// Глобы зон доверия (D2): правка файла под глобом зажигает
+    /// `trust_zone_change`. Пусто по умолчанию, как у `security_globs`.
+    #[serde(default)]
+    pub trust_zone_globs: Vec<String>,
+    /// Глобы контрактов данных (D2): схемы событий/топиков — правка файла
+    /// под глобом зажигает `data_contract_change`. Пусто по умолчанию.
+    #[serde(default)]
+    pub data_contract_globs: Vec<String>,
 }
 
 /// Дефолтные глобы контрактов (T-05): каталоги, где контракты лежат по
@@ -973,6 +987,9 @@ impl Default for SignificanceConfig {
             component_globs: default_component_globs(),
             integration_globs: default_integration_globs(),
             nfr_globs: default_nfr_globs(),
+            security_globs: Vec::new(),
+            trust_zone_globs: Vec::new(),
+            data_contract_globs: Vec::new(),
         }
     }
 }
@@ -1005,6 +1022,9 @@ impl SignificanceConfig {
             components: self.component_globs.clone(),
             integrations: self.integration_globs.clone(),
             nfr: self.nfr_globs.clone(),
+            security: self.security_globs.clone(),
+            trust_zone: self.trust_zone_globs.clone(),
+            data_contract: self.data_contract_globs.clone(),
         }
     }
 }
@@ -2158,6 +2178,29 @@ mod tests {
             toml::from_str("[significance]\nfast_max = 4\nstandard_max = 4\n").expect("parse");
         let err = bad.significance.limits().expect_err("границы совпали");
         assert!(err.to_string().contains("fast_max"), "{err}");
+    }
+
+    /// D2: глобы слепой зоны (`security`/`trust_zone`/`data_contract`) по
+    /// умолчанию ПУСТЫ (поведение прежнее, глобальных эвристик нет), а из
+    /// `[significance]` конфига кейса доезжают до `DiffGlobs` детектора.
+    #[test]
+    fn significance_case_globs_default_empty_and_parse() {
+        let bare: Config = toml::from_str("").expect("deserialize empty");
+        let globs = bare.significance.diff_globs();
+        assert!(globs.security.is_empty(), "дефолт пуст: {globs:?}");
+        assert!(globs.trust_zone.is_empty(), "дефолт пуст: {globs:?}");
+        assert!(globs.data_contract.is_empty(), "дефолт пуст: {globs:?}");
+
+        let custom: Config = toml::from_str(
+            "[significance]\nsecurity_globs = [\"auth/**\"]\ntrust_zone_globs = [\"deploy/mesh/**\"]\ndata_contract_globs = [\"schemas/events/**\"]\n",
+        )
+        .expect("parse");
+        let globs = custom.significance.diff_globs();
+        assert_eq!(globs.security, vec!["auth/**".to_string()]);
+        assert_eq!(globs.trust_zone, vec!["deploy/mesh/**".to_string()]);
+        assert_eq!(globs.data_contract, vec!["schemas/events/**".to_string()]);
+        // Остальные глобы — дефолтные (T-05 не сломан).
+        assert_eq!(globs.contracts, default_contract_globs());
     }
 
     #[test]
