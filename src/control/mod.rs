@@ -59,6 +59,7 @@ mod exec;
 mod registry;
 pub(crate) mod report;
 mod rules;
+mod score;
 mod shadow;
 mod templates;
 mod tools;
@@ -87,6 +88,9 @@ pub use rules::{
     ConstraintsPathResolution, HANDOFF_CONSTRAINTS_PATH, ROOT_CONSTRAINTS_PATH,
     constraints_drift_note, load_fitness_rules, load_fitness_rules_with_skips,
     resolve_constraints_path, resolve_constraints_path_detailed, rule_cards,
+};
+pub use score::{
+    MAX_REPLAY_COMMITS, ReplayEntry, ReplayReport, render_replay, replay_significance,
 };
 pub use shadow::{
     SHADOW_RECORD_PATH, SHADOW_RECORD_SCHEMA, ShadowChange, ShadowFleet, ShadowFleetChange,

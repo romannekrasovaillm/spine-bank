@@ -26,8 +26,13 @@
    `api_contract_change_is_classified_breaking_or_additive` (падал до фикса).
 
 Замер доли ложных срабатываний `new_vendor` (смена версии) на истории
-spine-bank — в `docs/experiments/significance-replay.md` (пункт D4 той же
-волны; раздел «Замер для ADR-061»).
+spine-bank — `docs/experiments/significance-replay.md` (пункт D4 той же
+волны, прогон `arch-be control score --replay HEAD` на 437 коммитах):
+по старой логике срабатываний было бы 24, из них истинно новые имена — 5,
+только смена версий — 19: **доля шума ≈ 79 %** (релизные bump'ы уходили в
+Standard). Остаточный шум — ключи секций `[package]`/`[features]` новых
+манифестов, консервативно считаемые новыми именами (fail-safe, см.
+Consequences).
 
 ## Decision
 
