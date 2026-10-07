@@ -51,7 +51,7 @@ arch-be gate --repo . --route critical          # PASS
 
 Правка кода после записи (`echo … >> skeleton/…py`) → находка
 `evidence_record_stale` («входы прогона изменились после записи»), гейт FAIL
-до повторного `evidence record`. См. ADR-065.
+до повторного `evidence record`. См. ADR-066.
 
 ### A2. Выводимые артефакты не пишутся руками
 
