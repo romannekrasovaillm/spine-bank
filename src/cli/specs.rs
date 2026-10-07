@@ -314,7 +314,14 @@ pub(crate) fn cmd_delta(cmd: DeltaCmd) -> Result<()> {
     let cwd = || std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     match cmd {
         DeltaCmd::New { name, repo } => {
-            let path = arch_harness::delta::new(&repo.unwrap_or_else(cwd), &name)?;
+            let root = repo.unwrap_or_else(cwd);
+            // F1 (ADR-062): репозиторий на чистом OpenSpec (`[delta] sources =
+            // ["openspec"]`) — DELTA.md не создаём (двойной учёт), изменение
+            // оформляется change'ом OpenSpec; markdown OpenSpec Spine не пишет.
+            if let Some(hint) = arch_harness::delta::openspec_only_hint(&root)? {
+                anyhow::bail!("{hint}");
+            }
+            let path = arch_harness::delta::new(&root, &name)?;
             println!("Дельта создана: {}", path.display());
         }
         DeltaCmd::List { repo } => {

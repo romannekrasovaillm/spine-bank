@@ -340,7 +340,9 @@ pub fn scan_scenarios(root: &Path) -> Result<Vec<Scenario>> {
 }
 
 /// Собирает markdown-файлы каталога (рекурсивно, детерминированный порядок).
-fn collect_md(dir: &Path) -> Vec<PathBuf> {
+/// `pub(crate)`: тот же обход читает гейт прямых правок спайна (F1, ADR-062 —
+/// дельты спек change `OpenSpec` как источник покрытия `delta guard`).
+pub(crate) fn collect_md(dir: &Path) -> Vec<PathBuf> {
     let mut files: Vec<PathBuf> = WalkDir::new(dir)
         .into_iter()
         .filter_map(std::result::Result::ok)
@@ -537,6 +539,36 @@ pub struct CoveredRequirement {
     pub via: Vec<String>,
 }
 
+/// Кандидат на перелинковку осиротевшей ссылки `covers:` (F4): требование
+/// той же capability с изменённым хэшем (id другой по построению), у которого
+/// нет покрытия (статус «без решения»).
+#[derive(Debug, Clone, Serialize)]
+pub struct OrphanCandidate {
+    /// Идентификатор требования-кандидата.
+    pub id: String,
+    /// Заголовок `### Requirement:`.
+    pub title: String,
+    /// Файл-источник (относительно корня репозитория).
+    pub file: PathBuf,
+    /// Строка заголовка требования (1-based).
+    pub line: usize,
+}
+
+/// Осиротевшая ссылка `covers:` (F4): правило ссылается на идентификатор
+/// требования, которого больше нет — правка текста требования меняет его id
+/// (так задумано, см. [`requirement_id`]), и связь «правило ← требование»
+/// раньше терялась молча. Уровень находки — warn (отчёт, не гейт).
+#[derive(Debug, Clone, Serialize)]
+pub struct CoverOrphan {
+    /// Осиротевший идентификатор из `covers:`.
+    pub id: String,
+    /// Правила, ссылающиеся на него (поимённо, дедуплицированы).
+    pub rules: Vec<String>,
+    /// Кандидат на перелинковку (`None` — в той же capability непокрытых
+    /// требований нет).
+    pub candidate: Option<OrphanCandidate>,
+}
+
 /// Отчёт покрытия требований правилами (JSON-контракт
 /// `openspec coverage --json`).
 #[derive(Debug, Clone, Serialize)]
@@ -561,6 +593,11 @@ pub struct CoverageReport {
     pub unresolved: usize,
     /// Поимённая разбивка.
     pub items: Vec<CoveredRequirement>,
+    /// Осиротевшие ссылки `covers:` (F4): id из `covers:`, которого нет среди
+    /// просканированных требований, с кандидатом на перелинковку. Аддитивное
+    /// поле 0.3.14; на счётчики и exit-коды не влияет (warn-уровень).
+    #[serde(default)]
+    pub orphans: Vec<CoverOrphan>,
 }
 
 impl CoverageReport {
@@ -633,6 +670,45 @@ impl CoverageReport {
         if !any {
             let _ = writeln!(out, "- нет");
         }
+
+        // F4: осиротевшие ссылки covers: — правка текста требования меняет его
+        // id, и правило молча теряет цель. Warn-уровень: видно в отчёте, гейт
+        // не ломает.
+        let _ = writeln!(out, "\n## Осиротевшие covers (covers_orphan)");
+        if self.orphans.is_empty() {
+            let _ = writeln!(out, "- нет");
+        }
+        for orphan in &self.orphans {
+            let _ = write!(
+                out,
+                "- [warn] covers_orphan — {} (правила: {}) → ",
+                orphan.id,
+                orphan.rules.join(", ")
+            );
+            match &orphan.candidate {
+                Some(c) => {
+                    let _ = writeln!(
+                        out,
+                        "кандидат той же capability без покрытия: {} — «{}» ({}:{}). Проверьте, \
+                         что это то же требование после правки текста, и обновите covers: на \
+                         новый id; если требование снято — снимите ссылку и пересмотрите само \
+                         правило",
+                        c.id,
+                        c.title,
+                        c.file.display(),
+                        c.line
+                    );
+                }
+                None => {
+                    let _ = writeln!(
+                        out,
+                        "непокрытого кандидата в этой capability нет. Если требование снято — \
+                         снимите ссылку из covers: и пересмотрите правило; если текст правили — \
+                         обновите covers: после сверки с новой редакцией"
+                    );
+                }
+            }
+        }
         out
     }
 }
@@ -677,6 +753,69 @@ fn unique_by_id(requirements: Vec<Requirement>) -> Vec<Requirement> {
         .collect()
 }
 
+/// Осиротевшие ссылки `covers:` (F4): идентификаторы вида `openspec:<cap>#<hash8>`,
+/// которых нет среди просканированных требований (правка текста требования
+/// меняет его id — связь рвётся молча). Для каждой ссылки — кандидат:
+/// первое (в порядке файл/строка, детерминированно) непокрытое требование
+/// той же capability.
+///
+/// Идентификаторы без префикса `openspec:` адаптеру не принадлежат и не
+/// проверяются (поле `covers:` может ссылаться на что-то иное — ложные
+/// срабатывания недопустимы). Дубль id у двух правил — одна находка с обоими
+/// именами.
+fn find_orphans(items: &[CoveredRequirement], rules: &[CoverRule]) -> Vec<CoverOrphan> {
+    let known: BTreeSet<&str> = items.iter().map(|i| i.requirement.id.as_str()).collect();
+    // Группировка «id → правила» в порядке появления (детерминизм отчёта).
+    let mut by_id: Vec<(String, Vec<String>)> = Vec::new();
+    for rule in rules {
+        let name = rule
+            .name
+            .clone()
+            .unwrap_or_else(|| "<без имени>".to_string());
+        for id in &rule.covers {
+            if !id.starts_with(ID_PREFIX) || known.contains(id.as_str()) {
+                continue;
+            }
+            if let Some((_, names)) = by_id.iter_mut().find(|(k, _)| k == id) {
+                if !names.contains(&name) {
+                    names.push(name.clone());
+                }
+            } else {
+                by_id.push((id.clone(), vec![name.clone()]));
+            }
+        }
+    }
+    by_id
+        .into_iter()
+        .map(|(id, rules)| {
+            // Capability — часть id между префиксом и '#'; без неё кандидата
+            // не ищем (невалидная форма id — сама по себе находка-орфан).
+            let capability = id
+                .strip_prefix(ID_PREFIX)
+                .and_then(|rest| rest.split_once('#'))
+                .map(|(cap, _)| cap);
+            let candidate = capability.and_then(|cap| {
+                items
+                    .iter()
+                    .find(|i| {
+                        i.status == CoverageStatus::Unresolved && i.requirement.capability == cap
+                    })
+                    .map(|i| OrphanCandidate {
+                        id: i.requirement.id.clone(),
+                        title: i.requirement.title.clone(),
+                        file: i.requirement.file.clone(),
+                        line: i.requirement.line,
+                    })
+            });
+            CoverOrphan {
+                id,
+                rules,
+                candidate,
+            }
+        })
+        .collect()
+}
+
 /// Отчёт покрытия требований `OpenSpec` правилами `CONSTRAINTS.yaml`.
 ///
 /// `constraints`: явный путь к файлу ограничений; `None` — авто-детект
@@ -704,6 +843,7 @@ pub fn coverage(root: &Path, constraints: Option<&Path>) -> Result<CoverageRepor
     };
     let items: Vec<CoveredRequirement> = requirements.iter().map(|r| classify(r, &rules)).collect();
     let count = |status: CoverageStatus| items.iter().filter(|i| i.status == status).count();
+    let orphans = find_orphans(&items, &rules);
     Ok(CoverageReport {
         root: root.to_path_buf(),
         constraints: path,
@@ -713,6 +853,7 @@ pub fn coverage(root: &Path, constraints: Option<&Path>) -> Result<CoverageRepor
         unverifiable: count(CoverageStatus::Unverifiable),
         unresolved: count(CoverageStatus::Unresolved),
         items,
+        orphans,
     })
 }
 
@@ -1103,7 +1244,9 @@ impl Tool for OpenspecCoverageTool {
             description: "Покрытие требований OpenSpec (openspec/specs/ + активные changes) \
                           правилами CONSTRAINTS.yaml (связь — поле covers: правила): SHALL \
                           всего / покрыто детектором / unverifiable с owner / без решения, \
-                          непокрытые поимённо. Ответ — JSON: passed + счётчики \
+                          непокрытые поимённо; осиротевшие ссылки covers: на исчезнувший id — \
+                          covers_orphans с кандидатом на перелинковку (F4, warn-уровень). \
+                          Ответ — JSON: passed + счётчики \
                           total/covered/unverifiable/unresolved + unresolved_items + \
                           report_markdown. passed=false только в strict-режиме при \
                           требованиях «без решения»"
@@ -1156,12 +1299,17 @@ impl Tool for OpenspecCoverageTool {
             })
             .collect();
         let summary = format!(
-            "OpenSpec-покрытие {}: SHALL {}, покрыто {}, unverifiable {}, без решения {}{}",
+            "OpenSpec-покрытие {}: SHALL {}, покрыто {}, unverifiable {}, без решения {}{}{}",
             report.root.display(),
             report.total,
             report.covered,
             report.unverifiable,
             report.unresolved,
+            if report.orphans.is_empty() {
+                String::new()
+            } else {
+                format!(", осиротевших covers: {}", report.orphans.len())
+            },
             if strict { " (strict)" } else { "" }
         );
         let drift_note = match (&report.constraints, &report.constraints_drift) {
@@ -1179,6 +1327,9 @@ impl Tool for OpenspecCoverageTool {
             "unverifiable": report.unverifiable,
             "unresolved": report.unresolved,
             "unresolved_items": unresolved_items,
+            // Аддитивное поле 0.3.14 (F4): осиротевшие ссылки covers: —
+            // id, правила, кандидат на перелинковку.
+            "covers_orphans": report.orphans,
             "summary": summary,
             "report_markdown": report.to_markdown(),
         });
@@ -1452,6 +1603,26 @@ mod tests {
         let md = report.to_markdown();
         assert!(md.contains("без решения: 1"));
         assert!(md.contains("Колбэки идемпотентны"));
+        // F4: `covers: openspec:payments#deadbeef` у ownerless_stub — ссылка на
+        // несуществующий id, находка covers_orphan; живые ссылки двух других
+        // правил осиротевшими не считаются (ложных срабатываний нет).
+        assert_eq!(report.orphans.len(), 1, "{:?}", report.orphans);
+        let orphan = &report.orphans[0];
+        assert_eq!(orphan.id, "openspec:payments#deadbeef");
+        assert_eq!(orphan.rules, vec!["ownerless_stub".to_string()]);
+        // Кандидат — непокрытое требование той же capability с изменённым
+        // хэшем (дельта активного change тоже участвует).
+        let candidate = orphan.candidate.as_ref().expect("кандидат");
+        assert_eq!(
+            candidate.id,
+            requirement_id(
+                "payments",
+                &["Повторный колбэк MUST NOT менять состояние платежа.".to_string()]
+            )
+        );
+        assert_eq!(candidate.title, "Колбэки идемпотентны");
+        assert!(md.contains("covers_orphan"), "{md}");
+        assert!(md.contains(&candidate.id), "{md}");
     }
 
     #[test]
@@ -1461,6 +1632,64 @@ mod tests {
         assert_eq!(report.constraints, None);
         assert_eq!(report.unresolved, report.total);
         assert_eq!(report.covered, 0);
+        // F4: без реестра правил ссылок covers: нет — и осиротевших нет.
+        assert!(report.orphans.is_empty(), "{:?}", report.orphans);
+    }
+
+    /// F4: осиротевшая ссылка без кандидата (capability неизвестна или вся
+    /// покрыта) — находка есть, кандидата нет; id не из пространства
+    /// `openspec:` адаптером не проверяются (ложных срабатываний нет);
+    /// дубль id у двух правил — одна находка с обоими именами.
+    #[test]
+    fn coverage_orphan_without_candidate_and_foreign_ids_ignored() {
+        let dir = fixture_repo();
+        let root = dir.path();
+        write(
+            &root.join("CONSTRAINTS.yaml"),
+            "rules:\n\
+             \x20 - name: orphan_one\n\
+             \x20   type: must_contain\n\
+             \x20   glob: \"src/**\"\n\
+             \x20   pattern: \"x\"\n\
+             \x20   covers: [\"openspec:billing#deadbeef\"]\n\
+             \x20 - name: orphan_two\n\
+             \x20   unverifiable: true\n\
+             \x20   owner: \"@arch\"\n\
+             \x20   covers: [\"openspec:billing#deadbeef\"]\n\
+             \x20 - name: foreign_links\n\
+             \x20   type: must_contain\n\
+             \x20   glob: \"src/**\"\n\
+             \x20   pattern: \"y\"\n\
+             \x20   covers: [\"REQ-7\", \"AD-3\"]\n",
+        );
+        let report = coverage(root, None).expect("coverage");
+        assert_eq!(
+            report.orphans.len(),
+            1,
+            "дубль id у двух правил — одна находка: {:?}",
+            report.orphans
+        );
+        let orphan = &report.orphans[0];
+        assert_eq!(orphan.id, "openspec:billing#deadbeef");
+        assert_eq!(
+            orphan.rules,
+            vec!["orphan_one".to_string(), "orphan_two".to_string()],
+            "оба правила поимённо"
+        );
+        assert!(
+            orphan.candidate.is_none(),
+            "capability billing в репозитории нет — кандидата нет: {:?}",
+            report.orphans
+        );
+        let md = report.to_markdown();
+        assert!(md.contains("covers_orphan"), "{md}");
+        assert!(md.contains("непокрытого кандидата"), "{md}");
+        // Чужие идентификаторы (REQ-7, AD-3) находок не дали.
+        assert!(!md.contains("REQ-7"), "{md}");
+        assert!(!md.contains("AD-3"), "{md}");
+        // Warn-уровень: счётчики покрытия и exit-семантика не меняются
+        // (все три требования фикстуры остаются «без решения»).
+        assert_eq!(report.unresolved, 3);
     }
 
     /// E2: обе копии реестра различаются — покрытие по пакетной + пометка
@@ -1613,6 +1842,8 @@ mod tests {
         assert_eq!(v["covered"], 1, "{v}");
         assert_eq!(v["unresolved"], 2, "{v}");
         assert_eq!(v["passed"], true, "отчёт, не гейт: {v}");
+        // F4: аддитивное поле осиротевших ссылок; здесь covers: валиден — пусто.
+        assert_eq!(v["covers_orphans"], json!([]), "{v}");
         let unresolved = v["unresolved_items"].as_array().expect("items");
         assert_eq!(unresolved.len(), 2, "{v}");
         assert!(
