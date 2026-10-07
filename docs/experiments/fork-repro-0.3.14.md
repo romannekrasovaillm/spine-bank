@@ -57,3 +57,23 @@ change, созданный внутри диапазона, правку не у
 change, существовавший до диапазона, — PASS
 (`src/delta.rs::guard_ownership_rejects_change_created_inside_range`, сценарии A/B;
 симметрия для дельты — `guard_ownership_rejects_delta_created_inside_range`).
+
+### F4. Осиротевшие `covers:`
+
+Не дефект-репродукция, а новая находка (warn) в `openspec coverage` (коммит
+feat(F4)): ссылка `covers:` на исчезнувший id требования (правка текста
+требования меняет id) раньше терялась молча. Проверено прогоном: реестр с
+`covers: ["openspec:payments#00000000"]` против спеки с переименованным
+текстом даёт в отчёте
+
+```
+- [warn] covers_orphan — openspec:payments#00000000 (правила: idem_detector) →
+  кандидат той же capability без покрытия: openspec:payments#a90fed0f —
+  «Idempotent intake v2» (openspec/specs/payments/spec.md:3)…
+```
+
+Exit-коды не меняются (0; с `--strict` — 1 только от «без решения», не от
+осиротевших ссылок). Тесты: `coverage_classifies_covered_unverifiable_unresolved`
+(находка + кандидат + отсутствие ложных срабатываний на живых ссылках),
+`coverage_orphan_without_candidate_and_foreign_ids_ignored` (нет кандидата,
+чужие префиксы id не проверяются, дубль id у двух правил — одна находка).
