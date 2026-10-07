@@ -1378,6 +1378,15 @@ pub struct EvidenceConfig {
     pub min_bytes: u64,
     /// Строгость находок о содержании артефактов.
     pub semantics: EvidenceSemantics,
+    /// Требование машинных записей прогонов (A1, 0.3.14): `true` — отчёт
+    /// `validation`/`fitness_report`/`walking_skeleton`, написанный прозой без
+    /// записи `.arch-handoff/evidence/<kind>.json` (`arch-be evidence record`),
+    /// блокирует выпуск (`evidence_report_unbound` — `error`); `false`
+    /// (дефолт) — та же находка остаётся предупреждением. Схема «warn → error
+    /// по флагу» (правило 4): поведение прежних версий не меняется без явного
+    /// решения проекта.
+    #[serde(default)]
+    pub require_records: bool,
 }
 
 /// Дефолтный порог «пустышки»: 200 байт (стартовое предложение ТЗ 0.3.4,
@@ -1389,6 +1398,7 @@ impl Default for EvidenceConfig {
         Self {
             min_bytes: DEFAULT_EVIDENCE_MIN_BYTES,
             semantics: EvidenceSemantics::Auto,
+            require_records: false,
         }
     }
 }

@@ -3425,7 +3425,7 @@ fn bootstrap_walks_a_new_case_towards_green() {
         ])
         .assert()
         .success()
-        .stdout(contains("бандл 13/13"))
+        .stdout(contains("бандл пишет автор 8/8 · выведет машина 1/5"))
         .stdout(contains("Следующий шаг — бандл"));
 
     // Повторный bootstrap в занятый каталог — отказ с выходом, а не копия.

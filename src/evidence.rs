@@ -51,8 +51,82 @@ pub struct EvidenceBundle {
     /// бандле означает `fnv1a64`.
     #[serde(default = "default_hash_alg")]
     pub hash_alg: String,
+    /// Запись значимости (A2): триггеры, источники, маршрут. Из неё выводится
+    /// артефакт `risk_level` — рукописный RISK.md не обязателен. Аддитивное
+    /// поле: бандлы прежних версий читаются как `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub significance: Option<SignificanceRecord>,
     /// Артефакты.
     pub items: Vec<EvidenceItem>,
+}
+
+/// Сработавший триггер значимости с источником (S-1, ADR-034):
+/// `declared` / `diff` / `declared+diff`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TriggerRecord {
+    /// Каноническое имя триггера.
+    pub name: String,
+    /// Источник срабатывания.
+    pub source: String,
+}
+
+/// Запись значимости в `EVIDENCE.yaml` (A2): уровень риска бандла выводится
+/// из этой записи, а не из рукописного RISK.md.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignificanceRecord {
+    /// Маршрут, заявленный при упаковке (после ROUTE.lock/флагов).
+    pub route: String,
+    /// Число сработавших триггеров по диффу рабочего дерева.
+    pub score: usize,
+    /// Сработавшие триггеры с источниками.
+    pub triggers: Vec<TriggerRecord>,
+    /// HEAD на момент упаковки (`absent` — не git-репозиторий).
+    pub head: String,
+    /// Метка времени записи.
+    pub recorded_at: String,
+}
+
+/// Вычисляет запись значимости для упаковки бандла (A2): триггеры и их
+/// источники — из механического диффа рабочего дерева (детекторы S-1), маршрут
+/// — тот, с которым пакуют. Вне git-репозитория триггеров нет (HEAD «absent»).
+#[must_use]
+pub fn significance_record(
+    dir: &Path,
+    route: Route,
+    limits: (usize, usize),
+    globs: &crate::control::DiffGlobs,
+) -> SignificanceRecord {
+    let diff = crate::control::detect_diff_triggers_with(dir, None, globs).unwrap_or_default();
+    let scored = crate::control::score_with_sources(
+        &std::collections::BTreeMap::new(),
+        &diff,
+        limits.0,
+        limits.1,
+    );
+    let triggers = scored
+        .sources
+        .iter()
+        .map(|(name, src)| TriggerRecord {
+            name: name.clone(),
+            source: src.label().to_string(),
+        })
+        .collect();
+    SignificanceRecord {
+        route: format!("{route:?}"),
+        score: scored.significance.score,
+        triggers,
+        head: current_head(dir).unwrap_or_else(|| "absent".to_string()),
+        recorded_at: chrono::Local::now().to_rfc3339(),
+    }
+}
+
+/// Артефакт выводится машиной (A2) и потому не пишется руками и не
+/// заглушается проводником: `risk_level` — из записи значимости в
+/// EVIDENCE.yaml, `rollback_rehearsal` — из REHEARSAL.json гейта A4,
+/// отчёты прогонов — из записей `arch-be evidence record` (A1).
+#[must_use]
+pub(crate) fn is_machine_derived(key: &str) -> bool {
+    RecordKind::for_artifact(key).is_some() || matches!(key, "risk_level" | "rollback_rehearsal")
 }
 
 /// Находка о СОДЕРЖАНИИ артефакта бандла — третий класс исхода наряду с
@@ -296,6 +370,12 @@ fn hash_with_alg(path: &Path, alg: &str) -> Result<(String, u64)> {
 }
 
 /// Ищет артефакт по каноническим путям (файл или каталог с ≥1 md).
+///
+/// F5: для ключей `problem` / `spec_or_delta` / `acceptance` после
+/// канонических путей ищутся активные `OpenSpec` changes — команда на `OpenSpec`
+/// не переписывает проблему, дельту спеки и сценарии приёмки второй раз.
+/// Markdown `OpenSpec` только читается: Spine его не пишет и не переписывает
+/// (правило 9, docs/openspec.md).
 fn find_artifact(change_dir: &Path, key: &str) -> Option<PathBuf> {
     for cand in candidate_paths(key) {
         let p = change_dir.join(cand);
@@ -313,7 +393,120 @@ fn find_artifact(change_dir: &Path, key: &str) -> Option<PathBuf> {
             }
         }
     }
+    if matches!(key, "problem" | "spec_or_delta" | "acceptance") {
+        return openspec_artifact(change_dir, key);
+    }
     None
+}
+
+// ---------------------------------------------------------------------------
+// F5: артефакты бандла из активных OpenSpec changes (только чтение)
+// ---------------------------------------------------------------------------
+
+/// Активные `OpenSpec` changes, видимые из каталога бандла: `openspec/changes/*`
+/// самого каталога и до двух предков выше (бандл дельты `changes/<name>/`
+/// читает change из корня репозитория); `archive/` пропускается — он уже
+/// выпущен. Порядок детерминирован: ближний корень, затем имя change.
+fn openspec_change_dirs(change_dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut dir = Some(change_dir);
+    let mut hops = 0;
+    while let Some(d) = dir {
+        if hops > 2 {
+            break;
+        }
+        if let Ok(rd) = std::fs::read_dir(d.join("openspec/changes")) {
+            let mut names: Vec<PathBuf> = rd
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.is_dir() && p.file_name().is_some_and(|n| n != "archive"))
+                .collect();
+            names.sort();
+            out.extend(names);
+        }
+        dir = d.parent();
+        hops += 1;
+    }
+    out
+}
+
+/// Есть ли в proposal секция `## Why` — без неё proposal не является
+/// формулировкой проблемы.
+fn has_why_section(text: &str) -> bool {
+    text.lines().any(|l| l.trim_start().starts_with("## Why"))
+}
+
+/// Есть ли в дельте спеки сценарии приёмки (`#### Scenario:`).
+fn has_scenarios(text: &str) -> bool {
+    text.lines()
+        .any(|l| l.trim_start().starts_with("#### Scenario:"))
+}
+
+/// Дельта-спеки change (`specs/**/spec.md`), порядок детерминирован.
+fn change_spec_files(change: &Path) -> Vec<PathBuf> {
+    dir_files(&change.join("specs"))
+        .into_iter()
+        .filter(|p| p.file_name().is_some_and(|n| n == "spec.md"))
+        .collect()
+}
+
+/// Артефакт бандла из активных `OpenSpec` changes (F5): `problem` —
+/// `proposal.md` с секцией Why; `spec_or_delta` — дельта-спека change;
+/// `acceptance` — дельта-спека со сценариями `#### Scenario:`. Первый
+/// подходящий по детерминированному порядку; `None` — подходящего нет.
+fn openspec_artifact(change_dir: &Path, key: &str) -> Option<PathBuf> {
+    for change in openspec_change_dirs(change_dir) {
+        match key {
+            "problem" => {
+                let proposal = change.join("proposal.md");
+                if proposal.is_file()
+                    && std::fs::read_to_string(&proposal).is_ok_and(|t| has_why_section(&t))
+                {
+                    return Some(proposal);
+                }
+            }
+            "spec_or_delta" => {
+                if let Some(spec) = change_spec_files(&change).into_iter().next() {
+                    return Some(spec);
+                }
+            }
+            "acceptance" => {
+                for spec in change_spec_files(&change) {
+                    let ok = std::fs::read_to_string(&spec).is_ok_and(|t| has_scenarios(&t));
+                    if ok {
+                        return Some(spec);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Путь артефакта относительно каталога бандла (для манифеста): артефакт
+/// может лежать ВЫШЕ каталога (`OpenSpec` change живёт в корне репозитория,
+/// а бандл — в `changes/<name>/`), тогда путь записывается через `..` —
+/// абсолютный путь привязывал бы манифест к машине.
+fn rel_artifact_path(change_dir: &Path, path: &Path) -> String {
+    if let Ok(rel) = path.strip_prefix(change_dir) {
+        return rel.display().to_string();
+    }
+    let change: Vec<_> = change_dir.components().collect();
+    let target: Vec<_> = path.components().collect();
+    let common = change
+        .iter()
+        .zip(target.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let mut rel = PathBuf::new();
+    for _ in common..change.len() {
+        rel.push("..");
+    }
+    for comp in &target[common..] {
+        rel.push(comp);
+    }
+    rel.display().to_string()
 }
 
 /// Собирает Evidence Bundle: манифест `EVIDENCE.yaml` в каталоге изменения.
@@ -321,17 +514,40 @@ fn find_artifact(change_dir: &Path, key: &str) -> Option<PathBuf> {
 /// # Errors
 /// Каталог недоступен, ошибка записи манифеста.
 pub fn pack(change_dir: &Path, route: Route) -> Result<(EvidenceBundle, EvidenceVerdict)> {
+    pack_with(change_dir, route, None)
+}
+
+/// Собирает Evidence Bundle с записью значимости (A2): при наличии
+/// `significance` артефакт `risk_level` выводится из записи и файл RISK.md
+/// не требуется (рукописный уровень риска — не evidence).
+///
+/// # Errors
+/// Каталог недоступен, ошибка записи манифеста.
+pub fn pack_with(
+    change_dir: &Path,
+    route: Route,
+    significance: Option<SignificanceRecord>,
+) -> Result<(EvidenceBundle, EvidenceVerdict)> {
     let mut items = Vec::new();
     let mut missing = Vec::new();
     for (key, _desc) in required_artifacts(route) {
-        match find_artifact(change_dir, key) {
+        // A2: уровень риска выводится из записи значимости в манифесте.
+        if key == "risk_level" && significance.is_some() {
+            continue;
+        }
+        // A1: для артефактов прогонов артефактом бандла становится машинная
+        // запись (`.arch-handoff/evidence/<kind>.json`), когда она есть;
+        // markdown-отчёт — legacy/сопровождение.
+        let found = RecordKind::for_artifact(key)
+            .map(|kind| record_path(change_dir, kind))
+            .filter(|p| p.is_file())
+            .or_else(|| find_artifact(change_dir, key));
+        match found {
             Some(path) => {
                 let (hash, size) = hash_artifact(&path, HASH_ALG_SHA256)?;
                 items.push(EvidenceItem {
                     key: key.into(),
-                    path: path
-                        .strip_prefix(change_dir)
-                        .map_or_else(|_| path.display().to_string(), |p| p.display().to_string()),
+                    path: rel_artifact_path(change_dir, &path),
                     hash,
                     size,
                 });
@@ -343,6 +559,7 @@ pub fn pack(change_dir: &Path, route: Route) -> Result<(EvidenceBundle, Evidence
         route: format!("{route:?}"),
         packed_at: chrono::Local::now().to_rfc3339(),
         hash_alg: HASH_ALG_SHA256.to_string(),
+        significance,
         items,
     };
     let manifest = change_dir.join("EVIDENCE.yaml");
@@ -363,6 +580,410 @@ pub fn pack(change_dir: &Path, route: Route) -> Result<(EvidenceBundle, Evidence
         not_verified: Vec::new(),
     };
     Ok((bundle, verdict))
+}
+
+// ---------------------------------------------------------------------------
+// Машинные записи прогонов (A1, 0.3.14): отчёт о прогоне пишет машина,
+// а не автор. По образцу `REHEARSAL.json` (`crate::rehearsal`) запись
+// `.arch-handoff/evidence/<kind>.json` фиксирует команду, её exit-код,
+// время, HEAD и хэш входов; `verify` требует запись и проверяет её свежесть.
+// ---------------------------------------------------------------------------
+
+use std::time::{Duration, Instant};
+
+/// Схема машинной записи прогона (версия формата).
+pub const RECORD_SCHEMA: &str = "arch-be/evidence-record/v1";
+
+/// Каталог записей прогонов внутри кейса/репозитория.
+pub const RECORD_DIR: &str = ".arch-handoff/evidence";
+
+/// Таймаут прогона по умолчанию, секунд: тесты и fitness могут идти минуты;
+/// зависший прогон — сам по себе находка (как шаг репетиции, ADR-049).
+pub const RECORD_TIMEOUT_SECS: u64 = 900;
+
+/// Хвост вывода прогона, попадающий в запись (символов): диагностика живёт
+/// в конце вывода.
+const RECORD_LOG_TAIL: usize = 2000;
+
+/// Каталоги и файлы, не входящие в хэш входов прогона: служебные и тяжёлые
+/// (результаты сборки/кэши) — иначе сам прогон инвалидировал бы свою запись.
+const RECORD_INPUT_SKIP_DIRS: &[&str] = &[
+    ".git",
+    ".arch-handoff",
+    "target",
+    "node_modules",
+    "__pycache__",
+    ".pytest_cache",
+];
+
+/// Вид машинной записи прогона (`arch-be evidence record <kind>`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordKind {
+    /// Прогон fitness-функций (реестр CONSTRAINTS.yaml).
+    Fitness,
+    /// Прогон тестов (валидация).
+    Tests,
+    /// Прогон walking skeleton (сквозной сценарий).
+    Skeleton,
+}
+
+impl RecordKind {
+    /// Имя вида для CLI и имени файла записи.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Fitness => "fitness",
+            Self::Tests => "tests",
+            Self::Skeleton => "skeleton",
+        }
+    }
+
+    /// Ключ артефакта бандла, который закрывает запись этого вида.
+    #[must_use]
+    pub fn artifact_key(self) -> &'static str {
+        match self {
+            Self::Fitness => "fitness_report",
+            Self::Tests => "validation",
+            Self::Skeleton => "walking_skeleton",
+        }
+    }
+
+    /// Вид записи по ключу артефакта (`None` — артефакт пишет автор).
+    #[must_use]
+    pub fn for_artifact(key: &str) -> Option<Self> {
+        match key {
+            "fitness_report" => Some(Self::Fitness),
+            "validation" => Some(Self::Tests),
+            "walking_skeleton" => Some(Self::Skeleton),
+            _ => None,
+        }
+    }
+
+    /// Команда по умолчанию: для fitness — прогон реестра правил; для тестов
+    /// и скелета универсальной команды нет — `--cmd` обязателен.
+    #[must_use]
+    pub fn default_command(self) -> Option<&'static str> {
+        match self {
+            Self::Fitness => Some("arch-be control check ."),
+            Self::Tests | Self::Skeleton => None,
+        }
+    }
+
+    /// Все виды (для подсказок и разбора CLI).
+    #[must_use]
+    pub fn all() -> [Self; 3] {
+        [Self::Fitness, Self::Tests, Self::Skeleton]
+    }
+}
+
+impl std::str::FromStr for RecordKind {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "fitness" => Ok(Self::Fitness),
+            "tests" => Ok(Self::Tests),
+            "skeleton" => Ok(Self::Skeleton),
+            other => Err(format!(
+                "неизвестный вид записи '{other}' (допустимы: fitness, tests, skeleton)"
+            )),
+        }
+    }
+}
+
+/// Машинная запись прогона (`.arch-handoff/evidence/<kind>.json`).
+///
+/// Свежесть записи (A1): запись действительна, пока совпадают и HEAD, и хэш
+/// входов. Совпадения только HEAD недостаточно — незакоммиченная правка кода
+/// обязана инвалидировать запись; вне git-репозитория (HEAD «absent») судят
+/// только входы.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunRecord {
+    /// Схема формата ([`RECORD_SCHEMA`]).
+    pub schema: String,
+    /// Вид записи (`fitness`/`tests`/`skeleton`).
+    pub kind: String,
+    /// Команда прогона (как запускалась).
+    pub command: String,
+    /// Exit-код прогона (`None` — таймаут, процесс убит).
+    pub exit_code: Option<i32>,
+    /// Прогон завершился кодом 0 до таймаута.
+    pub passed: bool,
+    /// Метка времени записи (локальная, RFC 3339).
+    pub recorded_at: String,
+    /// Длительность прогона, секунды.
+    pub duration_secs: f64,
+    /// HEAD репозитория на момент прогона (`absent` — не git-репозиторий).
+    pub head: String,
+    /// Хэш входов прогона (дерево без служебных/тяжёлых каталогов; для
+    /// `tests`/`skeleton` — без markdown-прозы; для `fitness` — всё дерево,
+    /// отпечаток реестра и команда).
+    pub inputs_hash: String,
+    /// Человеко-читаемое описание того, что вошло в хэш входов.
+    pub inputs_note: String,
+    /// Отпечаток реестра правил (SHA-256 файла CONSTRAINTS.yaml) — только
+    /// для `fitness`; `None` у остальных видов или когда реестр не найден.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registry_fingerprint: Option<String>,
+    /// Аттестация вердикта прогона: SHA-256 свёртка
+    /// `вид\0команда\0exit\0входы\0реестр` — привязывает итог к входам.
+    pub attestation: String,
+    /// Хвост вывода прогона (диагностика для читающего запись).
+    pub output_tail: String,
+}
+
+/// Имя файла записи вида (`fitness.json`).
+#[must_use]
+pub fn record_file_name(kind: RecordKind) -> String {
+    format!("{}.json", kind.as_str())
+}
+
+/// Путь записи вида в каталоге `dir` (без проверки существования).
+#[must_use]
+pub fn record_path(dir: &Path, kind: RecordKind) -> PathBuf {
+    dir.join(RECORD_DIR).join(record_file_name(kind))
+}
+
+/// HEAD репозитория, которому принадлежит `dir` (`None` — не git-репозиторий).
+fn current_head(dir: &Path) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", "HEAD"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let head = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!head.is_empty()).then_some(head)
+}
+
+/// Файлы-входы прогона: дерево `root` без служебных/тяжёлых каталогов и
+/// манифеста бандла; `exclude_markdown` — проза бандла не вход прогона
+/// тестов/скелета (правка отчёта не инвалидирует прогон тестов).
+fn record_input_files(root: &Path, exclude_markdown: bool) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in rd.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if path.is_dir() {
+                if !RECORD_INPUT_SKIP_DIRS.contains(&name.as_str()) {
+                    stack.push(path);
+                }
+            } else if path.is_file()
+                && !is_transient(&name)
+                && name != "EVIDENCE.yaml"
+                && !(exclude_markdown
+                    && Path::new(&name)
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .is_some_and(|e| e.eq_ignore_ascii_case("md")))
+            {
+                out.push(path);
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Отпечаток реестра правил кейса (для записи `fitness`): SHA-256 файла
+/// CONSTRAINTS.yaml, который резолвит движок (`control check`).
+fn registry_fingerprint(dir: &Path) -> Option<String> {
+    let resolved = crate::control::resolve_constraints_path_detailed(dir, None)?;
+    crate::hash::sha256_file(&resolved.path)
+}
+
+/// Хэш входов прогона: каноническая свёртка дерева входов, команды и (для
+/// fitness) отпечатка реестра.
+fn inputs_fingerprint(dir: &Path, kind: RecordKind, command: &str) -> (String, String) {
+    let exclude_md = kind != RecordKind::Fitness;
+    let mut acc = String::new();
+    let mut count = 0usize;
+    for file in record_input_files(dir, exclude_md) {
+        let Some(h) = crate::hash::sha256_file(&file) else {
+            continue;
+        };
+        let rel = file.strip_prefix(dir).map_or_else(
+            |_| file.display().to_string(),
+            |p| p.to_string_lossy().replace('\\', "/"),
+        );
+        // Запись в String не может завершиться ошибкой — игнор безопасен.
+        let _ = writeln!(acc, "{rel}\0{h}");
+        count += 1;
+    }
+    let registry = if kind == RecordKind::Fitness {
+        registry_fingerprint(dir)
+    } else {
+        None
+    };
+    let canonical = format!(
+        "{}\0{command}\0{}",
+        crate::hash::sha256_hex(acc.as_bytes()),
+        registry.as_deref().unwrap_or("-")
+    );
+    let note = match kind {
+        RecordKind::Fitness => format!(
+            "всё дерево кейса ({count} файлов, без {}) + отпечаток реестра + команда",
+            RECORD_INPUT_SKIP_DIRS.join("/")
+        ),
+        _ => format!(
+            "код и конфиги кейса ({count} файлов, без {} и *.md) + команда",
+            RECORD_INPUT_SKIP_DIRS.join("/")
+        ),
+    };
+    (crate::hash::sha256_hex(canonical.as_bytes()), note)
+}
+
+/// Прогоняет команду и пишет машинную запись `.arch-handoff/evidence/<kind>.json`
+/// (A1). Запись создаётся и при провале прогона: FAIL-запись — честное
+/// evidence неуспеха, а не отсутствие записи.
+///
+/// # Errors
+/// Каталог недоступен, команда не запустилась, запись не пишется.
+pub fn record_run(
+    dir: &Path,
+    kind: RecordKind,
+    command: &str,
+    timeout_secs: u64,
+) -> Result<RunRecord> {
+    let timeout = Duration::from_secs(if timeout_secs == 0 {
+        RECORD_TIMEOUT_SECS
+    } else {
+        timeout_secs
+    });
+    let (inputs_hash, inputs_note) = inputs_fingerprint(dir, kind, command);
+    let head = current_head(dir).unwrap_or_else(|| "absent".to_string());
+    let started = Instant::now();
+    let outcome = crate::proc::run_shell(dir, "bash", command, timeout)?;
+    let duration = started.elapsed().as_secs_f64();
+    let (exit_code, passed) = match outcome.status {
+        Some(s) => (s.code(), s.success()),
+        None => (None, false),
+    };
+    let mut output = String::from_utf8_lossy(&outcome.stdout).into_owned();
+    if !outcome.stderr.is_empty() {
+        output.push_str(&String::from_utf8_lossy(&outcome.stderr));
+    }
+    let output_tail: String = output
+        .chars()
+        .rev()
+        .take(RECORD_LOG_TAIL)
+        .collect::<Vec<char>>()
+        .into_iter()
+        .rev()
+        .collect();
+    let registry = if kind == RecordKind::Fitness {
+        registry_fingerprint(dir)
+    } else {
+        None
+    };
+    let attestation = crate::hash::sha256_hex(
+        format!(
+            "{}\0{}\0{}\0{}\0{}",
+            kind.as_str(),
+            command,
+            exit_code.map_or_else(|| "timeout".to_string(), |c| c.to_string()),
+            inputs_hash,
+            registry.as_deref().unwrap_or("-")
+        )
+        .as_bytes(),
+    );
+    let record = RunRecord {
+        schema: RECORD_SCHEMA.to_string(),
+        kind: kind.as_str().to_string(),
+        command: command.to_string(),
+        exit_code,
+        passed,
+        recorded_at: chrono::Local::now().to_rfc3339(),
+        duration_secs: duration,
+        head,
+        inputs_hash,
+        inputs_note,
+        registry_fingerprint: registry,
+        attestation,
+        output_tail: output_tail.trim().to_string(),
+    };
+    let path = record_path(dir, kind);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| HarnessError::io(parent, e))?;
+    }
+    let text = serde_json::to_string_pretty(&record)?;
+    std::fs::write(&path, format!("{text}\n")).map_err(|e| HarnessError::io(&path, e))?;
+    Ok(record)
+}
+
+/// Читает запись прогона из каталога `dir` (`None` — записи нет).
+///
+/// # Errors
+/// Файл есть, но не разбирается: подмена/дрейф evidence не замалчивается
+/// (тот же принцип, что у [`crate::rehearsal::load_report`]).
+pub fn load_run_record(dir: &Path, kind: RecordKind) -> Result<Option<RunRecord>> {
+    let path = record_path(dir, kind);
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let text = std::fs::read_to_string(&path).map_err(|e| HarnessError::io(&path, e))?;
+    let record = serde_json::from_str(&text).map_err(|e| {
+        HarnessError::Control(format!(
+            "{}: невалидная запись прогона ({e}) — перезапишите: \
+             `arch-be evidence record {}`",
+            path.display(),
+            kind.as_str()
+        ))
+    })?;
+    Ok(Some(record))
+}
+
+/// Находит запись прогона для бандла: в каталоге изменения, затем в
+/// родителях (бандл дельты `changes/<name>/` читает записи корня
+/// репозитория). Возвращает запись и корень, от которого она писалась
+/// (свежесть входов считается от него).
+fn find_run_record(change_dir: &Path, kind: RecordKind) -> Result<Option<(RunRecord, PathBuf)>> {
+    let mut dir = Some(change_dir);
+    let mut hops = 0;
+    while let Some(d) = dir {
+        if hops > 2 {
+            break;
+        }
+        if let Some(record) = load_run_record(d, kind)? {
+            return Ok(Some((record, d.to_path_buf())));
+        }
+        dir = d.parent();
+        hops += 1;
+    }
+    Ok(None)
+}
+
+/// Свежесть записи прогона: причины устаревания (пусто — запись свежая).
+/// Запись устаревает, когда сместился HEAD ИЛИ изменились входы: незакоммиченная
+/// правка кода обязана инвалидировать запись (приёмка A1). Вне git («absent»)
+/// судят только входы.
+fn record_stale_reasons(record: &RunRecord, kind: RecordKind, root: &Path) -> Vec<String> {
+    let mut why = Vec::new();
+    if record.head != "absent" {
+        if let Some(head) = current_head(root) {
+            if head != record.head {
+                why.push(format!(
+                    "HEAD сместился ({}… ≠ {} записи)",
+                    head.chars().take(12).collect::<String>(),
+                    record.head.chars().take(12).collect::<String>()
+                ));
+            }
+        }
+    }
+    let (now, _) = inputs_fingerprint(root, kind, &record.command);
+    if now != record.inputs_hash {
+        why.push("входы прогона изменились после записи".to_string());
+    }
+    why
 }
 
 // ---------------------------------------------------------------------------
@@ -458,20 +1079,24 @@ fn field_is_empty(value: &str) -> bool {
         || crate::stubs::is_template_stub(v)
 }
 
-/// Строка итога отчёта: `Итог: PASS` либо `PASS (N из M)`.
-fn has_result_line(text: &str) -> bool {
-    text.lines().any(|l| {
-        let t = l.trim();
-        t.contains("Итог: PASS") || (t.contains("PASS (") && t.contains(" из "))
-    })
-}
-
 /// Строка итога отчёта с провалом.
 fn has_fail_line(text: &str) -> bool {
     text.lines().any(|l| {
         let t = l.trim();
         t.contains("Итог: FAIL") || t.eq_ignore_ascii_case("fail") || t.starts_with("FAIL —")
     })
+}
+
+/// Подсказка находки по отчёту о прогоне (A1): прогон закрывается машинной
+/// записью, а не дописыванием текста — подсказка обязана вести к прогону,
+/// иначе она учит обходу («добавьте строку» и зелёный — так 0.3.13 принимал
+/// рукописный PASS).
+fn record_hint(key: &str) -> String {
+    let kind = RecordKind::for_artifact(key).map_or("<kind>", RecordKind::as_str);
+    format!(
+        "запустите `arch-be evidence record {kind} [--cmd …]`: факт и свежесть \
+         прогона фиксирует машинная запись, markdown остаётся сопровождением для человека"
+    )
 }
 
 /// Вердикт состязательного ревью: `READY` / `NOT-READY` (регистр и кириллица
@@ -530,7 +1155,10 @@ fn semantic_check(
     } else {
         text.len() as u64
     };
-    // Общие для всех ключей: размер-пустышка и маркеры-заглушки.
+    // Общие для всех ключей: размер-пустышка и маркеры-заглушки. У артефактов
+    // прогонов (A1) подсказка ведёт к машинной записи, а не к дописыванию
+    // текста: «заполните отчёт» у рукописного PASS — инструкция обхода.
+    let record_stub_hint = RecordKind::for_artifact(key).map(|_| record_hint(key));
     let mut stub_flagged = false;
     if size < cfg.min_bytes {
         let where_ = stub_file_of(path, cfg.min_bytes)
@@ -543,7 +1171,9 @@ fn semantic_check(
                 "артефакт не написан: {size} б < порога {} б ({where_})",
                 cfg.min_bytes
             ),
-            "заполните артефакт: заглушка в бандле не удостоверяет ничего",
+            record_stub_hint
+                .as_deref()
+                .unwrap_or("заполните артефакт: заглушка в бандле не удостоверяет ничего"),
         ));
         stub_flagged = true;
     } else if let Some(file) = stub_file_of(path, cfg.min_bytes) {
@@ -552,7 +1182,9 @@ fn semantic_check(
             "evidence_stub",
             severity,
             format!("артефакт содержит незаполненное место: {file}"),
-            "уберите маркеры-заглушки (TODO/TBD/<…>) — они попадут в аудиторский след",
+            record_stub_hint.as_deref().unwrap_or(
+                "уберите маркеры-заглушки (TODO/TBD/<…>) — они попадут в аудиторский след",
+            ),
         ));
         stub_flagged = true;
     } else if let Some((line, frag)) = crate::stubs::find_stub(&text, true) {
@@ -561,7 +1193,9 @@ fn semantic_check(
             "evidence_stub",
             severity,
             format!("строка {line}: незаполненное место «{frag}»"),
-            "замените заглушку содержанием: артефакт обязан быть написан",
+            record_stub_hint
+                .as_deref()
+                .unwrap_or("замените заглушку содержанием: артефакт обязан быть написан"),
         ));
         stub_flagged = true;
     }
@@ -722,26 +1356,120 @@ fn semantic_check(
                 )),
             }
         }
-        "validation" | "fitness_report" | "walking_skeleton" => {
-            if has_fail_line(&text) {
-                out.push(finding(
-                    key,
-                    "evidence_reports_fail",
-                    severity,
-                    "отчёт содержит итог FAIL".to_string(),
-                    "добейтесь зелёного прогона и переупакуйте бандл",
-                ));
-            } else if !stub_flagged && !has_result_line(&text) {
-                out.push(finding(
-                    key,
-                    "evidence_stub",
-                    severity,
-                    "в отчёте нет строки итога («Итог: PASS» или «PASS (N из M)»)".to_string(),
-                    "добавьте итоговую строку прогона — без неё отчёт не читается машиной",
-                ));
-            }
+        // A1: строка итога в прозе больше не удостоверяет прогон (рукописный
+        // PASS 0.3.13) — прогон доказывает машинная запись (проверяется в
+        // `record_checks`). Markdown остаётся сопровождением для человека;
+        // единственная проза-проверка — честность итога (FAIL в тексте
+        // против записи PASS — противоречие, которое надо разрешить прогоном).
+        "validation" | "fitness_report" | "walking_skeleton" if has_fail_line(&text) => {
+            out.push(finding(
+                key,
+                "evidence_reports_fail",
+                severity,
+                "отчёт содержит итог FAIL".to_string(),
+                &record_hint(key),
+            ));
         }
         _ => {}
+    }
+    (out, notes)
+}
+
+/// Проверки машинной записи прогона (A1): для артефактов `validation` /
+/// `fitness_report` / `walking_skeleton` прогон доказывает запись
+/// `.arch-handoff/evidence/<kind>.json`, а не проза.
+///
+/// - записи нет, а markdown-отчёт есть → `evidence_report_unbound` (warn;
+///   error при `[evidence] require_records = true`): проза не доказывает прогон;
+/// - запись есть, итог не PASS → `evidence_record_failed`;
+/// - запись устарела (HEAD или входы сместились) → `evidence_record_stale`;
+/// - запись не разбирается → `evidence_record_invalid` (подмена не замалчивается).
+fn record_checks(
+    change_dir: &Path,
+    kind: RecordKind,
+    has_markdown: bool,
+    cfg: &crate::config::EvidenceConfig,
+    severity: &str,
+) -> (Vec<SemanticFinding>, Vec<String>) {
+    let key = kind.artifact_key();
+    let mut out = Vec::new();
+    let mut notes = Vec::new();
+    let found = match find_run_record(change_dir, kind) {
+        Ok(found) => found,
+        Err(e) => {
+            out.push(finding(
+                key,
+                "evidence_record_invalid",
+                severity,
+                format!("запись прогона «{}» не разбирается: {e}", kind.as_str()),
+                &format!(
+                    "перезапишите запись прогоном: `arch-be evidence record {}`",
+                    kind.as_str()
+                ),
+            ));
+            return (out, notes);
+        }
+    };
+    let Some((record, root)) = found else {
+        if has_markdown {
+            // Правило 4 (warn → error по флагу): по умолчанию находка видна,
+            // но не блокирует; проект/bank-профиль включает требование записей.
+            let sev = if cfg.require_records { "error" } else { "warn" };
+            out.push(finding(
+                key,
+                "evidence_report_unbound",
+                sev,
+                format!(
+                    "отчёт «{key}» написан прозой, машинной записи прогона нет — \
+                     строка «Итог: PASS» в тексте не доказывает, что прогон был"
+                ),
+                &record_hint(key),
+            ));
+        }
+        return (out, notes);
+    };
+    notes.push(format!(
+        "запись «{}» удостоверяет факт и свежесть прогона ({}), а не его \
+         достаточность — что прогонять, решает автор команды",
+        kind.as_str(),
+        record.command
+    ));
+    if !record.passed {
+        out.push(finding(
+            key,
+            "evidence_record_failed",
+            severity,
+            format!(
+                "запись «{}» зафиксировала провал прогона (exit {}): {}",
+                kind.as_str(),
+                record
+                    .exit_code
+                    .map_or_else(|| "таймаут".to_string(), |c| c.to_string()),
+                record.output_tail.lines().next().unwrap_or_default()
+            ),
+            &format!(
+                "добейтесь зелёного прогона и повторите `arch-be evidence record {}`",
+                kind.as_str()
+            ),
+        ));
+        return (out, notes);
+    }
+    let stale = record_stale_reasons(&record, kind, &root);
+    if !stale.is_empty() {
+        out.push(finding(
+            key,
+            "evidence_record_stale",
+            severity,
+            format!(
+                "запись прогона «{}» устарела: {}",
+                kind.as_str(),
+                stale.join("; ")
+            ),
+            &format!(
+                "повторите `arch-be evidence record {}` на текущем состоянии и переупакуйте бандл",
+                kind.as_str()
+            ),
+        ));
     }
     (out, notes)
 }
@@ -752,14 +1480,50 @@ fn semantic_check(
 /// различаются: прогресс считается по манифесту, как и сама проверка.
 #[must_use]
 pub fn bundle_progress(change_dir: &Path, route: Route) -> Option<usize> {
+    let split = bundle_progress_split(change_dir, route)?;
+    Some(split.author_done + split.machine_done)
+}
+
+/// Прогресс бандла по происхождению артефактов (A2): раздельный счёт «что
+/// пишет автор» и «что выведет машина» — этой парой чисел снимается замер
+/// церемонии (сколько файлов человек правит руками, до/после).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BundleProgress {
+    /// Артефакты автора: есть в манифесте / всего по профилю.
+    pub author_done: usize,
+    /// Всего артефактов автора по профилю маршрута.
+    pub author_total: usize,
+    /// Машинные артефакты: есть в манифесте / всего по профилю.
+    pub machine_done: usize,
+    /// Всего машинных артефактов по профилю маршрута.
+    pub machine_total: usize,
+}
+
+/// Раздельный прогресс по манифесту: машинный ключ засчитан, когда его
+/// артефакт описан в манифесте; `risk_level` — когда в манифесте есть запись
+/// значимости (A2), даже без файла-артефакта.
+#[must_use]
+pub fn bundle_progress_split(change_dir: &Path, route: Route) -> Option<BundleProgress> {
     let text = std::fs::read_to_string(change_dir.join("EVIDENCE.yaml")).ok()?;
     let bundle: EvidenceBundle = serde_yaml_ng::from_str(&text).ok()?;
-    Some(
-        required_artifacts(route)
-            .iter()
-            .filter(|(key, _)| bundle.items.iter().any(|i| i.key == *key))
-            .count(),
-    )
+    let mut progress = BundleProgress {
+        author_done: 0,
+        author_total: 0,
+        machine_done: 0,
+        machine_total: 0,
+    };
+    for (key, _) in required_artifacts(route) {
+        let present = bundle.items.iter().any(|i| i.key == *key)
+            || (key == "risk_level" && bundle.significance.is_some());
+        if is_machine_derived(key) {
+            progress.machine_total += 1;
+            progress.machine_done += usize::from(present);
+        } else {
+            progress.author_total += 1;
+            progress.author_done += usize::from(present);
+        }
+    }
+    Some(progress)
 }
 
 /// Есть ли у бандла вход для проверки содержания артефакта (файл на месте).
@@ -817,7 +1581,10 @@ pub fn verify_with(
     let mut missing = Vec::new();
     let mut tampered = Vec::new();
     for (key, _desc) in required_artifacts(route) {
-        if !bundle.items.iter().any(|i| i.key == key) {
+        let present = bundle.items.iter().any(|i| i.key == key)
+            // A2: уровень риска выводится из записи значимости манифеста.
+            || (key == "risk_level" && bundle.significance.is_some());
+        if !present {
             missing.push(key.to_string());
         }
     }
@@ -840,6 +1607,28 @@ pub fn verify_with(
     let mut not_verified = Vec::new();
     if let Some(severity) = cfg.severity_for(route) {
         for (key, _desc) in required_artifacts(route) {
+            // A1: у артефактов прогонов машинная запись закрывает ключ и без
+            // markdown — проверяется и в этом случае.
+            if let Some(kind) = RecordKind::for_artifact(key) {
+                let md = existing_artifact(change_dir, key);
+                let (found, rec_notes) =
+                    record_checks(change_dir, kind, md.is_some(), cfg, severity);
+                semantics.extend(found);
+                for n in rec_notes {
+                    if !not_verified.contains(&n) {
+                        not_verified.push(n);
+                    }
+                }
+                let Some(path) = md else { continue };
+                let (found, notes) = semantic_check(change_dir, key, &path, cfg, severity);
+                semantics.extend(found);
+                for n in notes {
+                    if !not_verified.contains(&n) {
+                        not_verified.push(n);
+                    }
+                }
+                continue;
+            }
             let Some(path) = existing_artifact(change_dir, key) else {
                 continue;
             };
@@ -1059,996 +1848,4 @@ impl Tool for EvidencePackTool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn put(root: &Path, rel: &str, content: &str) {
-        let p = root.join(rel);
-        std::fs::create_dir_all(p.parent().expect("parent")).expect("mkdir");
-        std::fs::write(p, content).expect("write");
-    }
-
-    #[test]
-    fn fast_route_packs_minimal_bundle() {
-        let tmp = tempfile::tempdir().expect("tmp");
-        let dir = tmp.path();
-        put(dir, "PROBLEM.md", "# Проблема\n");
-        put(
-            dir,
-            "SPEC.md",
-            "## Проблема\n## Критерии приёмки\n## Риски\n",
-        );
-        put(dir, "RISK.md", "Fast: 0 триггеров\n");
-        put(dir, "ROLLBACK.md", "git revert\n");
-        let (bundle, verdict) = pack(dir, Route::Fast).expect("pack");
-        assert!(verdict.passed, "missing: {:?}", verdict.missing);
-        assert!(bundle.items.len() >= 5, "items: {}", bundle.items.len());
-        assert!(dir.join("EVIDENCE.yaml").is_file());
-        // Проверка чиста сразу после упаковки.
-        let v = verify(dir).expect("verify");
-        assert!(v.passed, "{:?} {:?}", v.missing, v.tampered);
-    }
-
-    #[test]
-    fn critical_route_requires_a3_and_spine() {
-        let tmp = tempfile::tempdir().expect("tmp");
-        let dir = tmp.path();
-        put(dir, "PROBLEM.md", "x");
-        let (_bundle, verdict) = pack(dir, Route::Critical).expect("pack");
-        assert!(!verdict.passed);
-        assert!(verdict.missing.contains(&"decision_a3".to_string()));
-        assert!(verdict.missing.contains(&"spine".to_string()));
-        assert!(verdict.missing.contains(&"adversarial_review".to_string()));
-        // Critical требует и evidence репетиции отката (гейт A4).
-        assert!(verdict.missing.contains(&"rollback_rehearsal".to_string()));
-    }
-
-    #[test]
-    fn verify_detects_tampering_after_pack() {
-        let tmp = tempfile::tempdir().expect("tmp");
-        let dir = tmp.path();
-        put(dir, "PROBLEM.md", "исходная проблема");
-        put(dir, "SPEC.md", "спека");
-        put(dir, "RISK.md", "r");
-        put(dir, "ROLLBACK.md", "rb");
-        pack(dir, Route::Fast).expect("pack");
-        // Подмена артефакта после упаковки.
-        put(dir, "SPEC.md", "ТИХО ПЕРЕПИСАЛИ");
-        let v = verify(dir).expect("verify");
-        assert!(!v.passed);
-        assert!(
-            v.tampered.iter().any(|t| t.contains("spec_or_delta")),
-            "{:?}",
-            v.tampered
-        );
-    }
-
-    // --- П2: канонический вход, рекурсия, SHA-256, миграция формата --------
-
-    /// Вердикт не зависит от написания пути, каталог хэшируется рекурсивно,
-    /// хэши — SHA-256.
-    #[test]
-    fn hash_is_path_invariant_and_recursive() {
-        let tmp = tempfile::tempdir().expect("tmp");
-        let dir = tmp.path();
-        put(dir, "PROBLEM.md", "p");
-        put(dir, "SPEC.md", "s\n## Критерии приёмки\n");
-        put(dir, "RISK.md", "r");
-        put(dir, "ROLLBACK.md", "rb");
-        put(dir, "docs/adr/ADR-001.md", "a1");
-        put(dir, "docs/adr/archive/ADR-002.md", "a2");
-        put(dir, "VALIDATION.md", "v");
-        put(dir, "reports/fitness.md", "f");
-        let (bundle, verdict) = pack(dir, Route::Standard).expect("pack");
-        assert!(verdict.passed, "missing: {:?}", verdict.missing);
-        assert_eq!(bundle.hash_alg, HASH_ALG_SHA256);
-        assert!(
-            bundle.items.iter().all(|i| i.hash.len() == 64),
-            "хэши обязаны быть SHA-256 hex: {:?}",
-            bundle
-                .items
-                .iter()
-                .map(|i| i.hash.len())
-                .collect::<Vec<_>>()
-        );
-        // Инвариантность к написанию пути (Д2): «.», абсолютный, с «/».
-        let trailing = PathBuf::from(format!("{}/", dir.display()));
-        let abs = dir.canonicalize().expect("canonicalize");
-        let v1 = verify(dir).expect("verify");
-        let v2 = verify(&trailing).expect("verify trailing");
-        let v3 = verify(&abs).expect("verify abs");
-        assert!(v1.passed && v2.passed && v3.passed, "{v1:?} {v2:?} {v3:?}");
-        assert_eq!(v1.tampered, v2.tampered);
-        assert_eq!(v1.tampered, v3.tampered);
-        // Рекурсия: правка во вложенном подкаталоге каталога-артефакта видна.
-        put(dir, "docs/adr/archive/ADR-002.md", "a2 ИЗМЕНЁН");
-        let v4 = verify(&abs).expect("verify");
-        assert!(!v4.passed);
-        assert!(
-            v4.tampered.iter().any(|t| t.contains("adr_or_pattern")),
-            "{:?}",
-            v4.tampered
-        );
-    }
-
-    /// Бандл старого формата (без `hash_alg`) проверяется старой свёрткой
-    /// и получает предупреждение о переупаковке.
-    #[test]
-    fn legacy_bundle_verified_with_old_alg_and_warned() {
-        let tmp = tempfile::tempdir().expect("tmp");
-        let dir = tmp.path();
-        put(dir, "PROBLEM.md", "p");
-        put(dir, "SPEC.md", "s");
-        put(dir, "RISK.md", "r");
-        put(dir, "ROLLBACK.md", "rb");
-        let (mut bundle, _v) = pack(dir, Route::Fast).expect("pack");
-        bundle.hash_alg = HASH_ALG_LEGACY.to_string();
-        for item in &mut bundle.items {
-            let p = dir.join(&item.path);
-            let (h, s) = hash_artifact_legacy(&p).expect("legacy hash");
-            item.hash = h;
-            item.size = s;
-        }
-        // Эмулируем старый манифест: поля hash_alg в нём не было.
-        let text = serde_yaml_ng::to_string(&bundle).expect("yaml");
-        let text = text
-            .lines()
-            .filter(|l| !l.starts_with("hash_alg:"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        std::fs::write(dir.join("EVIDENCE.yaml"), text).expect("write");
-        let v = verify(dir).expect("verify");
-        assert!(
-            v.passed,
-            "missing: {:?}, tampered: {:?}",
-            v.missing, v.tampered
-        );
-        assert!(
-            v.warnings.iter().any(|w| w.contains("старого формата")),
-            "{:?}",
-            v.warnings
-        );
-    }
-
-    // --- инструменты evidence_pack / evidence_verify ------------------------
-
-    /// Тестовый контекст без LLM.
-    fn tool_ctx(dir: &Path) -> ToolContext {
-        ToolContext::new(
-            dir.to_path_buf(),
-            Arc::new(crate::config::Config::default()),
-        )
-    }
-
-    #[tokio::test]
-    async fn evidence_pack_then_verify_tools_roundtrip_passes() {
-        let tmp = tempfile::tempdir().expect("tmp");
-        let dir = tmp.path();
-        // Содержательные артефакты: с 0.3.4 пустышка — находка (Н1, ADR-041),
-        // и «чисто сразу после упаковки» проверяется на написанном бандле.
-        put(dir, "PROBLEM.md", &body("Проблема"));
-        put(dir, "SPEC.md", &body("Спецификация"));
-        put(dir, "RISK.md", &body("Риск"));
-        put(dir, "ROLLBACK.md", &body("Откат"));
-        let ctx = tool_ctx(dir);
-        // pack (fast) → manifest записан, полнота ок.
-        let out = EvidencePackTool
-            .call(json!({"change_dir": ".", "route": "fast"}), &ctx)
-            .await
-            .expect("вызов");
-        assert!(!out.is_error, "{}", out.content);
-        let v: Value = serde_json::from_str(&out.content).expect("JSON-вердикт");
-        assert_eq!(v["passed"], true, "{v}");
-        assert!(dir.join("EVIDENCE.yaml").is_file());
-        // verify сразу после pack — чист.
-        let out = EvidenceVerifyTool
-            .call(json!({"change_dir": "."}), &ctx)
-            .await
-            .expect("вызов");
-        let v: Value = serde_json::from_str(&out.content).expect("JSON-вердикт");
-        assert_eq!(v["passed"], true, "{v}");
-        assert_eq!(v["issues"], json!([]));
-
-        // Подмена артефакта → verify passed=false, находка kind=tampered.
-        put(dir, "SPEC.md", "ПЕРЕПИСАНО");
-        let out = EvidenceVerifyTool
-            .call(json!({"change_dir": "."}), &ctx)
-            .await
-            .expect("вызов");
-        let v: Value = serde_json::from_str(&out.content).expect("JSON-вердикт");
-        assert_eq!(v["passed"], false, "{v}");
-        assert!(
-            v["issues"]
-                .as_array()
-                .expect("issues")
-                .iter()
-                .any(|i| i["kind"] == "tampered"),
-            "{v}"
-        );
-    }
-
-    // --- Н1: семантика артефакта («есть» ≠ «написан», ADR-041) -------------
-
-    /// Содержательное наполнение: длиннее порога 200 б и без маркеров-заглушек.
-    fn body(title: &str) -> String {
-        format!(
-            "# {title}\n\n{}\n",
-            "Содержательный раздел решения с обоснованием, альтернативами и \
-             последствиями. "
-                .repeat(4)
-        )
-    }
-
-    /// Полный и СОДЕРЖАТЕЛЬНЫЙ бандл маршрута Critical.
-    fn put_complete_critical(dir: &Path) {
-        put(dir, "PROBLEM.md", &body("Проблема"));
-        put(dir, "SPEC.md", &body("Спецификация"));
-        put(dir, "RISK.md", &body("Риск"));
-        put(dir, "ROLLBACK.md", &body("Откат"));
-        put(dir, "docs/adr/ADR-001.md", &body("Решение"));
-        put(dir, "ARCHITECTURE-SPINE.md", &body("Инварианты"));
-        put(
-            dir,
-            "DECISION.md",
-            &format!(
-                "# Решение A3\n\n- **choice**: {}\n- **rationale**: {}\n- \
-                 **rejected**: {}\n- **expiry**: 2099-12-31\n- **decided_by**: Архитектор ДКА\n",
-                body("вариант"),
-                body("обоснование"),
-                body("отвергнутое")
-            ),
-        );
-        put(
-            dir,
-            "WALKING-SKELETON.md",
-            &format!(
-                "# Walking skeleton\n\n{}\n\nИтог: PASS (8 из 8)\n",
-                body("Сквозной прогон")
-            ),
-        );
-        put(
-            dir,
-            "docs/REVIEW.md",
-            &format!(
-                "# Ревью\n\nВердикт.\n\nVERDICT: READY\n\nВопросы разобраны: {}",
-                body("итог")
-            ),
-        );
-        // Д8: «пройдено» обязано опираться на шаги. Отчёт без шагов (каким его
-        // писала заготовка `bootstrap` до 0.3.5) — не аттестация, и держать его
-        // в фикстуре «полного бандла» значило бы требовать от гейта слепоты.
-        put(
-            dir,
-            ".arch-handoff/REHEARSAL.json",
-            r#"{"kind":"rollback_rehearsal","gate":"A4","passed":true,
-                    "baseline_commit":"abc123","rehearsed_at":"2026-09-19T10:00:00Z",
-                    "duration_secs":1.5,
-                    "steps":[{"name":"якорь-доступен","status":"pass","exit_code":0,
-                              "detail":"commit"}],
-                    "verify":null,
-                    "log":["репетиция отката прошла"]}"#,
-        );
-        put(
-            dir,
-            ".arch-handoff/ROLLBACK.yaml",
-            "baseline_commit: abc123\nsteps:\n  - name: revert\n    run: git revert --no-edit HEAD\n",
-        );
-        put(
-            dir,
-            "VALIDATION.md",
-            &format!("# Валидация\n\n{}\n\nИтог: PASS\n", body("Тесты")),
-        );
-        put(
-            dir,
-            "reports/fitness.md",
-            &format!("# Fitness\n\n{}\n\nИтог: PASS\n", body("Правила")),
-        );
-    }
-
-    /// Абсолютный регресс 0.3.3: бандл из заглушек проходил как «выпуск разрешён».
-    #[test]
-    fn verify_passes_on_complete_bundle() {
-        let tmp = tempfile::tempdir().expect("tmp");
-        let dir = tmp.path();
-        put_complete_critical(dir);
-        let (_b, v) = pack(dir, Route::Critical).expect("pack");
-        assert!(v.passed, "missing: {:?}", v.missing);
-        let v = verify(dir).expect("verify");
-        assert!(
-            v.passed,
-            "содержательный бандл обязан быть зелёным; находки: {:?}",
-            v.semantics
-        );
-        assert!(v.semantics.is_empty(), "{:?}", v.semantics);
-        // Подлинность подписи A3 — заявленное, но механикой не проверяется.
-        assert!(
-            v.not_verified
-                .iter()
-                .any(|n| n.contains("подпись A3: заявлена")),
-            "{:?}",
-            v.not_verified
-        );
-    }
-
-    /// Заглушка вместо артефакта: файл есть, содержания нет.
-    #[test]
-    fn verify_flags_stub_artifact() {
-        let tmp = tempfile::tempdir().expect("tmp");
-        let dir = tmp.path();
-        put_complete_critical(dir);
-        put(dir, "DECISION.md", "TODO");
-        let (_b, _v) = pack(dir, Route::Critical).expect("pack");
-        let v = verify(dir).expect("verify");
-        assert!(!v.passed, "заглушка на Critical обязана блокировать выпуск");
-        assert!(
-            v.semantics.iter().any(|f| f.rule == "evidence_stub"
-                && f.key == "decision_a3"
-                && f.severity == "error"),
-            "{:?}",
-            v.semantics
-        );
-        assert!(!v.blocking_semantics().is_empty());
-    }
-
-    /// Ревью с вердиктом NOT-READY больше не даёт «выпуск разрешён».
-    #[test]
-    fn verify_blocks_not_ready_review() {
-        let tmp = tempfile::tempdir().expect("tmp");
-        let dir = tmp.path();
-        put_complete_critical(dir);
-        put(
-            dir,
-            "docs/REVIEW.md",
-            &format!("# R\n\nVERDICT: NOT-READY\n\n{}", body("замечания")),
-        );
-        let (_b, _v) = pack(dir, Route::Critical).expect("pack");
-        let v = verify(dir).expect("verify");
-        assert!(!v.passed);
-        assert!(
-            v.semantics.iter().any(|f| f.rule == "review_not_ready"),
-            "{:?}",
-            v.semantics
-        );
-        // Отсутствие строки вердикта — отдельная находка.
-        put(dir, "docs/REVIEW.md", &body("ревью без вердикта"));
-        pack(dir, Route::Critical).expect("repack");
-        let v = verify(dir).expect("verify");
-        assert!(
-            v.semantics
-                .iter()
-                .any(|f| f.rule == "review_verdict_missing"),
-            "{:?}",
-            v.semantics
-        );
-    }
-
-    /// Неподписанная запись A3 (пустой `decided_by`) — находка `a3_not_signed`.
-    #[test]
-    fn verify_flags_unsigned_a3() {
-        let tmp = tempfile::tempdir().expect("tmp");
-        let dir = tmp.path();
-        put_complete_critical(dir);
-        put(
-            dir,
-            "DECISION.md",
-            "# Решение A3\n\n- **choice**: вариант А — централизованный клиринг\n- **rationale**: снижает операционный риск расчётов и снимает зависимость от ручных сверок\n- **rejected**: вариант Б — распределённый клиринг, отклонён из-за сложности сопровождения\n- **expiry**: 2099-12-31\n- **decided_by**: \n",
-        );
-        pack(dir, Route::Critical).expect("pack");
-        let v = verify(dir).expect("verify");
-        assert!(!v.passed);
-        assert!(
-            v.semantics
-                .iter()
-                .any(|f| f.rule == "a3_not_signed" && f.message.contains("decided_by")),
-            "{:?}",
-            v.semantics
-        );
-        // Прочерк — тот же случай, что пустое поле.
-        put(
-            dir,
-            "DECISION.md",
-            "# Решение A3\n\n- **choice**: вариант А — централизованный клиринг\n- **rationale**: снижает операционный риск расчётов и снимает зависимость от ручных сверок\n- **rejected**: вариант Б — распределённый клиринг, отклонён из-за сложности сопровождения\n- **expiry**: 2099-12-31\n- **decided_by**: —\n",
-        );
-        pack(dir, Route::Critical).expect("pack");
-        let v = verify(dir).expect("verify");
-        assert!(v.semantics.iter().any(|f| f.rule == "a3_not_signed"));
-        assert!(!v.passed);
-    }
-
-    /// Просроченный срок пересмотра решения — находка `a3_expired`.
-    #[test]
-    fn verify_flags_expired_a3() {
-        let tmp = tempfile::tempdir().expect("tmp");
-        let dir = tmp.path();
-        put_complete_critical(dir);
-        put(
-            dir,
-            "DECISION.md",
-            "# Решение A3\n\n- **choice**: вариант А — централизованный клиринг\n- **rationale**: снижает операционный риск расчётов и снимает зависимость от ручных сверок\n- **rejected**: вариант Б — распределённый клиринг, отклонён из-за сложности сопровождения\n- **expiry**: 2020-01-01\n- **decided_by**: Архитектор\n",
-        );
-        pack(dir, Route::Critical).expect("pack");
-        let v = verify(dir).expect("verify");
-        assert!(!v.passed);
-        assert!(
-            v.semantics.iter().any(|f| f.rule == "a3_expired"),
-            "{:?}",
-            v.semantics
-        );
-    }
-
-    /// `semantics = off` возвращает поведение 0.3.3: проверяется только
-    /// наличие и целостность, о выключенных проверках сказано честно.
-    #[test]
-    fn semantics_off_restores_033_behaviour() {
-        let tmp = tempfile::tempdir().expect("tmp");
-        let dir = tmp.path();
-        put_complete_critical(dir);
-        put(dir, "DECISION.md", "TODO");
-        pack(dir, Route::Critical).expect("pack");
-        let cfg = crate::config::EvidenceConfig {
-            semantics: crate::config::EvidenceSemantics::Off,
-            ..crate::config::EvidenceConfig::default()
-        };
-        let v = verify_with(dir, &cfg).expect("verify");
-        assert!(
-            v.passed,
-            "0.3.3 не смотрела на содержание: {:?}",
-            v.semantics
-        );
-        assert!(v.semantics.is_empty());
-        assert!(
-            v.not_verified.iter().any(|n| n.contains("выключены")),
-            "{:?}",
-            v.not_verified
-        );
-        // На маршруте Standard та же заглушка — warn, выпуск не блокируется.
-        let std_dir = tmp.path().join("standard");
-        std::fs::create_dir_all(&std_dir).expect("mkdir");
-        put(&std_dir, "PROBLEM.md", &body("Проблема"));
-        put(&std_dir, "SPEC.md", &body("Спека"));
-        put(&std_dir, "RISK.md", &body("Риск"));
-        put(&std_dir, "ROLLBACK.md", &body("Откат"));
-        put(&std_dir, "VALIDATION.md", "TODO TODO TODO");
-        put(&std_dir, "reports/fitness.md", &body("Fitness"));
-        put(&std_dir, "docs/adr/ADR-001.md", &body("ADR"));
-        pack(&std_dir, Route::Standard).expect("pack");
-        let v = verify(&std_dir).expect("verify");
-        assert!(v.passed, "Standard — warn, не блокирует: {:?}", v.semantics);
-        assert!(
-            v.semantics
-                .iter()
-                .any(|f| f.rule == "evidence_stub" && f.severity == "warn"),
-            "{:?}",
-            v.semantics
-        );
-    }
-
-    /// Отчёт с провалом внутри — `evidence_reports_fail`.
-    #[test]
-    fn verify_flags_failing_report() {
-        let tmp = tempfile::tempdir().expect("tmp");
-        let dir = tmp.path();
-        put_complete_critical(dir);
-        put(
-            dir,
-            "VALIDATION.md",
-            &format!("{}\n\nИтог: FAIL\n", body("Прогон")),
-        );
-        pack(dir, Route::Critical).expect("pack");
-        let v = verify(dir).expect("verify");
-        assert!(!v.passed);
-        assert!(
-            v.semantics
-                .iter()
-                .any(|f| f.rule == "evidence_reports_fail"),
-            "{:?}",
-            v.semantics
-        );
-    }
-
-    /// Baseline репетиции разошёлся с планом отката — evidence обесценено.
-    #[test]
-    fn verify_flags_stale_rehearsal_baseline() {
-        let tmp = tempfile::tempdir().expect("tmp");
-        let dir = tmp.path();
-        put_complete_critical(dir);
-        put(
-            dir,
-            ".arch-handoff/ROLLBACK.yaml",
-            "baseline_commit: deadbeef\nsteps: []\n",
-        );
-        pack(dir, Route::Critical).expect("pack");
-        let v = verify(dir).expect("verify");
-        assert!(!v.passed);
-        assert!(
-            v.semantics
-                .iter()
-                .any(|f| f.rule == "rehearsal_stale_baseline"),
-            "{:?}",
-            v.semantics
-        );
-    }
-
-    /// git-команда в песочнице теста; identity задаётся явно — в окружении CI
-    /// её может не быть.
-    fn git(dir: &Path, args: &[&str]) -> String {
-        let out = std::process::Command::new("git")
-            .arg("-C")
-            .arg(dir)
-            .args(["-c", "user.email=test@example.com", "-c", "user.name=test"])
-            .args(args)
-            .output()
-            .expect("git запускается");
-        assert!(
-            out.status.success(),
-            "git {args:?}: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        String::from_utf8_lossy(&out.stdout).trim().to_string()
-    }
-
-    /// Д8: отчёт, объявленный пройденным, но без единого шага, — не
-    /// репетиция. На Critical это блокирующая находка: пустой список шагов
-    /// откат не подтверждает, а «passed: true» утверждает обратное.
-    #[test]
-    fn verify_flags_empty_rehearsal() {
-        let tmp = tempfile::tempdir().expect("tmp");
-        let dir = tmp.path();
-        put_complete_critical(dir);
-        put(
-            dir,
-            ".arch-handoff/REHEARSAL.json",
-            r#"{"kind":"rollback_rehearsal","gate":"A4","passed":true,
-                    "baseline_commit":"abc123","rehearsed_at":"2026-09-19T10:00:00Z",
-                    "duration_secs":1.5,"steps":[],"verify":null,
-                    "log":["репетиция отката прошла"]}"#,
-        );
-        pack(dir, Route::Critical).expect("pack");
-        let v = verify(dir).expect("verify");
-        assert!(!v.passed, "заготовка не имеет права давать зелёный");
-        let found = v
-            .semantics
-            .iter()
-            .find(|f| f.rule == "rehearsal_empty")
-            .unwrap_or_else(|| panic!("находка rehearsal_empty: {:?}", v.semantics));
-        assert_eq!(found.severity, "error", "Critical — блокирует выпуск");
-        assert!(!found.fix_hint.is_empty(), "у находки есть подсказка");
-    }
-
-    /// Д8: якорь отката, не резолвящийся в коммит ЭТОГО репозитория,
-    /// называется явно — но не блокирует: пакет мог быть собран в другой
-    /// истории (так живут перенесённые кейсы `кейсы/*`), и обвинять их в
-    /// подлоге нечем.
-    #[test]
-    fn verify_flags_unresolved_baseline() {
-        let tmp = tempfile::tempdir().expect("tmp");
-        let dir = tmp.path();
-        put_complete_critical(dir);
-        // Репозиторий есть, коммита `abc123` в нём нет.
-        git(dir, &["init", "-q"]);
-        pack(dir, Route::Critical).expect("pack");
-        let v = verify(dir).expect("verify");
-        let found = v
-            .semantics
-            .iter()
-            .find(|f| f.rule == "rehearsal_baseline_unresolved")
-            .unwrap_or_else(|| panic!("находка о нерезолвящемся якоре: {:?}", v.semantics));
-        assert_eq!(found.severity, "warn", "не блокирует: другой репозиторий");
-        assert!(found.message.contains("abc123"), "{}", found.message);
-        assert!(v.passed, "warn выпуск не блокирует: {:?}", v.semantics);
-    }
-
-    /// Обратная сторона Д8: честная репетиция (шаги записаны, якорь
-    /// резолвится) проходит без единого замечания о репетиции — усиление не
-    /// наказывает того, кто откат действительно отрепетировал.
-    #[test]
-    fn real_rehearsal_still_passes() {
-        let tmp = tempfile::tempdir().expect("tmp");
-        let dir = tmp.path();
-        put_complete_critical(dir);
-        git(dir, &["init", "-q"]);
-        git(dir, &["add", "-A"]);
-        git(dir, &["commit", "-q", "-m", "каркас кейса"]);
-        let head = git(dir, &["rev-parse", "HEAD"]);
-        put(
-            dir,
-            ".arch-handoff/ROLLBACK.yaml",
-            &format!(
-                "baseline_commit: {head}\nsteps:\n  - name: якорь-доступен\n    \
-                 run: \"true\"\nverify: \"true\"\n"
-            ),
-        );
-        let report =
-            crate::rehearsal::rehearse(dir, &dir.join(".arch-handoff")).expect("репетиция");
-        assert!(report.passed, "{:?}", report.log);
-        assert!(!report.steps.is_empty(), "шаги обязаны попасть в отчёт");
-        pack(dir, Route::Critical).expect("pack");
-        let v = verify(dir).expect("verify");
-        assert!(
-            v.semantics.iter().all(|f| !f.rule.starts_with("rehearsal")),
-            "честная репетиция не даёт находок о себе: {:?}",
-            v.semantics
-        );
-        assert!(v.passed, "{:?}", v.semantics);
-    }
-
-    #[tokio::test]
-    async fn evidence_tools_soft_errors_on_missing_input() {
-        let tmp = tempfile::tempdir().expect("tmp");
-        let ctx = tool_ctx(tmp.path());
-        // Без манифеста — мягкая ошибка verify.
-        let out = EvidenceVerifyTool
-            .call(json!({"change_dir": "."}), &ctx)
-            .await
-            .expect("вызов");
-        assert!(out.is_error, "{}", out.content);
-        // Неизвестный маршрут pack — мягкая ошибка, файл не создан.
-        let out = EvidencePackTool
-            .call(json!({"change_dir": ".", "route": "ludicrous"}), &ctx)
-            .await
-            .expect("вызов");
-        assert!(out.is_error, "{}", out.content);
-        assert!(!tmp.path().join("EVIDENCE.yaml").exists());
-    }
-    // --- прямые проверки хэшей, служебных файлов и строк отчёта --------------
-
-    /// FNV-1a по эталонным векторам: смещение и простое для каждого байта.
-    #[test]
-    fn fnv1a64_matches_reference_vectors() {
-        assert_eq!(fnv1a64(b""), 0xcbf2_9ce4_8422_2325);
-        assert_eq!(fnv1a64(b"a"), 0xaf63_dc4c_8601_ec8c);
-        assert_ne!(fnv1a64(b"abc"), fnv1a64(b"abd"));
-    }
-
-    /// Дефолт алгоритма для бандлов старого формата — именно legacy: иначе
-    /// бандл без поля `hash_alg` не получил бы предупреждения о переупаковке.
-    #[test]
-    fn default_hash_alg_is_legacy() {
-        assert_eq!(default_hash_alg(), HASH_ALG_LEGACY);
-    }
-
-    /// Временные и служебные файлы: бэкапы, `.DS_Store` и редакторские
-    /// черновики — по расширению, без учёта регистра.
-    #[test]
-    fn is_transient_recognizes_each_form() {
-        for name in ["notes.md~", ".DS_Store", "draft.TMP", "x.swp", "y.SWO"] {
-            assert!(is_transient(name), "{name} — служебный");
-        }
-        for name in ["SPEC.md", "NOTES.txt", "data.json"] {
-            assert!(!is_transient(name), "{name} — не служебный");
-        }
-    }
-
-    /// Обход каталога: только файлы, рекурсивно, без `.git` и служебных.
-    #[test]
-    fn dir_files_returns_only_real_files_recursively() {
-        let tmp = tempfile::tempdir().expect("tmp");
-        let root = tmp.path();
-        put(root, "a.md", "a");
-        put(root, "b.md~", "b");
-        put(root, "nested/c.md", "c");
-        put(root, ".git/config", "git");
-        let names: Vec<String> = dir_files(root)
-            .iter()
-            .map(|p| {
-                p.strip_prefix(root)
-                    .expect("внутри корня")
-                    .to_string_lossy()
-                    .replace('\\', "/")
-            })
-            .collect();
-        assert_eq!(names, vec!["a.md", "nested/c.md"], "{names:?}");
-    }
-
-    /// Хэш каталога считает суммарный размер всех файлов (а не только
-    /// последнего) и даёт sha256-дайджест.
-    #[test]
-    fn hash_artifact_sums_sizes_and_digests() {
-        let tmp = tempfile::tempdir().expect("tmp");
-        let root = tmp.path();
-        put(root, "one.md", "12345");
-        put(root, "two.md", "123");
-        let (digest, size) = hash_artifact(root, HASH_ALG_SHA256).expect("хэш каталога");
-        assert_eq!(size, 8);
-        assert_eq!(digest.len(), 64, "{digest}");
-        // Тот же каталог, переданный иначе («.», с завершающим слэшем) — тот же хэш.
-        let (digest_dot, _) =
-            hash_artifact(&root.join("."), HASH_ALG_SHA256).expect("хэш через точку");
-        assert_eq!(digest, digest_dot, "путь-аргумент на вердикт не влияет");
-    }
-
-    /// Legacy-свёртка каталога: сверка с формулой по каждому файлу и
-    /// накопление размера.
-    #[test]
-    fn hash_artifact_legacy_matches_formula() {
-        use std::fmt::Write as _;
-        let tmp = tempfile::tempdir().expect("tmp");
-        let root = tmp.path();
-        put(root, "a.md", "aa");
-        put(root, "b.md", "bbb");
-        let (digest, size) = hash_artifact_legacy(root).expect("legacy");
-        assert_eq!(size, 5);
-        let mut acc = String::new();
-        for name in ["a.md", "b.md"] {
-            let path = root.join(name);
-            let bytes = std::fs::read(&path).expect("read");
-            let _ = write!(acc, "{}:{:016x};", path.display(), fnv1a64(&bytes));
-        }
-        assert_eq!(digest, format!("{:016x}", fnv1a64(acc.as_bytes())));
-    }
-
-    /// Хэш одного файла legacy-алгоритмом — свёртка содержимого и его размер.
-    #[test]
-    fn hash_artifact_legacy_file_matches_content_hash() {
-        let tmp = tempfile::tempdir().expect("tmp");
-        let path = tmp.path().join("one.md");
-        std::fs::write(&path, "content").expect("write");
-        let (digest, size) = hash_artifact_legacy(&path).expect("legacy");
-        assert_eq!(size, 7);
-        assert_eq!(digest, format!("{:016x}", fnv1a64(b"content")));
-    }
-
-    /// `stub_file_of` называет проблемный файл: меньше порога — пустышка,
-    /// ровно порог с осмысленным текстом — нет; маркер-заглушка ловится и в
-    /// большом файле.
-    #[test]
-    fn stub_file_of_follows_threshold_strictly() {
-        let tmp = tempfile::tempdir().expect("tmp");
-        let root = tmp.path();
-        let min = 10_u64;
-        put(root, "exact.md", &"x".repeat(min as usize));
-        assert!(
-            stub_file_of(root, min).is_none(),
-            "ровно порог — не пустышка"
-        );
-        std::fs::write(root.join("exact.md"), "x".repeat(min as usize - 1)).expect("write");
-        assert!(
-            stub_file_of(root, min).is_some(),
-            "меньше порога — пустышка"
-        );
-        std::fs::write(
-            root.join("exact.md"),
-            format!(
-                "{} TODO {}",
-                "y".repeat(min as usize),
-                "z".repeat(min as usize)
-            ),
-        )
-        .expect("write");
-        assert!(
-            stub_file_of(root, min).is_some(),
-            "маркер-заглушка видна и в большом файле"
-        );
-        // Файл — не каталог: адресного поиска нет.
-        let file = root.join("exact.md");
-        assert!(stub_file_of(&file, min).is_none());
-    }
-
-    /// Пустые значения и маркеры-заглушки поля A3.
-    #[test]
-    fn field_is_empty_recognizes_empty_and_placeholders() {
-        for value in ["", "   ", "—", "–", "-", "?", "TBD", "TODO", "нет", "n/a"] {
-            assert!(field_is_empty(value), "«{value}» — пустое");
-        }
-        assert!(!field_is_empty("Вариант Б: свой шлюз"));
-    }
-
-    /// Строка итога отчёта: полная форма или «PASS (N из M)»; половинчатая
-    /// форма машиной не читается.
-    #[test]
-    fn has_result_line_needs_complete_marker() {
-        assert!(has_result_line("Итог: PASS"));
-        assert!(has_result_line("  PASS (3 из 5)  "));
-        assert!(!has_result_line("PASS (3"));
-        assert!(!has_result_line("PASS 3 из 5"));
-        assert!(!has_result_line("FAIL — есть дефекты"));
-    }
-
-    /// Строка провала — любая из трёх форм, включая английскую.
-    #[test]
-    fn has_fail_line_recognizes_each_form() {
-        assert!(has_fail_line("Итог: FAIL"));
-        assert!(has_fail_line("fail"));
-        assert!(has_fail_line("FAIL — есть дефекты"));
-        assert!(!has_fail_line("PASS (3 из 5)"));
-    }
-
-    /// Прогресс бандла считается по манифесту: сколько обязательных ключей
-    /// маршрута уже описано.
-    #[test]
-    fn bundle_progress_counts_manifest_keys() {
-        let tmp = tempfile::tempdir().expect("tmp");
-        let dir = tmp.path();
-        put(dir, "PROBLEM.md", "проблема");
-        let (_bundle, _v) = pack(dir, Route::Fast).expect("pack");
-        let required = required_artifacts(Route::Fast);
-        // Ожидание считается по тому же манифесту: прогресс — сколько
-        // обязательных ключей маршрута в нём описано.
-        let text = std::fs::read_to_string(dir.join("EVIDENCE.yaml")).expect("манифест");
-        let bundle: EvidenceBundle = serde_yaml_ng::from_str(&text).expect("yaml");
-        let expected = required
-            .iter()
-            .filter(|(key, _)| bundle.items.iter().any(|i| &i.key == key))
-            .count();
-        assert!(
-            expected > 0 && expected < required.len(),
-            "фикстура неполная: {expected} из {}",
-            required.len()
-        );
-        assert_eq!(
-            bundle_progress(dir, Route::Fast),
-            Some(expected),
-            "прогресс по манифесту: {} обязательных ключей",
-            required.len()
-        );
-        // Каталог без манифеста — прогресса нет.
-        let empty = tmp.path().join("empty");
-        std::fs::create_dir_all(&empty).expect("mkdir");
-        assert!(bundle_progress(&empty, Route::Fast).is_none());
-    }
-    /// Порог размера строгий: ровно порог — артефакт написан, на байт меньше —
-    /// пустышка.
-    #[test]
-    fn semantic_size_threshold_is_strict() {
-        let tmp = tempfile::tempdir().expect("tmp");
-        let dir = tmp.path();
-        let cfg = crate::config::EvidenceConfig::default();
-        let min = cfg.min_bytes as usize;
-        let artifact = dir.join("SPEC.md");
-        std::fs::write(&artifact, "s".repeat(min)).expect("write");
-        let (findings, _notes) = semantic_check(dir, "spec", &artifact, &cfg, "error");
-        assert!(
-            !findings.iter().any(|f| f.rule == "evidence_stub"),
-            "ровно порог — не пустышка: {findings:?}"
-        );
-        std::fs::write(&artifact, "s".repeat(min - 1)).expect("write");
-        let (findings, _notes) = semantic_check(dir, "spec", &artifact, &cfg, "error");
-        assert!(
-            findings.iter().any(|f| f.rule == "evidence_stub"),
-            "меньше порога — пустышка: {findings:?}"
-        );
-    }
-
-    /// Заглушка A3 не разбирается по полям: у неё один честный диагноз
-    /// (не написан), а не пять «поле не заполнено».
-    #[test]
-    fn semantic_stub_a3_is_not_checked_field_by_field() {
-        let tmp = tempfile::tempdir().expect("tmp");
-        let dir = tmp.path();
-        let cfg = crate::config::EvidenceConfig::default();
-        let a3 = dir.join("DECISION.md");
-        std::fs::write(&a3, "TODO").expect("write");
-        let (findings, _notes) = semantic_check(dir, "decision_a3", &a3, &cfg, "error");
-        assert!(
-            findings.iter().any(|f| f.rule == "evidence_stub"),
-            "заглушка названа: {findings:?}"
-        );
-        assert!(
-            !findings.iter().any(|f| f.rule == "a3_not_signed"),
-            "поля заглушки не разбираются: {findings:?}"
-        );
-    }
-
-    /// Подпись A3 называется ровно один раз — по полю `decided_by`, а не по
-    /// каждому заполненному полю.
-    #[test]
-    fn semantic_a3_signature_note_names_only_decided_by() {
-        let tmp = tempfile::tempdir().expect("tmp");
-        let dir = tmp.path();
-        let cfg = crate::config::EvidenceConfig::default();
-        put_complete_critical(dir);
-        let a3 = dir.join("DECISION.md");
-        let (findings, notes) = semantic_check(dir, "decision_a3", &a3, &cfg, "error");
-        assert!(
-            !findings.iter().any(|f| f.rule == "a3_not_signed"),
-            "полный A3 подписан: {findings:?}"
-        );
-        let signatures: Vec<&String> = notes.iter().filter(|n| n.contains("подпись A3")).collect();
-        assert_eq!(signatures.len(), 1, "подпись названа один раз: {notes:?}");
-    }
-
-    /// Срок A3 «сегодня» — ещё не просрочен: сравнение строгое.
-    #[test]
-    fn semantic_a3_expiry_today_is_not_expired() {
-        let tmp = tempfile::tempdir().expect("tmp");
-        let dir = tmp.path();
-        let cfg = crate::config::EvidenceConfig::default();
-        put_complete_critical(dir);
-        let today = chrono::Local::now().date_naive();
-        let text = std::fs::read_to_string(dir.join("DECISION.md")).expect("read");
-        let text = text
-            .lines()
-            .map(|l| {
-                if l.contains("expiry") {
-                    format!("- **expiry**: {today}\n")
-                } else {
-                    format!("{l}\n")
-                }
-            })
-            .collect::<String>();
-        std::fs::write(dir.join("DECISION.md"), text).expect("write");
-        let a3 = dir.join("DECISION.md");
-        let (findings, _notes) = semantic_check(dir, "decision_a3", &a3, &cfg, "error");
-        assert!(
-            !findings.iter().any(|f| f.rule == "a3_expired"),
-            "срок истекает сегодня — не просрочен: {findings:?}"
-        );
-    }
-
-    /// Отчёт-заглушка не требует строки итога: диагноз уже назван — «не
-    /// написан», и второго требования к тому же файлу быть не должно.
-    #[test]
-    fn semantic_stub_report_does_not_require_result_line() {
-        let tmp = tempfile::tempdir().expect("tmp");
-        let dir = tmp.path();
-        let cfg = crate::config::EvidenceConfig::default();
-        let report = dir.join("VALIDATION.md");
-        std::fs::write(&report, "TODO").expect("write");
-        let (findings, _notes) = semantic_check(dir, "validation", &report, &cfg, "warn");
-        assert!(
-            findings.iter().any(|f| f.rule == "evidence_stub"),
-            "заглушка названа: {findings:?}"
-        );
-        assert!(
-            !findings
-                .iter()
-                .any(|f| f.message.contains("нет строки итога")),
-            "строку итога у заглушки не требуем: {findings:?}"
-        );
-    }
-
-    /// Заглушка репетиции отката не разбирается как отчёт: у неё нет ни
-    /// списка шагов, ни якоря, и требовать их — шум.
-    #[test]
-    fn semantic_stub_rehearsal_is_not_parsed_as_report() {
-        let tmp = tempfile::tempdir().expect("tmp");
-        let dir = tmp.path();
-        let cfg = crate::config::EvidenceConfig::default();
-        // Рядом лежит отчёт-заготовка: без охранной ветки её разбор дал бы
-        // находку `rehearsal_empty` поверх честного «не написан».
-        put(
-            dir,
-            "REHEARSAL.json",
-            r#"{"kind":"rollback_rehearsal","gate":"A4","passed":true,
-                    "baseline_commit":"abc123","rehearsed_at":"2026-09-19T10:00:00Z",
-                    "duration_secs":1.5,"steps":[],"verify":null,
-                    "log":["репетиция отката прошла"]}"#,
-        );
-        let rehearsal = dir.join("ROLLBACK-REHEARSAL.md");
-        std::fs::write(&rehearsal, "TODO").expect("write");
-        let (findings, _notes) =
-            semantic_check(dir, "rollback_rehearsal", &rehearsal, &cfg, "error");
-        assert!(
-            !findings.iter().any(|f| f.rule == "rehearsal_empty"),
-            "заглушку не разбираем как отчёт: {findings:?}"
-        );
-        assert!(
-            findings.iter().any(|f| f.rule == "evidence_stub"),
-            "заглушка названа: {findings:?}"
-        );
-        let extra: Vec<&SemanticFinding> = findings
-            .iter()
-            .filter(|f| f.rule != "evidence_stub")
-            .collect();
-        assert!(extra.is_empty(), "лишних требований нет: {extra:?}");
-    }
-
-    /// Обязательные артефакты маршрута, которых нет в манифесте, попадают в
-    /// `missing` поимённо.
-    #[test]
-    fn verify_lists_missing_required_artifacts() {
-        let tmp = tempfile::tempdir().expect("tmp");
-        let dir = tmp.path();
-        put(dir, "PROBLEM.md", &body("Проблема"));
-        pack(dir, Route::Critical).expect("pack");
-        let v = verify(dir).expect("verify");
-        assert!(!v.passed);
-        for key in ["decision_a3", "spine", "adversarial_review"] {
-            assert!(
-                v.missing.contains(&key.to_string()),
-                "{key} назван: {:?}",
-                v.missing
-            );
-        }
-    }
-}
+mod tests;
