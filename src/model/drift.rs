@@ -177,6 +177,15 @@ fn rule_card(rule: &str) -> RuleCard {
             fix_hint: "восстановите контрактный артефакт по этому пути либо поправьте \
                        поле contract",
         },
+        "declared-edge-unused" => RuleCard {
+            adr: "ADR-030",
+            rationale: "объявленная зависимость, за которой нет ни одного импорта в коде, — \
+                        это либо устаревшая связь в модели (модель врёт), либо недонесённый \
+                        код: сопровождать «мёртвые» рёбра дорого, они сбивают ревью",
+            fix_hint: "подтвердите связь фактическим использованием модулей цели в коде \
+                       источника, либо пересмотрите depends_on решением архитектора \
+                       (связь могла устареть после рефакторинга)",
+        },
         _ => RuleCard {
             adr: "ADR-035",
             rationale: "внешняя интеграция без артефакта в репозитории легитимна, но обязана \
@@ -207,6 +216,107 @@ fn push_issue(
         fix_hint: Some(card.fix_hint.to_string()),
         ..LintIssue::default()
     });
+}
+
+/// Потолок размера исходника, читаемого проверкой рёбер (как у survey:
+/// regex-скан ориентирован на тексты, огромные файлы пропускаем).
+const MAX_SOURCE_BYTES: u64 = 1024 * 1024;
+
+/// Объявленные рёбра модели без кода (C2): CMP с `depends_on` на CMP с
+/// `code_roots`, но ни один файл из его `code_roots` не импортирует модули
+/// цели. Разбор импортов и разрешение владельца — общий код с
+/// `control::exec` и волной K ([`crate::imports`]), без дублирования.
+///
+/// Возвращает пары (источник, цель, файл сущности-источника), отсортированы.
+fn declared_unused_edges(
+    case_dir: &Path,
+    model: &crate::model::Model,
+) -> Result<Vec<(String, String, PathBuf)>> {
+    let contexts: Vec<(&crate::model::Entity, Vec<String>)> = model
+        .entities
+        .iter()
+        .filter(|e| e.kind == EntityKind::Cmp && !e.code_roots.is_empty())
+        .map(|e| {
+            (
+                e,
+                e.code_roots
+                    .iter()
+                    .map(|r| crate::imports::normalize_root(r))
+                    .collect(),
+            )
+        })
+        .collect();
+    if contexts.len() < 2 {
+        return Ok(Vec::new()); // паре нужны два CMP с корнями
+    }
+    // Использованные пары (источник, цель): обход исходников под корнями.
+    let bases = crate::imports::candidate_bases(case_dir);
+    let mut used: BTreeSet<(&str, &str)> = BTreeSet::new();
+    let walker = WalkDir::new(case_dir).follow_links(false).into_iter();
+    for entry in walker.filter_entry(|e| {
+        if e.depth() > 0 && e.file_type().is_dir() {
+            let name = e.file_name().to_string_lossy();
+            !(name.starts_with('.') || crate::survey::SKIP_DIRS.contains(&name.as_ref()))
+        } else {
+            true
+        }
+    }) {
+        let entry = entry.map_err(|e| {
+            crate::error::HarnessError::Model(format!("обход {}: {e}", case_dir.display()))
+        })?;
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let ext_ok = entry
+            .path()
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| crate::imports::IMPORT_EXTENSIONS.contains(&e));
+        if !ext_ok || entry.metadata().map_or(0, |m| m.len()) > MAX_SOURCE_BYTES {
+            continue;
+        }
+        let rel = entry
+            .path()
+            .strip_prefix(case_dir)
+            .map_err(|e| crate::error::HarnessError::Model(format!("относительный путь: {e}")))?
+            .to_string_lossy()
+            .replace('\\', "/");
+        let Some(source) = crate::imports::owner_by_path(&contexts, &rel) else {
+            continue;
+        };
+        let bytes = std::fs::read(entry.path())
+            .map_err(|e| crate::error::HarnessError::io(entry.path(), e))?;
+        let content = String::from_utf8_lossy(&bytes);
+        for edge in crate::imports::extract_imports(&rel, &content)? {
+            if let Some(target) = crate::imports::resolve_import_owner_fs(
+                case_dir,
+                &contexts,
+                &bases,
+                &rel,
+                &edge.module,
+            ) {
+                if target.id != source.id {
+                    used.insert((source.id.as_str(), target.id.as_str()));
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for e in &model.entities {
+        if e.kind != EntityKind::Cmp || e.code_roots.is_empty() {
+            continue;
+        }
+        for dep in &e.depends_on {
+            let target_ok = model
+                .get(dep)
+                .is_some_and(|t| t.kind == EntityKind::Cmp && !t.code_roots.is_empty());
+            if target_ok && !used.contains(&(e.id.as_str(), dep.as_str())) {
+                out.push((e.id.clone(), dep.clone(), e.file.clone()));
+            }
+        }
+    }
+    out.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
+    Ok(out)
 }
 
 /// Проверяет дрейф «модель ↔ код» для кейса `case_dir`.
@@ -322,6 +432,21 @@ pub fn drift_check(case_dir: &Path) -> Result<DriftReport> {
                 ),
             ),
         }
+    }
+
+    // 4. Объявленные рёбра без кода (C2): `depends_on` CMP на CMP с
+    //    `code_roots`, за которым нет ни одного импорта.
+    for (from, to, file) in declared_unused_edges(case_dir, &model)? {
+        push_issue(
+            &mut issues,
+            "warn",
+            file,
+            "declared-edge-unused",
+            format!(
+                "{from}: depends_on {to} объявлен, но ни один файл code_roots \
+                 не импортирует модули цели"
+            ),
+        );
     }
 
     issues.sort_by(|a, b| {
@@ -652,6 +777,100 @@ mod tests {
     fn missing_model_dir_is_error() {
         let dir = tempfile::tempdir().expect("tmp");
         assert!(drift_check(dir.path()).is_err());
+    }
+
+    /// Фикстура C2: два CMP с `code_roots`; CMP-001 объявляет `depends_on`
+    /// CMP-002. Импорт в коде — по параметру.
+    fn fixture_two_components(dir: &Path, with_import: bool) -> PathBuf {
+        let case = dir.join("case");
+        write_file(
+            &case,
+            "model/CMP-001-intake.md",
+            "---\nid: CMP-001\ntype: cmp\ntitle: Приём\nstatus: adopted\ncode_roots: [services/intake]\ndepends_on: [CMP-002]\n---\nПриём.\n",
+        );
+        write_file(
+            &case,
+            "model/CMP-002-ledger.md",
+            "---\nid: CMP-002\ntype: cmp\ntitle: Ядро\nstatus: adopted\ncode_roots: [services/ledger]\n---\nЯдро.\n",
+        );
+        write_file(
+            &case,
+            "services/ledger/client.py",
+            "def post():\n    pass\n",
+        );
+        if with_import {
+            write_file(
+                &case,
+                "services/intake/writer.py",
+                "from services.ledger import client\n",
+            );
+        } else {
+            write_file(
+                &case,
+                "services/intake/writer.py",
+                "def write():\n    pass\n",
+            );
+        }
+        case
+    }
+
+    /// C2: объявленное ребро без единого импорта в коде — warn-находка
+    /// `declared-edge-unused`.
+    #[test]
+    fn declared_edge_unused_is_warn() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let case = fixture_two_components(dir.path(), false);
+        let report = drift_check(&case).expect("drift");
+        let found: Vec<&LintIssue> = report
+            .issues
+            .iter()
+            .filter(|i| i.rule == "declared-edge-unused")
+            .collect();
+        assert_eq!(found.len(), 1, "{}", report.summary());
+        assert_eq!(found[0].severity, "warn");
+        assert!(found[0].message.contains("CMP-001"), "{}", found[0].message);
+        assert!(found[0].message.contains("CMP-002"), "{}", found[0].message);
+        assert_eq!(found[0].adr.as_deref(), Some("ADR-030"));
+        assert!(found[0].fix_hint.is_some());
+        assert!(!report.has_errors(), "warn не ломает итог");
+    }
+
+    /// C2: объявленное ребро, подтверждённое импортом, — не находка.
+    #[test]
+    fn declared_edge_with_import_is_clean() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let case = fixture_two_components(dir.path(), true);
+        let report = drift_check(&case).expect("drift");
+        assert!(
+            !report
+                .issues
+                .iter()
+                .any(|i| i.rule == "declared-edge-unused"),
+            "{}",
+            report.summary()
+        );
+    }
+
+    /// C2: цель без `code_roots` не проверяется (нечего искать в коде).
+    #[test]
+    fn declared_edge_target_without_roots_skipped() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let case = fixture_two_components(dir.path(), false);
+        // CMP-002 теряет code_roots — проверять нечего, находки быть не должно.
+        write_file(
+            &case,
+            "model/CMP-002-ledger.md",
+            "---\nid: CMP-002\ntype: cmp\ntitle: Ядро\nstatus: adopted\n---\nЯдро.\n",
+        );
+        let report = drift_check(&case).expect("drift");
+        assert!(
+            !report
+                .issues
+                .iter()
+                .any(|i| i.rule == "declared-edge-unused"),
+            "{}",
+            report.summary()
+        );
     }
 
     #[tokio::test]
