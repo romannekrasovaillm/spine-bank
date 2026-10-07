@@ -107,11 +107,11 @@ pub(super) fn run_inner(
             repo.display()
         )));
     }
-    let (mut route, route_auto, mut route_note) = if let Some(r) = route_override {
-        (r, false, format!("явный --route {r}"))
+    let (mut route, route_auto, mut route_note, route_triggers) = if let Some(r) = route_override {
+        (r, false, format!("явный --route {r}"), Vec::new())
     } else {
-        let (r, note) = auto_route(repo, base, limits, &options.diff_globs);
-        (r, true, note)
+        let (r, note, fired) = auto_route(repo, base, limits, &options.diff_globs);
+        (r, true, note, fired)
     };
     // П4: храповик маршрута — эффективный маршрут не ниже заявленного в
     // ROUTE.lock. Критический проект проверяется как Critical даже на чистом
@@ -231,6 +231,7 @@ pub(super) fn run_inner(
         route,
         route_auto,
         route_note,
+        route_triggers,
         components,
         outcome: GateOutcome::Pass,
         required: requirements.for_route(route).to_vec(),

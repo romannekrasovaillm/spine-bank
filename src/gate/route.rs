@@ -14,12 +14,15 @@ use crate::control::{self, Route};
 /// и [`control::score_with_sources`] с пустым declared (механический минимум
 /// S-1, ADR-034). Дифф недоступен (не git-репозиторий, нет HEAD) — fail-safe
 /// маршрут Critical с пометкой причины.
+///
+/// Третий элемент кортежа — сработавшие триггеры прогона (D1): паспорт
+/// вердикта по ним называет недетектируемые триггеры, оставшиеся слепыми.
 pub(super) fn auto_route(
     repo: &Path,
     base: Option<&str>,
     limits: (usize, usize),
     globs: &control::DiffGlobs,
-) -> (Route, String) {
+) -> (Route, String, Vec<String>) {
     match control::detect_diff_triggers_with(repo, base, globs) {
         Ok(diff) => {
             let scored = control::score_with_sources(&BTreeMap::new(), &diff, limits.0, limits.1);
@@ -42,11 +45,13 @@ pub(super) fn auto_route(
                     "auto: score {} ({fired}){excluded_note}",
                     scored.significance.score
                 ),
+                scored.significance.fired,
             )
         }
         Err(e) => (
             Route::Critical,
             format!("auto: дифф недоступен ({e}) — fail-safe маршрут Critical"),
+            Vec::new(),
         ),
     }
 }

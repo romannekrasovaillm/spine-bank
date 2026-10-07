@@ -427,6 +427,12 @@ pub struct GateReport {
     pub route_auto: bool,
     /// Заметка о маршруте: score и триггеры из диффа либо причина fail-safe.
     pub route_note: String,
+    /// Триггеры, по которым вычислен маршрут прогона (D1): пусты, когда
+    /// маршрут задан явно (`--route`) — тогда детектор диффа не запускался.
+    /// Паспорт вердикта по ним перечисляет недетектируемые триггеры,
+    /// оставшиеся слепыми ([`crate::control::DIFF_BLIND_TRIGGERS`]).
+    /// В конверт `gate-verdict/v1` не входит (представление, не вердикт).
+    pub route_triggers: Vec<String>,
     /// Составляющие в порядке прогона.
     pub components: Vec<GateComponent>,
     /// Итог: PASS / FAIL / INCOMPLETE (П1).
@@ -579,6 +585,7 @@ mod tests {
             route: Route::Fast,
             route_auto: false,
             route_note: "auto".to_string(),
+            route_triggers: Vec::new(),
             components: vec![
                 component("fitness", GateStatus::Pass, Vec::new()),
                 component("delta_guard", GateStatus::Pass, Vec::new()),

@@ -46,6 +46,38 @@ const FORCING_CRITICAL_TRIGGERS: [&str; 3] = [
     "criticality_or_exception",
 ];
 
+/// Триггеры, которые детектор диффа по умолчанию НЕ умеет видеть
+/// механически (D1): они зажигаются только заявлением автора
+/// (`--trigger`/`declared`). Паспорт вердикта обязан перечислять те из них,
+/// что не вошли в прогон, — иначе маршрут выглядит всевидящим, а недобор
+/// Critical остаётся невидимым.
+///
+/// Троица `security`/`trust_zone`/`data_contract` перестаёт быть слепой,
+/// когда кейс задаёт глобы `[significance]` (D2): тогда сработавший триггер
+/// попадает в маршрут и из этого списка исчезает.
+pub const DIFF_BLIND_TRIGGERS: [&str; 7] = [
+    "security_boundary_change",
+    "criticality_or_exception",
+    "trust_zone_change",
+    "data_contract_change",
+    "domain_ownership_change",
+    "consistency_model_change",
+    "financial_impact",
+];
+
+/// Недетектируемые триггеры, которые НЕ сработали в прогоне (D1): именно их
+/// отсутствие в маршруте — риск недобора Critical, и паспорт называет их
+/// поимённо. Вход — сработавшие триггеры прогона (из диффа и/или заявленные).
+#[must_use]
+pub fn blind_triggers_unfired<'a>(fired: impl IntoIterator<Item = &'a str>) -> Vec<&'static str> {
+    let fired: std::collections::BTreeSet<&str> = fired.into_iter().collect();
+    DIFF_BLIND_TRIGGERS
+        .iter()
+        .copied()
+        .filter(|t| !fired.contains(t))
+        .collect()
+}
+
 /// Оценивает значимость по карте «триггер → сработал» с дефолтными порогами
 /// ([`DEFAULT_FAST_MAX`]/[`DEFAULT_STANDARD_MAX`]) — обратная совместимость.
 #[must_use]
