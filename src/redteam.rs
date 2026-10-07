@@ -69,6 +69,38 @@ pub struct SemanticSubject {
     pub prefix: &'static str,
 }
 
+/// Слой засеянного дефекта (E2, волна E 0.3.14): доля обнаружения считается
+/// раздельно для документов+модели и для кода — текстовые правила реестра не
+/// должны маскировать слепоту к кодовым дефектам (корпус
+/// `experiments/openspec-vs-spine/`: классы нарушений агентов — кодовые).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Layer {
+    /// Документы и модель (спайн, ADR, DECISION, сущности model/).
+    DocsModel,
+    /// Код скелета/реализации (D11, D11b, D15, D18 и кодовые классы корпуса).
+    Code,
+}
+
+impl Layer {
+    /// Метка для отчёта.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::DocsModel => "документы+модель",
+            Self::Code => "код",
+        }
+    }
+
+    /// Машинная метка (JSON).
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::DocsModel => "docs_model",
+            Self::Code => "code",
+        }
+    }
+}
+
 /// Один мутатор: идентификатор, описание, ожидание и правка.
 pub struct Mutator {
     /// Идентификатор из red-team набора (`D1`, `D11b`, `R`…).
@@ -77,7 +109,9 @@ pub struct Mutator {
     pub title: &'static str,
     /// Каким инструментом обязан ловиться (человеко-читаемая подсказка).
     pub by: &'static str,
-    /// Ожидание.
+    /// Ожидание. У мутаторов с [`Mutator::expected_in`] — дефолт для кейса без
+    /// покрывающего правила (документация и статические проверки каталога);
+    /// фактическое ожидание прогона вычисляется на мутанте.
     pub expected: Expectation,
     /// Входит ли мутатор в знаменатель доли обнаружения — в набор из 14
     /// позиций раздела 7 ТЗ (D1…D13 + D11b). `R` (ревью `NOT-READY`), `D14`
@@ -90,11 +124,23 @@ pub struct Mutator {
     /// нарушающей реализации). Позиции раздела 7 мерят защищённость пакета;
     /// способность шаблона ловить нарушение — качество реестра, и складывать
     /// одно с другим значило бы менять смысл критерия приёмки.
+    ///
+    /// Мутаторы волны E (`D18`…`D24`) — тоже отдельные строки: они измеряют
+    /// кодовый слой (E2) и классы корпуса `openspec-vs-spine`, а не набор
+    /// раздела 7.
     pub in_ratio: bool,
     /// Смысловая рубрика, которой этот класс дефекта ловится (ADR-051, S5):
     /// у `D6`, `D10`, `D11` механика бессильна по построению, и измерение
     /// смыслового слоя — отдельная строка, в долю обнаружения не входящая.
     pub semantic: Option<SemanticSubject>,
+    /// Слой дефекта (E2): `Code` — правка кода скелета/реализации.
+    pub layer: Layer,
+    /// Динамическое ожидание по составу правил кейса (B2/E1): `Some(f)` —
+    /// ожидание вычисляется на мутанте после правки (правило класса дефекта
+    /// есть в реестре и покрывает файл — `Caught`, иначе — `Semantic`).
+    /// Честность по построению: «не пойман» на кейсе без правила класса —
+    /// утверждение о реестре, а не о механике.
+    pub expected_in: Option<fn(&Path) -> Expectation>,
     /// Правка кейса-мутанта.
     pub apply: Mutation,
 }
@@ -119,7 +165,13 @@ pub struct Mutator {
 /// нарушением инварианта в скелете (ADR-050) — при слиянии ветка среза
 /// происхождения уступила занятый номер, чтобы не переименовывать уже
 /// влитый мутатор.
-pub const MUTATORS: [Mutator; 19] = [
+///
+/// `D18` (волна B, B2, ADR-065) — лексический обход: в коде скелета проверка
+/// удаляется, а ключевое слово `pattern` остаётся в комментарии; ожидание —
+/// по составу правил кейса: `Semantic`, если инвариант охраняет только
+/// `must_contain` (слово на месте — правило зелёное), `Caught` для правила из
+/// шаблона (тест падает на отсутствующей проверке).
+pub const MUTATORS: [Mutator; 20] = [
     Mutator {
         id: "D1",
         title: "бюджет hop'а больше цели p99",
@@ -127,6 +179,8 @@ pub const MUTATORS: [Mutator; 19] = [
         expected: Expectation::Caught,
         in_ratio: true,
         semantic: None,
+        layer: Layer::DocsModel,
+        expected_in: None,
         apply: mutate_d1,
     },
     Mutator {
@@ -136,6 +190,8 @@ pub const MUTATORS: [Mutator; 19] = [
         expected: Expectation::Caught,
         in_ratio: true,
         semantic: None,
+        layer: Layer::DocsModel,
+        expected_in: None,
         apply: mutate_d2,
     },
     Mutator {
@@ -145,6 +201,8 @@ pub const MUTATORS: [Mutator; 19] = [
         expected: Expectation::Caught,
         in_ratio: true,
         semantic: None,
+        layer: Layer::DocsModel,
+        expected_in: None,
         apply: mutate_d3,
     },
     Mutator {
@@ -154,6 +212,8 @@ pub const MUTATORS: [Mutator; 19] = [
         expected: Expectation::Caught,
         in_ratio: true,
         semantic: None,
+        layer: Layer::DocsModel,
+        expected_in: None,
         apply: mutate_d4,
     },
     Mutator {
@@ -163,6 +223,8 @@ pub const MUTATORS: [Mutator; 19] = [
         expected: Expectation::Caught,
         in_ratio: true,
         semantic: None,
+        layer: Layer::DocsModel,
+        expected_in: None,
         apply: mutate_d5,
     },
     Mutator {
@@ -177,6 +239,8 @@ pub const MUTATORS: [Mutator; 19] = [
             dir: "model",
             prefix: "CMP-",
         }),
+        layer: Layer::DocsModel,
+        expected_in: None,
         apply: mutate_d6,
     },
     Mutator {
@@ -186,6 +250,8 @@ pub const MUTATORS: [Mutator; 19] = [
         expected: Expectation::Caught,
         in_ratio: true,
         semantic: None,
+        layer: Layer::DocsModel,
+        expected_in: None,
         apply: mutate_d7,
     },
     Mutator {
@@ -195,6 +261,8 @@ pub const MUTATORS: [Mutator; 19] = [
         expected: Expectation::Caught,
         in_ratio: true,
         semantic: None,
+        layer: Layer::DocsModel,
+        expected_in: None,
         apply: mutate_d8,
     },
     Mutator {
@@ -204,6 +272,8 @@ pub const MUTATORS: [Mutator; 19] = [
         expected: Expectation::Caught,
         in_ratio: true,
         semantic: None,
+        layer: Layer::DocsModel,
+        expected_in: None,
         apply: mutate_d9,
     },
     Mutator {
@@ -218,6 +288,8 @@ pub const MUTATORS: [Mutator; 19] = [
             dir: "docs/adr",
             prefix: "ADR-",
         }),
+        layer: Layer::DocsModel,
+        expected_in: None,
         apply: mutate_d10,
     },
     Mutator {
@@ -232,6 +304,8 @@ pub const MUTATORS: [Mutator; 19] = [
             dir: "src/legacy",
             prefix: "payments.py",
         }),
+        layer: Layer::Code,
+        expected_in: None,
         apply: mutate_d11,
     },
     Mutator {
@@ -246,6 +320,8 @@ pub const MUTATORS: [Mutator; 19] = [
             dir: "tests",
             prefix: "payments_test.py",
         }),
+        layer: Layer::Code,
+        expected_in: None,
         apply: mutate_d11b,
     },
     Mutator {
@@ -255,6 +331,8 @@ pub const MUTATORS: [Mutator; 19] = [
         expected: Expectation::Caught,
         in_ratio: true,
         semantic: None,
+        layer: Layer::DocsModel,
+        expected_in: None,
         apply: mutate_d12,
     },
     Mutator {
@@ -264,6 +342,8 @@ pub const MUTATORS: [Mutator; 19] = [
         expected: Expectation::Caught,
         in_ratio: true,
         semantic: None,
+        layer: Layer::DocsModel,
+        expected_in: None,
         apply: mutate_d13,
     },
     Mutator {
@@ -273,6 +353,8 @@ pub const MUTATORS: [Mutator; 19] = [
         expected: Expectation::Caught,
         in_ratio: false,
         semantic: None,
+        layer: Layer::DocsModel,
+        expected_in: None,
         apply: mutate_r,
     },
     Mutator {
@@ -282,6 +364,8 @@ pub const MUTATORS: [Mutator; 19] = [
         expected: Expectation::Control,
         in_ratio: false,
         semantic: None,
+        layer: Layer::DocsModel,
+        expected_in: None,
         apply: mutate_d14,
     },
     Mutator {
@@ -291,6 +375,8 @@ pub const MUTATORS: [Mutator; 19] = [
         expected: Expectation::Caught,
         in_ratio: false,
         semantic: None,
+        layer: Layer::Code,
+        expected_in: None,
         apply: mutate_d15,
     },
     Mutator {
@@ -300,6 +386,8 @@ pub const MUTATORS: [Mutator; 19] = [
         expected: Expectation::Caught,
         in_ratio: false,
         semantic: None,
+        layer: Layer::DocsModel,
+        expected_in: None,
         apply: mutate_d16,
     },
     Mutator {
@@ -309,7 +397,20 @@ pub const MUTATORS: [Mutator; 19] = [
         expected: Expectation::Caught,
         in_ratio: false,
         semantic: None,
+        layer: Layer::DocsModel,
+        expected_in: None,
         apply: mutate_d17,
+    },
+    Mutator {
+        id: "D18",
+        title: "слово на месте, логики нет (лексический обход must_contain)",
+        by: "шаблонное command_succeeds; текстовое правило — нет",
+        expected: Expectation::Semantic,
+        in_ratio: false,
+        semantic: None,
+        layer: Layer::Code,
+        expected_in: Some(expect_d18),
+        apply: mutate_d18,
     },
 ];
 
@@ -845,6 +946,153 @@ fn mutate_d17(root: &Path) -> std::result::Result<(), String> {
     )
 }
 
+// ---------------------------------------------------------------------------
+// D18 (волна B, B2): лексический обход — слово на месте, логики нет
+// ---------------------------------------------------------------------------
+
+/// Цель D18: реализация применённого шаблона (кейс подписан на зубья
+/// библиотеки и взял её правило в реестр) либо файл, охраняемый текстовым
+/// `must_contain`. Выбор ветки НЕ читает содержимого файлов (только lock,
+/// реестр, наличие файла): ожидание, вычисленное на мутанте после правки,
+/// обязано совпадать с веткой самой правки.
+enum D18Target {
+    /// Файл реализации применённого шаблона (rel-путь) и слово-маркер,
+    /// остающееся в комментарии.
+    Template {
+        /// Относительный путь файла реализации.
+        rel: String,
+        /// Ключевое слово, остающееся в комментарии.
+        keyword: String,
+    },
+    /// Файл с совпадением `must_contain` (rel-путь) и сам pattern.
+    Text {
+        /// Относительный путь файла с проверкой.
+        rel: String,
+        /// Pattern правила (слово обязано остаться находимым).
+        pattern: String,
+    },
+}
+
+/// Есть ли у кейса проводимое правило из шаблона: lock-запись, шаблон в
+/// сборке и правило `command_succeeds` с той же командой в реестре.
+fn d18_template_entry(root: &Path) -> Option<(crate::rule_templates::LockEntry, String)> {
+    let lock_rel = crate::rule_templates::LOCK_REL;
+    let text = std::fs::read_to_string(root.join(lock_rel)).ok()?;
+    let lock: TemplateLock = serde_yaml_ng::from_str(&text).ok()?;
+    let constraints = crate::control::resolve_constraints_path(root, None)?;
+    let cards = crate::control::rule_cards(&constraints).ok()?;
+    for entry in lock.templates {
+        let Ok(Some(t)) = crate::rule_templates::template(&entry.id) else {
+            continue;
+        };
+        if t.manifest.version != entry.version {
+            continue;
+        }
+        let wired = cards.iter().any(|c| {
+            c.kind == "command_succeeds" && c.command.as_deref() == Some(entry.command.as_str())
+        });
+        if !wired {
+            continue;
+        }
+        let lang = crate::rule_templates::Lang::parse(&entry.lang)
+            .unwrap_or(crate::rule_templates::Lang::Both);
+        let swaps = t.violating_for(lang);
+        let Some(swap) = swaps.first() else {
+            continue;
+        };
+        let rel = if entry.dir.is_empty() {
+            format!(
+                "{}/{}/{}",
+                crate::rule_templates::TARGET_REL,
+                entry.id,
+                swap.to
+            )
+        } else {
+            format!("{}/{}", entry.dir, swap.to)
+        };
+        if root.join(&rel).is_file() {
+            return Some((entry, rel));
+        }
+    }
+    None
+}
+
+/// Выбор цели D18: шаблонная ветка при наличии проведённого правила из
+/// шаблона, иначе — первый (по реестру и алфавиту файлов) `must_contain`,
+/// чей pattern реально встречается в файле набора.
+fn d18_target(root: &Path) -> Option<D18Target> {
+    if let Some((entry, rel)) = d18_template_entry(root) {
+        // Слово-маркер: если текстовое правило покрывает тот же файл, берём
+        // его образец (оно останется зелёным — в этом и демонстрация); иначе
+        // имя шаблона.
+        let keyword = crate::control::teeth::first_must_contain_match(root, &rel).map_or_else(
+            || entry.id.replace('-', "_"),
+            |(_, pattern)| crate::control::teeth::regex_specimen(&pattern).unwrap_or(pattern),
+        );
+        return Some(D18Target::Template { rel, keyword });
+    }
+    crate::control::teeth::first_must_contain_match(root, "")
+        .map(|(rel, pattern)| D18Target::Text { rel, pattern })
+}
+
+/// Комментарийный префикс по расширению файла (`//` для C-семейства).
+fn comment_prefix(rel: &str) -> &'static str {
+    match rel.rsplit('.').next() {
+        Some("rs" | "go" | "java" | "ts" | "js" | "c" | "cpp" | "h") => "//",
+        _ => "#",
+    }
+}
+
+/// D18: в коде скелета проверка удаляется, а ключевое слово остаётся в
+/// комментарии. Для шаблонной ветки — реализация заменяется файлом-комментарием
+/// (тест шаблона обязан упасть: `Caught`); для текстовой — строки с
+/// совпадением удаляются, а в конец файла дописывается комментарий с образцом,
+/// по-прежнему совпадающим с pattern (`must_contain` остаётся зелёным:
+/// `Semantic` — текстовое правило обходится лексически).
+fn mutate_d18(root: &Path) -> std::result::Result<(), String> {
+    match d18_target(root) {
+        Some(D18Target::Template { rel, keyword }) => write(
+            root,
+            &rel,
+            &format!(
+                "{} {keyword}: проверка выполняется здесь — слово на месте, логики нет (D18)\n",
+                comment_prefix(&rel)
+            ),
+        ),
+        Some(D18Target::Text { rel, pattern }) => {
+            let text = read(root, &rel)?;
+            let re = regex::Regex::new(&pattern).map_err(|e| format!("{pattern}: {e}"))?;
+            let specimen = crate::control::teeth::regex_specimen(&pattern)
+                .ok_or_else(|| format!("pattern '{pattern}': образец не синтезируется"))?;
+            let kept: Vec<&str> = text.lines().filter(|l| !re.is_match(l)).collect();
+            if kept.len() == text.lines().count() {
+                return Err(format!("{rel}: совпадений по строкам нет (мультилиния?)"));
+            }
+            let mut new = kept.join("\n");
+            let _ = writeln!(
+                new,
+                "\n{} {specimen} — проверка удалена: слово на месте, логики нет (D18)",
+                comment_prefix(&rel)
+            );
+            write(root, &rel, &new)
+        }
+        None => Err(
+            "нет цели: ни применённого шаблона с проведённым правилом, ни must_contain с совпадением в коде"
+                .to_string(),
+        ),
+    }
+}
+
+/// Ожидание D18 по составу правил кейса: `Caught` для правила из шаблона
+/// (проверка исполнением падает на отсутствующей логике), `Semantic` — если
+/// инвариант охраняет только текст (слово на месте — правило зелёное).
+fn expect_d18(root: &Path) -> Expectation {
+    match d18_target(root) {
+        Some(D18Target::Template { .. }) => Expectation::Caught,
+        _ => Expectation::Semantic,
+    }
+}
+
 /// Лок-файл применённых шаблонов, разобранный на стороне мутатора: в
 /// [`crate::rule_templates`] тип лока и его чтение приватны, а править
 /// библиотеку шаблонов ради мутатора нельзя — D15 обязан быть её
@@ -949,8 +1197,12 @@ pub struct Detection {
     pub id: String,
     /// Что засевали.
     pub title: String,
-    /// Ожидание.
+    /// Ожидание (у мутаторов с динамическим ожиданием — вычисленное на
+    /// мутанте по составу правил кейса, B2/E1).
     pub expected: Expectation,
+    /// Слой засеянного дефекта (E2): документы+модель или код — доли
+    /// обнаружения считаются раздельно.
+    pub layer: Layer,
     /// Кем поймано: имена проваленных составляющих гейта; `None` — не поймано.
     pub caught_by: Option<String>,
     /// Почему мутатор пропущен (вход не найден) — честная причина вместо
@@ -1841,6 +2093,7 @@ pub fn run_with_options(case: &Path, options: &RedteamOptions) -> Result<Redteam
                 id: m.id.to_string(),
                 title: m.title.to_string(),
                 expected: m.expected,
+                layer: m.layer,
                 caught_by: None,
                 skipped: Some(reason),
                 expected_by: m.by.to_string(),
@@ -1848,6 +2101,9 @@ pub fn run_with_options(case: &Path, options: &RedteamOptions) -> Result<Redteam
             });
             continue;
         }
+        // B2/E1: ожидание по составу правил кейса — вычисляется на мутанте
+        // после правки (правило класса дефекта покрывает файл → Caught).
+        let expected = m.expected_in.map_or(m.expected, |f| f(&root));
         // Бандл переупаковывается ПОСЛЕ правки: иначе любая правка удостоверенного
         // файла краснила бы evidence_verify как «изменён после упаковки», и
         // дефект ловился бы не тем инструментом, который проверяется.
@@ -1913,6 +2169,7 @@ pub fn run_with_options(case: &Path, options: &RedteamOptions) -> Result<Redteam
                 id: m.id.to_string(),
                 title: m.title.to_string(),
                 expected: m.expected,
+                layer: m.layer,
                 expected_by: m.by.to_string(),
                 in_ratio: m.in_ratio,
                 caught_by,
@@ -1923,7 +2180,8 @@ pub fn run_with_options(case: &Path, options: &RedteamOptions) -> Result<Redteam
         detections.push(Detection {
             id: m.id.to_string(),
             title: m.title.to_string(),
-            expected: m.expected,
+            expected,
+            layer: m.layer,
             expected_by: m.by.to_string(),
             in_ratio: m.in_ratio,
             caught_by: if failed.is_empty() {
@@ -2034,6 +2292,140 @@ mod corner_tests {
             assert!(!m.in_ratio, "{id} не должен входить в долю обнаружения");
             assert_eq!(m.expected, Expectation::Caught, "{id} обязан ловиться");
         }
+    }
+
+    // --- B2: D18 «слово на месте, логики нет» ---------------------------------
+
+    /// D18 в каталоге: кодовый слой, вне знаменателя (как D15 — он измеряет
+    /// ловлю по классу дефекта, а не набор раздела 7), ожидание динамическое.
+    #[test]
+    fn d18_is_in_the_catalog_as_a_dynamic_code_mutator() {
+        let m = MUTATORS.iter().find(|m| m.id == "D18").expect("D18");
+        assert_eq!(m.layer, Layer::Code);
+        assert!(!m.in_ratio, "D18 — отдельная строка, не знаменатель");
+        assert!(m.expected_in.is_some(), "ожидание по составу правил кейса");
+        // Статический дефолт честен: на кейсе без правила класса — не ловится.
+        assert_eq!(m.expected, Expectation::Semantic);
+    }
+
+    /// Ветка «только текст»: файл, охраняемый одним `must_contain`. После D18
+    /// строки-проверки удалены, слово осталось в комментарии — правило зелёное
+    /// (гейт дефект не видит), ожидание `Semantic`.
+    #[test]
+    fn d18_lexical_bypass_keeps_text_rule_green() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let case = tmp.path();
+        write(
+            case,
+            "CONSTRAINTS.yaml",
+            "rules:\n  - id: C-001\n    name: idem_present\n    type: must_contain\n    \
+             glob: 'skeleton/**/*.py'\n    pattern: 'idempotency_key'\n    severity: error\n",
+        )
+        .expect("реестр");
+        write(
+            case,
+            "skeleton/api.py",
+            "def take(idempotency_key, amount):\n    if idempotency_key in seen:\n        return seen[idempotency_key]\n    return send(amount)\n",
+        )
+        .expect("скелет");
+        let constraints = case.join("CONSTRAINTS.yaml");
+        let before = crate::control::check(case, &constraints).expect("гейт до");
+        assert!(before.passed, "до мутации зелёный: {:?}", before.issues);
+
+        mutate_d18(case).expect("мутация применима");
+        let text = std::fs::read_to_string(case.join("skeleton/api.py")).expect("файл");
+        assert!(
+            !text.contains("if idempotency_key in seen"),
+            "проверка удалена: {text}"
+        );
+        assert!(
+            text.contains("# idempotency_key"),
+            "слово осталось в комментарии: {text}"
+        );
+        // Текстовое правило остаётся зелёным — дефект оно не видит.
+        let after = crate::control::check(case, &constraints).expect("гейт после");
+        assert!(
+            after.passed,
+            "must_contain не различает код и комментарий: {:?}",
+            after.issues
+        );
+        assert_eq!(expect_d18(case), Expectation::Semantic);
+    }
+
+    /// Ветка шаблона: правило из библиотеки (команда следит за конструкцией
+    /// проверки, а не за словом). После D18 команда падает — `Caught`.
+    #[test]
+    fn d18_is_caught_when_guarded_by_a_template_rule() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let case = tmp.path();
+        let t = crate::rule_templates::template("idempotency-key")
+            .expect("сборка")
+            .expect("шаблон");
+        let dir = format!("{}/idempotency-key", crate::rule_templates::TARGET_REL);
+        let command = format!("grep -q _answers {dir}/reference_impl.py");
+        let mut files_yaml = String::new();
+        for f in t.files_for(crate::rule_templates::Lang::Python) {
+            let content = t.file(&f.from).expect("файл шаблона");
+            let rel = format!("{dir}/{}", f.to);
+            write(case, &rel, content).expect("файл");
+            let _ = write!(
+                files_yaml,
+                "      - path: {rel}\n        sha256: {}\n",
+                crate::hash::sha256_hex(content.as_bytes())
+            );
+        }
+        write(
+            case,
+            crate::rule_templates::LOCK_REL,
+            &format!(
+                "templates:\n  - id: idempotency-key\n    version: {}\n    ad: AD-1\n    \
+                 lang: python\n    dir: {dir}\n    command: '{command}'\n    files:\n{files_yaml}",
+                t.manifest.version
+            ),
+        )
+        .expect("lock");
+        write(
+            case,
+            "CONSTRAINTS.yaml",
+            &format!(
+                "rules:\n  - id: C-100\n    name: idempotency_key_enforced\n    \
+                 type: command_succeeds\n    command: '{command}'\n    severity: error\n"
+            ),
+        )
+        .expect("реестр");
+        let constraints = case.join("CONSTRAINTS.yaml");
+        let before = crate::control::check(case, &constraints).expect("гейт до");
+        assert!(before.passed, "до мутации зелёный: {:?}", before.issues);
+        assert_eq!(expect_d18(case), Expectation::Caught, "правило из шаблона");
+
+        mutate_d18(case).expect("мутация применима");
+        let gutted =
+            std::fs::read_to_string(case.join(format!("{dir}/reference_impl.py"))).expect("файл");
+        assert!(gutted.contains("слово на месте, логики нет"), "{gutted}");
+        let after = crate::control::check(case, &constraints).expect("гейт после");
+        assert!(
+            !after.passed,
+            "правило из шаблона обязано покраснеть на пустышке: {:?}",
+            after.issues
+        );
+        assert!(
+            after
+                .issues
+                .iter()
+                .any(|i| i.rule == "idempotency_key_enforced"),
+            "поймавшее правило названо: {:?}",
+            after.issues
+        );
+    }
+
+    /// Ни шаблона, ни `must_contain` с совпадением — D18 честно неприменим.
+    #[test]
+    fn d18_is_skipped_without_a_target() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let case = tmp.path();
+        write(case, "CONSTRAINTS.yaml", "rules: []\n").expect("реестр");
+        let reason = mutate_d18(case).expect_err("цели нет");
+        assert!(reason.contains("нет цели"), "{reason}");
     }
 }
 
@@ -2309,6 +2701,7 @@ mod tests {
                     id: "D1".into(),
                     title: "ловится".into(),
                     expected: Expectation::Caught,
+                    layer: Layer::DocsModel,
                     caught_by: Some("nfr".into()),
                     skipped: None,
                     expected_by: "nfr".into(),
@@ -2318,6 +2711,7 @@ mod tests {
                     id: "D2".into(),
                     title: "пропущен".into(),
                     expected: Expectation::Caught,
+                    layer: Layer::DocsModel,
                     caught_by: None,
                     skipped: Some("нет входа".into()),
                     expected_by: "nfr".into(),
@@ -2327,6 +2721,7 @@ mod tests {
                     id: "D6".into(),
                     title: "семантика".into(),
                     expected: Expectation::Semantic,
+                    layer: Layer::DocsModel,
                     caught_by: None,
                     skipped: None,
                     expected_by: "—".into(),
@@ -2642,6 +3037,7 @@ mod tests {
                 id: "D10".into(),
                 title: "решение противоречит инварианту".into(),
                 expected: Expectation::Semantic,
+                layer: Layer::DocsModel,
                 caught_by: None,
                 skipped: None,
                 expected_by: "—".into(),
