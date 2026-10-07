@@ -411,35 +411,57 @@ fn progress(dir: &Path, report: &GateReport, cfg: &Config) -> Progress {
     }
 }
 
-/// Стадия бандла: сколько обязательных артефактов профиля маршрута собрано
-/// (`7/13`), а не «есть EVIDENCE.yaml или нет».
+/// Стадия бандла (A2): раздельный счёт по происхождению артефактов —
+/// «бандл: пишет автор 3/8 · выведет машина 1/5», а не суммарные «7/13»:
+/// выводимые машиной артефакты не работа автора, и смешанный счёт скрывал
+/// сокращение церемонии. Полный и чистый бандл — по-прежнему «✓».
 fn bundle_stage(dir: &Path, report: &GateReport, title: &'static str) -> Stage {
     let component = report
         .components
         .iter()
         .find(|c| c.name == "evidence_verify");
+    let split_mark = |p: crate::evidence::BundleProgress| {
+        format!(
+            "пишет автор {}/{} · выведет машина {}/{}",
+            p.author_done, p.author_total, p.machine_done, p.machine_total
+        )
+    };
     let Some(bundle_dir) = bundle_dir(dir) else {
+        let empty = crate::evidence::BundleProgress {
+            author_done: 0,
+            author_total: 0,
+            machine_done: 0,
+            machine_total: 0,
+        };
         return Stage {
             key: "bundle",
             title,
-            mark: "0/13".to_string(),
+            mark: split_mark(empty),
             findings: 0,
             detail: "нет EVIDENCE.yaml — бандл не собран (`arch-be evidence pack .`)".to_string(),
         };
     };
-    let total = crate::evidence::required_artifacts(report.route).len();
-    let present = crate::evidence::bundle_progress(&bundle_dir, report.route).unwrap_or(0);
+    let progress = crate::evidence::bundle_progress_split(&bundle_dir, report.route).unwrap_or(
+        crate::evidence::BundleProgress {
+            author_done: 0,
+            author_total: 0,
+            machine_done: 0,
+            machine_total: 0,
+        },
+    );
     let detail = component.map_or_else(|| "бандл собран".to_string(), |c| c.detail.clone());
     let findings = component.map_or(0, |c| {
         c.findings.iter().filter(|f| f.severity == "error").count()
     });
+    let complete = progress.author_done == progress.author_total
+        && progress.machine_done == progress.machine_total;
     Stage {
         key: "bundle",
         title,
-        mark: if present == total && findings == 0 {
+        mark: if complete && findings == 0 {
             "✓".to_string()
         } else {
-            format!("{present}/{total}")
+            split_mark(progress)
         },
         findings,
         detail,
@@ -518,6 +540,37 @@ fn next_step(dir: &Path, report: &GateReport, cfg: &Config) -> Option<NextStep> 
                         });
                     }
                     if let Some(m) = verdict.missing.first() {
+                        // A2: у выводимых машиной артефактов шаг — прогон,
+                        // создавший evidence, а не «создайте файл руками».
+                        let fix_hint = if m == "risk_level" {
+                            format!(
+                                "переупакуйте бандл: `arch-be evidence pack {} --route {}` — \
+                                 уровень риска выводится из записи значимости, рукописный \
+                                 RISK.md не требуется",
+                                dir.display(),
+                                report.route
+                            )
+                        } else if let Some(kind) = crate::evidence::RecordKind::for_artifact(m) {
+                            format!(
+                                "прогоните проверку и запишите её машиной: \
+                                 `arch-be evidence record {} [--cmd …]`, затем переупакуйте: \
+                                 `arch-be evidence pack {} --route {}`",
+                                kind.as_str(),
+                                dir.display(),
+                                report.route
+                            )
+                        } else if m == "rollback_rehearsal" {
+                            "прогоните репетицию отката: `arch-be control gate A4 . --rehearse` \
+                             (план — .arch-handoff/ROLLBACK.yaml), затем переупакуйте бандл"
+                                .to_string()
+                        } else {
+                            format!(
+                                "создайте артефакт «{m}» и переупакуйте: \
+                                 arch-be evidence pack {} --route {}",
+                                dir.display(),
+                                report.route
+                            )
+                        };
                         return Some(NextStep {
                             stage: stage.to_string(),
                             component: c.name.to_string(),
@@ -525,12 +578,7 @@ fn next_step(dir: &Path, report: &GateReport, cfg: &Config) -> Option<NextStep> 
                                 "отсутствует артефакт бандла: {} ({m})",
                                 artifact_label(m)
                             ),
-                            fix_hint: format!(
-                                "создайте артефакт «{m}» и переупакуйте: \
-                                 arch-be evidence pack {} --route {}",
-                                dir.display(),
-                                report.route
-                            ),
+                            fix_hint,
                         });
                     }
                 }
@@ -682,7 +730,19 @@ pub fn create(dir: &Path, name: &str, domain: &str, cfg: &Config) -> Result<Prog
     }
     // Бандл собирает сам инструмент: каркас обязан быть упакован тем же
     // способом, что и настоящий кейс, иначе хэши в манифесте — выдумка.
-    crate::evidence::pack(dir, Route::Critical)?;
+    // A2: уровень риска — запись значимости в манифесте (триггеры из диффа
+    // свежего каркаса, маршрут — из ROUTE.lock), а не рукописный RISK.md.
+    let limits = cfg
+        .significance
+        .limits()
+        .map_err(|e| HarnessError::Config(format!("маршруты значимости: {e}")))?;
+    let significance = crate::evidence::significance_record(
+        dir,
+        Route::Critical,
+        limits,
+        &cfg.significance.diff_globs(),
+    );
+    crate::evidence::pack_with(dir, Route::Critical, Some(significance))?;
     // Каркас отвечает не «создано», а «вот что красное и что с ним делать»:
     // иначе проводник заканчивается там, где начинается работа.
     let mut progress = status(dir, cfg)?;
@@ -736,7 +796,8 @@ pub fn skeleton(name: &str, domain: &str) -> Vec<(String, String)> {
         "route: critical\ndecided_by: bootstrap\n".to_string(),
     );
     push(".arch-handoff/ROLLBACK.yaml", rollback_plan(&slug));
-    push(".arch-handoff/REHEARSAL.json", rehearsal(&slug));
+    // A2: заготовки REHEARSAL.json больше нет — evidence репетиции пишет
+    // прогон `arch-be control gate A4 --rehearse`, а не каркас.
     for (rel, body) in model(name, domain, rule.is_some()) {
         push(&rel, body);
     }
@@ -754,18 +815,21 @@ pub fn skeleton(name: &str, domain: &str) -> Vec<(String, String)> {
         &format!("docs/spec/{slug}-acceptance.md"),
         spec(name, domain),
     );
-    // Артефакты бандла: явные заглушки. Их обязана ловить семантика Н1 —
-    // проводник, производящий ложнозелёные пакеты, хуже отсутствия проводника.
+    // Артефакты бандла, которые пишет автор: явные заглушки. Их обязана ловить
+    // семантика Н1 — проводник, производящий ложнозелёные пакеты, хуже
+    // отсутствия проводника.
+    //
+    // A2: выводимые машиной артефакты (risk_level, validation, fitness_report,
+    // walking_skeleton, rollback_rehearsal) заглушек НЕ получают — их закрывают
+    // запись значимости в EVIDENCE.yaml (пишет `evidence pack`), записи
+    // `arch-be evidence record` (A1) и REHEARSAL.json гейта A4. Рукописная
+    // заглушка машинного артефакта учила бы обходу (рукописный PASS 0.3.13).
     for (rel, title) in [
         ("PROBLEM.md", "Проблема"),
         ("docs/SPEC.md", "Спецификация"),
-        ("RISK.md", "Риск"),
         ("ACCEPTANCE.md", "Критерии приёмки"),
         ("ROLLBACK.md", "План отката"),
         ("DECISION.md", "Человеческое решение A3"),
-        ("WALKING-SKELETON.md", "Walking skeleton"),
-        ("VALIDATION.md", "Валидация"),
-        ("reports/fitness.md", "Прогон fitness-функций"),
     ] {
         push(rel, stub_artifact(title, domain));
     }
@@ -1082,25 +1146,6 @@ fn rollback_plan(slug: &str) -> String {
     )
 }
 
-/// Отчёт репетиции отката — ЗАГОТОВКА, а не пройденная проверка (Д8):
-/// `"passed": false`, пустой список шагов и честная строка в `log`.
-///
-/// Заготовка с `"passed": true` и `steps: []` выглядела как аттестация: гейт A4
-/// на свежем каркасе не краснел по репетиции, хотя репетиции не было. Пустой
-/// список шагов не подтверждает ничего — отчёт обязан это сказать.
-fn rehearsal(slug: &str) -> String {
-    format!(
-        "{{\n  \"kind\": \"rollback_rehearsal\",\n  \"gate\": \"A4\",\n  \
-         \"passed\": false,\n  \"baseline_commit\": \"{slug}-1\",\n  \
-         \"rehearsed_at\": \"{now}\",\n  \"duration_secs\": 0.0,\n  \
-         \"steps\": [],\n  \"verify\": null,\n  \
-         \"log\": [\"каркас: репетиция отката НЕ проводилась — это заготовка \
-         отчёта, а не результат прогона; заполните .arch-handoff/ROLLBACK.yaml \
-         и прогоните `arch-be rehearsal run`\"]\n}}\n",
-        now = chrono::Local::now().to_rfc3339()
-    )
-}
-
 /// Слаг каталога из человеческого имени: кириллица транслитерируется,
 /// остальное обезвреживается до `[a-z0-9-]`. Одна и та же строка даёт одно
 /// и то же имя каталога — иначе повторный bootstrap создавал бы копии.
@@ -1279,13 +1324,16 @@ mod tests {
             .iter()
             .map(|s| (s.key, s.mark.as_str()))
             .collect();
+        // A2: артефакты автора собраны (заглушки — их ловит семантика),
+        // машинные — ждут прогонов: risk_level выведен из записи значимости
+        // при упаковке каркаса, записи прогонов и репетиция ещё не делались.
         assert_eq!(
             marks,
             vec![
                 ("spine", "✓"),
                 ("rules", "✓"),
                 ("model", "✓"),
-                ("bundle", "13/13")
+                ("bundle", "пишет автор 8/8 · выведет машина 1/5")
             ],
             "спайн, правила и модель каркаса обязаны быть валидны — иначе первым \
              шагом было бы «почините то, что создал проводник»"
@@ -1408,6 +1456,9 @@ mod tests {
     /// ГРАНИЦА ПРОВОДНИКА: заглушки каркаса обязаны ловиться семантикой Н1.
     /// Проводник, производящий ложнозелёные пакеты, хуже отсутствия
     /// проводника — он выдаёт «выпуск разрешён» за «ничего не написано».
+    /// A2: заглушки создаются только для артефактов АВТОРА (6 + место в
+    /// шаблоне ADR); выводимые машиной артефакты заглушек не имеют — они
+    /// видны как «отсутствует», пока их не создадут прогоны.
     #[test]
     fn bootstrap_stub_skeleton_is_caught_by_evidence_semantics() {
         let tmp = tempfile::tempdir().expect("tmp");
@@ -1426,49 +1477,71 @@ mod tests {
             .iter()
             .filter(|f| f.rule == "evidence_stub" && f.severity == "error")
             .collect();
-        assert!(
-            stubs.len() >= 10,
-            "заглушки каркаса обязаны быть пойманы все (десять артефактов-заглушек              плюс незаполненное место в шаблоне ADR), пойманы: {}",
-            stubs.len()
+        assert_eq!(
+            stubs.len(),
+            7,
+            "заглушки каркаса обязаны быть пойманы все (шесть артефактов-заглушек \
+             автора плюс незаполненное место в шаблоне ADR), пойманы: {:?}",
+            stubs.iter().map(|f| f.key.as_str()).collect::<Vec<_>>()
         );
         assert!(
             stubs.iter().all(|f| !f.fix_hint.is_empty()),
             "у каждой находки есть подсказка"
         );
+        // Выводимые машиной артефакты — не заглушки, а честное «отсутствует»
+        // (risk_level уже выведен записью значимости при упаковке каркаса).
+        for key in [
+            "validation",
+            "fitness_report",
+            "walking_skeleton",
+            "rollback_rehearsal",
+        ] {
+            assert!(
+                verdict.missing.iter().any(|m| m == key),
+                "{key} обязан отсутствовать до прогона: {:?}",
+                verdict.missing
+            );
+            assert!(
+                !stubs.iter().any(|f| f.key == key),
+                "у машинного артефакта {key} не бывает заглушки"
+            );
+        }
+        assert!(
+            !verdict.missing.iter().any(|m| m == "risk_level"),
+            "risk_level выведен из записи значимости: {:?}",
+            verdict.missing
+        );
     }
 
-    /// Д8: заготовка репетиции отката не имеет права выглядеть пройденной.
-    /// `passed: true` при пустом списке шагов — аттестация без предмета: гейт A4
-    /// на каркасе молчал, а архитектор считал откат отрепетированным.
+    /// A2: каркас не создаёт заглушек выводимых машиной артефактов —
+    /// ни прозы отчётов (рукописный PASS 0.3.13), ни заготовки REHEARSAL.json
+    /// (ложная аттестация Д8, ADR-049): машинное evidence пишут прогоны.
     #[test]
-    fn bootstrap_rehearsal_stub_is_not_passed() {
+    fn bootstrap_creates_no_stubs_for_machine_derived_artifacts() {
         let tmp = tempfile::tempdir().expect("tmp");
         let dir = tmp.path().join("case");
         bootstrapped(&dir, "Зарплатные выплаты");
 
-        let text = std::fs::read_to_string(dir.join(".arch-handoff/REHEARSAL.json"))
-            .expect("отчёт репетиции записан");
-        let report: serde_json::Value = serde_json::from_str(&text).expect("REHEARSAL.json — JSON");
-        assert_eq!(
-            report["passed"], false,
-            "заготовка не подтверждает откат: {text}"
-        );
-        assert_eq!(report["steps"].as_array().map(Vec::len), Some(0));
-        let log = report["log"].to_string();
-        assert!(
-            log.contains("НЕ проводилась"),
-            "лог обязан сказать, что репетиции не было: {log}"
-        );
-        // Следствие: семантика бандла ловит непройденную репетицию сама.
+        for rel in [
+            "RISK.md",
+            "VALIDATION.md",
+            "reports/fitness.md",
+            "WALKING-SKELETON.md",
+            ".arch-handoff/REHEARSAL.json",
+        ] {
+            assert!(
+                !dir.join(rel).exists(),
+                "{rel} больше не создаётся каркасом — его пишет машина"
+            );
+        }
+        // Репетиция отката видна как отсутствующая, а не как «заготовка,
+        // которая не пройдена»: evidence пишет `arch-be control gate A4`.
         let verdict = crate::evidence::verify_with(&dir, &crate::config::EvidenceConfig::default())
             .expect("бандл каркаса читается");
         assert!(
-            verdict
-                .semantics
-                .iter()
-                .any(|f| f.rule == "rehearsal_not_passed"),
-            "непройденная репетиция — находка, а не тишина: {:?}",
-            verdict.semantics
+            verdict.missing.iter().any(|m| m == "rollback_rehearsal"),
+            "{:?}",
+            verdict.missing
         );
     }
 
@@ -1504,7 +1577,10 @@ mod tests {
     }
 
     /// Заполненные артефакты уводят каркас к зелёному — проводник доводит до
-    /// конца, а не заканчивается на «создано».
+    /// конца, а не заканчивается на «создано». Церемония A1+A2 (bank-профиль,
+    /// `require_records = true`): автор пишет не больше 8 артефактов Critical,
+    /// остальные выводит машина — записи `evidence record`, репетиция A4 и
+    /// запись значимости при упаковке.
     #[test]
     fn bootstrap_walks_to_green_when_artifacts_are_written() {
         if !pytest_available() {
@@ -1514,25 +1590,19 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tmp");
         let dir = tmp.path().join("case");
         bootstrapped(&dir, "Зарплатные выплаты");
-        // Заменяем заглушки настоящим содержанием: то же, что сделает
-        // архитектор, идя по шагам проводника.
-        for (rel, _) in [
-            ("PROBLEM.md", ""),
-            ("docs/SPEC.md", ""),
-            ("RISK.md", ""),
-            ("ACCEPTANCE.md", ""),
-            ("ROLLBACK.md", ""),
-            ("DECISION.md", ""),
-            ("WALKING-SKELETON.md", ""),
-            ("VALIDATION.md", ""),
-            ("reports/fitness.md", ""),
-            ("docs/REVIEW.md", ""),
-        ] {
+        // Автор пишет только артефакты смысла: проблему, спеку, приёмку,
+        // откат, решение A3 и ревью (плюс заполнение места в шаблоне ADR).
+        let author_artifacts = [
+            "PROBLEM.md",
+            "docs/SPEC.md",
+            "ACCEPTANCE.md",
+            "ROLLBACK.md",
+            "DECISION.md",
+            "docs/REVIEW.md",
+        ];
+        for rel in &author_artifacts {
             std::fs::write(dir.join(rel), written_artifact(rel)).expect("write artifact");
         }
-        // Шаблон ADR — тоже с незаполненным местом (`<оценка>`), и его ловит
-        // та же семантика: шаблон не становится решением оттого, что лежит в
-        // docs/adr.
         let adr_dir = dir.join("docs/adr");
         for entry in std::fs::read_dir(&adr_dir).expect("adr dir").flatten() {
             let path = entry.path();
@@ -1540,10 +1610,14 @@ mod tests {
             std::fs::write(&path, text.replace("<оценка>", "две недели и один релиз"))
                 .expect("adr filled");
         }
-        // Репетиция отката — часть пути до зелёного на Critical (гейт A4).
-        // Д8: заготовка отчёта не считается пройденной репетицией, поэтому
-        // каркас доводится так же, как это делает архитектор: репозиторий,
-        // якорь отката, прогон шагов.
+        // Приёмка A2: на Critical автор правит руками не больше 8 артефактов
+        // (6 файлов выше + правка шаблона ADR).
+        let author_written = author_artifacts.len() + 1;
+        assert!(
+            author_written <= 8,
+            "церемония разрослась: {author_written} файлов автора"
+        );
+        // Машинная часть: репетиция отката (гейт A4)…
         git_init(&dir).expect("git init каркаса");
         let head = std::process::Command::new("git")
             .arg("-C")
@@ -1567,16 +1641,37 @@ mod tests {
             "шаги каркаса обязаны пройти: {:?}",
             report.log
         );
-
-        crate::evidence::pack(&dir, Route::Critical).expect("pack");
-        let progress = status(&dir, &Config::default()).expect("status");
+        // …и записи прогонов (A1) вместо рукописных отчётов.
+        for kind in crate::evidence::RecordKind::all() {
+            let rec = crate::evidence::record_run(&dir, kind, "true", 0).expect("запись прогона");
+            assert!(rec.passed);
+        }
+        // Упаковка выводит risk_level из записи значимости (A2).
+        let cfg = Config::default();
+        let limits = cfg.significance.limits().expect("лимиты маршрутов");
+        let significance = crate::evidence::significance_record(
+            &dir,
+            Route::Critical,
+            limits,
+            &cfg.significance.diff_globs(),
+        );
+        crate::evidence::pack_with(&dir, Route::Critical, Some(significance)).expect("pack");
+        // Bank-профиль (его пишет каркас в arch-harness.toml): записи обязательны.
+        let mut bank_cfg = Config::default();
+        bank_cfg.evidence.require_records = true;
+        let progress = status(&dir, &bank_cfg).expect("status");
         assert_eq!(
             progress.outcome,
             "PASS",
-            "заполненный каркас обязан дойти до зелёного: {}",
+            "заполненный каркас обязан дойти до зелёного и в строгом режиме: {}",
             progress.line()
         );
         assert!(progress.next.is_none(), "шагов не осталось");
+        assert!(
+            progress.line().contains("бандл ✓"),
+            "бандл собран полностью: {}",
+            progress.line()
+        );
     }
 
     /// A2: на машине без pytest свежий python-каркас — INCOMPLETE, а не
@@ -1611,7 +1706,7 @@ mod tests {
                 ("spine", "✓"),
                 ("rules", "⊘"),
                 ("model", "✓"),
-                ("bundle", "13/13")
+                ("bundle", "пишет автор 8/8 · выведет машина 1/5")
             ],
             "пропуск правил — не «красная» стадия: {marks:?}"
         );
@@ -1624,8 +1719,9 @@ mod tests {
         );
     }
 
-    /// Правдоподобное содержание артефакта — по его роли в бандле. Заглушек
-    /// нет, строка итога у отчётов есть, A3 подписан.
+    /// Правдоподобное содержание артефакта автора — по его роли в бандле.
+    /// Заглушек нет, A3 подписан. (A2: отчётов прогонов здесь нет — их пишет
+    /// машина через `arch-be evidence record`, а не автор.)
     fn written_artifact(rel: &str) -> &'static str {
         match rel {
             "DECISION.md" => {
@@ -1633,12 +1729,6 @@ mod tests {
             }
             "docs/REVIEW.md" => {
                 "# Состязательное ревью\n\nРазобраны сценарии повторной доставки, отказ платформы и разбор расхождения.\n\nVERDICT: READY\n"
-            }
-            "VALIDATION.md" | "reports/fitness.md" | "WALKING-SKELETON.md" => {
-                "# Отчёт\n\nПрогон на тестовом контуре: сценарии повторной доставки и отказа платформы проверены.\n\nИтог: PASS (8 из 8)\n"
-            }
-            "RISK.md" => {
-                "# Риск\n\nУровень: critical. Повторная доставка запроса без дедупликации даёт повторный эффект; отказ платформы оставляет операцию в неопределённом состоянии.\n"
             }
             "ACCEPTANCE.md" => {
                 "# Критерии приёмки\n\n- When запрос доставлен повторно, the сервис shall вернуть тот же результат, не выполняя эффект дважды.\n- When платформа не ответила, the сервис shall перевести операцию в разбор.\n"

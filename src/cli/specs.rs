@@ -268,13 +268,34 @@ pub(crate) fn cmd_evidence(cfg: &arch_harness::config::Config, cmd: EvidenceCmd)
                 "critical" => arch_harness::control::Route::Critical,
                 _ => arch_harness::control::Route::Standard,
             };
-            let (bundle, verdict) = arch_harness::evidence::pack(&dir, route)?;
+            // A2: уровень риска выводится из записи значимости (триггеры и
+            // источники — из диффа рабочего дерева), а не из рукописного
+            // RISK.md.
+            let limits = cfg
+                .significance
+                .limits()
+                .map_err(|e| anyhow::anyhow!("маршруты значимости: {e}"))?;
+            let significance = arch_harness::evidence::significance_record(
+                &dir,
+                route,
+                limits,
+                &cfg.significance.diff_globs(),
+            );
+            let (bundle, verdict) =
+                arch_harness::evidence::pack_with(&dir, route, Some(significance))?;
             println!("{}", verdict.summary);
             for item in &bundle.items {
                 println!("  + {:<20} {} ({} б)", item.key, item.path, item.size);
             }
             for miss in &verdict.missing {
                 println!("  ✗ ОТСУТСТВУЕТ: {miss}");
+            }
+            // Раздельный счёт церемонии (A2): что пишет автор, что выводит машина.
+            if let Some(p) = arch_harness::evidence::bundle_progress_split(&dir, route) {
+                println!(
+                    "Бандл: пишет автор {}/{} · выведет машина {}/{}",
+                    p.author_done, p.author_total, p.machine_done, p.machine_total
+                );
             }
             println!("Манифест: {}", dir.join("EVIDENCE.yaml").display());
             if !verdict.passed {
