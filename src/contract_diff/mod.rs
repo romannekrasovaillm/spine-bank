@@ -88,7 +88,7 @@ mod tools;
 mod types;
 
 pub use detect::detect_format;
-pub use diffbase::{diff_contracts, diff_report};
+pub use diffbase::{diff_contracts, diff_report, diff_report_str};
 pub use report::{render_report, report_json};
 pub use tools::{ContractDiffTool, tools};
 pub use types::{ContractFormat, ContractImpact, DiffReport, Finding};

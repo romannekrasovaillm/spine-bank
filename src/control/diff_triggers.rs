@@ -229,10 +229,18 @@ pub struct DiffTriggers {
     /// Сработавшие триггеры (канонические имена из [`SIGNIFICANCE_TRIGGERS`]).
     pub triggers: BTreeSet<String>,
     /// Основания срабатываний («триггер: файл») — для отчёта и аудита.
+    /// Инвариант: одна запись на первое срабатывание триггера
+    /// (`evidence.len() == triggers.len()`).
     pub evidence: Vec<String>,
     /// Пути, исключённые из детекторов манифестом `connect`/`.spineignore`
     /// (П3: исключение видимо, а не молчаливо).
     pub excluded: Vec<String>,
+    /// Контекст, не поднимающий маршрут (D3, ADR-061): обновления версий
+    /// существующих зависимостей (не новые вендоры) и пофайловая
+    /// классификация изменённых контрактов (ломающее/аддитивное по
+    /// `contract_diff`). Информационные строки: на счёт триггеров и
+    /// exit-код не влияют.
+    pub notes: Vec<String>,
 }
 
 impl DiffTriggers {
@@ -240,6 +248,52 @@ impl DiffTriggers {
     fn fire(&mut self, trigger: &str, evidence: &str) {
         if self.triggers.insert(trigger.to_string()) {
             self.evidence.push(format!("{trigger}: {evidence}"));
+        }
+    }
+}
+
+/// Содержимое файла на ревизии (`git show <rev>:<path>`); `None` — файла на
+/// этой ревизии нет, ревизия/репозиторий недоступны или содержимое не UTF-8.
+/// Тишина здесь — не сбой детектора: без старой версии классификация просто
+/// не выполняется (fail-soft в сторону прежнего поведения).
+fn git_show_text(repo: &Path, rev: &str, path: &str) -> Option<String> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["show", &format!("{rev}:{path}")])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8(out.stdout).ok()
+}
+
+/// Стороны диапазона диффа для чтения содержимого (D3): `левая` — база
+/// (старая версия файла), `правая` — новая версия (`None` — рабочее дерево).
+/// `git_ref = None` — дифф рабочего дерева против HEAD: новая сторона —
+/// диск. `Some(r)` нормализуется [`normalize_base_range`], поэтому всегда
+/// содержит `..`: новая сторона — правая ревизия диапазона (`A...HEAD` →
+/// `HEAD`, `A..B` → `B`).
+///
+/// Для трёхточечного диапазона `A...HEAD` старой версией берётся сам `A`, а
+/// не merge-base: в типовом CI база — предок HEAD, и разницы нет; когда база
+/// разошлась, классификация контракта приблизительна (задокументированное
+/// ограничение D3 — точность заметки, а не вердикта).
+fn range_sides(git_ref: Option<&str>) -> (String, Option<String>) {
+    match git_ref {
+        None => ("HEAD".to_string(), None),
+        Some(r) => {
+            let range = normalize_base_range(r);
+            let left = base_rev(&range).to_string();
+            let right = range
+                .split_once("..")
+                .map(|(_, right)| right.trim_start_matches('.'))
+                .filter(|right| !right.is_empty())
+                .map(str::to_string);
+            (left, right)
         }
     }
 }
@@ -315,6 +369,59 @@ fn looks_like_dependency_line(manifest: &str, line: &str) -> bool {
         }
         _ => false,
     }
+}
+
+/// Имя пакета в строке зависимости (D3, ADR-061) — эвристика по типу
+/// манифеста, без полного парсера. `None` — имя не извлеклось; вызывающий
+/// обязан отнести такую строку к срабатыванию `new_vendor` (консервативно:
+/// лучше лишний триггер, чем пропущенный новый вендор).
+fn dependency_name(manifest: &str, line: &str) -> Option<String> {
+    let l = line.trim();
+    match manifest {
+        // serde = "1.0" / serde = { version = "1.0" } / tokio-util = { ... }
+        "Cargo.toml" => {
+            let name = l.split(['=', ' ']).next().unwrap_or_default();
+            (!name.is_empty()
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+            .then(|| name.to_string())
+        }
+        // "left-pad": "^1.3.0"
+        "package.json" => l
+            .strip_prefix('"')
+            .and_then(|rest| rest.split_once('"'))
+            .map(|(name, _)| name.to_string())
+            .filter(|name| !name.is_empty()),
+        // <artifactId>payments-core</artifactId> / <groupId>ru.bank</groupId>
+        "pom.xml" => l
+            .split_once('>')
+            .and_then(|(_, rest)| rest.split_once('<'))
+            .map(|(name, _)| name.trim().to_string())
+            .filter(|name| !name.is_empty()),
+        // require github.com/foo/bar v1.2.3 → github.com/foo/bar;
+        // строка внутри блока require: «github.com/foo/bar v1.2.3»
+        "go.mod" => l
+            .strip_prefix("require ")
+            .unwrap_or(l)
+            .split_whitespace()
+            .next()
+            .filter(|name| !name.is_empty())
+            .map(str::to_string),
+        _ => None,
+    }
+}
+
+/// Имена зависимостей манифеста по его содержимому (D3): все строки,
+/// похожие на зависимость. Вспомогательный шум (например, поле `name = "x"`
+/// в `[package]` даёт имя «name») безвреден: набор нужен только как
+/// надмножество «уже существующих» имён.
+fn manifest_dependency_names(manifest: &str, content: &str) -> BTreeSet<String> {
+    content
+        .lines()
+        .filter(|l| looks_like_dependency_line(manifest, l))
+        .filter_map(|l| dependency_name(manifest, l))
+        .collect()
 }
 
 /// Файл — конфиг по эвристике: расширение из списка или «config»/«application»/
@@ -527,13 +634,16 @@ pub fn detect_diff_triggers(repo: &Path, git_ref: Option<&str>) -> Result<DiffTr
 /// - `new_component` — добавлен каталог верхнего/второго уровня с манифестом
 ///   (Cargo.toml/pom.xml/package.json/go.mod), каталог `src/` или сущность
 ///   модели по глобу [`DiffGlobs::components`];
-/// - `new_vendor` — в диффе манифеста зависимостей добавлена строка
-///   зависимости;
+/// - `new_vendor` — в диффе манифеста зависимостей добавлена строка с НОВЫМ
+///   именем пакета (D3, ADR-061: смена версии существующего пакета маршрут не
+///   поднимает — она отмечается в [`DiffTriggers::notes`] как «обновление»);
 /// - `api_contract_change` — изменён, добавлен или УДАЛЁН контракт: по
 ///   содержимому (`openapi:`/`asyncapi:`/`swagger:` ключом верхнего уровня,
 ///   расширение `.proto`) либо по глобу [`DiffGlobs::contracts`] (T-05:
 ///   раньше — только по `openapi`/`asyncapi` в имени файла, из-за чего
-///   `docs/contracts/wallet-api.v1.yaml` в дельте был невидим);
+///   `docs/contracts/wallet-api.v1.yaml` в дельте был невидим); у изменённого
+///   контракта основание несёт классификацию `contract_diff` — «ломающее»
+///   или «аддитивное/совместимое» (D3), та же строка класса — в `notes`;
 /// - `cross_domain_integration` — появилась или изменена сущность интеграции
 ///   модели по глобу [`DiffGlobs::integrations`];
 /// - `significant_nfr` — появилась или изменена NFR-сущность модели по глобу
@@ -662,6 +772,17 @@ pub fn detect_diff_triggers_with(
     let re_rto_rpo_field = diff_regex(r"(?i)^\s*(?:rto|rpo)_\w*\s*:")?;
     let re_rto_rpo_target = diff_regex(r"(?i)\b(?:rto|rpo)\s*[≤<:=]\s*\d")?;
 
+    // D3: стороны диффа для чтения содержимого (база манифеста для
+    // new_vendor, старая/новая версия контракта для классификации).
+    let (old_rev, new_rev) = range_sides(git_ref);
+    // Читатель новой версии: рабочее дерево (диск) или ревизия (git show).
+    let new_text_of = |path: &str| -> Option<String> {
+        match &new_rev {
+            None => std::fs::read_to_string(repo.join(path)).ok(),
+            Some(rev) => git_show_text(repo, rev, path),
+        }
+    };
+
     let mut found = DiffTriggers::default();
     for (code, path) in &files {
         let segs: Vec<&str> = path.split('/').collect();
@@ -749,20 +870,57 @@ pub fn detect_diff_triggers_with(
             }
         }
 
-        // new_vendor: строка зависимости в диффе манифеста.
+        // new_vendor (D3, ADR-061): только НОВОЕ имя пакета. Смена версии
+        // существующей зависимости маршрут не поднимает — она уходит в
+        // `notes` как «обновление». Строка зависимости без распознанного
+        // имени — консервативное срабатывание (лучше лишний триггер, чем
+        // пропущенный новый вендор).
         if *code != 'D' && DEP_MANIFESTS.contains(&file_name) {
             if let Some(lines) = added.get(path.as_str()) {
-                if let Some(l) = lines
+                let dep_lines: Vec<&str> = lines
                     .iter()
-                    .find(|l| looks_like_dependency_line(file_name, l))
-                {
-                    found.fire(
-                        "new_vendor",
-                        &format!(
-                            "зависимость в {path}: {}",
-                            l.trim().chars().take(80).collect::<String>()
-                        ),
-                    );
+                    .filter(|l| looks_like_dependency_line(file_name, l))
+                    .map(String::as_str)
+                    .collect();
+                if !dep_lines.is_empty() {
+                    // Имена, уже бывшие в манифесте на базе диффа. Базы нет
+                    // (новый манифест, нет HEAD) — все строки считаются новыми
+                    // (прежнее поведение).
+                    let base_names: Option<BTreeSet<String>> = git_show_text(repo, &old_rev, path)
+                        .map(|content| manifest_dependency_names(file_name, &content));
+                    let mut new_names: Vec<String> = Vec::new();
+                    let mut updates: Vec<String> = Vec::new();
+                    for l in dep_lines {
+                        match dependency_name(file_name, l) {
+                            Some(name) => match &base_names {
+                                Some(base) if base.contains(&name) => {
+                                    if !updates.contains(&name) {
+                                        updates.push(name);
+                                    }
+                                }
+                                _ => {
+                                    if !new_names.contains(&name) {
+                                        new_names.push(name);
+                                    }
+                                }
+                            },
+                            None => new_names.push(format!(
+                                "<нераспознанная строка: {}>",
+                                l.trim().chars().take(60).collect::<String>()
+                            )),
+                        }
+                    }
+                    if !new_names.is_empty() {
+                        found.fire(
+                            "new_vendor",
+                            &format!("новые зависимости в {path}: {}", new_names.join(", ")),
+                        );
+                    }
+                    for name in updates {
+                        found.notes.push(format!(
+                            "обновление зависимости {name} в {path} (смена версии, не новый вендор)"
+                        ));
+                    }
                 }
             }
         }
@@ -784,10 +942,22 @@ pub fn detect_diff_triggers_with(
             } else {
                 "по имени файла"
             };
+            // D3(б): классификация изменённого контракта по contract_diff
+            // (ломающее/аддитивное). Срабатывание сохраняется ВСЕГДА — значим
+            // сам факт правки контракта; класс — контекст для ревьюера.
+            // Только 'M': у добавленного контракта нет старой версии
+            // (аддитивен по определению), удалённый — ломающий по определению.
+            let mut class_suffix = String::new();
+            if *code == 'M' {
+                if let Some(class) = classify_contract_change(repo, &old_rev, path, &new_text_of) {
+                    found.notes.push(format!("contract_diff: {path} — {class}"));
+                    class_suffix = format!(" · contract_diff: {class}");
+                }
+            }
             found.fire(
                 "api_contract_change",
                 &format!(
-                    "{} контракт {path} ({how})",
+                    "{} контракт {path} ({how}){class_suffix}",
                     if *code == 'D' {
                         "удалён"
                     } else {
@@ -901,6 +1071,50 @@ fn file_looks_like_contract(path: &Path) -> bool {
 
 /// Сколько байт файла читается при опознании контракта по содержимому (T-05).
 const CONTRACT_PROBE_BYTES: usize = 4096;
+
+/// Классификация изменения контракта (D3(б)): дифф старой версии (на базе
+/// диапазона) и новой (рабочее дерево или правая ревизия) через
+/// [`crate::contract_diff::diff_report_str`]. Возвращает краткий класс
+/// («ломающее (error-находок: N)» / «аддитивное/совместимое» /
+/// «без классификации (причина)»); `None` — стороны диффа недоступны
+/// (файл удалён из ревизии, переименование): тогда основание остаётся
+/// прежним, без суффикса.
+fn classify_contract_change(
+    repo: &Path,
+    old_rev: &str,
+    path: &str,
+    new_text_of: &dyn Fn(&str) -> Option<String>,
+) -> Option<String> {
+    let old_text = git_show_text(repo, old_rev, path)?;
+    let new_text = new_text_of(path)?;
+    match crate::contract_diff::diff_report_str(&old_text, &new_text, None, Path::new(path)) {
+        Ok(report) => {
+            let breaking = report
+                .findings
+                .iter()
+                .filter(|f| f.severity == "error")
+                .count();
+            Some(if breaking > 0 {
+                format!("ломающее (error-находок: {breaking})")
+            } else {
+                "аддитивное/совместимое".to_string()
+            })
+        }
+        // Формат не распознан/не парсится — честная пометка, а не молчание:
+        // триггер уже сработал по имени/глобу/содержимому.
+        Err(e) => {
+            let reason: String = e
+                .to_string()
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .chars()
+                .take(100)
+                .collect();
+            Some(format!("без классификации ({reason})"))
+        }
+    }
+}
 
 /// Источник срабатывания триггера значимости (anti-bypass отчёт, S-1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1457,6 +1671,198 @@ mod tests {
         );
         let ev = deleted.evidence.join("\n");
         assert!(ev.contains("удалён файл границы безопасности"), "{ev}");
+    }
+
+    /// D3(а), ADR-061: `new_vendor` — только на НОВОМ имени пакета. Смена
+    /// версии существующего пакета триггер не зажигает, а отмечается в
+    /// `notes` как обновление. До фикса этот тест падал: добавленная строка
+    /// зависимости зажигала триггер независимо от новизны имени.
+    #[test]
+    fn new_vendor_fires_only_on_new_dependency_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = git_repo(dir.path());
+        write_file(
+            &repo,
+            "Cargo.toml",
+            "[package]\nname = \"x\"\n\n[dependencies]\nserde = \"1.0\"\n",
+        );
+        git_in(&repo, &["add", "."]);
+        git_in(&repo, &["commit", "-q", "-m", "с serde 1.0"]);
+
+        // Смена версии существующего пакета — НЕ новый вендор.
+        write_file(
+            &repo,
+            "Cargo.toml",
+            "[package]\nname = \"x\"\n\n[dependencies]\nserde = \"1.1\"\n",
+        );
+        git_in(&repo, &["add", "."]);
+        git_in(&repo, &["commit", "-q", "-m", "bump serde"]);
+        let found = detect_diff_triggers(&repo, Some("HEAD~1")).unwrap();
+        assert!(
+            !found.triggers.contains("new_vendor"),
+            "смена версии serde не делает вендора новым: {:?}",
+            found.triggers
+        );
+        assert!(
+            found
+                .notes
+                .iter()
+                .any(|n| n.contains("обновление зависимости serde")),
+            "смена версии — заметка «обновление»: {:?}",
+            found.notes
+        );
+
+        // Смешанный дифф: bump serde + новое имя tokio — триггер зажигается
+        // только новым именем, bump остаётся заметкой.
+        write_file(
+            &repo,
+            "Cargo.toml",
+            "[package]\nname = \"x\"\n\n[dependencies]\nserde = \"1.2\"\ntokio = \"1\"\n",
+        );
+        git_in(&repo, &["add", "."]);
+        git_in(&repo, &["commit", "-q", "-m", "bump serde + add tokio"]);
+        let found = detect_diff_triggers(&repo, Some("HEAD~1")).unwrap();
+        assert!(
+            found.triggers.contains("new_vendor"),
+            "новое имя tokio — новый вендор: {:?}",
+            found.triggers
+        );
+        let ev = found.evidence.join("\n");
+        assert!(ev.contains("tokio"), "{ev}");
+        assert!(!ev.contains("serde"), "serde — обновление, не вендор: {ev}");
+        assert!(
+            found
+                .notes
+                .iter()
+                .any(|n| n.contains("обновление зависимости serde")),
+            "{:?}",
+            found.notes
+        );
+    }
+
+    /// D3(а): манифест, появившийся в этом диффе (базы нет) — все его
+    /// зависимости новые (прежнее поведение детектора сохранено).
+    #[test]
+    fn new_vendor_fires_when_manifest_is_new() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = git_repo(dir.path());
+        write_file(
+            &repo,
+            "billing/Cargo.toml",
+            "[package]\nname = \"billing\"\n\n[dependencies]\nserde = \"1.0\"\n",
+        );
+        git_in(&repo, &["add", "."]);
+        git_in(&repo, &["commit", "-q", "-m", "новый манифест"]);
+        let found = detect_diff_triggers(&repo, Some("HEAD~1")).unwrap();
+        assert!(
+            found.triggers.contains("new_vendor"),
+            "{:?}",
+            found.triggers
+        );
+        assert!(
+            found.notes.is_empty(),
+            "новый манифест — обновлений нет: {:?}",
+            found.notes
+        );
+    }
+
+    /// D3(б): срабатывание `api_contract_change` сохраняется, а основание и
+    /// `notes` несут классификацию `contract_diff`: «аддитивное» против
+    /// «ломающее». До фикса тест падал: вывод не различал классы диффа.
+    #[test]
+    fn api_contract_change_is_classified_breaking_or_additive() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = git_repo(dir.path());
+        write_file(
+            &repo,
+            "docs/contracts/wallet.yaml",
+            "openapi: 3.0.3\ninfo:\n  title: Wallet\n  version: 1.0.0\npaths:\n  /pay:\n    get:\n      responses:\n        '200':\n          description: ok\n",
+        );
+        git_in(&repo, &["add", "."]);
+        git_in(&repo, &["commit", "-q", "-m", "контракт v1"]);
+
+        // Аддитивная правка: новый путь при смене minor-версии.
+        write_file(
+            &repo,
+            "docs/contracts/wallet.yaml",
+            "openapi: 3.0.3\ninfo:\n  title: Wallet\n  version: 1.1.0\npaths:\n  /pay:\n    get:\n      responses:\n        '200':\n          description: ok\n  /balance:\n    get:\n      responses:\n        '200':\n          description: ok\n",
+        );
+        git_in(&repo, &["add", "."]);
+        git_in(&repo, &["commit", "-q", "-m", "новый путь"]);
+        let found = detect_diff_triggers(&repo, Some("HEAD~1")).unwrap();
+        assert!(
+            found.triggers.contains("api_contract_change"),
+            "{:?}",
+            found.triggers
+        );
+        let ev = found.evidence.join("\n");
+        assert!(ev.contains("аддитивное"), "класс в основании: {ev}");
+        assert!(
+            found
+                .notes
+                .iter()
+                .any(|n| n.contains("contract_diff") && n.contains("аддитивное")),
+            "класс в notes: {:?}",
+            found.notes
+        );
+
+        // Ломающая правка: удалён путь.
+        write_file(
+            &repo,
+            "docs/contracts/wallet.yaml",
+            "openapi: 3.0.3\ninfo:\n  title: Wallet\n  version: 2.0.0\npaths:\n  /balance:\n    get:\n      responses:\n        '200':\n          description: ok\n",
+        );
+        git_in(&repo, &["add", "."]);
+        git_in(&repo, &["commit", "-q", "-m", "удалён /pay"]);
+        let found = detect_diff_triggers(&repo, Some("HEAD~1")).unwrap();
+        assert!(
+            found.triggers.contains("api_contract_change"),
+            "{:?}",
+            found.triggers
+        );
+        let ev = found.evidence.join("\n");
+        assert!(ev.contains("ломающее"), "класс в основании: {ev}");
+    }
+
+    /// D3(б): контракт, который `contract_diff` не смог разобрать (битый YAML
+    /// под глобом контрактов), — честная пометка «без классификации»,
+    /// срабатывание триггера сохраняется.
+    #[test]
+    fn api_contract_change_classification_failure_is_named() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = git_repo(dir.path());
+        write_file(&repo, "docs/contracts/data.yaml", "key: value\n");
+        git_in(&repo, &["add", "."]);
+        git_in(&repo, &["commit", "-q", "-m", "v1"]);
+        write_file(&repo, "docs/contracts/data.yaml", "key: other\n");
+        git_in(&repo, &["add", "."]);
+        git_in(&repo, &["commit", "-q", "-m", "v2"]);
+        let found = detect_diff_triggers(&repo, Some("HEAD~1")).unwrap();
+        assert!(
+            found.triggers.contains("api_contract_change"),
+            "{:?}",
+            found.triggers
+        );
+        let ev = found.evidence.join("\n");
+        assert!(ev.contains("без классификации"), "{ev}");
+    }
+
+    /// D3: `range_sides` — новая сторона «рабочее дерево» только без базы.
+    #[test]
+    fn range_sides_map_diff_forms() {
+        assert_eq!(range_sides(None), ("HEAD".to_string(), None));
+        assert_eq!(
+            range_sides(Some("main")),
+            ("main".to_string(), Some("HEAD".to_string()))
+        );
+        assert_eq!(
+            range_sides(Some("a..b")),
+            ("a".to_string(), Some("b".to_string()))
+        );
+        assert_eq!(
+            range_sides(Some("a...HEAD")),
+            ("a".to_string(), Some("HEAD".to_string()))
+        );
     }
 
     #[test]

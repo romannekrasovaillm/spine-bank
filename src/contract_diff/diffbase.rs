@@ -106,6 +106,50 @@ pub fn diff_report(
     })
 }
 
+/// Дифф по содержимому, без файлов на диске (D3): старая и новая версии
+/// контракта приходят строками (например, из `git show <rev>:<path>` при
+/// классификации изменения в детекторе значимости). `path_hint` несёт
+/// расширение для детектора формата и адрес в сообщениях ошибок; связка с
+/// моделью здесь не строится (`impact` всегда `None`).
+///
+/// # Errors
+/// Формат не распознан, различается между версиями или текст не парсится.
+pub fn diff_report_str(
+    old_text: &str,
+    new_text: &str,
+    format_override: Option<ContractFormat>,
+    path_hint: &Path,
+) -> Result<DiffReport> {
+    let format = if let Some(f) = format_override {
+        f
+    } else {
+        let f_old = detect_format(path_hint, old_text)?;
+        let f_new = detect_format(path_hint, new_text)?;
+        if f_old != f_new {
+            return Err(HarnessError::Tool(format!(
+                "{}: форматы различаются между версиями ({} → {}) — сравнивать нужно одноформатное",
+                path_hint.display(),
+                f_old.name(),
+                f_new.name()
+            )));
+        }
+        f_old
+    };
+    let mut findings = match format {
+        ContractFormat::OpenApi => diff_openapi(old_text, new_text, path_hint, path_hint)?,
+        ContractFormat::Proto => diff_proto(old_text, new_text),
+        ContractFormat::Avro => diff_avro(old_text, new_text, path_hint, path_hint)?,
+        ContractFormat::JsonSchema => diff_jsonschema(old_text, new_text, path_hint, path_hint)?,
+        ContractFormat::Ddl => diff_ddl(old_text, new_text),
+    };
+    major_rule(format, old_text, new_text, &mut findings);
+    Ok(DiffReport {
+        format,
+        findings,
+        impact: None,
+    })
+}
+
 /// Правило «ломающий дифф без смены major — error», где major определим:
 /// `OpenAPI` — major-компонент semver `info.version` (CD-007); proto —
 /// суффикс `.vN` пакета (CD-P06). Major не определим (нет поля/суффикса) —
@@ -393,6 +437,37 @@ mod tests {
         assert!(
             diff_contracts(&old, &same).expect("дифф").is_empty(),
             "идентичные контракты — чисто"
+        );
+    }
+
+    /// `diff_report_str` (D3): дифф по содержимому без файлов — тот же
+    /// вердикт, что у файловой формы; impact не строится.
+    #[test]
+    fn diff_report_str_classifies_without_files() {
+        use super::diff_report_str;
+        use std::path::Path;
+        let breaking = diff_report_str(
+            PROTO_V1,
+            &PROTO_V1.replace("  optional string currency = 3;\n", ""),
+            None,
+            Path::new("pay.proto"),
+        )
+        .expect("дифф строк");
+        assert!(
+            breaking.findings.iter().any(|f| f.rule == "CD-P02"),
+            "{:?}",
+            breaking.findings
+        );
+        assert!(breaking.impact.is_none(), "без модели impact не строится");
+        let clean =
+            diff_report_str(PROTO_V1, PROTO_V1, None, Path::new("pay.proto")).expect("идентичные");
+        assert!(clean.findings.is_empty(), "{:?}", clean.findings);
+        // Форматовая ошибка честна: не OpenAPI/proto/… — доменная ошибка.
+        let err = diff_report_str("просто текст", "другой текст", None, Path::new("x.txt"))
+            .expect_err("не контракт");
+        assert!(
+            err.to_string().contains("не удалось определить формат"),
+            "{err}"
         );
     }
 

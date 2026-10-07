@@ -452,6 +452,11 @@ pub(crate) fn cmd_control(cfg: &arch_harness::config::Config, cmd: ControlCmd) -
                 for e in &diff.evidence {
                     println!("  diff: {e}");
                 }
+                // D3: контекст, не поднимающий маршрут (обновления версий,
+                // классификация контрактов) — виден рядом с основаниями.
+                for n in &diff.notes {
+                    println!("  заметка: {n}");
+                }
                 if !scored.undeclared.is_empty() {
                     println!(
                         "ВНИМАНИЕ — расхождение: заявлено флагами vs видно по диффу: {}",
