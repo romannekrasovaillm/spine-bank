@@ -1538,7 +1538,7 @@ pub(crate) async fn run() -> Result<()> {
             println!("экспортировано {n} строк → {}", out.display());
         }
         Some(Cmd::Delta { cmd }) => cmd_delta(cmd)?,
-        Some(Cmd::Openspec { cmd }) => cmd_openspec(cmd)?,
+        Some(Cmd::Openspec { cmd }) => cmd_openspec(&cfg, cmd)?,
         Some(Cmd::AgentsMd { cmd }) => cmd_agents_md(&cfg, cmd)?,
         #[cfg(feature = "harness")]
         Some(Cmd::Cron { cmd }) => cmd_cron(&cfg, cmd).await?,

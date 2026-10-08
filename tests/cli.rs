@@ -4638,3 +4638,95 @@ fn arch_diff_json_mermaid_and_empty() {
         .success()
         .stdout(contains("Архитектурных изменений нет."));
 }
+
+/// F3 (ADR-067): `openspec gate --change <id>` — гейт активного change одним
+/// вызовом: требование дельты без решения → exit 1 с `requirement_uncovered`;
+/// покрытие правилом с `covers:` → exit 0; несуществующий change — exit 1 с
+/// понятной ошибкой.
+#[test]
+fn openspec_gate_change_red_then_green() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let home = tmp.path();
+    let repo = home.join("repo");
+    let write = |rel: &str, text: &str| {
+        let p = repo.join(rel);
+        std::fs::create_dir_all(p.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&p, text).expect("write");
+    };
+    write(
+        "CONSTRAINTS.yaml",
+        "rules:\n  - name: spine_present\n    type: file_exists\n    path: \"ARCHITECTURE-SPINE.md\"\n    severity: error\n",
+    );
+    write("ARCHITECTURE-SPINE.md", "# Spine\n");
+    write("src/lib.rs", "pub fn charge() -> u64 { 1 }\n");
+    write(
+        "openspec/changes/add-limits/proposal.md",
+        "## Why\nНужны лимиты.\n",
+    );
+    write(
+        "openspec/changes/add-limits/specs/payments/spec.md",
+        "## ADDED Requirements\n\n### Requirement: Лимиты идемпотентны\nПовторный вызов MUST NOT менять лимит.\n",
+    );
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .expect("git");
+        assert!(out.status.success(), "git {args:?}");
+    };
+    git(&["init", "-q"]);
+    git(&["add", "."]);
+    git(&["commit", "-q", "-m", "init"]);
+
+    // Красный: требование дельты без решения.
+    arch_cmd(home)
+        .args(["openspec", "gate", "--change", "add-limits"])
+        .arg(repo.as_os_str())
+        .assert()
+        .failure()
+        .stdout(contains("requirement_uncovered"))
+        .stdout(contains("Итог: FAIL"));
+
+    // Несуществующий change — понятная ошибка, exit 1.
+    arch_cmd(home)
+        .args(["openspec", "gate", "--change", "no-such"])
+        .arg(repo.as_os_str())
+        .assert()
+        .failure()
+        .stderr(contains("не найден"));
+
+    // Зелёный: правило с covers: на требование дельты.
+    let delta_id = arch_harness::openspec::requirement_id(
+        "payments",
+        &["Повторный вызов MUST NOT менять лимит.".to_string()],
+    );
+    write(
+        "CONSTRAINTS.yaml",
+        &format!(
+            "rules:\n  - name: spine_present\n    type: file_exists\n    path: \"ARCHITECTURE-SPINE.md\"\n    severity: error\n  - name: no_f64_money\n    type: must_not_contain\n    glob: \"src/**/*.rs\"\n    pattern: '\\bf64\\b'\n    severity: error\n    covers: [\"{delta_id}\"]\n"
+        ),
+    );
+    git(&["add", "."]);
+    git(&["commit", "-q", "-m", "покрытие"]);
+    arch_cmd(home)
+        .args(["openspec", "gate", "--change", "add-limits"])
+        .arg(repo.as_os_str())
+        .assert()
+        .success()
+        .stdout(contains("Маршрут по диффу:"))
+        .stdout(contains("Итог: PASS"));
+
+    // Прежний режим --archive по-прежнему требует позиционный change-id.
+    arch_cmd(home)
+        .args(["openspec", "gate", "--archive"])
+        .arg(repo.as_os_str())
+        .assert()
+        .failure()
+        .stderr(contains("change-id"));
+}

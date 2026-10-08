@@ -118,6 +118,27 @@ Exit code: 0 всегда, кроме `--strict` — тогда 1 при нал�
 хотя бы одно требование дельты `changes/<change-id>/specs/` — «без решения»,
 либо падает `control check` по файлу ограничений. Иначе PASS, exit 0.
 
+### `arch-be openspec gate --change <ID> <ROOT> [--constraints <PATH>] [--base <REF>]` (F3, ADR-067)
+
+Гейт активного change — для MR, реализующего конкретный change. Одним
+вызовом:
+
+1. **покрытие требований дельты change** (F2 в области change): требование
+   без решения — `requirement_uncovered`, exit 1; покрытие текстом (зубья
+   правил не подтверждены) показывается отдельным счётчиком;
+2. **`delta_guard` с этим change как источником** (F1): правки защищённых
+   путей (`model/`, `ARCHITECTURE-SPINE.md`, `CONSTRAINTS.yaml`) обязаны
+   упоминаться в `proposal.md`/`design.md`/`tasks.md`/`specs/**` активного
+   change;
+3. **`control check`** по реестру правил;
+4. **маршрут значимости по диффу** `base..HEAD` (детектор триггеров, как у
+   `gate --route auto`): печатается в шапке отчёта; `--base` — для CI
+   (напр. `origin/main...HEAD`), по умолчанию `HEAD` (рабочее дерево).
+
+Без git-репозитория `delta_guard` и маршрут честно помечаются недоступными
+(не притворяются пройденными), вердикт решают покрытие и `control check`.
+Провал любой части — **exit 1**.
+
 ## Составляющая `openspec_coverage` единого гейта (F2, ADR-067)
 
 Покрытие требований OpenSpec — часть `arch-be gate`: составляющая
@@ -178,8 +199,6 @@ Exit code: 0 всегда, кроме `--strict` — тогда 1 при нал�
 
 - **sync**: спайн поверх design.md — подтверждённые кандидаты из
   `SPINE.draft.md` в `ARCHITECTURE-SPINE.md` с обратной ссылкой на change.
-- **gate --change <id>**: гейт активного change (proposal/tasks как контекст,
-  покрытие дельты до archive).
 - **gate --expiry**: правила, порождённые из archived changes, получают
   expiry/owner из истории archive; просроченные — в отчёт.
 - **config.yaml rules → черновики правил**: маппинг per-artifact rules

@@ -1471,6 +1471,231 @@ pub fn gate_archive(
     })
 }
 
+/// Маршрут значимости по диффу диапазона change (F3): тот же детектор, что у
+/// `gate --route auto` (S-1, ADR-034) — механический минимум без declared.
+#[derive(Debug)]
+pub struct ChangeRoute {
+    /// Маршрут (Fast/Standard/Critical).
+    pub route: crate::control::Route,
+    /// Счёт значимости.
+    pub score: usize,
+    /// Сработавшие триггеры.
+    pub fired: Vec<String>,
+}
+
+/// Отчёт гейта активного change (F3, ADR-067): покрытие требований дельты,
+/// `delta_guard` с этим change как источником, `control check`, маршрут по
+/// диффу диапазона change.
+#[derive(Debug)]
+pub struct ChangeGateReport {
+    /// Идентификатор change.
+    pub change: String,
+    /// База git-диффа, как передана (для печати).
+    pub base: String,
+    /// Требований в дельте change.
+    pub total: usize,
+    /// Требования дельты без решения (блокируют).
+    pub uncovered: Vec<CoveredRequirement>,
+    /// Покрыто детектором, но без подтверждённых зубьев (волна B): «покрыто
+    /// текстом» — отчётный счётчик, не блок.
+    pub text_covered: usize,
+    /// Итог `delta_guard` (источник покрытия — changes `OpenSpec`, F1);
+    /// `None` — git недоступен (честная пометка, не притворяется прогоном).
+    pub delta_guard: Option<crate::delta::GuardReport>,
+    /// Итог `control check` (`None` — файл ограничений не найден).
+    pub control: Option<crate::control::FitnessReport>,
+    /// Маршрут по диффу (`None` — git недоступен или дифф не собрался).
+    pub route: Option<ChangeRoute>,
+    /// Гейт пройден.
+    pub passed: bool,
+}
+
+impl ChangeGateReport {
+    /// Рендерит отчёт гейта change в markdown.
+    #[must_use]
+    pub fn to_markdown(&self) -> String {
+        let mut out = String::new();
+        let _ = writeln!(
+            out,
+            "# Гейт активного change OpenSpec: '{}' (база диффа: {})",
+            self.change, self.base
+        );
+        match &self.route {
+            Some(r) => {
+                let fired = if r.fired.is_empty() {
+                    "триггеров нет".to_string()
+                } else {
+                    r.fired.join(", ")
+                };
+                let _ = writeln!(
+                    out,
+                    "\nМаршрут по диффу: {} (score {}, {fired})",
+                    r.route, r.score
+                );
+            }
+            None => {
+                let _ = writeln!(
+                    out,
+                    "\nМаршрут по диффу: не вычислен (не git-репозиторий или дифф недоступен)"
+                );
+            }
+        }
+        let _ = writeln!(
+            out,
+            "\n## Покрытие требований change\n\nТребований: {}, без решения: {}, покрыто текстом (зубья не подтверждены): {}",
+            self.total,
+            self.uncovered.len(),
+            self.text_covered
+        );
+        for item in &self.uncovered {
+            let r = &item.requirement;
+            let _ = writeln!(
+                out,
+                "- [error] requirement_uncovered — {} — «{}» ({}:{}) → добавьте правило с \
+                 covers: [\"{}\"] или назначьте заглушку unverifiable с owner",
+                r.id,
+                r.title,
+                r.file.display(),
+                r.line,
+                r.id
+            );
+        }
+        let _ = writeln!(out, "\n## delta_guard (источник — changes OpenSpec)");
+        match &self.delta_guard {
+            Some(guard) => {
+                let _ = writeln!(out, "\n{}", crate::delta::render_guard(guard).trim_end());
+            }
+            None => {
+                let _ = writeln!(
+                    out,
+                    "\nНе прогонялся: не git-репозиторий — дифф защищённых путей недоступен."
+                );
+            }
+        }
+        let _ = writeln!(out, "\n## control check");
+        match &self.control {
+            Some(report) => {
+                let _ = writeln!(
+                    out,
+                    "\n{} — {}",
+                    if report.passed { "PASS" } else { "FAIL" },
+                    report.summary
+                );
+            }
+            None => {
+                let _ = writeln!(out, "\nНе запускался (файл ограничений не найден).");
+            }
+        }
+        let _ = writeln!(out, "\nИтог: {}", if self.passed { "PASS" } else { "FAIL" });
+        out
+    }
+}
+
+/// Гейт активного change (F3, ADR-067): для MR, реализующего change —
+/// покрытие требований его дельты, `delta_guard` с changes `OpenSpec` как
+/// источником покрытия (правки защищённых путей обязаны упоминаться в
+/// change), `control check` и маршрут значимости по диффу `base..HEAD`.
+///
+/// Fail-soft на инфраструктуру (как у составляющих гейта): без
+/// git-репозитория `delta_guard` и маршрут помечаются недоступными, а не
+/// притворяются пройденными; вердикт тогда решают покрытие и control check.
+///
+/// # Errors
+/// Change не найден (или уже в архиве), файл ограничений не читается,
+/// правила `control check` некорректны, `delta_guard` при живом git упал
+/// (например, несуществующая база).
+pub fn gate_change(
+    root: &Path,
+    change_id: &str,
+    constraints: Option<&Path>,
+    base: Option<&str>,
+    limits: (usize, usize),
+    globs: &crate::control::DiffGlobs,
+) -> Result<ChangeGateReport> {
+    active_change_dir(root, change_id)?;
+    let delta_reqs = change_requirements(root, change_id)?;
+
+    let path = match constraints {
+        Some(p) => Some(p.to_path_buf()),
+        None => default_constraints(root),
+    };
+    let rules = match &path {
+        Some(p) => load_cover_rules(p)?,
+        None => Vec::new(),
+    };
+    let teeth = load_teeth_context(root, path.as_deref());
+    let items: Vec<CoveredRequirement> = unique_by_id(delta_reqs)
+        .iter()
+        .map(|r| classify(r, &rules, teeth.as_ref()))
+        .collect();
+    let total = items.len();
+    let text_covered = items
+        .iter()
+        .filter(|i| {
+            i.status == CoverageStatus::Covered && i.teeth != Some(TeethEvidence::Confirmed)
+        })
+        .count();
+    let uncovered: Vec<CoveredRequirement> = items
+        .into_iter()
+        .filter(|i| i.status == CoverageStatus::Unresolved)
+        .collect();
+
+    let control = match &path {
+        Some(p) => Some(crate::control::check(root, p)?),
+        None => None,
+    };
+
+    // delta_guard и маршрут требуют git с HEAD; без него — честная пометка.
+    let git_ready = crate::handoff::git_out(root, &["rev-parse", "--git-dir"]).is_some()
+        && crate::handoff::git_out(root, &["rev-parse", "--verify", "HEAD"]).is_some();
+    let delta_guard = if git_ready {
+        Some(crate::delta::guard_with(
+            root,
+            base,
+            &[],
+            &crate::delta::GuardOptions {
+                sources: Some(vec![crate::delta::CoverageSource::Openspec]),
+                agent_range: None,
+            },
+        )?)
+    } else {
+        None
+    };
+    let route = if git_ready {
+        crate::control::detect_diff_triggers_with(root, base, globs)
+            .ok()
+            .map(|diff| {
+                let scored = crate::control::score_with_sources(
+                    &std::collections::BTreeMap::new(),
+                    &diff,
+                    limits.0,
+                    limits.1,
+                );
+                ChangeRoute {
+                    route: scored.significance.route,
+                    score: scored.significance.score,
+                    fired: scored.significance.fired,
+                }
+            })
+    } else {
+        None
+    };
+    let passed = uncovered.is_empty()
+        && delta_guard.as_ref().is_none_or(|g| g.passed)
+        && control.as_ref().is_none_or(|c| c.passed);
+    Ok(ChangeGateReport {
+        change: change_id.to_string(),
+        base: base.unwrap_or("HEAD").to_string(),
+        total,
+        uncovered,
+        text_covered,
+        delta_guard,
+        control,
+        route,
+        passed,
+    })
+}
+
 /// Инструменты домена: `openspec_coverage`.
 #[must_use]
 pub fn tools() -> Vec<Arc<dyn Tool>> {
@@ -2239,6 +2464,183 @@ mod tests {
         let err = gate_archive(dir.path(), "2026-01-01-add-auth", None)
             .expect_err("архивный change — не активен");
         assert!(err.to_string().contains("уже в архиве"));
+    }
+
+    // --- F3 (ADR-067): гейт активного change --------------------------------
+
+    /// git в каталоге с тестовой идентичностью коммиттера (образец —
+    /// `gate::testkit::git`; здесь свой, testkit внутренний для gate).
+    fn git(dir: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .expect("git");
+        assert!(
+            out.status.success(),
+            "git {}: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// Текст реестра фикстуры F3: `spine_present` + опционально детектор с
+    /// `covers:` на требование дельты change.
+    fn f3_constraints(cover_delta: bool) -> String {
+        let mut text = String::from(
+            "rules:\n  - name: spine_present\n    type: file_exists\n    path: \"ARCHITECTURE-SPINE.md\"\n    severity: error\n",
+        );
+        if cover_delta {
+            let id = requirement_id(
+                "payments",
+                &["Повторный вызов MUST NOT менять лимит.".to_string()],
+            );
+            let _ = writeln!(
+                text,
+                "  - name: no_f64_money\n    type: must_not_contain\n    glob: \"src/**/*.rs\"\n    \
+                 pattern: '\\bf64\\b'\n    severity: error\n    covers: [\"{id}\"]"
+            );
+        }
+        text
+    }
+
+    /// Репо-фикстура F3 (git): реестр + spine + src/lib.rs + активный change
+    /// `add-limits` с одним SHALL. `proposal_mentions_constraints` — упоминает
+    /// ли proposal.md защищённый `CONSTRAINTS.yaml` (для сценариев guard).
+    fn f3_repo(cover_delta: bool, proposal_mentions_constraints: bool) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tmp");
+        let root = dir.path();
+        write(&root.join("CONSTRAINTS.yaml"), &f3_constraints(cover_delta));
+        write(&root.join("ARCHITECTURE-SPINE.md"), "# Spine\n");
+        write(&root.join("src/lib.rs"), "pub fn charge() -> u64 { 1 }\n");
+        let proposal = if proposal_mentions_constraints {
+            "## Why\nНужны лимиты.\n\n## What Changes\n- CONSTRAINTS.yaml: правило покрытия.\n"
+        } else {
+            "## Why\nНужны лимиты.\n"
+        };
+        write(
+            &root.join("openspec/changes/add-limits/proposal.md"),
+            proposal,
+        );
+        write(
+            &root.join("openspec/changes/add-limits/specs/payments/spec.md"),
+            "## ADDED Requirements\n\n### Requirement: Лимиты идемпотентны\n\
+             Повторный вызов MUST NOT менять лимит.\n",
+        );
+        git(root, &["init", "-q"]);
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "init"]);
+        dir
+    }
+
+    /// F3, красная→зелёная: требование дельты без решения валит гейт change
+    /// (контроль и guard при этом зелёны — красит именно покрытие); правило с
+    /// `covers:` зеленит. Маршрут по диффу вычислен.
+    #[test]
+    fn gate_change_fails_on_uncovered_and_passes_with_covers() {
+        let dir = f3_repo(false, true);
+        let root = dir.path();
+        let globs = crate::control::DiffGlobs::default();
+        let report = gate_change(root, "add-limits", None, None, (1, 4), &globs).expect("гейт");
+        assert!(!report.passed);
+        assert_eq!(report.total, 1);
+        assert_eq!(report.uncovered.len(), 1);
+        assert!(
+            report.control.as_ref().is_some_and(|c| c.passed),
+            "control check зелёный"
+        );
+        assert!(
+            report.delta_guard.as_ref().is_some_and(|g| g.passed),
+            "чистое дерево — guard чист"
+        );
+        assert!(report.route.is_some(), "маршрут вычислен на git-репо");
+        let md = report.to_markdown();
+        assert!(md.contains("Итог: FAIL"), "{md}");
+        assert!(md.contains("без решения: 1"), "{md}");
+
+        // Покрываем требование дельты и коммитим (дифф чист — guard зелёный).
+        write(&root.join("CONSTRAINTS.yaml"), &f3_constraints(true));
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "покрытие"]);
+        let report = gate_change(root, "add-limits", None, None, (1, 4), &globs).expect("гейт");
+        assert!(report.passed, "{}", report.to_markdown());
+        assert!(report.to_markdown().contains("Итог: PASS"));
+    }
+
+    /// F3, guard с change как источником: незакоммиченная правка защищённого
+    /// `CONSTRAINTS.yaml` покрыта упоминанием в proposal.md ЭТОГО change
+    /// (метка `openspec:add-limits`); без упоминания — FAIL.
+    #[test]
+    fn gate_change_guard_uses_the_change_as_coverage_source() {
+        let globs = crate::control::DiffGlobs::default();
+        // Покрытие есть: proposal упоминает CONSTRAINTS.yaml.
+        let dir = f3_repo(true, true);
+        let root = dir.path();
+        // Незакоммиченная правка защищённого файла (комментарий — реестр валиден).
+        let mut text = f3_constraints(true);
+        let _ = writeln!(text, "# правка в работе");
+        write(&root.join("CONSTRAINTS.yaml"), &text);
+        let report = gate_change(root, "add-limits", None, None, (1, 4), &globs).expect("гейт");
+        let guard = report.delta_guard.as_ref().expect("guard прогнан");
+        assert!(
+            guard
+                .covered
+                .iter()
+                .any(|(f, label)| f == "CONSTRAINTS.yaml" && label == "openspec:add-limits"),
+            "источник покрытия — change: {:?}",
+            guard.covered
+        );
+        assert!(report.passed, "{}", report.to_markdown());
+
+        // Покрытия нет: proposal молчит про CONSTRAINTS.yaml — guard FAIL.
+        let dir = f3_repo(true, false);
+        let root = dir.path();
+        let mut text = f3_constraints(true);
+        let _ = writeln!(text, "# правка в работе");
+        write(&root.join("CONSTRAINTS.yaml"), &text);
+        let report = gate_change(root, "add-limits", None, None, (1, 4), &globs).expect("гейт");
+        let guard = report.delta_guard.as_ref().expect("guard прогнан");
+        assert!(!guard.passed, "правка мимо change не проходит");
+        assert!(!report.passed, "{}", report.to_markdown());
+        let md = report.to_markdown();
+        assert!(md.contains("Итог: FAIL"), "{md}");
+        assert!(md.contains("delta_guard"), "{md}");
+    }
+
+    /// F3: неизвестный и заархивированный change — понятные ошибки (как у
+    /// гейта архивации); репозиторий без git — guard и маршрут честно
+    /// помечены недоступными, вердикт решают покрытие и control check.
+    #[test]
+    fn gate_change_unknown_change_errors_and_non_git_is_explicit() {
+        let dir = f3_repo(false, true);
+        let globs = crate::control::DiffGlobs::default();
+        let err =
+            gate_change(dir.path(), "no-such", None, None, (1, 4), &globs).expect_err("нет change");
+        assert!(err.to_string().contains("не найден"), "{err}");
+
+        // Не git: guard и маршрут — None, вердикт по покрытию (красный:
+        // требование без решения) — и это написано в отчёте.
+        let plain = tempfile::tempdir().expect("tmp");
+        let root = plain.path();
+        write(&root.join("CONSTRAINTS.yaml"), &f3_constraints(false));
+        write(&root.join("ARCHITECTURE-SPINE.md"), "# Spine\n");
+        write(
+            &root.join("openspec/changes/add-limits/specs/payments/spec.md"),
+            "## ADDED Requirements\n\n### Requirement: Лимиты идемпотентны\n\
+             Повторный вызов MUST NOT менять лимит.\n",
+        );
+        let report = gate_change(root, "add-limits", None, None, (1, 4), &globs).expect("гейт");
+        assert!(report.delta_guard.is_none(), "guard честно не прогонялся");
+        assert!(report.route.is_none(), "маршрут честно не вычислен");
+        assert!(!report.passed, "покрытие решает: без решения — FAIL");
+        let md = report.to_markdown();
+        assert!(md.contains("не git-репозиторий"), "{md}");
+        assert!(md.contains("Итог: FAIL"), "{md}");
     }
 
     /// Инструмент `openspec_coverage`: счётчики и поимённые непокрытые на

@@ -181,21 +181,34 @@ pub(crate) enum OpenspecCmd {
         #[arg(long)]
         force: bool,
     },
-    /// Гейт архивации change (точка CI перед `openspec archive`): exit 1,
-    /// если у требований change нет решения (ни детектора, ни unverifiable
-    /// с owner) или падает `control check`. Реализован только --archive
-    /// (roadmap: --change, --expiry — `docs/openspec.md`).
+    /// Гейт change (точка CI). Два режима:
+    /// `--archive <change-id>` — гейт архивации (перед `openspec archive`):
+    /// exit 1, если у требований change нет решения (ни детектора, ни
+    /// unverifiable с owner) или падает `control check`;
+    /// `--change <id>` — гейт активного change (F3, ADR-067): покрытие
+    /// требований его дельты, `delta_guard` с этим change как источником,
+    /// `control check` и маршрут по диффу диапазона change; exit 1 при
+    /// провале. (Roadmap: --expiry — `docs/openspec.md`.)
     Gate {
         /// Режим гейта: архивация change.
         #[arg(long)]
         archive: bool,
+        /// Режим гейта: активный change (MR, реализующий change) — id
+        /// задаётся значением флага: `openspec gate --change add-limits .`.
+        #[arg(long, value_name = "ID", conflicts_with = "archive")]
+        change: Option<String>,
         /// Корень репозитория с разметкой `OpenSpec`.
         root: PathBuf,
-        /// Идентификатор change (каталог openspec/changes/<id>).
-        change_id: String,
+        /// Идентификатор change (для --archive; при --change id идёт
+        /// значением флага).
+        change_id: Option<String>,
         /// Файл ограничений (умолчание — как у `coverage`).
         #[arg(long)]
         constraints: Option<PathBuf>,
+        /// База git для диффа диапазона change (только --change; по умолчанию
+        /// HEAD — рабочее дерево; для CI — напр. origin/main...HEAD).
+        #[arg(long)]
+        base: Option<String>,
     },
 }
 
@@ -463,7 +476,7 @@ pub(crate) fn cmd_delta(cmd: DeltaCmd) -> Result<()> {
 }
 
 /// `arch-be openspec`: адаптер `OpenSpec` — требования → покрытие fitness-правилами.
-pub(crate) fn cmd_openspec(cmd: OpenspecCmd) -> Result<()> {
+pub(crate) fn cmd_openspec(cfg: &Config, cmd: OpenspecCmd) -> Result<()> {
     match cmd {
         OpenspecCmd::Scan { root, json } => {
             let requirements = arch_harness::openspec::scan_requirements(&root)?;
@@ -518,15 +531,46 @@ pub(crate) fn cmd_openspec(cmd: OpenspecCmd) -> Result<()> {
         }
         OpenspecCmd::Gate {
             archive,
+            change,
             root,
             change_id,
             constraints,
+            base,
         } => {
+            // F3: гейт активного change (MR, реализующий change).
+            if let Some(change) = change {
+                if change_id.is_some() {
+                    anyhow::bail!(
+                        "с --change идентификатор задаётся значением флага, позиционный <change-id> не нужен"
+                    );
+                }
+                let limits = cfg
+                    .significance
+                    .limits()
+                    .map_err(|e| anyhow::anyhow!("маршруты значимости: {e}"))?;
+                let report = arch_harness::openspec::gate_change(
+                    &root,
+                    &change,
+                    constraints.as_deref(),
+                    base.as_deref(),
+                    limits,
+                    &cfg.significance.diff_globs(),
+                )?;
+                print!("{}", report.to_markdown());
+                if !report.passed {
+                    std::process::exit(1);
+                }
+                return Ok(());
+            }
             if !archive {
                 anyhow::bail!(
-                    "реализован только гейт --archive (roadmap: --change, --expiry — docs/openspec.md)"
+                    "укажите режим гейта: --archive <change-id> или --change <id> \
+                     (roadmap: --expiry — docs/openspec.md)"
                 );
             }
+            let Some(change_id) = change_id else {
+                anyhow::bail!("--archive требует <change-id> позиционным аргументом");
+            };
             let report =
                 arch_harness::openspec::gate_archive(&root, &change_id, constraints.as_deref())?;
             print!("{}", report.to_markdown());
