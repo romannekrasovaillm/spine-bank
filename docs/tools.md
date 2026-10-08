@@ -231,6 +231,19 @@ Archify CLI (`schemaVersion: 1`) — точка машинного потреб�
 | `architect_review` | Составное ревью репозитория одним вызовом (п.13): маршрут значимости из git-диффа + контур единого гейта (fitness, delta_guard, rule_weakened, spine_lint, trace_check; на Standard/Critical — nfr, evidence, sensors) + `model_validate` + линт контрактов OpenAPI/AsyncAPI (из `contract` у INT и `contracts/`). Каждая секция fail-soft SKIP без входа. Ответ — JSON `{passed, route, components (status/detail/findings), summary}`; `passed=false` — основание отказать изменению. CLI: `arch-be review <dir> [--base] [--json]` | `path` (репозиторий, по умолчанию текущий каталог); `base` (git-ref базы диффа) |
 | `change_impact` | Радиус взрыва изменения (п.13): от `id` сущности или `paths` файлов (→ CMP по `code_roots`, ADR-030) транзитивный обход графа модели в обе стороны → затронутые сущности по типам, правила CONSTRAINTS.yaml (C-NNN из `verified_by`, с владельцами из карточек), контракты INT, владельцы OWNER. Толерантная загрузка (E3) — `load_issues`. Ответ — JSON `{seeds, affected, rules, contracts, owners, gaps, summary}`; отчёт, не гейт. CLI: `arch-be model impact <dir> --id\|--paths [--json]` | `path` (корень кейса ИЛИ каталог `model/` — инструмент находит модель сам, T-13; по умолчанию текущий каталог); `id` (сущность-источник) или `paths` (массив файлов) — хотя бы одно |
 
+### CLI-команды контура без MCP-инструмента (0.3.14)
+
+Пользовательские команды (агент вызывает их через `bash`, а не function
+calling — поэтому отдельной строки инструмента у них нет):
+
+| Команда | Зачем |
+|---|---|
+| `arch-be evidence record fitness\|tests\|skeleton [--cmd …]` | Машинная запись прогона (A1, ADR-066): `.arch-handoff/evidence/<kind>.json` с командой, exit-кодом, HEAD и хэшем входов; строка «Итог: PASS» в прозе прогон не удостоверяет |
+| `arch-be arch-diff --base <ветка> [--format md\|mermaid\|json\|sarif]` + `accept`/`reject` | Архитектурный дифф PR (волна K, ADR-063/064): рёбра вне модели, контракты, NFR, инварианты с основаниями `файл:строка`; предложения правки модели принимаются в дельту — `docs/arch-diff.md` |
+| `arch-be rules teeth [--rule <id>] [--save]` | Измерение зубьев правил реестра мутацией на копии кейса (B1, ADR-065): `.arch-handoff/teeth.json` (`confirmed`/`toothless`/`trivial`/`glob_empty`/`unknown`) |
+| `arch-be openspec gate --change <id> <root>` | Гейт активного change OpenSpec (F3, ADR-067): покрытие дельты + `delta_guard` + `control check` + маршрут одним вызовом — `docs/openspec.md` |
+| `arch-be control score --replay <rev-range> [--json]` | Реплей маршрута значимости по истории (D4): распределение маршрутов и частота триггеров, отчёт `arch-be/significance-replay/v1` — `docs/control.md` |
+
 ## Передача кодовым харнессам
 
 | Инструмент | Назначение | Параметры |
