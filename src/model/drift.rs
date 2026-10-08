@@ -41,6 +41,10 @@ pub struct DriftReport {
     pub case: PathBuf,
     /// Сущностей в модели.
     pub entities: usize,
+    /// CMP всего (C1: гейт различает «модель без компонентов» и «модель
+    /// не привязана к коду» — второе это `components_with_roots == 0` при
+    /// `components_total > 0`).
+    pub components_total: usize,
     /// CMP с непустым `code_roots`.
     pub components_with_roots: usize,
     /// Каталогов с манифестами сборки, найденных в репозитории.
@@ -459,6 +463,11 @@ pub fn drift_check_with(case_dir: &Path, options: &DriftOptions) -> Result<Drift
     }
 
     // 1. CMP → код: каждый корень code_roots обязан существовать.
+    let components_total = model
+        .entities
+        .iter()
+        .filter(|e| e.kind == EntityKind::Cmp)
+        .count();
     let mut covered_roots: Vec<String> = Vec::new();
     let mut components_with_roots = 0usize;
     for e in &model.entities {
@@ -588,6 +597,7 @@ pub fn drift_check_with(case_dir: &Path, options: &DriftOptions) -> Result<Drift
     Ok(DriftReport {
         case: case_dir.to_path_buf(),
         entities: model.entities.len(),
+        components_total,
         components_with_roots,
         manifest_dirs: manifest_dirs.len(),
         issues,

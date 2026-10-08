@@ -14,21 +14,34 @@
 //! опознание контрактов по содержимому — [`crate::control::diff_triggers`],
 //! классификация контрактов — [`crate::contract_diff`], NFR — [`crate::nfr`],
 //! маршрут значимости — [`crate::control::score_with_sources`].
+//!
+//! Модуль [`decisions`] — журнал решений по диффу (`.arch-handoff/
+//! arch-diff-decisions.json`, схема `arch-be/arch-diff-decisions/v1`):
+//! пишет `arch-diff accept|reject` (K5, ADR-064), читает составляющая гейта
+//! `arch_drift` (K6); [`snapshot::snapshot_worktree`] — снимок рабочего
+//! дерева (голова диффа гейта: незакоммиченные правки).
 
 mod as_built;
+mod decisions;
 mod diff;
 mod report;
 mod snapshot;
 mod types;
 
 pub use as_built::{as_built, as_built_with};
+pub(crate) use as_built::{scan_revision, scan_worktree};
+pub use decisions::{
+    ARCH_DIFF_DECISIONS_PATH, ARCH_DIFF_DECISIONS_SCHEMA, Decision, DecisionEntry,
+    DecisionsJournal, edge_id, grounds_hash, load_decisions,
+};
+pub(crate) use diff::edge_model_status;
 pub use diff::{
     ArchDiff, ArchDiffInput, ContractChange, ContractClass, DeclaredEdge, EdgeChange, FailOn,
     InvariantHit, ModelProposal, ModelStatus, NfrShift, ProposalKind, RouteInfo, RuleGuard,
     TeethClass, TriggerHit, arch_diff, matched_failures,
 };
 pub use report::{render_json, render_md, render_mermaid, render_sarif};
-pub use snapshot::{Snapshot, resolve_rev, snapshot_at};
+pub use snapshot::{Snapshot, resolve_rev, snapshot_at, snapshot_worktree};
 pub use types::{
     ARCH_DIFF_SCHEMA, ArchEdge, ArchGraph, ArchNode, EdgeKind, MAX_EDGE_EVIDENCE, NodeKind,
 };

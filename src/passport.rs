@@ -674,9 +674,11 @@ mod tests {
 - **spine_lint** \* — PASS — находок: 0 (error: 0)
 - **trace_check** — SKIP — нет каталога model/
 - **model_validate** — SKIP — нет каталога model/
+- **model_drift** — SKIP — нет каталога model/
 - **decision_quality** — SKIP — не включена: добавьте 'decision_quality' в [gate.required] нужного маршрута
 - **secrets** — PASS — область: changed, просканировано файлов: 0, находок: 0 (error: 0)
 - **semantic_quality** — SKIP — не включена: добавьте 'semantic_quality' в [gate.required] нужного маршрута
+- **arch_drift** — SKIP — не включена: добавьте 'arch_drift' в [gate.required] нужного маршрута или задайте [gate.arch_drift] enabled = true (проверка дорогая: снимки ревизий git)
 
 \* — обязательна для маршрута Fast; остальные — сверх неё.
 
@@ -693,8 +695,10 @@ mod tests {
 - **control_plane** — нет MANIFEST.json — пинов контрольной плоскости нет (не обязательна для маршрута)
 - **trace_check** — нет каталога model/ (не обязательна для маршрута)
 - **model_validate** — нет каталога model/ (не обязательна для маршрута)
+- **model_drift** — нет каталога model/ (не обязательна для маршрута)
 - **decision_quality** — не включена: добавьте 'decision_quality' в [gate.required] нужного маршрута (не обязательна для маршрута)
 - **semantic_quality** — не включена: добавьте 'semantic_quality' в [gate.required] нужного маршрута (не обязательна для маршрута)
+- **arch_drift** — не включена: добавьте 'arch_drift' в [gate.required] нужного маршрута или задайте [gate.arch_drift] enabled = true (проверка дорогая: снимки ревизий git) (не обязательна для маршрута)
 
 ## Аттестация
 
@@ -741,9 +745,11 @@ arch-be gate --repo кейс --format json > verdict.json && arch-be gate --repo
 - **spine_lint** \* — PASS — находок: 0 (error: 0)
 - **trace_check** — SKIP — нет каталога model/
 - **model_validate** — SKIP — нет каталога model/
+- **model_drift** — SKIP — нет каталога model/
 - **decision_quality** — SKIP — не включена: добавьте 'decision_quality' в [gate.required] нужного маршрута
 - **secrets** — PASS — область: changed, просканировано файлов: 0, находок: 0 (error: 0)
 - **semantic_quality** — SKIP — не включена: добавьте 'semantic_quality' в [gate.required] нужного маршрута
+- **arch_drift** — SKIP — не включена: добавьте 'arch_drift' в [gate.required] нужного маршрута или задайте [gate.arch_drift] enabled = true (проверка дорогая: снимки ревизий git)
 
 \* — обязательна для маршрута Fast; остальные — сверх неё.
 
@@ -760,8 +766,10 @@ arch-be gate --repo кейс --format json > verdict.json && arch-be gate --repo
 - **control_plane** — нет MANIFEST.json — пинов контрольной плоскости нет (не обязательна для маршрута)
 - **trace_check** — нет каталога model/ (не обязательна для маршрута)
 - **model_validate** — нет каталога model/ (не обязательна для маршрута)
+- **model_drift** — нет каталога model/ (не обязательна для маршрута)
 - **decision_quality** — не включена: добавьте 'decision_quality' в [gate.required] нужного маршрута (не обязательна для маршрута)
 - **semantic_quality** — не включена: добавьте 'semantic_quality' в [gate.required] нужного маршрута (не обязательна для маршрута)
+- **arch_drift** — не включена: добавьте 'arch_drift' в [gate.required] нужного маршрута или задайте [gate.arch_drift] enabled = true (проверка дорогая: снимки ревизий git) (не обязательна для маршрута)
 
 ## Аттестация
 
