@@ -1764,6 +1764,7 @@ mod corner_tests {
             control_ok: true,
             control_note: None,
             semantic_kept: Vec::new(),
+            corpus: None,
         };
         assert_eq!(report.layer_counts(Layer::DocsModel), (2, 2));
         assert_eq!(
@@ -1806,6 +1807,7 @@ mod corner_tests {
             control_ok: true,
             control_note: None,
             semantic_kept: Vec::new(),
+            corpus: None,
         };
         assert_eq!(report.layer_ratio(Layer::Code), None);
         assert!(report.passed(), "без порога кодовой доли — как прежде");
@@ -1848,6 +1850,7 @@ mod corner_tests {
             control_ok: true,
             control_note: None,
             semantic_kept: Vec::new(),
+            corpus: None,
         };
         let path = save_summary(&case, &report).expect("сохранение");
         let back = load_summary(&path).expect("чтение");

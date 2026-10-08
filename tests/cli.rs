@@ -3258,6 +3258,86 @@ fn redteam_measures_merchant_case_detection_share() {
         .stdout(predicates::str::contains("Итог: FAIL"));
 }
 
+/// E3 (эксперимент): `redteam --corpus <dir>` — патчи корпуса как мутаторы.
+/// Пойманный дефект (PAN в tests/** — правило C-003 кейса) и непойманный
+/// (f64-деньги: правила класса в реестре кейса нет — честный пробел), файл
+/// не-unified-diff отброшен при загрузке; прогон информационный — exit 0
+/// при наличии непойманной позиции; `--save` несовместим (clap).
+#[test]
+fn redteam_corpus_applies_patches_and_stays_informational() {
+    let case = Path::new(env!("CARGO_MANIFEST_DIR")).join("кейсы/digital-ruble-merchant");
+    let tmp = tempfile::tempdir().expect("tmp");
+    let corpus = tmp.path().join("corpus");
+    std::fs::create_dir_all(&corpus).expect("corpus");
+    // Пойманный: PAN-литерал в новом тесте (C-003: must_not_contain PAN по tests/**/*.py).
+    std::fs::write(
+        corpus.join("01-pan.patch"),
+        "diff --git a/tests/notify_test.py b/tests/notify_test.py\nnew file mode 100644\n\
+         --- /dev/null\n+++ b/tests/notify_test.py\n@@ -0,0 +1,3 @@\n\
+         +PAN = '4111 1111 1111 1111'\n+def test_notify():\n+    assert PAN\n",
+    )
+    .expect("patch 01");
+    // Непойманный: деньги в float — правила класса в реестре кейса нет.
+    std::fs::write(
+        corpus.join("02-f64.patch"),
+        "diff --git a/skeleton/payments/total.py b/skeleton/payments/total.py\nnew file mode 100644\n\
+         --- /dev/null\n+++ b/skeleton/payments/total.py\n@@ -0,0 +1,2 @@\n\
+         +def total_rub(parts):\n+    return sum(parts)\n",
+    )
+    .expect("patch 02");
+    // Не unified diff — отбрасывается при загрузке с причиной.
+    std::fs::write(
+        corpus.join("03-journal.patch"),
+        "протокол прогона, не патч\n",
+    )
+    .expect("patch 03");
+
+    let mut cmd = arch_cmd(tmp.path());
+    let out = cmd
+        .arg("redteam")
+        .arg(case.as_os_str())
+        .arg("--corpus")
+        .arg(corpus.as_os_str())
+        .output()
+        .expect("прогон arch-be");
+    // Информационный прогон: непойманная позиция корпуса не краснит exit.
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("Корпус (E3, эксперимент)"), "{text}");
+    assert!(text.contains("применилось: 2"), "{text}");
+    assert!(text.contains("поймано гейтом: 1/2"), "{text}");
+    assert!(
+        text.contains("01-pan.patch") && text.contains("пойман: fitness"),
+        "{text}"
+    );
+    assert!(
+        text.contains("02-f64.patch") && text.contains("НЕ ПОЙМАН"),
+        "{text}"
+    );
+    assert!(
+        text.contains("03-journal.patch") && text.contains("нет заголовков unified diff"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("Итог:"),
+        "у корпуса нет приёмочного итога: {text}"
+    );
+
+    // --save несовместим с --corpus (измерение корпуса — не вход метрики доверия).
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("redteam")
+        .arg(case.as_os_str())
+        .arg("--corpus")
+        .arg(corpus.as_os_str())
+        .arg("--save");
+    cmd.assert().failure();
+}
+
 /// W2: машинный формат отчёта — JSON-схема с картой обнаружения.
 #[test]
 fn redteam_json_format_reports_detections() {

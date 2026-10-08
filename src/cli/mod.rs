@@ -368,6 +368,16 @@ enum Cmd {
         /// харнесс, — в ядре LLM нет. В долю обнаружения они не входят.
         #[arg(long, value_name = "КАТАЛОГ")]
         keep_semantic: Option<PathBuf>,
+        /// ЭКСПЕРИМЕНТАЛЬНЫЙ режим (E3, исследование): вместо каталога
+        /// мутаторов — внешний корпус патчей (`*.patch`/`*.diff`, unified
+        /// diff; например, из журналов прогонов харнессов). Каждый патч
+        /// применяется к копии кейса как мутатор (`git apply`), дальше —
+        /// обычный конвейер гейта. Прогон информационный: exit-код от доли
+        /// поимки корпуса не зависит (порог не задан), несовместим с
+        /// `--save` (измерение корпуса — не измерение защищённости кейса
+        /// для метрики доверия). Разбор — docs/experiments/redteam-corpus.md.
+        #[arg(long, value_name = "DIR", conflicts_with = "save")]
+        corpus: Option<PathBuf>,
     },
     /// Составное архитектурное ревью репозитория одним ответом (бэклог
     /// волны 3, п.13): маршрут значимости из git-диффа + весь контур
@@ -1294,6 +1304,7 @@ pub(crate) async fn run() -> Result<()> {
             no_decision_quality,
             save,
             keep_semantic,
+            corpus,
         }) => {
             // Подкоманда `semantic-score` читает уже сохранённые клоны: сам
             // прогон кейса не нужен и кейс не обязателен.
@@ -1336,22 +1347,39 @@ pub(crate) async fn run() -> Result<()> {
                      `arch-be redteam semantic-score <каталог>`"
                 );
             };
-            let report = arch_harness::redteam::run_with_options(
-                &case,
-                &arch_harness::redteam::RedteamOptions {
-                    min_detection,
-                    // E2: порог кодовой доли — из конфига, по умолчанию не задан
-                    // ([РЕШЕНИЕ ЧЕЛОВЕКА] задания 0.3.14).
-                    min_code_detection: cfg.redteam.min_code_detection,
-                    decision_quality: !no_decision_quality,
-                    keep_semantic: keep_semantic.clone(),
-                },
-            )?;
-            if save {
-                // Сохраняем в ИСХОДНЫЙ кейс: прогон шёл в копии.
-                let path = arch_harness::redteam::save_summary(&case, &report)?;
-                eprintln!("Итог измерения сохранён: {}", path.display());
-            }
+            let report = if let Some(corpus_dir) = corpus.as_deref() {
+                // E3 (эксперимент): внешний корпус патчей вместо каталога
+                // мутаторов. Информационный прогон: без --save (несовместимо
+                // на уровне clap) и без exit 1 по доле поимки корпуса.
+                arch_harness::redteam::corpus::run_corpus(
+                    &case,
+                    corpus_dir,
+                    &arch_harness::redteam::RedteamOptions {
+                        min_detection,
+                        min_code_detection: cfg.redteam.min_code_detection,
+                        decision_quality: !no_decision_quality,
+                        keep_semantic: keep_semantic.clone(),
+                    },
+                )?
+            } else {
+                let report = arch_harness::redteam::run_with_options(
+                    &case,
+                    &arch_harness::redteam::RedteamOptions {
+                        min_detection,
+                        // E2: порог кодовой доли — из конфига, по умолчанию не задан
+                        // ([РЕШЕНИЕ ЧЕЛОВЕКА] задания 0.3.14).
+                        min_code_detection: cfg.redteam.min_code_detection,
+                        decision_quality: !no_decision_quality,
+                        keep_semantic: keep_semantic.clone(),
+                    },
+                )?;
+                if save {
+                    // Сохраняем в ИСХОДНЫЙ кейс: прогон шёл в копии.
+                    let path = arch_harness::redteam::save_summary(&case, &report)?;
+                    eprintln!("Итог измерения сохранён: {}", path.display());
+                }
+                report
+            };
             match format.trim().to_ascii_lowercase().as_str() {
                 "json" => {
                     let out = report.to_json();
@@ -1363,7 +1391,9 @@ pub(crate) async fn run() -> Result<()> {
                 "markdown" | "md" => print!("{}", arch_harness::redteam::render_markdown(&report)),
                 _ => print!("{}", report.render()),
             }
-            if !report.passed() {
+            // Корпусный прогон (E3) информационный: доля поимки корпуса —
+            // измерение, а не приёмка, exit-код от неё не зависит.
+            if corpus.is_none() && !report.passed() {
                 std::process::exit(1);
             }
         }
