@@ -102,7 +102,8 @@ const SCANNABLE_EXTENSIONS: [&str; 22] = [
 ];
 
 /// Расширения конфигов, из которых извлекаются интеграции (URL/host'ы).
-const CONFIG_EXTENSIONS: [&str; 5] = ["yaml", "yml", "toml", "properties", "json"];
+/// `pub(crate)`: тот же набор использует граф as-built волны K.
+pub(crate) const CONFIG_EXTENSIONS: [&str; 5] = ["yaml", "yml", "toml", "properties", "json"];
 
 /// Имена каталогов миграций (включая «db/migrate» — по суффиксу пути).
 const MIGRATION_DIR_NAMES: [&str; 4] = ["migrations", "flyway", "liquibase", "alembic"];
@@ -536,7 +537,9 @@ fn scan_storages(snap: &RepoSnapshot) -> Vec<Finding> {
 /// Извлекает `host:port` из URL/строки подключения: схема и путь отбрасываются,
 /// userinfo (`user:pass@`) срезается по ПОСЛЕДНЕМУ `@` в authority-части.
 /// Петлевые хосты ([`LOOPBACK_HOSTS`]) → None.
-fn extract_host_port(url: &str) -> Option<String> {
+/// `pub(crate)`: тот же разбор использует граф as-built волны K
+/// (`crate::arch_diff`), чтобы карта обследования и дифф не расходились.
+pub(crate) fn extract_host_port(url: &str) -> Option<String> {
     let after_scheme = url.split_once("://").map_or(url, |(_, rest)| rest);
     // Authority — до первого разделителя пути/запроса/фрагмента.
     let end = after_scheme
@@ -554,14 +557,17 @@ fn extract_host_port(url: &str) -> Option<String> {
     Some(host_port.to_string())
 }
 
+/// Regex URL/строк подключения сканера интеграций — выделен в константу для
+/// графа as-built волны K (`crate::arch_diff`): одна семантика «что считать
+/// внешней системой» у карты обследования и архитектурного диффа.
+pub(crate) const INTEGRATION_URL_PATTERN: &str = r#"(?i)\b(?:https?|postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis|amqps?|jdbc:[a-z0-9]+)://[^\s"'<>)\]]+"#;
+
 /// Сканер 4: интеграции — URL/строки подключения из конфигов → host:port.
 /// Значения проходят через редактор секретов (`src/secrets.rs`) — в карту
 /// не должны уехать ни userinfo, ни токены в query.
 fn scan_integrations(snap: &RepoSnapshot) -> Result<Vec<Finding>> {
-    let re = Regex::new(
-        r#"(?i)\b(?:https?|postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis|amqps?|jdbc:[a-z0-9]+)://[^\s"'<>)\]]+"#,
-    )
-    .map_err(|e| HarnessError::Control(format!("шаблон интеграций: {e}")))?;
+    let re = Regex::new(INTEGRATION_URL_PATTERN)
+        .map_err(|e| HarnessError::Control(format!("шаблон интеграций: {e}")))?;
     let redactor = crate::secrets::Redactor::with_builtin_rules();
     let mut by_host: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for (path, lines) in &snap.contents {

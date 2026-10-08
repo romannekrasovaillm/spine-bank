@@ -1,6 +1,15 @@
 //! `arch-be connect ci` (B1): готовая джоба архитектурного гейта под
 //! площадку (GitLab CI / GitHub Actions / Jenkins) — маркерные блоки,
 //! подстановка версии и адреса релизов.
+//!
+//! K4 (волна K): рядом с джобой гейта рендерится джоба `arch-diff` —
+//! `arch-be arch-diff --base <целевая> --format md` публикуется ОДНИМ
+//! комментарием MR/PR, обновляемым на каждом пуше (маркер
+//! `<!-- spine-arch-diff -->` + edit вместо new). Публикация — средствами
+//! пайплайна (curl/gh и токены площадки), бинарь сети не касается (C-34).
+//! Для Bitbucket Data Center доставка вердикта — Code Insights
+//! (`--format bitbucket-insights`, D1, ADR-059) — самообновляющийся отчёт,
+//! комментарий не нужен.
 
 use std::path::{Path, PathBuf};
 
@@ -89,6 +98,8 @@ fn with_version(template: &str) -> String {
 /// Джоба GitLab CI: `arch-be gate` с нативным форматом `gitlab-codequality`
 /// в артефакт `reports.codequality` (нарушения появляются в интерфейсе merge
 /// request без ручной настройки) + текстовая сводка в лог джобы.
+/// Рядом — джоба `spine-arch-diff` (K4): `arch-be arch-diff --format md`
+/// одним обновляемым комментарием MR (маркер + PUT/POST в notes API).
 fn gitlab_ci_block() -> String {
     with_version(
         "# spine-connect:begin — архитектурный гейт Spine (arch-be)\n\
@@ -120,6 +131,44 @@ fn gitlab_ci_block() -> String {
          \x20   when: always\n\
          \x20   reports:\n\
          \x20     codequality: codequality-spine.json   # → виджет Code Quality в merge request\n\
+         # --- K4: архитектурный дифф MR одним обновляемым комментарием ---\n\
+         spine-arch-diff:\n\
+         \x20 stage: test\n\
+         \x20 image: debian:bookworm-slim\n\
+         \x20 rules:\n\
+         \x20   - if: $CI_PIPELINE_SOURCE == \"merge_request_event\"\n\
+         \x20 variables:\n\
+         \x20   ARCH_BE_VERSION: \"@ARCH_BE_VERSION@\"\n\
+         \x20   RELEASES_URL: \"https://github.com/<org>/<repo>/releases/download\"\n\
+         \x20   GIT_DEPTH: \"0\"   # диффу нужна база origin/<целевая ветка>\n\
+         \x20 before_script:\n\
+         \x20   - apt-get update -qq && apt-get install -y -qq curl ca-certificates git jq > /dev/null\n\
+         \x20   - curl -fsSL -o /usr/local/bin/arch-be \"${RELEASES_URL}/v${ARCH_BE_VERSION}/arch-be-linux-x86_64\" && chmod +x /usr/local/bin/arch-be\n\
+         \x20 script:\n\
+         \x20   - BASE=\"origin/${CI_MERGE_REQUEST_TARGET_BRANCH_NAME:-main}\"\n\
+         \x20   # Дифф информационный (exit 0); краснота MR — джоба spine-gate или --fail-on у arch-diff.\n\
+         \x20   - arch-be arch-diff --repo . --base \"$BASE\" --format md > arch-diff.md\n\
+         \x20   # Один комментарий MR, обновляемый на каждом пуше: маркер + edit вместо new.\n\
+         \x20   # Публикация — curl в GitLab API из пайплайна; бинарь arch-be сети не касается (C-34).\n\
+         \x20   # GITLAB_TOKEN — masked CI-переменная (project access token, scope api):\n\
+         \x20   # у CI_JOB_TOKEN прав на комментарии MR нет.\n\
+         \x20   - |\n\
+         \x20     MARKER='<!-- spine-arch-diff -->'\n\
+         \x20     { echo \"$MARKER\"; echo; cat arch-diff.md; } > .arch-diff-comment.md\n\
+         \x20     PAYLOAD=$(jq -n --arg b \"$(cat .arch-diff-comment.md)\" '{body: $b}')\n\
+         \x20     NOTES=\"${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/merge_requests/${CI_MERGE_REQUEST_IID}/notes\"\n\
+         \x20     AUTH=\"PRIVATE-TOKEN: ${GITLAB_TOKEN:?задайте masked CI-переменную GITLAB_TOKEN (project access token, scope api)}\"\n\
+         \x20     NOTE_ID=$(curl -fsS -H \"$AUTH\" \"${NOTES}?per_page=100&sort=desc\" | jq -r '[.[] | select(.body | contains(\"<!-- spine-arch-diff -->\")) | .id][0] // empty')\n\
+         \x20     if [ -n \"$NOTE_ID\" ]; then\n\
+         \x20       curl -fsS -X PUT -H \"$AUTH\" -H 'Content-Type: application/json' --data \"$PAYLOAD\" \"${NOTES}/${NOTE_ID}\" > /dev/null\n\
+         \x20     else\n\
+         \x20       curl -fsS -X POST -H \"$AUTH\" -H 'Content-Type: application/json' --data \"$PAYLOAD\" \"$NOTES\" > /dev/null\n\
+         \x20     fi\n\
+         \x20     echo \"arch-diff: комментарий MR ${NOTE_ID:+обновлён}${NOTE_ID:-создан}\"\n\
+         \x20 artifacts:\n\
+         \x20   when: always\n\
+         \x20   paths:\n\
+         \x20     - arch-diff.md\n\
          # spine-connect:end",
     )
 }
@@ -128,6 +177,8 @@ fn gitlab_ci_block() -> String {
 /// включённом Advanced Security — загрузка в code scanning, вариант в
 /// комментарии) + markdown-сводка в Job Summary. Внешних действий сверх
 /// официальных `actions/checkout` и `actions/upload-artifact` нет.
+/// Рядом — job `arch-diff` (K4): `arch-be arch-diff --format md` одним
+/// обновляемым комментарием PR (маркер + PATCH/POST через `gh api`).
 fn github_workflow_block() -> String {
     with_version(
         "# spine-connect:begin — архитектурный гейт Spine (arch-be)\n\
@@ -166,6 +217,49 @@ fn github_workflow_block() -> String {
          \x20       with:\n\
          \x20         name: spine-gate-sarif\n\
          \x20         path: spine-gate.sarif\n\
+         \x20   # --- K4: архитектурный дифф PR одним обновляемым комментарием ---\n\
+         \x20 arch-diff:\n\
+         \x20   if: github.event_name == 'pull_request'\n\
+         \x20   runs-on: ubuntu-latest\n\
+         \x20   permissions:\n\
+         \x20     contents: read\n\
+         \x20     pull-requests: write   # правка одного комментария PR (маркер + edit)\n\
+         \x20   steps:\n\
+         \x20     - uses: actions/checkout@v4\n\
+         \x20       with:\n\
+         \x20         fetch-depth: 0   # диффу нужна база origin/<целевая ветка>\n\
+         \x20     - name: Установка arch-be\n\
+         \x20       env:\n\
+         \x20         ARCH_BE_VERSION: \"@ARCH_BE_VERSION@\"\n\
+         \x20         RELEASES_URL: \"https://github.com/<org>/<repo>/releases/download\"\n\
+         \x20       run: |\n\
+         \x20         sudo curl -fsSL -o /usr/local/bin/arch-be \"${RELEASES_URL}/v${ARCH_BE_VERSION}/arch-be-linux-x86_64\" && sudo chmod +x /usr/local/bin/arch-be\n\
+         \x20         arch-be --version\n\
+         \x20     - name: Архитектурный дифф\n\
+         \x20       # Информационный (exit 0); красный PR — job gate или --fail-on у arch-diff.\n\
+         \x20       run: arch-be arch-diff --repo . --base \"origin/${{ github.base_ref || 'main' }}\" --format md > arch-diff.md\n\
+         \x20     - name: Комментарий PR (один, обновляемый)\n\
+         \x20       env:\n\
+         \x20         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}\n\
+         \x20         PR_NUMBER: ${{ github.event.pull_request.number }}\n\
+         \x20       # Маркер + edit вместо new; публикация — gh из раннера, бинарь сети не касается (C-34).\n\
+         \x20       run: |\n\
+         \x20         MARKER='<!-- spine-arch-diff -->'\n\
+         \x20         { echo \"$MARKER\"; echo; cat arch-diff.md; } > .arch-diff-comment.md\n\
+         \x20         COMMENTS=\"repos/${{ github.repository }}/issues/${PR_NUMBER}/comments\"\n\
+         \x20         CID=$(gh api \"${COMMENTS}?per_page=100\" --jq '[.[] | select(.body | contains(\"<!-- spine-arch-diff -->\")) | .id][0] // empty')\n\
+         \x20         if [ -n \"$CID\" ]; then\n\
+         \x20           gh api -X PATCH \"repos/${{ github.repository }}/issues/comments/${CID}\" -f body=@.arch-diff-comment.md > /dev/null\n\
+         \x20         else\n\
+         \x20           gh api -X POST \"$COMMENTS\" -f body=@.arch-diff-comment.md > /dev/null\n\
+         \x20         fi\n\
+         \x20         echo \"arch-diff: комментарий PR ${CID:+обновлён}${CID:-создан}\"\n\
+         \x20     - name: Отчёт диффа артефактом\n\
+         \x20       if: always()\n\
+         \x20       uses: actions/upload-artifact@v4\n\
+         \x20       with:\n\
+         \x20         name: spine-arch-diff\n\
+         \x20         path: arch-diff.md\n\
          \x20     # Вариант для code scanning (Security → Code scanning), если включён\n\
          \x20     # GitHub Advanced Security:\n\
          \x20     # - name: Загрузка SARIF\n\
@@ -178,7 +272,9 @@ fn github_workflow_block() -> String {
 
 /// Джоба Jenkins (declarative pipeline): `arch-be gate --format junit` в файл,
 /// публикация `junit(...)` (находки — как упавшие тесты) и `error(...)` по
-/// коду возврата гейта.
+/// коду возврата гейта. Рядом — этап 'Spine arch-diff' (K4): дифф PR одним
+/// обновляемым комментарием MR/PR (маркер + curl в API площадки; endpoint —
+/// переменными окружения, формы GitLab/GitHub в комментарии этапа).
 fn jenkinsfile_block() -> String {
     with_version(
         "// spine-connect:begin — архитектурный гейт Spine (arch-be)\n\
@@ -212,6 +308,51 @@ fn jenkinsfile_block() -> String {
          \x20                           error('Spine gate FAIL — находки в spine-gate.xml и в логе джобы')\n\
          \x20                       }\n\
          \x20                   }\n\
+         \x20               }\n\
+         \x20           }\n\
+         \x20       }\n\
+         \x20       // --- K4: архитектурный дифф PR одним обновляемым комментарием ---\n\
+         \x20       stage('Spine arch-diff') {\n\
+         \x20           // Только PR-сборки multibranch (CHANGE_ID/CHANGE_TARGET заданы).\n\
+         \x20           when { changeRequest() }\n\
+         \x20           steps {\n\
+         \x20               // Дифф PR в файл (информационный; exit всегда 0). Красный билд — у 'Spine gate'.\n\
+         \x20               sh 'arch-be arch-diff --repo . --base \"origin/${CHANGE_TARGET:-main}\" --format md > arch-diff.md'\n\
+         \x20               // Один обновляемый комментарий MR/PR: маркер + edit вместо new (K4).\n\
+         \x20               // Публикация — curl в REST API площадки MR из пайплайна; бинарь сети не касается (C-34).\n\
+         \x20               // [ТРЕБУЕТ ПРОВЕРКИ по документации вашей площадки] — переменные окружения:\n\
+         \x20               //   ARCH_DIFF_PLATFORM  gitlab (обновление PUT) | github (PATCH)\n\
+         \x20               //   ARCH_DIFF_LIST_URL  коллекция комментариев (GET — список; POST — создание):\n\
+         \x20               //     gitlab: https://HOST/api/v4/projects/<id>/merge_requests/<iid>/notes\n\
+         \x20               //     github: https://api.github.com/repos/<org>/<repo>/issues/<n>/comments\n\
+         \x20               //   ARCH_DIFF_ITEM_URL  URL комментария с плейсхолдером {id} (PUT/PATCH):\n\
+         \x20               //     gitlab: .../notes/{id}   github: .../repos/<org>/<repo>/issues/comments/{id}\n\
+         \x20               // jq обязателен на агенте (установка — как у бинаря arch-be выше).\n\
+         \x20               withCredentials([string(credentialsId: 'arch-diff-mr-token', variable: 'ARCH_DIFF_TOKEN')]) {\n\
+         \x20                   sh '''\n\
+         \x20                     set -eu\n\
+         \x20                     MARKER='<!-- spine-arch-diff -->'\n\
+         \x20                     { echo \"$MARKER\"; echo; cat arch-diff.md; } > .arch-diff-comment.md\n\
+         \x20                     PAYLOAD=$(jq -n --arg b \"$(cat .arch-diff-comment.md)\" '{body: $b}')\n\
+         \x20                     case \"${ARCH_DIFF_PLATFORM:-gitlab}\" in\n\
+         \x20                       gitlab) AUTH=\"PRIVATE-TOKEN: ${ARCH_DIFF_TOKEN}\"; METHOD=PUT ;;\n\
+         \x20                       github) AUTH=\"Authorization: Bearer ${ARCH_DIFF_TOKEN}\"; METHOD=PATCH ;;\n\
+         \x20                       *) echo \"arch-diff: неизвестная ARCH_DIFF_PLATFORM='${ARCH_DIFF_PLATFORM}' (gitlab|github)\"; exit 2 ;;\n\
+         \x20                     esac\n\
+         \x20                     ID=$(curl -fsS -H \"$AUTH\" \"${ARCH_DIFF_LIST_URL}?per_page=100\" | jq -r '[.[] | select(.body | contains(\"<!-- spine-arch-diff -->\")) | .id][0] // empty')\n\
+         \x20                     if [ -n \"$ID\" ]; then\n\
+         \x20                       ITEM_URL=$(printf '%s' \"$ARCH_DIFF_ITEM_URL\" | sed \"s/{id}/${ID}/\")\n\
+         \x20                       curl -fsS -X \"$METHOD\" -H \"$AUTH\" -H 'Content-Type: application/json' --data \"$PAYLOAD\" \"$ITEM_URL\" > /dev/null\n\
+         \x20                     else\n\
+         \x20                       curl -fsS -X POST -H \"$AUTH\" -H 'Content-Type: application/json' --data \"$PAYLOAD\" \"$ARCH_DIFF_LIST_URL\" > /dev/null\n\
+         \x20                     fi\n\
+         \x20                     echo \"arch-diff: комментарий MR/PR ${ID:+обновлён}${ID:-создан}\"\n\
+         \x20                   '''\n\
+         \x20               }\n\
+         \x20           }\n\
+         \x20           post {\n\
+         \x20               always {\n\
+         \x20                   archiveArtifacts artifacts: 'arch-diff.md', allowEmptyArchive: true\n\
          \x20               }\n\
          \x20           }\n\
          \x20       }\n\
@@ -403,9 +544,15 @@ pub fn connect_ci(
                  reports.codequality — ручной настройки площадки не нужно"
                     .into(),
             );
+            report.notes.push(
+                "джоба `spine-arch-diff` (K4) публикует архитектурный дифф одним обновляемым \
+                 комментарием MR (маркер `<!-- spine-arch-diff -->`, edit вместо new); \
+                 публикация — curl в GitLab API, бинарь сети не касается (C-34)"
+                    .into(),
+            );
             report.next_steps.extend([
-                "закоммитьте .gitlab-ci.yml и откройте merge request — джоба spine-gate \
-                 появится в пайплайне MR"
+                "закоммитьте .gitlab-ci.yml и откройте merge request — джобы spine-gate и \
+                 spine-arch-diff появятся в пайплайне MR"
                     .to_string(),
                 if releases_url.is_none() {
                     "задайте адрес релизов: `arch-be connect ci --provider gitlab \
@@ -415,6 +562,10 @@ pub fn connect_ci(
                 } else {
                     "адрес релизов подставлен из --releases-url".to_string()
                 },
+                "для комментария MR от `spine-arch-diff` задайте masked CI-переменную \
+                 GITLAB_TOKEN (project access token, scope api) — без неё шаг публикации \
+                 комментария красный (у CI_JOB_TOKEN прав на комментарии нет)"
+                    .to_string(),
             ]);
         }
         CiProvider::GitHub => {
@@ -422,6 +573,13 @@ pub fn connect_ci(
                 "SARIF складывается артефактом прогона (actions/upload-artifact); загрузка в \
                  code scanning (вкладка Security) — закомментированным шагом в файле (нужен \
                  GitHub Advanced Security)"
+                    .into(),
+            );
+            report.notes.push(
+                "job `arch-diff` (K4) публикует архитектурный дифф одним обновляемым \
+                 комментарием PR (маркер `<!-- spine-arch-diff -->`, PATCH вместо new) — \
+                 работает на встроенном GITHUB_TOKEN (permissions: pull-requests: write \
+                 объявлены в workflow)"
                     .into(),
             );
             report.next_steps.extend([
@@ -440,6 +598,11 @@ pub fn connect_ci(
                     .to_string(),
                 "бинарь arch-be: готовый в PATH агента Jenkins или curl из релизов/бандла \
                  (варианты — в комментарии этапа)"
+                    .to_string(),
+                "этап 'Spine arch-diff' (K4) публикует дифф одним обновляемым комментарием \
+                 MR/PR: заведите credentialsId 'arch-diff-mr-token' и переменные \
+                 ARCH_DIFF_PLATFORM/ARCH_DIFF_LIST_URL/ARCH_DIFF_ITEM_URL (формы для GitLab и \
+                 GitHub — в комментарии этапа); jq обязателен на агенте"
                     .to_string(),
             ]);
         }
@@ -746,6 +909,85 @@ mod tests {
         );
         assert!(again.contains("--format bitbucket-insights"), "{again}");
         assert_eq!(again.matches(BLOCK_BEGIN).count(), 1, "{again}");
+    }
+
+    /// K4: джобы gitlab/github/jenkins рендерят `arch-be arch-diff` с
+    /// публикацией ОДНОГО обновляемого комментария MR/PR (маркер + edit вместо
+    /// new) силами пайплайна (curl/gh), а не бинаря (C-34); Bitbucket — через
+    /// Code Insights (D1, блок выше не тронут).
+    #[test]
+    fn ci_jobs_render_arch_diff_with_updating_comment() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path().join("proj");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+
+        // GitLab: джоба spine-arch-diff, база MR, комментарий через notes API.
+        connect_ci(CiProvider::GitLab, &dir, false, None).expect("connect ci gitlab");
+        let gl = read(&dir.join(".gitlab-ci.yml"));
+        for needle in [
+            "spine-arch-diff:",
+            "arch-be arch-diff --repo . --base",
+            "--format md > arch-diff.md",
+            "<!-- spine-arch-diff -->",
+            "/merge_requests/${CI_MERGE_REQUEST_IID}/notes",
+            "GITLAB_TOKEN",
+            "curl -fsS -X PUT",
+            "curl -fsS -X POST",
+        ] {
+            assert!(gl.contains(needle), "gitlab: нет «{needle}»:\n{gl}");
+        }
+        assert!(
+            !gl.contains("...HEAD"),
+            "gitlab: база — голая ревизия: {gl}"
+        );
+
+        // GitHub: job arch-diff, PR-only, комментарий через gh api.
+        connect_ci(CiProvider::GitHub, &dir, false, None).expect("connect ci github");
+        let gh = read(&dir.join(".github/workflows/spine-gate.yml"));
+        for needle in [
+            "arch-diff:",
+            "github.event_name == 'pull_request'",
+            "pull-requests: write",
+            "arch-be arch-diff --repo . --base",
+            "--format md > arch-diff.md",
+            "<!-- spine-arch-diff -->",
+            "GH_TOKEN",
+            "gh api -X PATCH",
+            "gh api -X POST",
+        ] {
+            assert!(gh.contains(needle), "github: нет «{needle}»:\n{gh}");
+        }
+
+        // Jenkins: этап 'Spine arch-diff', только PR-сборки, публикация curl'ом
+        // в endpoint из переменных окружения (форма GitLab/GitHub — комментарий).
+        connect_ci(CiProvider::Jenkins, &dir, false, None).expect("connect ci jenkins");
+        let jk = read(&dir.join("Jenkinsfile"));
+        for needle in [
+            "stage('Spine arch-diff')",
+            "changeRequest()",
+            "arch-be arch-diff --repo . --base",
+            "--format md > arch-diff.md",
+            "<!-- spine-arch-diff -->",
+            "ARCH_DIFF_LIST_URL",
+            "ARCH_DIFF_ITEM_URL",
+            "METHOD=PUT",
+            "METHOD=PATCH",
+            "[ТРЕБУЕТ ПРОВЕРКИ",
+            "arch-diff-mr-token",
+        ] {
+            assert!(jk.contains(needle), "jenkins: нет «{needle}»:\n{jk}");
+        }
+
+        // В джобах комментария дифф информационный (без --fail-on): краснота
+        // MR/PR — у джобы гейта; --fail-on — отдельная опция (docs/arch-diff.md).
+        for (name, text) in [("gitlab", &gl), ("github", &gh), ("jenkins", &jk)] {
+            for line in text.lines().filter(|l| l.contains("arch-be arch-diff")) {
+                assert!(
+                    !line.contains("--fail-on"),
+                    "{name}: комментарий-джоба обязана быть информационной: {line}"
+                );
+            }
+        }
     }
 
     /// Маркерный сплайс: замена зоны между маркерами, рукописное снаружи цело.

@@ -52,6 +52,14 @@ standard_max = 4   # fast_max < score ≤ standard_max → Standard; выше �
 contract_globs    = ["docs/contracts/**", "contracts/**"]
 component_globs   = ["model/CMP-*"]
 integration_globs = ["model/INT-*"]
+# Глобы слепой зоны (D2): правка файла под глобом зажигает соответствующий
+# триггер. ПУСТЫ по умолчанию — без настройки эти триггеры детектор не видит
+# (паспорт вердикта называет их «не проверено детектором», D1). Шаблон —
+# плагин arch-governance, скилл fitness-rule-authoring. Глобы якорятся от
+# корня репозитория; ведущий `**/` не поддерживается (совпадёт со всем).
+security_globs       = []  # напр. ["auth/**", "deploy/network-policies/**"]
+trust_zone_globs     = []  # напр. ["deploy/mesh/**"]
+data_contract_globs  = []  # напр. ["schemas/events/**"]
 ```
 
 Контракт распознаётся и **по содержимому** (ключ верхнего уровня
@@ -98,13 +106,16 @@ git-репозитория — ошибка с понятным текстом.
 | Триггер | Механика |
 |---|---|
 | `new_component` | добавлен каталог верхнего/второго уровня с манифестом (`Cargo.toml`/`pom.xml`/`package.json`/`go.mod`), `src/` или сущность модели по `component_globs` |
-| `new_vendor` | в диффе манифеста зависимостей добавлена строка зависимости |
-| `api_contract_change` | контракт изменён, добавлен или УДАЛЁН: по содержимому (ключ верхнего уровня `openapi:`/`asyncapi:`/`swagger:`, расширение `.proto`), по `contract_globs` или по `openapi`/`asyncapi` в имени (T-05) |
+| `new_vendor` | в диффе манифеста зависимостей добавлена строка с НОВЫМ именем пакета (D3, ADR-061); смена версии существующего пакета — заметка «обновление», маршрут не поднимает |
+| `api_contract_change` | контракт изменён, добавлен или УДАЛЁН: по содержимому (ключ верхнего уровня `openapi:`/`asyncapi:`/`swagger:`, расширение `.proto`), по `contract_globs` или по `openapi`/`asyncapi` в имени (T-05); у изменённого контракта основание несёт класс `contract_diff`: ломающее/аддитивное (D3) |
 | `cross_domain_integration` | появилась или изменена сущность интеграции модели по `integration_globs` (T-05) |
 | `significant_nfr` | появилась или изменена NFR-сущность модели по `nfr_globs` (1.7 п.3) |
 | `rto_rpo_targets` | в добавленных строках файлов `model/` изменились цели RTO/RPO: поля `rto_minutes:`/`rpo_seconds:` или инлайн-формы «RTO ≤ 15»/«RPO = 0» (1.7 п.3; упоминание в ADR/прозе — не цель) |
 | `irreversible_migration` | в диффе файла миграций (`migrations/` или `*.sql`) есть `DROP TABLE`/`TRUNCATE`/`DROP COLUMN` |
 | `new_datastore` | в конфигах добавлены строки подключения `postgres://`/`mysql://`/`kafka`/`mongodb`/`redis://` |
+| `security_boundary_change` (D2) | изменён файл под глобом кейса `security_globs` (пуст по умолчанию) |
+| `trust_zone_change` (D2) | изменён файл под глобом кейса `trust_zone_globs` (пуст по умолчанию) |
+| `data_contract_change` (D2) | изменён файл под глобом кейса `data_contract_globs` (пуст по умолчанию) |
 
 В выводе у каждого сработавшего триггера — источник: `(declared)`,
 `(diff)` или `(declared+diff)`. Триггер, найденный диффом, но не заявленный
@@ -114,9 +125,33 @@ git-репозитория — ошибка с понятным текстом.
 ```bash
 arch-be control score --trigger new_component=true --from-diff
 # Score: 2 (new_component (declared), new_vendor (diff) триггеров) → маршрут Standard
-#   diff: new_vendor: зависимость в Cargo.toml: serde = "1.0"
+#   diff: new_vendor: новые зависимости в Cargo.toml: serde
 # ВНИМАНИЕ — расхождение: заявлено флагами vs видно по диффу: new_vendor
 ```
+
+Строки `заметка:` (D3) — контекст, не поднимающий маршрут: обновления версий
+существующих зависимостей и классификация изменённых контрактов
+(`contract_diff: ломающее/аддитивное`).
+
+### Реплей истории: `--replay` (D4)
+
+`arch-be control score --replay <REV_RANGE>` прогоняет детектор по КАЖДОМУ
+коммиту диапазона (`родитель..коммит`) и печатает маршрут, счёт и триггеры
+покоммитно плюс сводку: распределение маршрутов, частоту триггеров, счётчики
+заметок D3 (обновления зависимостей, ломающие контракты). `--json` отдаёт
+машинный отчёт `arch-be/significance-replay/v1`. Это инструмент измерения
+детектора (exit 0, на гейт не влияет): им калибруют маршрут по реальной
+истории, а не по ощущениям — см. `docs/experiments/significance-replay.md`.
+
+```bash
+arch-be control score --replay v0.3.12..HEAD
+arch-be control score --replay v0.3.12..HEAD --json > replay.json
+```
+
+Ограничения: потолок 5000 коммитов на прогон (сужайте диапазон); у корневого
+коммита база — пустое дерево; опознание контракта «по содержимому» читает
+текущее рабочее дерево (исторический контракт без «openapi» в имени виден по
+глобу/имени, по содержимому — только если путь существует сейчас).
 
 ## Линтер spine (`control spine`)
 
@@ -649,7 +684,10 @@ arch-be control rules-report . --constraints CONSTRAINTS.yaml
 - git-прокси — `git log --since="90 days ago" --oneline -- <файл>`; вне
   git-репозитория (или без git) — строка «недоступно», не ошибка;
 - `effort_hours` из карточек суммируется в итоговой строке (метаданные,
-  движок не enforce'ит).
+  движок не enforce'ит);
+- строка «Проверяют поведение» и раздел «Зубья правил» читают сохранённое
+  измерение `.arch-handoff/teeth.json` (B1): без него — честное «не измерено»,
+  а не счёт по типам правил.
 
 ## Шаблоны исполняемых правил (`rules template`, ADR-050)
 
@@ -672,6 +710,39 @@ arch-be rules template verify --dir .                  # зубы применё
 `apply` **не** правит реестр и спайн и не перезаписывает существующие файлы:
 фрагмент правила и строку `verified_by` вносит архитектор дельтой. Значение
 `--ad` проверяется по форме `AD-<n>` и по наличию инварианта в спайне.
+
+## Измерение зубьев правил (`rules teeth`, B1, ADR-065)
+
+«Проверяет поведение» — это измерение, а не тип правила: `command_succeeds`
+с `command: 'true'` проверкой не является, а `must_contain` с честным
+шаблоном — является. Команда меряет зубья каждого правила реестра на копии
+кейса во временном каталоге (исходный кейс read-only): `must_not_contain`
+получает вставку строки, совпадающей с `pattern` (образец синтезируется из
+regex и проверяется скомпилированным шаблоном), `must_contain` /
+`each_file_must_contain` — удаление совпадений, `file_exists` /
+`dir_must_have_file` — удаление обязательного файла, `command_succeeds` —
+подмену эталонной реализации нарушающей из применённого шаблона
+(`.arch-handoff/rule-templates.lock`, ADR-050). Мутация обязана дать находку.
+
+```bash
+arch-be rules teeth .                 # весь реестр
+arch-be rules teeth . --rule C-007    # одно правило
+arch-be rules teeth . --save          # + запись .arch-handoff/teeth.json
+arch-be rules teeth . --format json   # машиночитаемо (arch-be/rules-teeth/v1)
+```
+
+Статусы: `confirmed` (находка появилась), `toothless` (мутация не поймана),
+`trivial` (`executable_rule_trivial`: команда не способна упасть),
+`glob_empty` (`rule_glob_empty`: по glob нет файлов), `unknown` (измерить
+нечем: нет шаблона, команда уже падает, тип не поддержан). Находки
+(toothless/trivial/glob_empty) дают exit 1; `unknown` — честное «не измерено»,
+а не «с зубьями». У записи — отпечаток проверяемых полей: правка тела правила
+после измерения обнуляет доверие к записи.
+
+Измерение читают без пересчёта: `arch-be trust` (ступень 3, см. ADR-065) и
+`control rules-report` — он делит реестр на «проверяют поведение (зубья
+подтверждены)», «текст» и «зубья не измерены»; без `teeth.json` доля
+поведенческих правил не заявляется вовсе.
 
 Проверка зубов (`verify`) подменяет эталонную реализацию нарушающей: тест
 остался зелёным — находка `executable_rule_toothless` (в вердикт гейта не
@@ -934,8 +1005,20 @@ job summary — `markdown`. Текстовый вывод не меняется;
 | `spine_lint` | `control spine ARCHITECTURE-SPINE.md` | error-находки линтера |
 | `trace_check` | `trace check` (нужны `model/` и `CONSTRAINTS.yaml` в корне; crosscheck сверяет все ссылки спайна на сущности модели) | error-находки трассировки |
 | `model_validate` | ссылочная целостность `model/` (`model validate`); SKIP, если каталога нет | error-находки валидации (битая ссылка/дубль ID/цикл); на маршруте **Critical** сюда же повышается `nfr-without-verification` — NFR без способа проверки там не цель, а пожелание |
+| `model_drift` (C1) | дрейф «модель ↔ код» (`model drift`): существование путей `code_roots` CMP, покрытие каталогов с манифестами, звено INT → контракт, мёртвые `depends_on` (`declared-edge-unused`); вне `[gate.required]` находки — **warn** (вердикт не ломают), в `[gate.required]` маршрута error-находки блокируют; SKIP, если нет `model/`; SKIP без молчания, если ни у одного CMP нет `code_roots` — паспорт вердикта пишет «модель не привязана к коду: 0 из N CMP имеют code_roots» (на обязательном маршруте это INCOMPLETE) | `code-root-missing`, `int-contract-missing` (только когда составляющая в `[gate.required]`) |
+| `arch_drift` (K6) | рёбра графа «как построено» против модели: дифф «база (`HEAD` или `--base`) → рабочее дерево» + журнал решений `.arch-handoff/arch-diff-decisions.json` (пишет `arch-be arch-diff accept\|reject`, K5); **по умолчанию SKIP** (дорогая проверка: снимки ревизий) — включается записью `arch_drift` в `[gate.required]` (находки error) или `[gate.arch_drift] enabled = true` (находки warn); SKIP также без git/`model/`/базовой ревизии | `undeclared-edge` (ребро добавлено в код, но его нет в модели), `rejected-edge-present` (отклонённое ребро осталось в коде, пока `grounds_hash` записи совпадает с основаниями ребра), `arch_diff_decisions_invalid` (журнал решений есть, но не читается) |
 | `decision_quality` | качество принятых ADR по отчётам рубрики (`reports/rubric/*.json`, пишут `arch-be rubric run` и MCP `rubric_verify`); **по умолчанию SKIP** — включается только через `[gate.required]`; SKIP, если нет `docs/adr` или принятых ADR | `rubric_report_missing`, `rubric_report_stale` (документ изменён после оценки), `decision_quality_low` (ниже `[gate.decision_quality] min_score`), `rubric_report_inconsistent` (отчёт не сходится со своими сырыми ответами — балл правили руками), `rubric_raw_tampered` (текст сохранённого ответа не сходится с хэшем); warn `judge_is_author` || `decision_quality` | качество принятых ADR по отчётам рубрики (`reports/rubric/*.json`, пишут `arch-be rubric run` и MCP `rubric_verify`); **по умолчанию SKIP** — включается только через `[gate.required]`; SKIP, если нет `docs/adr` или принятых ADR | `rubric_report_missing`, `rubric_report_stale` (документ изменён после оценки), `decision_quality_low` (ниже `[gate.decision_quality] min_score`); warn `judge_is_author` |
 | `semantic_quality` | смысловые рубрики по отчётам судьи (ADR-052): решение против инварианта, ссылка не на ту сущность, обещание без механизма, код против инварианта; **по умолчанию SKIP** — включается через `[gate.required]`; SKIP, если список `[gate.semantic_quality] rubrics` пуст | `semantic_report_missing`, `semantic_report_stale` (изменился любой источник досье, включая спайн), `semantic_contradiction` (главный критерий ≤ 2 с подтверждёнными цитатами); warn: `semantic_quality_low` (итог ниже `min_score`), `semantic_accusation_unconfirmed`, `semantic_coverage_incomplete`, `judge_is_author` |
+
+**Граница `model_drift` / `arch_drift` (C1/K6).** Составляющие отвечают за
+разные стороны дрейфа и не дублируют друг друга: `model_drift` — привязка
+модели к коду (пути `code_roots` существуют, каталоги с манифестами покрыты
+компонентами, контракты INT на месте, мёртвые `depends_on`), `arch_drift` —
+рёбра графа кода против модели (новое ребро, которого нет в `depends_on`/
+INT, и отклонённое решением ребро, оставшееся в коде). Общая логика одна:
+правило `declared-edge-unused` живёт в `model drift`, а статус ребра
+«в модели / нет в модели» считает `arch_diff` — обе составляющие только
+вызывают их.
 
 На маршрутах **Standard/Critical** добавляются:
 

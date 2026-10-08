@@ -51,6 +51,27 @@ pub(crate) enum RulesCmd {
         #[arg(long)]
         constraints: Option<PathBuf>,
     },
+    /// Измерение зубьев правил реестра (волна B, ADR-065): на копии кейса
+    /// каждое правило получает мутацию, которую обязано поймать (вставка
+    /// строки под `pattern`, удаление совпадений, подмена реализации из
+    /// применённого шаблона). Исходный кейс не изменяется. Exit 1, если есть
+    /// находки (беззубые/тривиальные правила, пустой набор по glob).
+    Teeth {
+        /// Корень кейса (по умолчанию — текущий каталог).
+        #[arg(default_value = ".")]
+        dir: PathBuf,
+        /// Измерить одно правило (id или имя); без флага — все правила.
+        #[arg(long)]
+        rule: Option<String>,
+        /// Сохранить результат в `.arch-handoff/teeth.json` кейса — его без
+        /// пересчёта читают `arch-be trust` (ступень 3) и
+        /// `arch-be control rules-report` (три группы зубьев).
+        #[arg(long)]
+        save: bool,
+        /// Формат вывода: text (дефолт) | json.
+        #[arg(long, default_value = "text", value_name = "FORMAT")]
+        format: String,
+    },
 }
 
 /// Подкоманды `arch-be rules template`.
@@ -130,6 +151,31 @@ pub(crate) fn cmd_rules(cmd: RulesCmd) -> Result<()> {
             }
         }
         RulesCmd::Template { cmd } => cmd_rules_template(cmd),
+        RulesCmd::Teeth {
+            dir,
+            rule,
+            save,
+            format,
+        } => {
+            let report = arch_harness::control::teeth::measure(&dir, rule.as_deref())?;
+            if save {
+                let path = arch_harness::control::teeth::save(&dir, &report)?;
+                eprintln!("Измерение зубьев сохранено: {}", path.display());
+            }
+            if format.trim().eq_ignore_ascii_case("json") {
+                let out = arch_harness::control::teeth::to_json(&report);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string())
+                );
+            } else {
+                print!("{}", arch_harness::control::teeth::render(&report));
+            }
+            if !report.passed() {
+                std::process::exit(1);
+            }
+            Ok(())
+        }
         RulesCmd::Allow { repo, constraints } => {
             // A3: доверие фиксируется на канонизированный отпечаток набора
             // command-строк ВСЕГО разрешённого реестра (extends учтён —

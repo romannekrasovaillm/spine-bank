@@ -1,6 +1,7 @@
 //! Составляющие гейта (B1): `fitness`, `delta_guard`, `rule_weakened`,
 //! `spine_lint`, `trace_check`, `sensors`, `nfr`, `evidence_verify`,
-//! `model_validate`, `decision_quality`.
+//! `model_validate`, `decision_quality`, `model_drift` (C1), `arch_drift`
+//! (K6).
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -13,6 +14,13 @@ use super::git::{
 use super::types::{GateComponent, GateFinding, GateOptions};
 use crate::control::{self, Route};
 use crate::{delta, evidence, nfr, trace};
+
+mod model_drift;
+
+mod arch_drift;
+
+pub(in crate::gate) use arch_drift::component_arch_drift;
+pub(in crate::gate) use model_drift::component_model_drift;
 
 /// Составляющая `fitness`: прогон `CONSTRAINTS.yaml` ([`control::check`]).
 ///
@@ -284,10 +292,16 @@ fn coverage_note(report: &delta::GuardReport) -> String {
 }
 
 /// Составляющая `delta_guard`: гейт прямых правок спайна ([`delta::guard`]).
+///
+/// С диапазоном прогона исполнителя (A5, ADR-055; передаётся только пост-
+/// гейтом `harness_run`) покрытие, созданное или изменённое в этом диапазоне,
+/// правку не узаконивает — ни дельтой Spine, ни change `OpenSpec` (F1, ADR-062):
+/// находка `self_approved` вместо тихого PASS.
 pub(super) fn component_delta_guard(
     repo: &Path,
     base: Option<&str>,
     git: &GitProbe,
+    agent_range: Option<&crate::control::AgentRange>,
 ) -> GateComponent {
     if !git.repo {
         return GateComponent::skip(
@@ -301,7 +315,11 @@ pub(super) fn component_delta_guard(
             "нет базового коммита (HEAD не существует) — дифф недоступен".to_string(),
         );
     }
-    match delta::guard(repo, base, &[]) {
+    let options = delta::GuardOptions {
+        sources: None,
+        agent_range: agent_range.cloned(),
+    };
+    match delta::guard_with(repo, base, &[], &options) {
         Ok(report) if report.passed => {
             let mut detail = format!(
                 "изменённых файлов: {}, защищённых среди них: {}",
@@ -309,41 +327,261 @@ pub(super) fn component_delta_guard(
                 report.protected_changed.len()
             );
             // Отчёт, а не галочка (D8): какие защищённые пути изменены и
-            // какой дельтой каждый покрыт.
+            // каким источником каждый покрыт (F1: дельта или change OpenSpec).
             if !report.protected_changed.is_empty() {
                 // Запись в String не может завершиться ошибкой — игнор безопасен.
                 let _ = write!(detail, " — покрытие: {}", coverage_note(&report));
             }
             GateComponent::pass("delta_guard", detail)
         }
-        Ok(report) => GateComponent::fail(
-            "delta_guard",
-            format!(
-                "правки спайна мимо дельты: {} файлов (активных дельт: {})",
-                report.violations.len(),
-                report.active_deltas
-            ),
-            report
+        Ok(report) => {
+            let mut findings: Vec<GateFinding> = report
                 .violations
                 .iter()
                 .map(|v| {
+                    let openspec_on = report.sources.iter().any(|s| s == "openspec");
                     GateFinding::file_only(
                         "error",
                         v.clone(),
-                        if report.active_deltas == 0 {
-                            "не упоминается ни в одной активной дельте — активных дельт нет"
-                                .to_string()
-                        } else {
-                            format!(
+                        match (
+                            openspec_on,
+                            report.active_deltas == 0 && report.active_changes == 0,
+                        ) {
+                            // Репозиторий без OpenSpec: формулировка прежних
+                            // версий (совместимость текста находки).
+                            (false, true) => {
+                                "не упоминается ни в одной активной дельте — активных дельт нет"
+                                    .to_string()
+                            }
+                            (false, false) => format!(
                                 "не упоминается ни в одной из {} активных дельт",
                                 report.active_deltas
-                            )
+                            ),
+                            (true, true) => "не упоминается ни в одном активном источнике \
+                                 покрытия — активных дельт и changes OpenSpec нет"
+                                .to_string(),
+                            (true, false) => format!(
+                                "не упоминается ни в одном активном источнике покрытия \
+                                 (активных дельт: {}, активных changes OpenSpec: {})",
+                                report.active_deltas, report.active_changes
+                            ),
                         },
                     )
                 })
-                .collect(),
-        ),
+                .collect();
+            // ADR-055: покрытие из диапазона исполнителя — самоодобрение.
+            for (file, sources) in &report.self_approved {
+                findings.push(GateFinding {
+                    severity: "error".into(),
+                    rule: Some("self_approved".into()),
+                    file: Some(file.clone()),
+                    line: None,
+                    message: format!(
+                        "покрытие ({}) создано или изменено в диапазоне прогона исполнителя → \
+                         перенесите оформление изменения в основной репозиторий решением \
+                         владельца (ADR-055)",
+                        sources.join(", ")
+                    ),
+                });
+            }
+            let mut detail = format!(
+                "правки спайна мимо дельты: {} файлов (активных дельт: {}{})",
+                report.violations.len(),
+                report.active_deltas,
+                if report.sources.iter().any(|s| s == "openspec") {
+                    format!(", активных changes OpenSpec: {}", report.active_changes)
+                } else {
+                    String::new()
+                }
+            );
+            if !report.self_approved.is_empty() {
+                // Запись в String не может завершиться ошибкой — игнор безопасен.
+                let _ = write!(
+                    detail,
+                    "; покрытий из диапазона исполнителя (self_approved): {}",
+                    report.self_approved.len()
+                );
+            }
+            GateComponent::fail("delta_guard", detail, findings)
+        }
         Err(e) => GateComponent::fail("delta_guard", format!("сбой выполнения: {e}"), Vec::new()),
+    }
+}
+
+/// Составляющая `openspec_coverage` (F2, ADR-067): покрытие требований
+/// `OpenSpec` правилами реестра — как часть единого гейта.
+///
+/// Образец включения — `decision_quality`: блокирующей (error-находки
+/// `requirement_uncovered`) составляющая становится только при наличии в
+/// `[gate.required]` маршрута; иначе та же непокрытость — warn (схема
+/// «warn → error по включению», ужесточений без явного решения проекта нет).
+///
+/// Область (`[gate.openspec_coverage] scope`): `changed` (дефолт) —
+/// требования дельт активных changes, затронутых диффом `base..дерево`, плюс
+/// требования живых спек, чьи файлы изменены; `all` — как
+/// `openspec coverage`. Без `openspec/` — SKIP с явной пометкой (паспорт
+/// подхватывает её в блок «не проверено»).
+///
+/// Связка с волной B: правила, покрывающие требование, обязаны иметь
+/// подтверждённые зубья (`.arch-handoff/teeth.json`, ридер толерантный —
+/// нет файла: «зубья не измерены»). Покрытие детектором без подтверждённых
+/// зубьев засчитывается «покрыто текстом» отдельной строкой детали; правило,
+/// измеренное беззубым, даёт warn-находку `requirement_text_only` — покрытие
+/// требований не должно быть формальным.
+pub(super) fn component_openspec_coverage(
+    repo: &Path,
+    constraints: &ConstraintsPath,
+    base: Option<&str>,
+    git: &GitProbe,
+    cfg: crate::config::OpenspecCoverageConfig,
+    required: bool,
+) -> GateComponent {
+    if !repo.join("openspec").is_dir() {
+        return GateComponent::skip(
+            "openspec_coverage",
+            "нет каталога openspec/ — разметки OpenSpec нет, покрытие требований не проверяется"
+                .to_string(),
+        );
+    }
+    // Область changed — тот же дифф, что у delta_guard/secrets (та же
+    // fail-soft дисциплина: нет git/базы — SKIP с причиной).
+    let changed = match cfg.scope {
+        crate::config::OpenspecCoverageScope::All => None,
+        crate::config::OpenspecCoverageScope::Changed => {
+            if !git.repo {
+                return GateComponent::skip(
+                    "openspec_coverage",
+                    "не git-репозиторий — область changed недоступна".to_string(),
+                );
+            }
+            if base.is_none() && !git.head {
+                return GateComponent::skip(
+                    "openspec_coverage",
+                    "нет базового коммита (HEAD не существует) — область changed недоступна"
+                        .to_string(),
+                );
+            }
+            match delta::changed_files(repo, base) {
+                Ok(files) => Some(files),
+                Err(e) => {
+                    return GateComponent::fail(
+                        "openspec_coverage",
+                        format!("сбой диффа области changed: {e}"),
+                        Vec::new(),
+                    );
+                }
+            }
+        }
+    };
+    // Тот же файл ограничений, что прочитал гейт (пакетная копия — E2);
+    // файла нет — все требования «без решения» (честное состояние отчёта).
+    let constraints_arg = constraints
+        .path
+        .is_file()
+        .then_some(constraints.path.as_path());
+    let report = match crate::openspec::coverage_scoped(repo, constraints_arg, changed.as_deref()) {
+        Ok(report) => report,
+        Err(e) => {
+            return GateComponent::fail(
+                "openspec_coverage",
+                format!("сбой выполнения: {e}"),
+                Vec::new(),
+            );
+        }
+    };
+    let severity = if required { "error" } else { "warn" };
+    let mut findings = Vec::new();
+    for item in &report.items {
+        match item.status {
+            crate::openspec::CoverageStatus::Unresolved => {
+                let r = &item.requirement;
+                findings.push(GateFinding::ruled(
+                    severity.to_string(),
+                    "requirement_uncovered".to_string(),
+                    format!(
+                        "{} — «{}» ({}:{}): нет ни детектора, ни unverifiable с owner → \
+                         добавьте правило с covers: [\"{}\"] в CONSTRAINTS.yaml или назначьте \
+                         заглушку unverifiable с owner",
+                        r.id,
+                        r.title,
+                        r.file.display(),
+                        r.line,
+                        r.id
+                    ),
+                ));
+            }
+            crate::openspec::CoverageStatus::Covered
+                if item.teeth == Some(crate::openspec::TeethEvidence::MeasuredNoTeeth) =>
+            {
+                findings.push(GateFinding::ruled(
+                    "warn".to_string(),
+                    "requirement_text_only".to_string(),
+                    format!(
+                        "{} — «{}»: покрытие только текстом — правила ({}) измерены без \
+                         подтверждённых зубьев → усильте правило, чтобы оно ловило нарушение, \
+                         и подтвердите измерением: `arch-be rules teeth --save`",
+                        item.requirement.id,
+                        item.requirement.title,
+                        item.via.join(", ")
+                    ),
+                ));
+            }
+            _ => {}
+        }
+    }
+    // F4: осиротевшие covers: видны и в гейте (warn, не блок).
+    for orphan in &report.orphans {
+        findings.push(GateFinding::ruled(
+            "warn".to_string(),
+            "covers_orphan".to_string(),
+            match &orphan.candidate {
+                Some(c) => format!(
+                    "{} (правила: {}): ссылки нет среди требований — кандидат той же capability \
+                     без покрытия: {} — «{}»; проверьте, что это то же требование после правки \
+                     текста, и обновите covers: на новый id",
+                    orphan.id,
+                    orphan.rules.join(", "),
+                    c.id,
+                    c.title
+                ),
+                None => format!(
+                    "{} (правила: {}): ссылки нет среди требований и кандидата на перелинковку \
+                     нет — если требование снято, снимите ссылку из covers: и пересмотрите правило",
+                    orphan.id,
+                    orphan.rules.join(", ")
+                ),
+            },
+        ));
+    }
+    let detail = format!(
+        "область: {}, SHALL: {}, покрыто детектором: {} (с подтверждёнными зубьями: {}, \
+         покрыто текстом: {}), unverifiable: {}, без решения: {}, осиротевших covers: {}",
+        cfg.scope.as_str(),
+        report.total,
+        report.covered,
+        report.covered_teeth,
+        report.covered_text,
+        report.unverifiable,
+        report.unresolved,
+        report.orphans.len()
+    );
+    // Границы вердикта (W1, блок 2 паспорта): что зелёный здесь НЕ означает.
+    let mut notes = vec![
+        "строка SHALL прочитана как текст требования; выполнимость формулировки и то, что \
+         правило проверяет именно СМЫСЛ требования, механикой не проверяются"
+            .to_string(),
+    ];
+    if report.teeth_file.is_none() && report.covered > 0 {
+        notes.push(format!(
+            "зубья покрывающих правил не измерены (нет {}) — «покрыто текстом» выше означает \
+             «не проверялось», а не «зубьев нет»; прогоните `arch-be rules teeth --save`",
+            crate::control::teeth::TEETH_RESULT_REL
+        ));
+    }
+    if findings.iter().any(|f| f.severity == "error") {
+        GateComponent::fail("openspec_coverage", detail, findings).noting(notes)
+    } else {
+        GateComponent::pass_with_findings("openspec_coverage", detail, findings).noting(notes)
     }
 }
 
@@ -1774,5 +2012,13 @@ pub(super) fn component_decision_quality(
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_arch_drift;
+#[cfg(test)]
+mod tests_delta_guard_openspec;
+#[cfg(test)]
+mod tests_model_drift;
+#[cfg(test)]
+mod tests_openspec_coverage;
 #[cfg(test)]
 mod tests_secrets;

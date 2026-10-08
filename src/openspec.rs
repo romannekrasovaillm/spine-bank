@@ -340,7 +340,9 @@ pub fn scan_scenarios(root: &Path) -> Result<Vec<Scenario>> {
 }
 
 /// Собирает markdown-файлы каталога (рекурсивно, детерминированный порядок).
-fn collect_md(dir: &Path) -> Vec<PathBuf> {
+/// `pub(crate)`: тот же обход читает гейт прямых правок спайна (F1, ADR-062 —
+/// дельты спек change `OpenSpec` как источник покрытия `delta guard`).
+pub(crate) fn collect_md(dir: &Path) -> Vec<PathBuf> {
     let mut files: Vec<PathBuf> = WalkDir::new(dir)
         .into_iter()
         .filter_map(std::result::Result::ok)
@@ -386,22 +388,28 @@ fn parse_spec_file(
 /// (`openspec/changes/<id>/specs/**/*.md`; `changes/archive/` — история,
 /// не сканируется). Порядок результата детерминирован (файл, строка).
 ///
+/// Живых спек может ещё не быть (первый change проекта — нормальное
+/// состояние): отсутствие `openspec/specs` при наличии `openspec/changes` —
+/// не ошибка (та же толерантность, что у [`scan_scenarios`]).
+///
 /// # Errors
-/// `openspec/specs` отсутствует (репозиторий без разметки `OpenSpec`),
-/// файл спеки не читается.
+/// Нет ни `openspec/specs`, ни `openspec/changes` (репозиторий без разметки
+/// `OpenSpec`); файл спеки не читается.
 pub fn scan_requirements(root: &Path) -> Result<Vec<Requirement>> {
     let specs_dir = root.join("openspec/specs");
-    if !specs_dir.is_dir() {
+    let changes_dir = root.join("openspec/changes");
+    if !specs_dir.is_dir() && !changes_dir.is_dir() {
         return Err(HarnessError::Control(format!(
             "openspec/specs не найден в {} — адаптер читает репозиторий с разметкой OpenSpec",
             root.display()
         )));
     }
     let mut out = Vec::new();
-    for file in collect_md(&specs_dir) {
-        parse_spec_file(&file, root, &ReqSource::Spec, &mut out)?;
+    if specs_dir.is_dir() {
+        for file in collect_md(&specs_dir) {
+            parse_spec_file(&file, root, &ReqSource::Spec, &mut out)?;
+        }
     }
-    let changes_dir = root.join("openspec/changes");
     if changes_dir.is_dir() {
         let mut change_dirs: Vec<PathBuf> = std::fs::read_dir(&changes_dir)
             .map_err(|e| HarnessError::io(&changes_dir, e))?
@@ -526,6 +534,25 @@ pub enum CoverageStatus {
     Unresolved,
 }
 
+/// Доказательность покрытия детектором (F2, ADR-067): связка с измерением
+/// зубьев правил (волна B, `.arch-handoff/teeth.json`, схема
+/// `arch-be/rules-teeth/v1`). Покрытие требования не должно быть формальным:
+/// правило, которое демонстрируемо не ловит нарушение, — не покрытие
+/// поведением, а покрытие текстом.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TeethEvidence {
+    /// Хотя бы одно покрывающее правило-детектор имеет подтверждённые зубья
+    /// (запись `confirmed`, отпечаток правила сошёлся).
+    Confirmed,
+    /// Все покрывающие правила-детекторы измерены, и ни у одного зубьев нет
+    /// (`toothless`/`trivial`/`glob_empty`) — покрытие формально.
+    MeasuredNoTeeth,
+    /// Зубья не измерялись: нет файла измерения, нет записи о правиле или
+    /// отпечаток не сошёлся (правило правили после измерения).
+    NotMeasured,
+}
+
 /// Требование с присвоенным статусом покрытия.
 #[derive(Debug, Clone, Serialize)]
 pub struct CoveredRequirement {
@@ -535,6 +562,40 @@ pub struct CoveredRequirement {
     pub status: CoverageStatus,
     /// Имена правил, перечисляющих требование в `covers:`.
     pub via: Vec<String>,
+    /// Доказательность покрытия детектором (F2): зубья покрывающих правил по
+    /// сохранённому измерению. `Some` только при статусе `Covered`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub teeth: Option<TeethEvidence>,
+}
+
+/// Кандидат на перелинковку осиротевшей ссылки `covers:` (F4): требование
+/// той же capability с изменённым хэшем (id другой по построению), у которого
+/// нет покрытия (статус «без решения»).
+#[derive(Debug, Clone, Serialize)]
+pub struct OrphanCandidate {
+    /// Идентификатор требования-кандидата.
+    pub id: String,
+    /// Заголовок `### Requirement:`.
+    pub title: String,
+    /// Файл-источник (относительно корня репозитория).
+    pub file: PathBuf,
+    /// Строка заголовка требования (1-based).
+    pub line: usize,
+}
+
+/// Осиротевшая ссылка `covers:` (F4): правило ссылается на идентификатор
+/// требования, которого больше нет — правка текста требования меняет его id
+/// (так задумано, см. [`requirement_id`]), и связь «правило ← требование»
+/// раньше терялась молча. Уровень находки — warn (отчёт, не гейт).
+#[derive(Debug, Clone, Serialize)]
+pub struct CoverOrphan {
+    /// Осиротевший идентификатор из `covers:`.
+    pub id: String,
+    /// Правила, ссылающиеся на него (поимённо, дедуплицированы).
+    pub rules: Vec<String>,
+    /// Кандидат на перелинковку (`None` — в той же capability непокрытых
+    /// требований нет).
+    pub candidate: Option<OrphanCandidate>,
 }
 
 /// Отчёт покрытия требований правилами (JSON-контракт
@@ -561,6 +622,25 @@ pub struct CoverageReport {
     pub unresolved: usize,
     /// Поимённая разбивка.
     pub items: Vec<CoveredRequirement>,
+    /// Осиротевшие ссылки `covers:` (F4): id из `covers:`, которого нет среди
+    /// просканированных требований, с кандидатом на перелинковку. Аддитивное
+    /// поле 0.3.14; на счётчики и exit-коды не влияет (warn-уровень).
+    #[serde(default)]
+    pub orphans: Vec<CoverOrphan>,
+    /// Из покрытых детектором — с подтверждёнными зубьями (F2, ADR-067).
+    /// Аддитивное поле 0.3.14.
+    #[serde(default)]
+    pub covered_teeth: usize,
+    /// Из покрытых детектором — «текстом»: зубья не подтверждены (не
+    /// измерялись или измерены беззубыми). `covered = covered_teeth +
+    /// covered_text`. Аддитивное поле 0.3.14.
+    #[serde(default)]
+    pub covered_text: usize,
+    /// Файл измерения зубьев, из которого прочитаны статусы (F2): `None` —
+    /// зубья не измерялись вовсе, и «покрыто текстом» означает лишь «не
+    /// проверялось». В JSON не сериализуется (путь — деталь прогона).
+    #[serde(skip_serializing)]
+    pub teeth_file: Option<PathBuf>,
 }
 
 impl CoverageReport {
@@ -590,6 +670,16 @@ impl CoverageReport {
         }
         let _ = writeln!(out, "\nSHALL всего: {}", self.total);
         let _ = writeln!(out, "- покрыто детектором: {}", self.covered);
+        // F2: «покрыто детектором» расщепляется по доказательности — зубья
+        // правил (волна B): покрытие не должно быть формальным.
+        if self.covered > 0 {
+            let _ = writeln!(out, "  - с подтверждёнными зубьями: {}", self.covered_teeth);
+            let _ = writeln!(
+                out,
+                "  - покрыто текстом (зубья не подтверждены): {}",
+                self.covered_text
+            );
+        }
         let _ = writeln!(out, "- unverifiable с owner: {}", self.unverifiable);
         let _ = writeln!(out, "- без решения: {}", self.unresolved);
 
@@ -633,15 +723,155 @@ impl CoverageReport {
         if !any {
             let _ = writeln!(out, "- нет");
         }
+
+        // F2: «покрыто текстом» — отдельная строка отчёта: правила есть, но
+        // их зубья не подтверждены измерением (`arch-be rules teeth --save`).
+        if self.covered_text > 0 {
+            let _ = writeln!(out, "\n## Покрыто текстом (зубья правил не подтверждены)");
+            if self.teeth_file.is_none() {
+                let _ = writeln!(
+                    out,
+                    "Измерения нет ({} отсутствует) — «текстом» здесь означает «не проверялось»; \
+                     прогоните `arch-be rules teeth --save`.",
+                    crate::control::teeth::TEETH_RESULT_REL
+                );
+            }
+            for item in &self.items {
+                if item.status == CoverageStatus::Covered
+                    && item.teeth != Some(TeethEvidence::Confirmed)
+                {
+                    let r = &item.requirement;
+                    let mark = match item.teeth {
+                        Some(TeethEvidence::MeasuredNoTeeth) => "измерено беззубым",
+                        _ => "зубья не измерены",
+                    };
+                    let _ = writeln!(
+                        out,
+                        "- {} — {} ({}:{}, правила: {} — {mark})",
+                        r.id,
+                        r.title,
+                        r.file.display(),
+                        r.line,
+                        item.via.join(", ")
+                    );
+                }
+            }
+        }
+
+        // F4: осиротевшие ссылки covers: — правка текста требования меняет его
+        // id, и правило молча теряет цель. Warn-уровень: видно в отчёте, гейт
+        // не ломает.
+        let _ = writeln!(out, "\n## Осиротевшие covers (covers_orphan)");
+        if self.orphans.is_empty() {
+            let _ = writeln!(out, "- нет");
+        }
+        for orphan in &self.orphans {
+            let _ = write!(
+                out,
+                "- [warn] covers_orphan — {} (правила: {}) → ",
+                orphan.id,
+                orphan.rules.join(", ")
+            );
+            match &orphan.candidate {
+                Some(c) => {
+                    let _ = writeln!(
+                        out,
+                        "кандидат той же capability без покрытия: {} — «{}» ({}:{}). Проверьте, \
+                         что это то же требование после правки текста, и обновите covers: на \
+                         новый id; если требование снято — снимите ссылку и пересмотрите само \
+                         правило",
+                        c.id,
+                        c.title,
+                        c.file.display(),
+                        c.line
+                    );
+                }
+                None => {
+                    let _ = writeln!(
+                        out,
+                        "непокрытого кандидата в этой capability нет. Если требование снято — \
+                         снимите ссылку из covers: и пересмотрите правило; если текст правили — \
+                         обновите covers: после сверки с новой редакцией"
+                    );
+                }
+            }
+        }
         out
     }
+}
+
+/// Контекст зубьев для классификации покрытия (F2): сохранённое измерение
+/// (`.arch-handoff/teeth.json`) и полный резолв реестра — отпечаток правила
+/// сверяется по живым полям, иначе вчерашний замер засчитывался бы на
+/// сегодняшнюю редакцию правила.
+struct TeethContext {
+    /// Сохранённое измерение зубьев.
+    report: crate::control::teeth::TeethReport,
+    /// Полный резолв реестра, из которого прочитаны `covers:`.
+    rules: Vec<crate::control::FitnessRule>,
+}
+
+/// Читает контекст зубьев для репозитория и файла ограничений. Толерантный
+/// ридер: нет файла измерения или реестр не резолвится (например, скелет
+/// `CONSTRAINTS.from-openspec.yaml` без `type`) — `None`, все покрытия
+/// получат [`TeethEvidence::NotMeasured`] («не проверялось», а не «зубьев
+/// нет»).
+fn load_teeth_context(root: &Path, constraints: Option<&Path>) -> Option<TeethContext> {
+    let report = crate::control::teeth::load(root)?;
+    let rules = constraints
+        .and_then(|p| crate::control::load_constraints_resolved(p).ok())
+        .map(|r| r.rules)
+        .unwrap_or_default();
+    Some(TeethContext { report, rules })
+}
+
+/// Доказательность покрытия требования зубьями его правил-детекторов:
+/// `Confirmed`, если хотя бы одно правило с подтверждёнными зубьями;
+/// `MeasuredNoTeeth`, если ВСЕ измерены и беззубы; иначе `NotMeasured`
+/// (хотя бы одно правило не измерено — «зубьев нет» утверждать нельзя).
+fn teeth_evidence(covering: &[&CoverRule], ctx: Option<&TeethContext>) -> Option<TeethEvidence> {
+    use crate::control::teeth::TeethStatus;
+
+    let detectors: Vec<&&CoverRule> = covering.iter().filter(|r| !r.unverifiable).collect();
+    if detectors.is_empty() {
+        return None;
+    }
+    // Измерения нет вовсе (нет teeth.json) — честное «не измерено»,
+    // а не отсутствие данных: потребитель различает это по полю отчёта
+    // `teeth_file` (`None` — «не проверялось», а не «зубьев нет»).
+    let Some(ctx) = ctx else {
+        return Some(TeethEvidence::NotMeasured);
+    };
+    let mut any_unmeasured = false;
+    for cover_rule in detectors {
+        let status = cover_rule
+            .name
+            .as_deref()
+            .and_then(|name| ctx.rules.iter().find(|fr| fr.name == name))
+            .and_then(|fr| ctx.report.status_of(fr));
+        match status {
+            Some(TeethStatus::Confirmed) => return Some(TeethEvidence::Confirmed),
+            Some(TeethStatus::Toothless | TeethStatus::Trivial | TeethStatus::GlobEmpty) => {}
+            Some(TeethStatus::Unknown) | None => any_unmeasured = true,
+        }
+    }
+    Some(if any_unmeasured {
+        TeethEvidence::NotMeasured
+    } else {
+        TeethEvidence::MeasuredNoTeeth
+    })
 }
 
 /// Классифицирует требование по карточкам правил: детектор (хотя бы одно
 /// покрывающее правило без `unverifiable`) → unverifiable с owner →
 /// без решения. Заглушка `unverifiable` с пустым owner — это ещё НЕ решение
 /// (свежий скелет `openspec init`), требование остаётся «без решения».
-fn classify(requirement: &Requirement, rules: &[CoverRule]) -> CoveredRequirement {
+/// Для покрытых детектором добавляется доказательность зубьев (F2).
+fn classify(
+    requirement: &Requirement,
+    rules: &[CoverRule],
+    teeth: Option<&TeethContext>,
+) -> CoveredRequirement {
     let covering: Vec<&CoverRule> = rules
         .iter()
         .filter(|r| r.covers.iter().any(|c| c == &requirement.id))
@@ -660,10 +890,16 @@ fn classify(requirement: &Requirement, rules: &[CoverRule]) -> CoveredRequiremen
     } else {
         CoverageStatus::Unresolved
     };
+    let teeth = if status == CoverageStatus::Covered {
+        teeth_evidence(&covering, teeth)
+    } else {
+        None
+    };
     CoveredRequirement {
         requirement: requirement.clone(),
         status,
         via,
+        teeth,
     }
 }
 
@@ -677,6 +913,76 @@ fn unique_by_id(requirements: Vec<Requirement>) -> Vec<Requirement> {
         .collect()
 }
 
+/// Осиротевшие ссылки `covers:` (F4): идентификаторы вида `openspec:<cap>#<hash8>`,
+/// которых нет среди просканированных требований (правка текста требования
+/// меняет его id — связь рвётся молча). Для каждой ссылки — кандидат:
+/// первое (в порядке файл/строка, детерминированно) непокрытое требование
+/// той же capability.
+///
+/// `known` — все идентификаторы ПОЛНОГО сканирования (в области `changed`
+/// шире отфильтрованного списка: иначе ссылка на требование вне области
+/// выглядела бы осиротевшей — ложные срабатывания недопустимы).
+///
+/// Идентификаторы без префикса `openspec:` адаптеру не принадлежат и не
+/// проверяются (поле `covers:` может ссылаться на что-то иное — ложные
+/// срабатывания недопустимы). Дубль id у двух правил — одна находка с обоими
+/// именами.
+fn find_orphans(
+    known: &BTreeSet<String>,
+    items: &[CoveredRequirement],
+    rules: &[CoverRule],
+) -> Vec<CoverOrphan> {
+    // Группировка «id → правила» в порядке появления (детерминизм отчёта).
+    let mut by_id: Vec<(String, Vec<String>)> = Vec::new();
+    for rule in rules {
+        let name = rule
+            .name
+            .clone()
+            .unwrap_or_else(|| "<без имени>".to_string());
+        for id in &rule.covers {
+            if !id.starts_with(ID_PREFIX) || known.contains(id) {
+                continue;
+            }
+            if let Some((_, names)) = by_id.iter_mut().find(|(k, _)| k == id) {
+                if !names.contains(&name) {
+                    names.push(name.clone());
+                }
+            } else {
+                by_id.push((id.clone(), vec![name.clone()]));
+            }
+        }
+    }
+    by_id
+        .into_iter()
+        .map(|(id, rules)| {
+            // Capability — часть id между префиксом и '#'; без неё кандидата
+            // не ищем (невалидная форма id — сама по себе находка-орфан).
+            let capability = id
+                .strip_prefix(ID_PREFIX)
+                .and_then(|rest| rest.split_once('#'))
+                .map(|(cap, _)| cap);
+            let candidate = capability.and_then(|cap| {
+                items
+                    .iter()
+                    .find(|i| {
+                        i.status == CoverageStatus::Unresolved && i.requirement.capability == cap
+                    })
+                    .map(|i| OrphanCandidate {
+                        id: i.requirement.id.clone(),
+                        title: i.requirement.title.clone(),
+                        file: i.requirement.file.clone(),
+                        line: i.requirement.line,
+                    })
+            });
+            CoverOrphan {
+                id,
+                rules,
+                candidate,
+            }
+        })
+        .collect()
+}
+
 /// Отчёт покрытия требований `OpenSpec` правилами `CONSTRAINTS.yaml`.
 ///
 /// `constraints`: явный путь к файлу ограничений; `None` — авто-детект
@@ -687,7 +993,34 @@ fn unique_by_id(requirements: Vec<Requirement>) -> Vec<Requirement> {
 /// `openspec/specs` отсутствует, явно заданный файл ограничений не
 /// читается/невалиден, файл спеки не читается.
 pub fn coverage(root: &Path, constraints: Option<&Path>) -> Result<CoverageReport> {
-    let requirements = unique_by_id(scan_requirements(root)?);
+    coverage_scoped(root, constraints, None)
+}
+
+/// [`coverage`] с областью (F2): `changed = Some(files)` — только требования
+/// дельт активных changes, у которых хотя бы один файл каталога
+/// `openspec/changes/<id>/` входит в `files`, и требования живых спек, чей
+/// файл изменён; `None` — всё (поведение `openspec coverage`).
+///
+/// Осиротевшие `covers:` (F4) считаются по ПОЛНОМУ сканированию требований:
+/// ссылка на требование вне области — не сирота.
+///
+/// # Errors
+/// Как у [`coverage`].
+pub fn coverage_scoped(
+    root: &Path,
+    constraints: Option<&Path>,
+    changed: Option<&[String]>,
+) -> Result<CoverageReport> {
+    let scanned = scan_requirements(root)?;
+    let known: BTreeSet<String> = scanned.iter().map(|r| r.id.clone()).collect();
+    let requirements = match changed {
+        None => scanned,
+        Some(files) => scanned
+            .into_iter()
+            .filter(|r| in_changed_scope(r, files))
+            .collect(),
+    };
+    let requirements = unique_by_id(requirements);
     // Единый резолвер (E2): явный путь → пакетная копия → корневая; дрейф
     // двух копий (корневая новее пакетной — частый случай) — пометкой,
     // а не молчаливым покрытием по устаревшей копии.
@@ -702,18 +1035,49 @@ pub fn coverage(root: &Path, constraints: Option<&Path>) -> Result<CoverageRepor
         Some(p) => load_cover_rules(p)?,
         None => Vec::new(),
     };
-    let items: Vec<CoveredRequirement> = requirements.iter().map(|r| classify(r, &rules)).collect();
+    // F2: зубья покрывающих правил — по сохранённому измерению (волна B);
+    // толерантный ридер: нет файла — «зубья не измерены», а не «зубьев нет».
+    let teeth = load_teeth_context(root, path.as_deref());
+    let items: Vec<CoveredRequirement> = requirements
+        .iter()
+        .map(|r| classify(r, &rules, teeth.as_ref()))
+        .collect();
     let count = |status: CoverageStatus| items.iter().filter(|i| i.status == status).count();
+    let covered_teeth = items
+        .iter()
+        .filter(|i| i.teeth == Some(TeethEvidence::Confirmed))
+        .count();
+    let orphans = find_orphans(&known, &items, &rules);
+    let covered = count(CoverageStatus::Covered);
+    let covered_text = covered - covered_teeth;
     Ok(CoverageReport {
         root: root.to_path_buf(),
         constraints: path,
         constraints_drift: drift,
         total: items.len(),
-        covered: count(CoverageStatus::Covered),
+        covered,
         unverifiable: count(CoverageStatus::Unverifiable),
         unresolved: count(CoverageStatus::Unresolved),
         items,
+        orphans,
+        covered_teeth,
+        covered_text,
+        teeth_file: teeth.map(|_| root.join(crate::control::teeth::TEETH_RESULT_REL)),
     })
+}
+
+/// Требование в области `changed` (F2): живая спека — её файл изменён;
+/// требование дельты — change затронут диффом (хотя бы один файл каталога
+/// `openspec/changes/<id>/` в списке изменённых).
+fn in_changed_scope(requirement: &Requirement, changed: &[String]) -> bool {
+    let file = requirement.file.to_string_lossy();
+    match &requirement.source {
+        ReqSource::Spec => changed.iter().any(|f| f.as_str() == file.as_ref()),
+        ReqSource::Change { change } => {
+            let prefix = format!("openspec/changes/{change}/");
+            changed.iter().any(|f| f.starts_with(&prefix))
+        }
+    }
 }
 
 /// Кандидат в спайн из design.md: заголовок секции решений/ограничений.
@@ -1001,6 +1365,65 @@ impl GateReport {
     }
 }
 
+/// Каталог активного change (`openspec/changes/<id>`): существует и не в
+/// архиве. Общая проверка гейтов change (`gate_archive`, `gate_change`) и
+/// handoff из change (F6).
+///
+/// # Errors
+/// Change не найден (или уже в архиве — об этом подсказка в тексте).
+pub fn active_change_dir(root: &Path, change_id: &str) -> Result<PathBuf> {
+    let change_dir = root.join("openspec/changes").join(change_id);
+    if !change_dir.is_dir() {
+        let archived = root.join("openspec/changes/archive").join(change_id);
+        let hint = if archived.is_dir() {
+            " — change уже в архиве (openspec/changes/archive/)"
+        } else {
+            ""
+        };
+        return Err(HarnessError::Control(format!(
+            "change '{change_id}' не найден: {}{hint}",
+            change_dir.display()
+        )));
+    }
+    Ok(change_dir)
+}
+
+/// Требования дельты активного change (`openspec/changes/<id>/specs/**/*.md`;
+/// порядок детерминирован: файл, строка). Парсится напрямую, без
+/// `openspec/specs`: у репозитория могут быть только changes.
+///
+/// # Errors
+/// Change не найден (см. [`active_change_dir`]), файл спеки не читается.
+pub fn change_requirements(root: &Path, change_id: &str) -> Result<Vec<Requirement>> {
+    let change_dir = active_change_dir(root, change_id)?;
+    let mut out = Vec::new();
+    let source = ReqSource::Change {
+        change: change_id.to_string(),
+    };
+    for file in collect_md(&change_dir.join("specs")) {
+        parse_spec_file(&file, root, &source, &mut out)?;
+    }
+    out.sort_by(|a, b| a.file.cmp(&b.file).then(a.line.cmp(&b.line)));
+    Ok(out)
+}
+
+/// Файлы-носители change для handoff-пакета (F6): `proposal.md`, `design.md`,
+/// `tasks.md` (только существующие) и дельты спек `specs/**/*.md` — в этом
+/// порядке, пути абсолютные.
+///
+/// # Errors
+/// Change не найден (см. [`active_change_dir`]).
+pub fn change_packet_files(root: &Path, change_id: &str) -> Result<Vec<PathBuf>> {
+    let change_dir = active_change_dir(root, change_id)?;
+    let mut out: Vec<PathBuf> = ["proposal.md", "design.md", "tasks.md"]
+        .iter()
+        .map(|name| change_dir.join(name))
+        .filter(|p| p.is_file())
+        .collect();
+    out.extend(collect_md(&change_dir.join("specs")));
+    Ok(out)
+}
+
 /// Гейт архивации change (точка CI перед `openspec archive`): FAIL, если
 /// хотя бы одно требование дельты `changes/<change_id>/specs/` — «без
 /// решения» (нет ни детектора, ни unverifiable с owner), либо падает
@@ -1015,28 +1438,10 @@ pub fn gate_archive(
     change_id: &str,
     constraints: Option<&Path>,
 ) -> Result<GateReport> {
-    let change_dir = root.join("openspec/changes").join(change_id);
-    if !change_dir.is_dir() {
-        let archived = root.join("openspec/changes/archive").join(change_id);
-        let hint = if archived.is_dir() {
-            " — change уже в архиве (openspec/changes/archive/)"
-        } else {
-            ""
-        };
-        return Err(HarnessError::Control(format!(
-            "change '{change_id}' не найден: {}{hint}",
-            change_dir.display()
-        )));
-    }
+    active_change_dir(root, change_id)?;
     // Дельта change парсится напрямую: scan_requirements требует
     // openspec/specs, а у репозитория могут быть только changes.
-    let mut delta_reqs = Vec::new();
-    let source = ReqSource::Change {
-        change: change_id.to_string(),
-    };
-    for file in collect_md(&change_dir.join("specs")) {
-        parse_spec_file(&file, root, &source, &mut delta_reqs)?;
-    }
+    let delta_reqs = change_requirements(root, change_id)?;
 
     let path = match constraints {
         Some(p) => Some(p.to_path_buf()),
@@ -1046,9 +1451,10 @@ pub fn gate_archive(
         Some(p) => load_cover_rules(p)?,
         None => Vec::new(),
     };
+    let teeth = load_teeth_context(root, path.as_deref());
     let items: Vec<CoveredRequirement> = unique_by_id(delta_reqs)
         .iter()
-        .map(|r| classify(r, &rules))
+        .map(|r| classify(r, &rules, teeth.as_ref()))
         .collect();
     let total = items.len();
     let uncovered: Vec<CoveredRequirement> = items
@@ -1067,6 +1473,231 @@ pub fn gate_archive(
         total,
         uncovered,
         control,
+        passed,
+    })
+}
+
+/// Маршрут значимости по диффу диапазона change (F3): тот же детектор, что у
+/// `gate --route auto` (S-1, ADR-034) — механический минимум без declared.
+#[derive(Debug)]
+pub struct ChangeRoute {
+    /// Маршрут (Fast/Standard/Critical).
+    pub route: crate::control::Route,
+    /// Счёт значимости.
+    pub score: usize,
+    /// Сработавшие триггеры.
+    pub fired: Vec<String>,
+}
+
+/// Отчёт гейта активного change (F3, ADR-067): покрытие требований дельты,
+/// `delta_guard` с этим change как источником, `control check`, маршрут по
+/// диффу диапазона change.
+#[derive(Debug)]
+pub struct ChangeGateReport {
+    /// Идентификатор change.
+    pub change: String,
+    /// База git-диффа, как передана (для печати).
+    pub base: String,
+    /// Требований в дельте change.
+    pub total: usize,
+    /// Требования дельты без решения (блокируют).
+    pub uncovered: Vec<CoveredRequirement>,
+    /// Покрыто детектором, но без подтверждённых зубьев (волна B): «покрыто
+    /// текстом» — отчётный счётчик, не блок.
+    pub text_covered: usize,
+    /// Итог `delta_guard` (источник покрытия — changes `OpenSpec`, F1);
+    /// `None` — git недоступен (честная пометка, не притворяется прогоном).
+    pub delta_guard: Option<crate::delta::GuardReport>,
+    /// Итог `control check` (`None` — файл ограничений не найден).
+    pub control: Option<crate::control::FitnessReport>,
+    /// Маршрут по диффу (`None` — git недоступен или дифф не собрался).
+    pub route: Option<ChangeRoute>,
+    /// Гейт пройден.
+    pub passed: bool,
+}
+
+impl ChangeGateReport {
+    /// Рендерит отчёт гейта change в markdown.
+    #[must_use]
+    pub fn to_markdown(&self) -> String {
+        let mut out = String::new();
+        let _ = writeln!(
+            out,
+            "# Гейт активного change OpenSpec: '{}' (база диффа: {})",
+            self.change, self.base
+        );
+        match &self.route {
+            Some(r) => {
+                let fired = if r.fired.is_empty() {
+                    "триггеров нет".to_string()
+                } else {
+                    r.fired.join(", ")
+                };
+                let _ = writeln!(
+                    out,
+                    "\nМаршрут по диффу: {} (score {}, {fired})",
+                    r.route, r.score
+                );
+            }
+            None => {
+                let _ = writeln!(
+                    out,
+                    "\nМаршрут по диффу: не вычислен (не git-репозиторий или дифф недоступен)"
+                );
+            }
+        }
+        let _ = writeln!(
+            out,
+            "\n## Покрытие требований change\n\nТребований: {}, без решения: {}, покрыто текстом (зубья не подтверждены): {}",
+            self.total,
+            self.uncovered.len(),
+            self.text_covered
+        );
+        for item in &self.uncovered {
+            let r = &item.requirement;
+            let _ = writeln!(
+                out,
+                "- [error] requirement_uncovered — {} — «{}» ({}:{}) → добавьте правило с \
+                 covers: [\"{}\"] или назначьте заглушку unverifiable с owner",
+                r.id,
+                r.title,
+                r.file.display(),
+                r.line,
+                r.id
+            );
+        }
+        let _ = writeln!(out, "\n## delta_guard (источник — changes OpenSpec)");
+        match &self.delta_guard {
+            Some(guard) => {
+                let _ = writeln!(out, "\n{}", crate::delta::render_guard(guard).trim_end());
+            }
+            None => {
+                let _ = writeln!(
+                    out,
+                    "\nНе прогонялся: не git-репозиторий — дифф защищённых путей недоступен."
+                );
+            }
+        }
+        let _ = writeln!(out, "\n## control check");
+        match &self.control {
+            Some(report) => {
+                let _ = writeln!(
+                    out,
+                    "\n{} — {}",
+                    if report.passed { "PASS" } else { "FAIL" },
+                    report.summary
+                );
+            }
+            None => {
+                let _ = writeln!(out, "\nНе запускался (файл ограничений не найден).");
+            }
+        }
+        let _ = writeln!(out, "\nИтог: {}", if self.passed { "PASS" } else { "FAIL" });
+        out
+    }
+}
+
+/// Гейт активного change (F3, ADR-067): для MR, реализующего change —
+/// покрытие требований его дельты, `delta_guard` с changes `OpenSpec` как
+/// источником покрытия (правки защищённых путей обязаны упоминаться в
+/// change), `control check` и маршрут значимости по диффу `base..HEAD`.
+///
+/// Fail-soft на инфраструктуру (как у составляющих гейта): без
+/// git-репозитория `delta_guard` и маршрут помечаются недоступными, а не
+/// притворяются пройденными; вердикт тогда решают покрытие и control check.
+///
+/// # Errors
+/// Change не найден (или уже в архиве), файл ограничений не читается,
+/// правила `control check` некорректны, `delta_guard` при живом git упал
+/// (например, несуществующая база).
+pub fn gate_change(
+    root: &Path,
+    change_id: &str,
+    constraints: Option<&Path>,
+    base: Option<&str>,
+    limits: (usize, usize),
+    globs: &crate::control::DiffGlobs,
+) -> Result<ChangeGateReport> {
+    active_change_dir(root, change_id)?;
+    let delta_reqs = change_requirements(root, change_id)?;
+
+    let path = match constraints {
+        Some(p) => Some(p.to_path_buf()),
+        None => default_constraints(root),
+    };
+    let rules = match &path {
+        Some(p) => load_cover_rules(p)?,
+        None => Vec::new(),
+    };
+    let teeth = load_teeth_context(root, path.as_deref());
+    let items: Vec<CoveredRequirement> = unique_by_id(delta_reqs)
+        .iter()
+        .map(|r| classify(r, &rules, teeth.as_ref()))
+        .collect();
+    let total = items.len();
+    let text_covered = items
+        .iter()
+        .filter(|i| {
+            i.status == CoverageStatus::Covered && i.teeth != Some(TeethEvidence::Confirmed)
+        })
+        .count();
+    let uncovered: Vec<CoveredRequirement> = items
+        .into_iter()
+        .filter(|i| i.status == CoverageStatus::Unresolved)
+        .collect();
+
+    let control = match &path {
+        Some(p) => Some(crate::control::check(root, p)?),
+        None => None,
+    };
+
+    // delta_guard и маршрут требуют git с HEAD; без него — честная пометка.
+    let git_ready = crate::handoff::git_out(root, &["rev-parse", "--git-dir"]).is_some()
+        && crate::handoff::git_out(root, &["rev-parse", "--verify", "HEAD"]).is_some();
+    let delta_guard = if git_ready {
+        Some(crate::delta::guard_with(
+            root,
+            base,
+            &[],
+            &crate::delta::GuardOptions {
+                sources: Some(vec![crate::delta::CoverageSource::Openspec]),
+                agent_range: None,
+            },
+        )?)
+    } else {
+        None
+    };
+    let route = if git_ready {
+        crate::control::detect_diff_triggers_with(root, base, globs)
+            .ok()
+            .map(|diff| {
+                let scored = crate::control::score_with_sources(
+                    &std::collections::BTreeMap::new(),
+                    &diff,
+                    limits.0,
+                    limits.1,
+                );
+                ChangeRoute {
+                    route: scored.significance.route,
+                    score: scored.significance.score,
+                    fired: scored.significance.fired,
+                }
+            })
+    } else {
+        None
+    };
+    let passed = uncovered.is_empty()
+        && delta_guard.as_ref().is_none_or(|g| g.passed)
+        && control.as_ref().is_none_or(|c| c.passed);
+    Ok(ChangeGateReport {
+        change: change_id.to_string(),
+        base: base.unwrap_or("HEAD").to_string(),
+        total,
+        uncovered,
+        text_covered,
+        delta_guard,
+        control,
+        route,
         passed,
     })
 }
@@ -1103,10 +1734,14 @@ impl Tool for OpenspecCoverageTool {
             description: "Покрытие требований OpenSpec (openspec/specs/ + активные changes) \
                           правилами CONSTRAINTS.yaml (связь — поле covers: правила): SHALL \
                           всего / покрыто детектором / unverifiable с owner / без решения, \
-                          непокрытые поимённо. Ответ — JSON: passed + счётчики \
-                          total/covered/unverifiable/unresolved + unresolved_items + \
-                          report_markdown. passed=false только в strict-режиме при \
-                          требованиях «без решения»"
+                          непокрытые поимённо; осиротевшие ссылки covers: на исчезнувший id — \
+                          covers_orphans с кандидатом на перелинковку (F4, warn-уровень). \
+                          Покрытие детектором расщеплено по зубьям правил (F2): covered_teeth \
+                          (подтверждены измерением .arch-handoff/teeth.json) и covered_text \
+                          (покрытие текстом). Ответ — JSON: passed + счётчики \
+                          total/covered/covered_teeth/covered_text/unverifiable/unresolved + \
+                          unresolved_items + report_markdown. passed=false только в \
+                          strict-режиме при требованиях «без решения»"
                 .into(),
             parameters: json!({
                 "type": "object",
@@ -1156,12 +1791,17 @@ impl Tool for OpenspecCoverageTool {
             })
             .collect();
         let summary = format!(
-            "OpenSpec-покрытие {}: SHALL {}, покрыто {}, unverifiable {}, без решения {}{}",
+            "OpenSpec-покрытие {}: SHALL {}, покрыто {}, unverifiable {}, без решения {}{}{}",
             report.root.display(),
             report.total,
             report.covered,
             report.unverifiable,
             report.unresolved,
+            if report.orphans.is_empty() {
+                String::new()
+            } else {
+                format!(", осиротевших covers: {}", report.orphans.len())
+            },
             if strict { " (strict)" } else { "" }
         );
         let drift_note = match (&report.constraints, &report.constraints_drift) {
@@ -1179,6 +1819,13 @@ impl Tool for OpenspecCoverageTool {
             "unverifiable": report.unverifiable,
             "unresolved": report.unresolved,
             "unresolved_items": unresolved_items,
+            // Аддитивное поле 0.3.14 (F4): осиротевшие ссылки covers: —
+            // id, правила, кандидат на перелинковку.
+            "covers_orphans": report.orphans,
+            // Аддитивные поля 0.3.14 (F2): расщепление покрытия детектором по
+            // зубьям правил (волна B) — покрытие не должно быть формальным.
+            "covered_teeth": report.covered_teeth,
+            "covered_text": report.covered_text,
             "summary": summary,
             "report_markdown": report.to_markdown(),
         });
@@ -1412,6 +2059,29 @@ mod tests {
         assert!(err.to_string().contains("openspec/specs не найден"));
     }
 
+    /// Репозиторий с одним лишь change (первый change проекта, живых спек
+    /// ещё нет) — нормальное состояние `OpenSpec`, а не «сбой»: сканируются
+    /// дельты changes (как уже умеет `scan_scenarios`).
+    #[test]
+    fn scan_tolerates_repo_with_only_changes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write(
+            &dir.path()
+                .join("openspec/changes/add-limits/specs/payments/spec.md"),
+            DELTA_SPEC_MD,
+        );
+        let reqs = scan_requirements(dir.path()).expect("scan по одним changes");
+        assert_eq!(reqs.len(), 1);
+        assert!(matches!(
+            &reqs[0].source,
+            ReqSource::Change { change } if change == "add-limits"
+        ));
+        // И покрытие считается (все требования — из дельты).
+        let report = coverage(dir.path(), None).expect("coverage");
+        assert_eq!(report.total, 1);
+        assert_eq!(report.unresolved, 1);
+    }
+
     #[test]
     fn coverage_classifies_covered_unverifiable_unresolved() {
         let dir = fixture_repo();
@@ -1452,6 +2122,26 @@ mod tests {
         let md = report.to_markdown();
         assert!(md.contains("без решения: 1"));
         assert!(md.contains("Колбэки идемпотентны"));
+        // F4: `covers: openspec:payments#deadbeef` у ownerless_stub — ссылка на
+        // несуществующий id, находка covers_orphan; живые ссылки двух других
+        // правил осиротевшими не считаются (ложных срабатываний нет).
+        assert_eq!(report.orphans.len(), 1, "{:?}", report.orphans);
+        let orphan = &report.orphans[0];
+        assert_eq!(orphan.id, "openspec:payments#deadbeef");
+        assert_eq!(orphan.rules, vec!["ownerless_stub".to_string()]);
+        // Кандидат — непокрытое требование той же capability с изменённым
+        // хэшем (дельта активного change тоже участвует).
+        let candidate = orphan.candidate.as_ref().expect("кандидат");
+        assert_eq!(
+            candidate.id,
+            requirement_id(
+                "payments",
+                &["Повторный колбэк MUST NOT менять состояние платежа.".to_string()]
+            )
+        );
+        assert_eq!(candidate.title, "Колбэки идемпотентны");
+        assert!(md.contains("covers_orphan"), "{md}");
+        assert!(md.contains(&candidate.id), "{md}");
     }
 
     #[test]
@@ -1461,6 +2151,64 @@ mod tests {
         assert_eq!(report.constraints, None);
         assert_eq!(report.unresolved, report.total);
         assert_eq!(report.covered, 0);
+        // F4: без реестра правил ссылок covers: нет — и осиротевших нет.
+        assert!(report.orphans.is_empty(), "{:?}", report.orphans);
+    }
+
+    /// F4: осиротевшая ссылка без кандидата (capability неизвестна или вся
+    /// покрыта) — находка есть, кандидата нет; id не из пространства
+    /// `openspec:` адаптером не проверяются (ложных срабатываний нет);
+    /// дубль id у двух правил — одна находка с обоими именами.
+    #[test]
+    fn coverage_orphan_without_candidate_and_foreign_ids_ignored() {
+        let dir = fixture_repo();
+        let root = dir.path();
+        write(
+            &root.join("CONSTRAINTS.yaml"),
+            "rules:\n\
+             \x20 - name: orphan_one\n\
+             \x20   type: must_contain\n\
+             \x20   glob: \"src/**\"\n\
+             \x20   pattern: \"x\"\n\
+             \x20   covers: [\"openspec:billing#deadbeef\"]\n\
+             \x20 - name: orphan_two\n\
+             \x20   unverifiable: true\n\
+             \x20   owner: \"@arch\"\n\
+             \x20   covers: [\"openspec:billing#deadbeef\"]\n\
+             \x20 - name: foreign_links\n\
+             \x20   type: must_contain\n\
+             \x20   glob: \"src/**\"\n\
+             \x20   pattern: \"y\"\n\
+             \x20   covers: [\"REQ-7\", \"AD-3\"]\n",
+        );
+        let report = coverage(root, None).expect("coverage");
+        assert_eq!(
+            report.orphans.len(),
+            1,
+            "дубль id у двух правил — одна находка: {:?}",
+            report.orphans
+        );
+        let orphan = &report.orphans[0];
+        assert_eq!(orphan.id, "openspec:billing#deadbeef");
+        assert_eq!(
+            orphan.rules,
+            vec!["orphan_one".to_string(), "orphan_two".to_string()],
+            "оба правила поимённо"
+        );
+        assert!(
+            orphan.candidate.is_none(),
+            "capability billing в репозитории нет — кандидата нет: {:?}",
+            report.orphans
+        );
+        let md = report.to_markdown();
+        assert!(md.contains("covers_orphan"), "{md}");
+        assert!(md.contains("непокрытого кандидата"), "{md}");
+        // Чужие идентификаторы (REQ-7, AD-3) находок не дали.
+        assert!(!md.contains("REQ-7"), "{md}");
+        assert!(!md.contains("AD-3"), "{md}");
+        // Warn-уровень: счётчики покрытия и exit-семантика не меняются
+        // (все три требования фикстуры остаются «без решения»).
+        assert_eq!(report.unresolved, 3);
     }
 
     /// E2: обе копии реестра различаются — покрытие по пакетной + пометка
@@ -1503,6 +2251,169 @@ mod tests {
         let report = coverage(root, None).expect("coverage");
         assert_eq!(report.constraints_drift, None);
         assert!(!report.to_markdown().contains("drift"));
+    }
+
+    // --- F2 (ADR-067): зубья покрытия и область changed ---------------------
+
+    /// Пишет `.arch-handoff/teeth.json` с заданным статусом для правила
+    /// (отпечаток — по живому правилу реестра фикстуры: правка правила после
+    /// измерения обнуляет запись, и тест это учитывает порядком вызова).
+    fn write_teeth_fixture(root: &Path, rule_name: &str, status: &str) {
+        let resolved = crate::control::load_constraints_resolved(&root.join("CONSTRAINTS.yaml"))
+            .expect("реестр фикстуры");
+        let rule = resolved
+            .rules
+            .iter()
+            .find(|r| r.name == rule_name)
+            .expect("правило фикстуры");
+        let fingerprint = crate::control::teeth::rule_fingerprint(rule);
+        let json = format!(
+            "{{\"schema\":\"{}\",\"case\":\"{}\",\"measured_at\":\"2026-10-08T00:00:00+00:00\",\
+             \"entries\":[{{\"name\":\"{rule_name}\",\"kind\":\"must_contain\",\
+             \"status\":\"{status}\",\"fingerprint\":\"{fingerprint}\",\"detail\":\"тест\"}}]}}",
+            crate::control::teeth::TEETH_SCHEMA,
+            root.display()
+        );
+        write(&root.join(crate::control::teeth::TEETH_RESULT_REL), &json);
+    }
+
+    /// F2: покрытие детектором расщепляется по доказательности зубьев: без
+    /// измерения — «не проверялось» (`NotMeasured`), с confirmed — полное
+    /// покрытие, с измерением беззубым — «покрыто текстом» (`MeasuredNoTeeth`).
+    /// Счётчики сходятся: covered = `covered_teeth` + `covered_text`.
+    #[test]
+    fn coverage_splits_detector_coverage_by_teeth() {
+        let dir = fixture_repo();
+        let root = dir.path();
+        let covered_id = fixture_money_id();
+        write(
+            &root.join("CONSTRAINTS.yaml"),
+            &format!(
+                "rules:\n  - name: detector_rule\n    type: must_contain\n    glob: 'src/**'\n    pattern: 'minor_units'\n    covers: [\"{covered_id}\"]\n"
+            ),
+        );
+        // Без teeth.json: покрыто текстом, но «не измерено», а не «беззубо».
+        let report = coverage(root, None).expect("coverage");
+        assert_eq!(report.covered, 1);
+        assert_eq!(report.covered_teeth, 0);
+        assert_eq!(report.covered_text, 1);
+        assert!(report.teeth_file.is_none(), "измерения не было");
+        let item = report
+            .items
+            .iter()
+            .find(|i| i.requirement.id == covered_id)
+            .expect("требование");
+        assert_eq!(item.teeth, Some(TeethEvidence::NotMeasured));
+        let md = report.to_markdown();
+        assert!(
+            md.contains("покрыто текстом (зубья не подтверждены): 1"),
+            "{md}"
+        );
+        assert!(md.contains("## Покрыто текстом"), "{md}");
+        assert!(md.contains("зубья не измерены"), "{md}");
+
+        // Подтверждённые зубья — полное покрытие, «текстом» пусто.
+        write_teeth_fixture(root, "detector_rule", "confirmed");
+        let report = coverage(root, None).expect("coverage");
+        assert_eq!(report.covered_teeth, 1);
+        assert_eq!(report.covered_text, 0);
+        assert!(report.teeth_file.is_some());
+        let item = report
+            .items
+            .iter()
+            .find(|i| i.requirement.id == covered_id)
+            .expect("требование");
+        assert_eq!(item.teeth, Some(TeethEvidence::Confirmed));
+        assert!(
+            !report.to_markdown().contains("## Покрыто текстом"),
+            "секция «текстом» пуста при полном покрытии"
+        );
+
+        // Измерено беззубым — «покрыто текстом» с меткой «измерено беззубым».
+        write_teeth_fixture(root, "detector_rule", "toothless");
+        let report = coverage(root, None).expect("coverage");
+        assert_eq!(report.covered_text, 1);
+        let item = report
+            .items
+            .iter()
+            .find(|i| i.requirement.id == covered_id)
+            .expect("требование");
+        assert_eq!(item.teeth, Some(TeethEvidence::MeasuredNoTeeth));
+        assert!(report.to_markdown().contains("измерено беззубым"));
+    }
+
+    /// F2, область changed: требования дельт затронутых changes и изменённых
+    /// живых спек; незатронутое в отчёт не входит, а ссылка на него из
+    /// `covers:` сиротой не считается (известные id — из полного скана).
+    #[test]
+    fn coverage_scoped_limits_to_changed_and_keeps_orphans_honest() {
+        let dir = fixture_repo();
+        let root = dir.path();
+        let money_id = fixture_money_id();
+        let delta_id = requirement_id(
+            "payments",
+            &["Повторный колбэк MUST NOT менять состояние платежа.".to_string()],
+        );
+        write(
+            &root.join("CONSTRAINTS.yaml"),
+            &format!(
+                "rules:\n  - name: detector_rule\n    type: must_contain\n    glob: 'src/**'\n    pattern: 'x'\n    covers: [\"{money_id}\", \"{delta_id}\"]\n"
+            ),
+        );
+        // Область: только файлы живой спеки → требование change вне области…
+        let changed = vec!["openspec/specs/payments/spec.md".to_string()];
+        let report = coverage_scoped(root, None, Some(&changed)).expect("coverage");
+        assert_eq!(report.total, 2, "только требования живой спеки");
+        assert!(
+            report
+                .items
+                .iter()
+                .all(|i| i.requirement.source == ReqSource::Spec),
+            "change вне области"
+        );
+        // …но ссылка на его id — НЕ сирота (известен из полного скана).
+        assert!(report.orphans.is_empty(), "{:?}", report.orphans);
+        // Область: каталог change → его дельта входит целиком.
+        let changed = vec!["openspec/changes/add-callback/proposal.md".to_string()];
+        let report = coverage_scoped(root, None, Some(&changed)).expect("coverage");
+        assert_eq!(report.total, 1);
+        assert!(matches!(
+            &report.items[0].requirement.source,
+            ReqSource::Change { change } if change == "add-callback"
+        ));
+        // Пустая область — пустой отчёт (не «всё непокрыто»).
+        let report = coverage_scoped(root, None, Some(&[])).expect("coverage");
+        assert_eq!(report.total, 0);
+        assert_eq!(report.unresolved, 0);
+    }
+
+    /// F6: файлы-носители change для пакета — proposal/design/tasks (из
+    /// существующих) + дельты спек, в стабильном порядке.
+    #[test]
+    fn change_packet_files_collects_known_documents() {
+        let dir = fixture_repo();
+        let root = dir.path();
+        // proposal.md и tasks.md у change фикстуры нет — не выдумываются.
+        let files = change_packet_files(root, "add-callback").expect("файлы change");
+        let names: Vec<String> = files
+            .iter()
+            .map(|p| {
+                p.strip_prefix(root)
+                    .expect("внутри корня")
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "openspec/changes/add-callback/design.md".to_string(),
+                "openspec/changes/add-callback/specs/payments/spec.md".to_string(),
+            ],
+            "proposal.md нет — не выдумывается; порядок стабилен: {names:?}"
+        );
+        let err = change_packet_files(root, "no-such").expect_err("нет change");
+        assert!(err.to_string().contains("не найден"), "{err}");
     }
 
     #[test]
@@ -1584,6 +2495,183 @@ mod tests {
         assert!(err.to_string().contains("уже в архиве"));
     }
 
+    // --- F3 (ADR-067): гейт активного change --------------------------------
+
+    /// git в каталоге с тестовой идентичностью коммиттера (образец —
+    /// `gate::testkit::git`; здесь свой, testkit внутренний для gate).
+    fn git(dir: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .expect("git");
+        assert!(
+            out.status.success(),
+            "git {}: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// Текст реестра фикстуры F3: `spine_present` + опционально детектор с
+    /// `covers:` на требование дельты change.
+    fn f3_constraints(cover_delta: bool) -> String {
+        let mut text = String::from(
+            "rules:\n  - name: spine_present\n    type: file_exists\n    path: \"ARCHITECTURE-SPINE.md\"\n    severity: error\n",
+        );
+        if cover_delta {
+            let id = requirement_id(
+                "payments",
+                &["Повторный вызов MUST NOT менять лимит.".to_string()],
+            );
+            let _ = writeln!(
+                text,
+                "  - name: no_f64_money\n    type: must_not_contain\n    glob: \"src/**/*.rs\"\n    \
+                 pattern: '\\bf64\\b'\n    severity: error\n    covers: [\"{id}\"]"
+            );
+        }
+        text
+    }
+
+    /// Репо-фикстура F3 (git): реестр + spine + src/lib.rs + активный change
+    /// `add-limits` с одним SHALL. `proposal_mentions_constraints` — упоминает
+    /// ли proposal.md защищённый `CONSTRAINTS.yaml` (для сценариев guard).
+    fn f3_repo(cover_delta: bool, proposal_mentions_constraints: bool) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tmp");
+        let root = dir.path();
+        write(&root.join("CONSTRAINTS.yaml"), &f3_constraints(cover_delta));
+        write(&root.join("ARCHITECTURE-SPINE.md"), "# Spine\n");
+        write(&root.join("src/lib.rs"), "pub fn charge() -> u64 { 1 }\n");
+        let proposal = if proposal_mentions_constraints {
+            "## Why\nНужны лимиты.\n\n## What Changes\n- CONSTRAINTS.yaml: правило покрытия.\n"
+        } else {
+            "## Why\nНужны лимиты.\n"
+        };
+        write(
+            &root.join("openspec/changes/add-limits/proposal.md"),
+            proposal,
+        );
+        write(
+            &root.join("openspec/changes/add-limits/specs/payments/spec.md"),
+            "## ADDED Requirements\n\n### Requirement: Лимиты идемпотентны\n\
+             Повторный вызов MUST NOT менять лимит.\n",
+        );
+        git(root, &["init", "-q"]);
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "init"]);
+        dir
+    }
+
+    /// F3, красная→зелёная: требование дельты без решения валит гейт change
+    /// (контроль и guard при этом зелёны — красит именно покрытие); правило с
+    /// `covers:` зеленит. Маршрут по диффу вычислен.
+    #[test]
+    fn gate_change_fails_on_uncovered_and_passes_with_covers() {
+        let dir = f3_repo(false, true);
+        let root = dir.path();
+        let globs = crate::control::DiffGlobs::default();
+        let report = gate_change(root, "add-limits", None, None, (1, 4), &globs).expect("гейт");
+        assert!(!report.passed);
+        assert_eq!(report.total, 1);
+        assert_eq!(report.uncovered.len(), 1);
+        assert!(
+            report.control.as_ref().is_some_and(|c| c.passed),
+            "control check зелёный"
+        );
+        assert!(
+            report.delta_guard.as_ref().is_some_and(|g| g.passed),
+            "чистое дерево — guard чист"
+        );
+        assert!(report.route.is_some(), "маршрут вычислен на git-репо");
+        let md = report.to_markdown();
+        assert!(md.contains("Итог: FAIL"), "{md}");
+        assert!(md.contains("без решения: 1"), "{md}");
+
+        // Покрываем требование дельты и коммитим (дифф чист — guard зелёный).
+        write(&root.join("CONSTRAINTS.yaml"), &f3_constraints(true));
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "покрытие"]);
+        let report = gate_change(root, "add-limits", None, None, (1, 4), &globs).expect("гейт");
+        assert!(report.passed, "{}", report.to_markdown());
+        assert!(report.to_markdown().contains("Итог: PASS"));
+    }
+
+    /// F3, guard с change как источником: незакоммиченная правка защищённого
+    /// `CONSTRAINTS.yaml` покрыта упоминанием в proposal.md ЭТОГО change
+    /// (метка `openspec:add-limits`); без упоминания — FAIL.
+    #[test]
+    fn gate_change_guard_uses_the_change_as_coverage_source() {
+        let globs = crate::control::DiffGlobs::default();
+        // Покрытие есть: proposal упоминает CONSTRAINTS.yaml.
+        let dir = f3_repo(true, true);
+        let root = dir.path();
+        // Незакоммиченная правка защищённого файла (комментарий — реестр валиден).
+        let mut text = f3_constraints(true);
+        let _ = writeln!(text, "# правка в работе");
+        write(&root.join("CONSTRAINTS.yaml"), &text);
+        let report = gate_change(root, "add-limits", None, None, (1, 4), &globs).expect("гейт");
+        let guard = report.delta_guard.as_ref().expect("guard прогнан");
+        assert!(
+            guard
+                .covered
+                .iter()
+                .any(|(f, label)| f == "CONSTRAINTS.yaml" && label == "openspec:add-limits"),
+            "источник покрытия — change: {:?}",
+            guard.covered
+        );
+        assert!(report.passed, "{}", report.to_markdown());
+
+        // Покрытия нет: proposal молчит про CONSTRAINTS.yaml — guard FAIL.
+        let dir = f3_repo(true, false);
+        let root = dir.path();
+        let mut text = f3_constraints(true);
+        let _ = writeln!(text, "# правка в работе");
+        write(&root.join("CONSTRAINTS.yaml"), &text);
+        let report = gate_change(root, "add-limits", None, None, (1, 4), &globs).expect("гейт");
+        let guard = report.delta_guard.as_ref().expect("guard прогнан");
+        assert!(!guard.passed, "правка мимо change не проходит");
+        assert!(!report.passed, "{}", report.to_markdown());
+        let md = report.to_markdown();
+        assert!(md.contains("Итог: FAIL"), "{md}");
+        assert!(md.contains("delta_guard"), "{md}");
+    }
+
+    /// F3: неизвестный и заархивированный change — понятные ошибки (как у
+    /// гейта архивации); репозиторий без git — guard и маршрут честно
+    /// помечены недоступными, вердикт решают покрытие и control check.
+    #[test]
+    fn gate_change_unknown_change_errors_and_non_git_is_explicit() {
+        let dir = f3_repo(false, true);
+        let globs = crate::control::DiffGlobs::default();
+        let err =
+            gate_change(dir.path(), "no-such", None, None, (1, 4), &globs).expect_err("нет change");
+        assert!(err.to_string().contains("не найден"), "{err}");
+
+        // Не git: guard и маршрут — None, вердикт по покрытию (красный:
+        // требование без решения) — и это написано в отчёте.
+        let plain = tempfile::tempdir().expect("tmp");
+        let root = plain.path();
+        write(&root.join("CONSTRAINTS.yaml"), &f3_constraints(false));
+        write(&root.join("ARCHITECTURE-SPINE.md"), "# Spine\n");
+        write(
+            &root.join("openspec/changes/add-limits/specs/payments/spec.md"),
+            "## ADDED Requirements\n\n### Requirement: Лимиты идемпотентны\n\
+             Повторный вызов MUST NOT менять лимит.\n",
+        );
+        let report = gate_change(root, "add-limits", None, None, (1, 4), &globs).expect("гейт");
+        assert!(report.delta_guard.is_none(), "guard честно не прогонялся");
+        assert!(report.route.is_none(), "маршрут честно не вычислен");
+        assert!(!report.passed, "покрытие решает: без решения — FAIL");
+        let md = report.to_markdown();
+        assert!(md.contains("не git-репозиторий"), "{md}");
+        assert!(md.contains("Итог: FAIL"), "{md}");
+    }
+
     /// Инструмент `openspec_coverage`: счётчики и поимённые непокрытые на
     /// фикстуре; по умолчанию — отчёт, strict — гейт по «без решения».
     #[tokio::test]
@@ -1613,6 +2701,8 @@ mod tests {
         assert_eq!(v["covered"], 1, "{v}");
         assert_eq!(v["unresolved"], 2, "{v}");
         assert_eq!(v["passed"], true, "отчёт, не гейт: {v}");
+        // F4: аддитивное поле осиротевших ссылок; здесь covers: валиден — пусто.
+        assert_eq!(v["covers_orphans"], json!([]), "{v}");
         let unresolved = v["unresolved_items"].as_array().expect("items");
         assert_eq!(unresolved.len(), 2, "{v}");
         assert!(

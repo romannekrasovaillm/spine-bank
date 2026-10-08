@@ -45,6 +45,8 @@ pub struct Config {
     pub judge: JudgeConfig,
     /// Порог независимости судьи для метрики доверия (ADR-048).
     pub trust: TrustConfig,
+    /// Настройки мутационного прогона redteam (волна E 0.3.14, ADR-065).
+    pub redteam: RedteamConfig,
     /// Настройки флота прогонов кодовых харнессов (изоляция и гейт мерджа).
     pub fleet: FleetConfig,
     /// Пороги маршрутизации значимости (Architecture Significance Score).
@@ -57,6 +59,8 @@ pub struct Config {
     pub evidence: EvidenceConfig,
     /// Требование исполняемой проверки инвариантов (ADR-050).
     pub trace: TraceConfig,
+    /// Проверки дрейфа «модель ↔ код» (волна C: C3 за флагом).
+    pub drift: DriftConfig,
     /// Пути к ассетам, отчётам и сессиям.
     pub paths: PathsConfig,
     /// Откуда конфиг загружен (нужно `harness_run` для горячего
@@ -798,14 +802,42 @@ pub struct TrustConfig {
     /// Уровни: `none` < `declared` < `declared_cross_family` < `launched` <
     /// `launched_cross_family`.
     pub min_independence: String,
+    /// Минимальная доля правил с подтверждёнными зубьями для ступени 3, когда
+    /// в модели нет несущих инвариантов (`load_bearing`) — читается только в
+    /// режиме `require_teeth` (B3, ADR-065). Порог — решение архитектора
+    /// ([РЕШЕНИЕ ЧЕЛОВЕКА] задания 0.3.14): дефолт 0.2, не зашит в логику.
+    pub behaviour_share_min: f64,
+    /// Строгий режим ступени 3 (схема «warn → error», ADR-065): `false`
+    /// (дефолт) — измерение зубьев показывается предупреждением якоря, условие
+    /// ступени прежнее (поведение 0.3.13 не ломается); `true` — условие
+    /// измеренное: несущие инварианты покрыты правилами с подтверждёнными
+    /// зубьями либо доля таких правил ≥ `behaviour_share_min`.
+    pub require_teeth: bool,
 }
 
 impl Default for TrustConfig {
     fn default() -> Self {
         Self {
             min_independence: crate::judge::INDEPENDENCE_DECLARED.to_string(),
+            behaviour_share_min: DEFAULT_BEHAVIOUR_SHARE_MIN,
+            require_teeth: false,
         }
     }
+}
+
+/// Дефолт порога доли правил с зубьями для ступени 3 доверия (B3, ADR-065).
+pub const DEFAULT_BEHAVIOUR_SHARE_MIN: f64 = 0.2;
+
+/// Настройки мутационного прогона (`arch-be redteam`, волна E 0.3.14).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RedteamConfig {
+    /// Порог доли обнаружения КОДОВЫХ дефектов (слой code: мутаторы D11, D11b,
+    /// D15, D18–D24), ниже которого прогон красный (E2, ADR-065). `None`
+    /// (дефолт) — кодовая доля только показывается; порог суммарной доли
+    /// (`--min-detection`, дефолт 0.78) не меняется. Значение порога —
+    /// решение архитектора ([РЕШЕНИЕ ЧЕЛОВЕКА] задания 0.3.14).
+    pub min_code_detection: Option<f64>,
 }
 
 /// Настройки LLM-судьи рубрик (калибровка и верификация, ADR-004).
@@ -941,6 +973,20 @@ pub struct SignificanceConfig {
     /// или правка которых поднимает `significant_nfr`.
     #[serde(default = "default_nfr_globs")]
     pub nfr_globs: Vec<String>,
+    /// Глобы границы безопасности (D2): auth-конфиги, сетевые политики, IAM —
+    /// правка файла под глобом зажигает `security_boundary_change`.
+    /// ПУСТ по умолчанию: глобальных эвристик нет, соглашения репозитория не
+    /// зашиты в бинарь; без настройки триггер остаётся заявляемым (D1).
+    #[serde(default)]
+    pub security_globs: Vec<String>,
+    /// Глобы зон доверия (D2): правка файла под глобом зажигает
+    /// `trust_zone_change`. Пусто по умолчанию, как у `security_globs`.
+    #[serde(default)]
+    pub trust_zone_globs: Vec<String>,
+    /// Глобы контрактов данных (D2): схемы событий/топиков — правка файла
+    /// под глобом зажигает `data_contract_change`. Пусто по умолчанию.
+    #[serde(default)]
+    pub data_contract_globs: Vec<String>,
 }
 
 /// Дефолтные глобы контрактов (T-05): каталоги, где контракты лежат по
@@ -973,6 +1019,9 @@ impl Default for SignificanceConfig {
             component_globs: default_component_globs(),
             integration_globs: default_integration_globs(),
             nfr_globs: default_nfr_globs(),
+            security_globs: Vec::new(),
+            trust_zone_globs: Vec::new(),
+            data_contract_globs: Vec::new(),
         }
     }
 }
@@ -1005,6 +1054,9 @@ impl SignificanceConfig {
             components: self.component_globs.clone(),
             integrations: self.integration_globs.clone(),
             nfr: self.nfr_globs.clone(),
+            security: self.security_globs.clone(),
+            trust_zone: self.trust_zone_globs.clone(),
+            data_contract: self.data_contract_globs.clone(),
         }
     }
 }
@@ -1013,7 +1065,8 @@ impl SignificanceConfig {
 ///
 /// Имена — имена составляющих `arch-be gate`: `fitness`, `delta_guard`,
 /// `rule_weakened`, `spine_lint`, `trace_check`, `sensors`, `nfr`,
-/// `evidence_verify`. Пустой список = на маршруте обязательных нет.
+/// `evidence_verify`, `decision_quality`, `semantic_quality`, `secrets`,
+/// `openspec_coverage`. Пустой список = на маршруте обязательных нет.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GateConfig {
@@ -1035,6 +1088,50 @@ pub struct GateConfig {
     /// Составляющая `secrets` (C3 волны C 0.3.12): литеральные секреты в
     /// исходниках — детекторы [`crate::secrets::builtin_rules`].
     pub secrets: SecretsConfig,
+    /// Составляющая `arch_drift` (K6 волны K 0.3.14): рёбра графа «как
+    /// построено» против модели. Дорогая (снимок базовой ревизии + обход
+    /// рабочего дерева), поэтому по умолчанию SKIP: включается записью
+    /// `arch_drift` в `[gate.required]` маршрута (тогда находки блокируют)
+    /// либо флагом здесь (находки — warn).
+    pub arch_drift: ArchDriftConfig,
+    /// Составляющая `openspec_coverage` (F2 волны F 0.3.14, ADR-067): покрытие
+    /// требований `OpenSpec` правилами реестра — область проверки.
+    #[serde(default)]
+    pub openspec_coverage: OpenspecCoverageConfig,
+}
+
+/// Настройки составляющей гейта `openspec_coverage` (F2): секция
+/// `[gate.openspec_coverage]`. Только область: включение в блокирующие — через
+/// `[gate.required]` маршрута (образец — `decision_quality`), ужесточений
+/// без явного решения проекта нет.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OpenspecCoverageConfig {
+    /// Область проверки (дефолт `changed` — дешёвый режим потока доработок).
+    pub scope: OpenspecCoverageScope,
+}
+
+/// Область покрытия требований `OpenSpec` в составляющей гейта (F2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenspecCoverageScope {
+    /// Требования дельт активных changes, затронутых диффом `base..дерево`,
+    /// плюс требования живых спек, чьи файлы изменены (дефолт).
+    #[default]
+    Changed,
+    /// Все требования — как `openspec coverage`.
+    All,
+}
+
+impl OpenspecCoverageScope {
+    /// Метка области для детали составляющей.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Changed => "changed",
+            Self::All => "all",
+        }
+    }
 }
 
 /// Severity находки `BodyChanged` анти-ослабления реестра (A1).
@@ -1124,6 +1221,20 @@ pub struct SecretsConfig {
     pub severity: SecretSeverity,
     /// Область сканирования (дефолт `changed`).
     pub scope: SecretScope,
+}
+
+/// Настройки составляющей `arch_drift` (K6): секция `[gate.arch_drift]`.
+///
+/// Составляющая строит граф «как построено» дважды (базовая ревизия git +
+/// рабочее дерево) и потому дорогая: по умолчанию она SKIP и включение —
+/// осознанное решение проекта (обратная совместимость, правило 4).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ArchDriftConfig {
+    /// Включить `arch_drift` вне `[gate.required]`: находки о рёбрах вне
+    /// модели и отклонённых рёбрах в коде — warn. `false` (дефолт) —
+    /// составляющая не прогоняется, если не названа в `[gate.required]`.
+    pub enabled: bool,
 }
 
 /// Настройки проверки overrides (A2): секция `[gate.overrides]`.
@@ -1358,6 +1469,15 @@ pub struct EvidenceConfig {
     pub min_bytes: u64,
     /// Строгость находок о содержании артефактов.
     pub semantics: EvidenceSemantics,
+    /// Требование машинных записей прогонов (A1, 0.3.14): `true` — отчёт
+    /// `validation`/`fitness_report`/`walking_skeleton`, написанный прозой без
+    /// записи `.arch-handoff/evidence/<kind>.json` (`arch-be evidence record`),
+    /// блокирует выпуск (`evidence_report_unbound` — `error`); `false`
+    /// (дефолт) — та же находка остаётся предупреждением. Схема «warn → error
+    /// по флагу» (правило 4): поведение прежних версий не меняется без явного
+    /// решения проекта.
+    #[serde(default)]
+    pub require_records: bool,
 }
 
 /// Дефолтный порог «пустышки»: 200 байт (стартовое предложение ТЗ 0.3.4,
@@ -1369,6 +1489,7 @@ impl Default for EvidenceConfig {
         Self {
             min_bytes: DEFAULT_EVIDENCE_MIN_BYTES,
             semantics: EvidenceSemantics::Auto,
+            require_records: false,
         }
     }
 }
@@ -1421,6 +1542,21 @@ impl Default for TraceConfig {
             executable_required: ExecutableRequired::Off,
         }
     }
+}
+
+/// Секция `[drift]`: проверки дрейфа «модель ↔ код» (волна C 0.3.14).
+///
+/// Дефолт off — обратная совместимость: находка `nfr-metric-missing`
+/// появляется только при осознанном включении (`[drift] nfr_metric_check =
+/// true` в конфиге кейса).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DriftConfig {
+    /// C3: метрика из `verification` NFR (`snake_case` с суффиксом
+    /// `_seconds`/`_total`/`_bytes`/`_ratio`) обязана встречаться в коде CMP,
+    /// реализующих NFR (`implements`), иначе warn-находка
+    /// `nfr-metric-missing`.
+    pub nfr_metric_check: bool,
 }
 
 impl ExecutableRequired {
@@ -1746,11 +1882,13 @@ impl Default for Config {
             cron: CronSettings::default(),
             judge: JudgeConfig::default(),
             trust: TrustConfig::default(),
+            redteam: RedteamConfig::default(),
             fleet: FleetConfig::default(),
             significance: SignificanceConfig::default(),
             gate: GateConfig::default(),
             evidence: EvidenceConfig::default(),
             trace: TraceConfig::default(),
+            drift: DriftConfig::default(),
             paths: PathsConfig::default(),
             loaded_from: None,
         }
@@ -2158,6 +2296,29 @@ mod tests {
             toml::from_str("[significance]\nfast_max = 4\nstandard_max = 4\n").expect("parse");
         let err = bad.significance.limits().expect_err("границы совпали");
         assert!(err.to_string().contains("fast_max"), "{err}");
+    }
+
+    /// D2: глобы слепой зоны (`security`/`trust_zone`/`data_contract`) по
+    /// умолчанию ПУСТЫ (поведение прежнее, глобальных эвристик нет), а из
+    /// `[significance]` конфига кейса доезжают до `DiffGlobs` детектора.
+    #[test]
+    fn significance_case_globs_default_empty_and_parse() {
+        let bare: Config = toml::from_str("").expect("deserialize empty");
+        let globs = bare.significance.diff_globs();
+        assert!(globs.security.is_empty(), "дефолт пуст: {globs:?}");
+        assert!(globs.trust_zone.is_empty(), "дефолт пуст: {globs:?}");
+        assert!(globs.data_contract.is_empty(), "дефолт пуст: {globs:?}");
+
+        let custom: Config = toml::from_str(
+            "[significance]\nsecurity_globs = [\"auth/**\"]\ntrust_zone_globs = [\"deploy/mesh/**\"]\ndata_contract_globs = [\"schemas/events/**\"]\n",
+        )
+        .expect("parse");
+        let globs = custom.significance.diff_globs();
+        assert_eq!(globs.security, vec!["auth/**".to_string()]);
+        assert_eq!(globs.trust_zone, vec!["deploy/mesh/**".to_string()]);
+        assert_eq!(globs.data_contract, vec!["schemas/events/**".to_string()]);
+        // Остальные глобы — дефолтные (T-05 не сломан).
+        assert_eq!(globs.contracts, default_contract_globs());
     }
 
     #[test]

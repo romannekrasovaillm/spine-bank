@@ -1362,6 +1362,7 @@ fn packet_registry_is_a_copy_of_the_root_one() {
         Route::Fast,
         HandoffOptions {
             refresh_constraints: true,
+            ..HandoffOptions::default()
         },
     )
     .expect("refresh");
@@ -1448,4 +1449,260 @@ fn manifest_pins_control_plane_minimum() {
         Some(expected_ci.as_str())
     );
     assert!(!pins.contains_key(".arch-handoff/mcp-calls.jsonl"));
+}
+
+// --- F6 (ADR-067): handoff из change OpenSpec ------------------------------
+
+/// Валидная якорная рубрика (минимум) — в assets временного каталога.
+const ANCHOR_RUBRIC: &str = "name: handoff_quality\n\
+    description: якорная рубрика приёмки\n\
+    scale_max: 5\n\
+    origin: anchor\n\
+    criteria:\n\
+    \x20 - id: epic_context\n\
+    \x20   name: Полнота epic-context\n\
+    \x20   description: контекст\n\
+    \x20   weight: 3\n\
+    \x20   anchors:\n\
+    \x20     1: плохо\n\
+    \x20     5: хорошо\n";
+
+/// Change `add-limits` в репозитории: proposal/design/tasks + дельта спеки с
+/// одним SHALL. `design_chars` — размер прозы design.md (для порога Critical).
+fn write_change(repo: &Path, design_chars: usize) {
+    write_file(
+        &repo.join("openspec/changes/add-limits/proposal.md"),
+        "## Why\nНужны лимиты платежей.\n\n## What Changes\n- лимиты и идемпотентность.\n",
+    );
+    let prose = "Лимит — решение по контексту платежа. ".repeat(design_chars / 40 + 1);
+    write_file(
+        &repo.join("openspec/changes/add-limits/design.md"),
+        &format!("# Design: add-limits\n\n## Решение 1: Таблица лимитов\n{prose}\n"),
+    );
+    write_file(
+        &repo.join("openspec/changes/add-limits/tasks.md"),
+        "- [ ] 1.1 Таблица лимитов\n",
+    );
+    write_file(
+        &repo.join("openspec/changes/add-limits/specs/payments/spec.md"),
+        "## ADDED Requirements\n\n### Requirement: Лимиты идемпотентны\n\
+         Повторный вызов MUST NOT менять лимит.\n",
+    );
+}
+
+/// F6: proposal/design/tasks и дельты спек change кладутся в пакет как
+/// --spec (контент — в ARCHITECTURE.md и SPEC.md, ссылки — в MANIFEST.json),
+/// требования change — критерием рубрики пакета поверх якоря.
+#[test]
+fn handoff_packet_from_openspec_change() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = tmp.path().join("repo");
+    git_repo_with_baseline(&repo);
+    write_change(&repo, 400);
+    let cfg = cfg_in(tmp.path());
+    write_file(
+        &cfg.paths.rubrics_dir().join("handoff_quality.yaml"),
+        ANCHOR_RUBRIC,
+    );
+    let packet = generate_handoff_opts(
+        &repo,
+        "реализовать add-limits",
+        &[],
+        &cfg,
+        None,
+        Route::Standard,
+        HandoffOptions {
+            refresh_constraints: false,
+            openspec_change: Some("add-limits".to_string()),
+        },
+    )
+    .expect("пакет");
+    assert_eq!(packet.openspec_change.as_deref(), Some("add-limits"));
+    assert_eq!(packet.openspec_requirements, 1, "одно SHALL у change");
+
+    let dir = repo.join(".arch-handoff");
+    let arch = std::fs::read_to_string(dir.join("ARCHITECTURE.md")).expect("arch");
+    assert!(
+        arch.contains("Нужны лимиты платежей"),
+        "proposal в контексте"
+    );
+    assert!(
+        arch.contains("Повторный вызов MUST NOT менять лимит"),
+        "дельта спеки в контексте"
+    );
+    let spec = std::fs::read_to_string(dir.join("SPEC.md")).expect("spec");
+    assert!(spec.contains("Лимиты идемпотентны"), "дельта в SPEC.md");
+    let manifest = std::fs::read_to_string(dir.join("MANIFEST.json")).expect("manifest");
+    assert!(
+        manifest.contains("\"openspec_change\": \"add-limits\""),
+        "{manifest}"
+    );
+    assert!(manifest.contains("proposal.md"), "{manifest}");
+
+    // Рубрика: якорный критерий на месте + добавлен критерий требований.
+    let rubric = crate::rubric::load(&dir.join("RUBRIC.yaml")).expect("рубрика читается");
+    assert!(
+        rubric.criteria.iter().any(|c| c.id == "epic_context"),
+        "якорь сохранён: {:?}",
+        rubric.criteria.iter().map(|c| &c.id).collect::<Vec<_>>()
+    );
+    let criterion = rubric
+        .criteria
+        .iter()
+        .find(|c| c.id == "openspec_change_requirements")
+        .expect("критерий требований change");
+    let req_id = crate::openspec::requirement_id(
+        "payments",
+        &["Повторный вызов MUST NOT менять лимит.".to_string()],
+    );
+    assert!(criterion.description.contains(&req_id), "{criterion:?}");
+    assert!(criterion.description.contains("add-limits"));
+}
+
+/// F6: порог контекста Critical считается С УЧЁТОМ файлов change: пакет без
+/// --spec, но с content-ным change, собирается на Critical; без change — та же
+/// генерация отклоняется порогом окна рубрики.
+#[test]
+fn handoff_change_counts_toward_critical_context_threshold() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = tmp.path().join("repo");
+    git_repo_with_baseline(&repo);
+    // Дизайн с объёмной прозой: выше окна рубрики (~3200 символов).
+    write_change(&repo, 5000);
+    let cfg = cfg_in(tmp.path());
+    let err = generate_handoff_opts(
+        &repo,
+        "реализовать add-limits",
+        &[],
+        &cfg,
+        None,
+        Route::Critical,
+        HandoffOptions::default(),
+    )
+    .expect_err("без change — ниже окна");
+    assert!(err.to_string().contains("epic-context"), "{err}");
+    let packet = generate_handoff_opts(
+        &repo,
+        "реализовать add-limits",
+        &[],
+        &cfg,
+        None,
+        Route::Critical,
+        HandoffOptions {
+            refresh_constraints: false,
+            openspec_change: Some("add-limits".to_string()),
+        },
+    )
+    .expect("с change порог пройден");
+    assert!(
+        packet.epic_context_tokens >= 800,
+        "{}",
+        packet.epic_context_tokens
+    );
+}
+
+/// F6: неизвестный/архивный change — понятная ошибка; существующая
+/// RUBRIC.yaml не затирается, требования не вписываются, и это — предупреждение
+/// пакета, а не молчание.
+#[test]
+fn handoff_openspec_change_unknown_and_existing_rubric_preserved() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = tmp.path().join("repo");
+    git_repo_with_baseline(&repo);
+    write_change(&repo, 400);
+    let cfg = cfg_in(tmp.path());
+    let err = generate_handoff_opts(
+        &repo,
+        "задача",
+        &[],
+        &cfg,
+        None,
+        Route::Standard,
+        HandoffOptions {
+            refresh_constraints: false,
+            openspec_change: Some("ghost".to_string()),
+        },
+    )
+    .expect_err("нет change");
+    assert!(err.to_string().contains("не найден"), "{err}");
+
+    // Существующая рубрика архитектора не затирается — предупреждение в пакете.
+    write_file(
+        &repo.join(".arch-handoff/RUBRIC.yaml"),
+        "# рубрика архитектора — не трогать\n",
+    );
+    let packet = generate_handoff_opts(
+        &repo,
+        "задача",
+        &[],
+        &cfg,
+        None,
+        Route::Standard,
+        HandoffOptions {
+            refresh_constraints: false,
+            openspec_change: Some("add-limits".to_string()),
+        },
+    )
+    .expect("пакет");
+    let rubric = std::fs::read_to_string(repo.join(".arch-handoff/RUBRIC.yaml")).expect("rubric");
+    assert!(rubric.contains("не трогать"), "файл не затёрт");
+    assert!(
+        packet
+            .warnings
+            .iter()
+            .any(|w| w.contains("не вписаны") && w.contains("add-limits")),
+        "предупреждение о невписанных требованиях: {:?}",
+        packet.warnings
+    );
+}
+
+/// F6 без якорной рубрики: пишется рубрика из критерия требований change.
+#[test]
+fn handoff_change_without_anchor_writes_requirements_rubric() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = tmp.path().join("repo");
+    git_repo_with_baseline(&repo);
+    write_change(&repo, 400);
+    let cfg = cfg_in(tmp.path()); // якоря нет: assets пусты
+    let packet = generate_handoff_opts(
+        &repo,
+        "задача",
+        &[],
+        &cfg,
+        None,
+        Route::Standard,
+        HandoffOptions {
+            refresh_constraints: false,
+            openspec_change: Some("add-limits".to_string()),
+        },
+    )
+    .expect("пакет");
+    let rubric = crate::rubric::load(&packet.dir.join("RUBRIC.yaml")).expect("рубрика");
+    assert_eq!(rubric.criteria.len(), 1);
+    assert_eq!(rubric.criteria[0].id, "openspec_change_requirements");
+}
+
+/// F6: MCP-инструмент `handoff_create` принимает `openspec_change`.
+#[tokio::test]
+async fn handoff_create_tool_accepts_openspec_change() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = tmp.path().join("repo");
+    git_repo_with_baseline(&repo);
+    write_change(&repo, 400);
+    let cfg = cfg_in(tmp.path());
+    let tool = HandoffCreateTool::new(cfg.clone());
+    let ctx = ToolContext::new(tmp.path().to_path_buf(), Arc::new(cfg));
+    let out = tool
+        .call(
+            json!({"repo": "repo", "task": "реализовать change", "openspec_change": "add-limits"}),
+            &ctx,
+        )
+        .await
+        .expect("call");
+    assert!(!out.is_error, "{}", out.content);
+    assert!(out.content.contains("add-limits"), "{}", out.content);
+    assert!(
+        repo.join(".arch-handoff/RUBRIC.yaml").is_file(),
+        "рубрика с требованиями change записана"
+    );
 }

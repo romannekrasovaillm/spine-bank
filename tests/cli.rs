@@ -2438,6 +2438,81 @@ fn review_broken_model_exits_1() {
         .stdout(contains("Итог: FAIL"));
 }
 
+/// Минимальный артефакт `arch-be/arch-diff/v1` для ящика ревью (K7).
+fn arch_diff_artifact(route: &str, with_edge: bool) -> String {
+    let edges = if with_edge {
+        r#"[{"from": "CMP-001", "to": "CMP-004", "kind": "import", "evidence": ["s/writer.py:2"], "model_status": "not_in_model"}]"#
+    } else {
+        "[]"
+    };
+    format!(
+        "{{\"schema\": \"arch-be/arch-diff/v1\", \"arch_be\": \"0.3.14\", \
+         \"base\": \"aaaa\", \"head\": \"bbbb\", \"added_nodes\": [], \"removed_nodes\": [], \
+         \"added_edges\": {edges}, \"removed_edges\": [], \"declared_unused\": [], \
+         \"invariants_touched\": [], \"adrs_touched\": [], \"contract_changes\": [], \
+         \"nfr_shifts\": [], \"route\": {{\"route\": \"{route}\", \"score\": 1, \
+         \"triggers\": [], \"evidence\": [], \"undeclared\": []}}, \"proposals\": []}}"
+    )
+}
+
+/// `arch-be review inbox <ROOT>` (K7, эксперимент): непустой дифф попадает
+/// в ящик (critical выше standard), пустой — отфильтрован, битый JSON —
+/// предупреждение и пропуск, exit 0 (информационная команда).
+#[test]
+fn review_inbox_filters_sorts_and_warns() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().join("fleet");
+    std::fs::create_dir_all(root.join("pay-core")).expect("mkdir");
+    std::fs::create_dir_all(root.join("shop")).expect("mkdir");
+    std::fs::create_dir_all(root.join("blog")).expect("mkdir");
+    std::fs::write(
+        root.join("pay-core/arch-diff.json"),
+        arch_diff_artifact("critical", true),
+    )
+    .expect("critical");
+    std::fs::write(
+        root.join("shop/arch-diff-mr7.json"),
+        arch_diff_artifact("standard", true),
+    )
+    .expect("standard");
+    // Пустой дифф — в ящик не попадает.
+    std::fs::write(
+        root.join("blog/arch-diff.json"),
+        arch_diff_artifact("fast", false),
+    )
+    .expect("empty");
+    // Битый JSON — предупреждение и пропуск.
+    std::fs::write(root.join("blog/arch-diff-mr9.json"), "{битый").expect("broken");
+
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("review").arg("inbox").arg(root.as_os_str());
+    let out = cmd.assert().success();
+    let text = String::from_utf8_lossy(&out.get_output().stdout).into_owned();
+    assert!(text.contains("Непустых диффов: 2"), "{text}");
+    assert!(text.contains("пустых отфильтровано: 1"), "{text}");
+    assert!(text.contains("пропущено с предупреждением: 1"), "{text}");
+    assert!(
+        text.find("critical").expect("critical") < text.find("standard").expect("standard"),
+        "critical выше standard: {text}"
+    );
+    assert!(text.contains("[warn]"), "{text}");
+
+    // JSON-форма: схема review-inbox/v1, счётчики, записи.
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("review")
+        .arg("inbox")
+        .arg(root.as_os_str())
+        .arg("--format")
+        .arg("json");
+    let out = cmd.assert().success();
+    let json: serde_json::Value =
+        serde_json::from_slice(&out.get_output().stdout).expect("stdout — валидный JSON");
+    assert_eq!(json["schema"], "arch-be/review-inbox/v1");
+    assert_eq!(json["non_empty"], 2);
+    assert_eq!(json["empty_filtered"], 1);
+    assert_eq!(json["entries"][0]["route"], "critical");
+}
+
 /// `arch-be model impact <dir> --id`: радиус изменения — затронутые сущности,
 /// правило с владельцем, контракт INT, «с кем согласовывать»; exit 0
 /// (отчёт, не гейт). `--json` — машиночитаемая форма.
@@ -3191,8 +3266,12 @@ fn a4_without_manifest_is_a_finding_not_io_error() {
 ///
 /// Тест держит ДВА свойства инструмента, а не только число: доля считается по
 /// 14 позициям раздела 7 (R и контроль D14 в неё не входят), и семантические
-/// дефекты (D6, D10, D11) НЕ должны ловиться — если механика начнёт их ловить,
-/// это регресс, а не успех.
+/// дефекты не должны ловиться механикой смысла. Волна B4 (0.3.14, дельта
+/// `changes/executable-invariants` в кейсе) пересмотрела D11: класс «код
+/// нарушает инвариант, правил на код нет» в кейсе закрыт правилом C-019
+/// (`no_card_data_in_code`, PAN по `**/*.py`) — D11 ловится `fitness`, и это
+/// задуманное закрытие слепой зоны `src/`, а не регресс. Смысловые дефекты
+/// (D6, D10) по-прежнему обязаны оставаться невидимыми для механики.
 #[test]
 fn redteam_measures_merchant_case_detection_share() {
     let case = Path::new(env!("CARGO_MANIFEST_DIR")).join("кейсы/digital-ruble-merchant");
@@ -3211,14 +3290,23 @@ fn redteam_measures_merchant_case_detection_share() {
     assert_eq!(out.status.code(), Some(0), "вывод: {text}");
     assert!(text.contains("11/14"), "ожидалась доля 11 из 14: {text}");
     assert!(text.contains("контроль аттестации: да"), "{text}");
-    // Семантика обязана остаться невидимой механике.
-    for id in ["D6", "D10", "D11"] {
+    // Семантика обязана остаться невидимой механике (D6, D10); D11 после B4
+    // ловится механикой — и это приёмка B4, а не регресс.
+    for id in ["D6", "D10"] {
         let line = text
             .lines()
             .find(|l| l.contains(id) && l.contains("не пойман и не должен"))
             .unwrap_or_else(|| panic!("{id} обязан быть не пойман: {text}"));
         assert_ne!(line, "");
     }
+    let d11 = text
+        .lines()
+        .find(|l| l.contains("D11") && !l.contains("D11b"))
+        .unwrap_or_else(|| panic!("строка D11 обязана быть в карте: {text}"));
+    assert!(
+        d11.contains("пойман") && d11.contains("fitness"),
+        "D11 после B4 обязан ловиться fitness (C-019): {d11}"
+    );
     // Дефекты, которые обязаны ловиться, названы с инструментом.
     for (id, tool) in [
         ("D1", "nfr"),
@@ -3245,6 +3333,86 @@ fn redteam_measures_merchant_case_detection_share() {
         .stdout(predicates::str::contains("Итог: FAIL"));
 }
 
+/// E3 (эксперимент): `redteam --corpus <dir>` — патчи корпуса как мутаторы.
+/// Пойманный дефект (PAN в tests/** — правило C-003 кейса) и непойманный
+/// (f64-деньги: правила класса в реестре кейса нет — честный пробел), файл
+/// не-unified-diff отброшен при загрузке; прогон информационный — exit 0
+/// при наличии непойманной позиции; `--save` несовместим (clap).
+#[test]
+fn redteam_corpus_applies_patches_and_stays_informational() {
+    let case = Path::new(env!("CARGO_MANIFEST_DIR")).join("кейсы/digital-ruble-merchant");
+    let tmp = tempfile::tempdir().expect("tmp");
+    let corpus = tmp.path().join("corpus");
+    std::fs::create_dir_all(&corpus).expect("corpus");
+    // Пойманный: PAN-литерал в новом тесте (C-003: must_not_contain PAN по tests/**/*.py).
+    std::fs::write(
+        corpus.join("01-pan.patch"),
+        "diff --git a/tests/notify_test.py b/tests/notify_test.py\nnew file mode 100644\n\
+         --- /dev/null\n+++ b/tests/notify_test.py\n@@ -0,0 +1,3 @@\n\
+         +PAN = '4111 1111 1111 1111'\n+def test_notify():\n+    assert PAN\n",
+    )
+    .expect("patch 01");
+    // Непойманный: деньги в float — правила класса в реестре кейса нет.
+    std::fs::write(
+        corpus.join("02-f64.patch"),
+        "diff --git a/skeleton/payments/total.py b/skeleton/payments/total.py\nnew file mode 100644\n\
+         --- /dev/null\n+++ b/skeleton/payments/total.py\n@@ -0,0 +1,2 @@\n\
+         +def total_rub(parts):\n+    return sum(parts)\n",
+    )
+    .expect("patch 02");
+    // Не unified diff — отбрасывается при загрузке с причиной.
+    std::fs::write(
+        corpus.join("03-journal.patch"),
+        "протокол прогона, не патч\n",
+    )
+    .expect("patch 03");
+
+    let mut cmd = arch_cmd(tmp.path());
+    let out = cmd
+        .arg("redteam")
+        .arg(case.as_os_str())
+        .arg("--corpus")
+        .arg(corpus.as_os_str())
+        .output()
+        .expect("прогон arch-be");
+    // Информационный прогон: непойманная позиция корпуса не краснит exit.
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("Корпус (E3, эксперимент)"), "{text}");
+    assert!(text.contains("применилось: 2"), "{text}");
+    assert!(text.contains("поймано гейтом: 1/2"), "{text}");
+    assert!(
+        text.contains("01-pan.patch") && text.contains("пойман: fitness"),
+        "{text}"
+    );
+    assert!(
+        text.contains("02-f64.patch") && text.contains("НЕ ПОЙМАН"),
+        "{text}"
+    );
+    assert!(
+        text.contains("03-journal.patch") && text.contains("нет заголовков unified diff"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("Итог:"),
+        "у корпуса нет приёмочного итога: {text}"
+    );
+
+    // --save несовместим с --corpus (измерение корпуса — не вход метрики доверия).
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("redteam")
+        .arg(case.as_os_str())
+        .arg("--corpus")
+        .arg(corpus.as_os_str())
+        .arg("--save");
+    cmd.assert().failure();
+}
+
 /// W2: машинный формат отчёта — JSON-схема с картой обнаружения.
 #[test]
 fn redteam_json_format_reports_detections() {
@@ -3265,12 +3433,14 @@ fn redteam_json_format_reports_detections() {
     assert_eq!(value["passed"], true);
     assert_eq!(value["control_ok"], true);
     let detections = value["detections"].as_array().expect("detections");
-    // 19 = 17 строк релиза 0.3.5 (14 долевых мутантов + R, D14, D15-скелет)
+    // 26 = 17 строк релиза 0.3.5 (14 долевых мутантов + R, D14, D15-скелет)
     // + красный угол среза происхождения: D16 (поднятый рукой балл) и
-    // D17 (подменённая метка автора, ADR-048).
-    assert_eq!(detections.len(), 19);
+    // D17 (подменённая метка автора, ADR-048) + D18 — лексический обход
+    // «слово на месте, логики нет» (B2 волны B, ADR-065) + D19–D24 —
+    // кодовые классы корпуса openspec-vs-spine (E1 волны E).
+    assert_eq!(detections.len(), 26);
     let ids: Vec<&str> = detections.iter().filter_map(|d| d["id"].as_str()).collect();
-    for extra in ["D16", "D17"] {
+    for extra in ["D16", "D17", "D18", "D24"] {
         assert!(ids.contains(&extra), "нет мутатора {extra}: {ids:?}");
     }
     // 19 = 14 долевых мутантов + контрольные строки (R, D14) + D15 (нарушение
@@ -3425,7 +3595,7 @@ fn bootstrap_walks_a_new_case_towards_green() {
         ])
         .assert()
         .success()
-        .stdout(contains("бандл 13/13"))
+        .stdout(contains("бандл пишет автор 8/8 · выведет машина 1/5"))
         .stdout(contains("Следующий шаг — бандл"));
 
     // Повторный bootstrap в занятый каталог — отказ с выходом, а не копия.
@@ -4445,4 +4615,286 @@ fn policy_export_without_deployment_reports_and_exits_zero() {
         .assert()
         .success()
         .stdout(contains("не содержит инвариантов"));
+}
+
+// ---------------------------------------------------------------------------
+// `arch-be arch-diff` (волна K, ADR-063): демо-сценарий раздела 9 задания —
+// ветка agent/direct-ledger-write на фикстуре salary-payments-формы.
+// ---------------------------------------------------------------------------
+
+/// git в каталоге с тестовой идентичностью (изоляция AD-7, как в lib-тестах).
+fn git_fixture(dir: &Path, args: &[&str]) {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("GIT_AUTHOR_NAME", "t")
+        .env("GIT_AUTHOR_EMAIL", "t@t")
+        .env("GIT_COMMITTER_NAME", "t")
+        .env("GIT_COMMITTER_EMAIL", "t@t")
+        .env("GIT_AUTHOR_DATE", "2026-01-01T00:00:00Z")
+        .env("GIT_COMMITTER_DATE", "2026-01-01T00:00:00Z")
+        .output()
+        .expect("git");
+    assert!(
+        out.status.success(),
+        "git {}: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Пишет файл фикстуры (родители создаются).
+fn write_fixture(dir: &Path, name: &str, content: &str) {
+    let p = dir.join(name);
+    if let Some(parent) = p.parent() {
+        std::fs::create_dir_all(parent).expect("mkdir");
+    }
+    std::fs::write(&p, content).expect("write");
+}
+
+/// Кейс «зарплатные реестры»: приём (CMP-001), ядро (CMP-004), оркестратор
+/// (CMP-009); AD-2 с охранником C-007; base-коммит, затем правка «агента» —
+//  прямая запись в ядро в обход оркестратора + строка подключения к БД.
+fn arch_diff_demo_repo(home: &Path) -> PathBuf {
+    let repo = home.join("case");
+    std::fs::create_dir_all(&repo).expect("mkdir");
+    write_fixture(
+        &repo,
+        "model/CMP-001-intake.md",
+        "---\nid: CMP-001\ntype: cmp\ntitle: Приём реестров\nstatus: adopted\ncode_roots: [skeleton/intake]\ndepends_on: [CMP-009]\n---\nПриём.\n",
+    );
+    write_fixture(
+        &repo,
+        "model/CMP-004-ledger.md",
+        "---\nid: CMP-004\ntype: cmp\ntitle: \"Ядро: счета и проводки\"\nstatus: adopted\ncode_roots: [skeleton/ledger]\n---\nЯдро.\n",
+    );
+    write_fixture(
+        &repo,
+        "model/CMP-009-orchestrator.md",
+        "---\nid: CMP-009\ntype: cmp\ntitle: Оркестратор\nstatus: adopted\ncode_roots: [skeleton/orchestrator]\n---\nОркестратор.\n",
+    );
+    write_fixture(
+        &repo,
+        "model/AD-2-ledger-via-orchestrator.md",
+        "---\nid: AD-2\ntype: ad\ntitle: Проводки только через Оркестратор\nstatus: accepted\naffects: [CMP-001]\nverified_by: [C-007]\n---\nИнвариант.\n",
+    );
+    write_fixture(
+        &repo,
+        "CONSTRAINTS.yaml",
+        "rules:\n  - id: C-007\n    name: no-direct-ledger-write\n    type: must_not_contain\n    glob: 'skeleton/intake/**'\n    pattern: 'ledger_db'\n",
+    );
+    write_fixture(
+        &repo,
+        "skeleton/intake/writer.py",
+        "from skeleton.orchestrator import api\n\ndef write():\n    api.post()\n",
+    );
+    write_fixture(
+        &repo,
+        "skeleton/orchestrator/api.py",
+        "def post():\n    pass\n",
+    );
+    write_fixture(
+        &repo,
+        "skeleton/ledger/client.py",
+        "def post():\n    pass\n",
+    );
+    git_fixture(&repo, &["init", "-q", "-b", "main"]);
+    git_fixture(&repo, &["add", "-A"]);
+    git_fixture(&repo, &["commit", "-q", "-m", "base"]);
+    // Правка «агента».
+    write_fixture(
+        &repo,
+        "skeleton/intake/writer.py",
+        "from skeleton.orchestrator import api\nfrom skeleton.ledger import client\nimport ledger_db\n\ndef write():\n    client.post()\n",
+    );
+    write_fixture(
+        &repo,
+        "skeleton/intake/config.yaml",
+        "dsn: \"postgres://ledger-db:5432/ledger\"\n",
+    );
+    git_fixture(&repo, &["add", "-A"]);
+    git_fixture(&repo, &["commit", "-q", "-m", "agent/direct-ledger-write"]);
+    repo
+}
+
+/// md-экран демо-сценария: новое ребро вне модели, задетый инвариант,
+/// новое хранилище, предложение модели; информационный exit 0.
+#[test]
+fn arch_diff_md_demo_screen() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let home = tmp.path();
+    let repo = arch_diff_demo_repo(home);
+    arch_cmd(home)
+        .args(["arch-diff", "--repo"])
+        .arg(repo.as_os_str())
+        .args(["--base", "main~1"])
+        .assert()
+        .success()
+        .stdout(contains("Архитектурный дифф"))
+        .stdout(contains("в модели: НЕТ"))
+        .stdout(contains("основание: skeleton/intake/writer.py:2"))
+        .stdout(contains("store:postgres://ledger-db:5432"))
+        .stdout(contains("AD-2"))
+        .stdout(contains(
+            "1. model/CMP-001-intake.md: depends_on += CMP-004",
+        ))
+        .stdout(contains("⚠ противоречит AD-2"));
+}
+
+/// `--fail-on undeclared-edge` — exit 1 на ребре вне модели; `--fail-on
+/// breaking-contract` на том же диффе — exit 0 (контрактов нет).
+#[test]
+fn arch_diff_fail_on_exit_codes() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let home = tmp.path();
+    let repo = arch_diff_demo_repo(home);
+    arch_cmd(home)
+        .args(["arch-diff", "--repo"])
+        .arg(repo.as_os_str())
+        .args(["--base", "main~1", "--fail-on", "undeclared-edge"])
+        .assert()
+        .code(1);
+    arch_cmd(home)
+        .args(["arch-diff", "--repo"])
+        .arg(repo.as_os_str())
+        .args(["--base", "main~1", "--fail-on", "breaking-contract"])
+        .assert()
+        .success();
+    arch_cmd(home)
+        .args(["arch-diff", "--repo"])
+        .arg(repo.as_os_str())
+        .args(["--base", "main~1", "--fail-on", "nope"])
+        .assert()
+        .failure(); // неизвестное условие — ошибка использования (anyhow → exit 1)
+}
+
+/// json: контракт `arch-be/arch-diff/v1` читается машиной; mermaid — валидный
+/// flowchart; без изменений — одна строка «нет изменений» и exit 0.
+#[test]
+fn arch_diff_json_mermaid_and_empty() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let home = tmp.path();
+    let repo = arch_diff_demo_repo(home);
+
+    let out = arch_cmd(home)
+        .args(["arch-diff", "--repo"])
+        .arg(repo.as_os_str())
+        .args(["--base", "main~1", "--format", "json"])
+        .assert()
+        .success();
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.get_output().stdout).expect("json-контракт");
+    assert_eq!(v["schema"], "arch-be/arch-diff/v1");
+    assert!(v["added_edges"].is_array(), "{v}");
+
+    arch_cmd(home)
+        .args(["arch-diff", "--repo"])
+        .arg(repo.as_os_str())
+        .args(["--base", "main~1", "--format", "mermaid"])
+        .assert()
+        .success()
+        .stdout(contains("flowchart LR"))
+        .stdout(contains("CMP_001"));
+
+    // Без архитектурных изменений (base == head) — честный пустой экран.
+    arch_cmd(home)
+        .args(["arch-diff", "--repo"])
+        .arg(repo.as_os_str())
+        .args(["--base", "main"])
+        .assert()
+        .success()
+        .stdout(contains("Архитектурных изменений нет."));
+}
+
+/// F3 (ADR-067): `openspec gate --change <id>` — гейт активного change одним
+/// вызовом: требование дельты без решения → exit 1 с `requirement_uncovered`;
+/// покрытие правилом с `covers:` → exit 0; несуществующий change — exit 1 с
+/// понятной ошибкой.
+#[test]
+fn openspec_gate_change_red_then_green() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let home = tmp.path();
+    let repo = home.join("repo");
+    let write = |rel: &str, text: &str| {
+        let p = repo.join(rel);
+        std::fs::create_dir_all(p.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&p, text).expect("write");
+    };
+    write(
+        "CONSTRAINTS.yaml",
+        "rules:\n  - name: spine_present\n    type: file_exists\n    path: \"ARCHITECTURE-SPINE.md\"\n    severity: error\n",
+    );
+    write("ARCHITECTURE-SPINE.md", "# Spine\n");
+    write("src/lib.rs", "pub fn charge() -> u64 { 1 }\n");
+    write(
+        "openspec/changes/add-limits/proposal.md",
+        "## Why\nНужны лимиты.\n",
+    );
+    write(
+        "openspec/changes/add-limits/specs/payments/spec.md",
+        "## ADDED Requirements\n\n### Requirement: Лимиты идемпотентны\nПовторный вызов MUST NOT менять лимит.\n",
+    );
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .expect("git");
+        assert!(out.status.success(), "git {args:?}");
+    };
+    git(&["init", "-q"]);
+    git(&["add", "."]);
+    git(&["commit", "-q", "-m", "init"]);
+
+    // Красный: требование дельты без решения.
+    arch_cmd(home)
+        .args(["openspec", "gate", "--change", "add-limits"])
+        .arg(repo.as_os_str())
+        .assert()
+        .failure()
+        .stdout(contains("requirement_uncovered"))
+        .stdout(contains("Итог: FAIL"));
+
+    // Несуществующий change — понятная ошибка, exit 1.
+    arch_cmd(home)
+        .args(["openspec", "gate", "--change", "no-such"])
+        .arg(repo.as_os_str())
+        .assert()
+        .failure()
+        .stderr(contains("не найден"));
+
+    // Зелёный: правило с covers: на требование дельты.
+    let delta_id = arch_harness::openspec::requirement_id(
+        "payments",
+        &["Повторный вызов MUST NOT менять лимит.".to_string()],
+    );
+    write(
+        "CONSTRAINTS.yaml",
+        &format!(
+            "rules:\n  - name: spine_present\n    type: file_exists\n    path: \"ARCHITECTURE-SPINE.md\"\n    severity: error\n  - name: no_f64_money\n    type: must_not_contain\n    glob: \"src/**/*.rs\"\n    pattern: '\\bf64\\b'\n    severity: error\n    covers: [\"{delta_id}\"]\n"
+        ),
+    );
+    git(&["add", "."]);
+    git(&["commit", "-q", "-m", "покрытие"]);
+    arch_cmd(home)
+        .args(["openspec", "gate", "--change", "add-limits"])
+        .arg(repo.as_os_str())
+        .assert()
+        .success()
+        .stdout(contains("Маршрут по диффу:"))
+        .stdout(contains("Итог: PASS"));
+
+    // Прежний режим --archive по-прежнему требует позиционный change-id.
+    arch_cmd(home)
+        .args(["openspec", "gate", "--archive"])
+        .arg(repo.as_os_str())
+        .assert()
+        .failure()
+        .stderr(contains("change-id"));
 }

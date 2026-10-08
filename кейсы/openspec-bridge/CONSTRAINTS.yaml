@@ -1,0 +1,42 @@
+# Реестр правил кейса openspec-bridge: связь «правило ← требование» через covers:
+# (идентификаторы — `arch-be openspec scan .`, стабильны к переименованию
+# требования, но ломаются правкой его текста — тогда сработает covers_orphan).
+rules:
+  - id: C-001
+    name: money_minor_units_no_float
+    type: must_not_contain
+    glob: "src/**/*.py"
+    pattern: '\bfloat\b'
+    severity: error
+    covers: ["openspec:payments#86909390"]
+    ad: AD-2
+    rationale: 'суммы — целые копейки; float в денежном пути запрещён (требование «Точные деньги»)'
+    fix_hint: 'перевести сумму на int minor units; округление — на границе ввода одним местом'
+    owner: OWNER-001
+    expiry: 2027-12-31
+    effort_hours: 1
+  - id: C-002
+    name: idempotency_key_in_intake
+    type: must_contain
+    glob: "src/**/*.py"
+    pattern: 'idempotency_key'
+    severity: error
+    covers: ["openspec:payments#42ccf83e"]
+    ad: AD-1
+    rationale: 'ключ идемпотентности обязателен в точке входа (требование «Идемпотентный приём»)'
+    fix_hint: 'точка входа обязана принимать idempotency_key и дедуплицировать по нему'
+    owner: OWNER-001
+    expiry: 2027-12-31
+    effort_hours: 1
+  - id: C-003
+    name: limits_checked_in_intake
+    type: must_contain
+    glob: "src/**/*.py"
+    pattern: 'check_limits'
+    severity: error
+    covers: ["openspec:payments#25baa3fb"]
+    rationale: 'проверка лимита вызывается до исполнения платежа (требование «Лимиты на приём», change add-limits)'
+    fix_hint: 'вызов check_limits обязан предшествовать исполнению платежа'
+    owner: OWNER-001
+    expiry: 2027-12-31
+    effort_hours: 1

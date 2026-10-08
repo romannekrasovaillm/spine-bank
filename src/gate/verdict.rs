@@ -5,8 +5,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::components::{
-    component_control_plane, component_decision_quality, component_delta_guard, component_evidence,
-    component_fitness, component_model_validate, component_nfr, component_rule_weakened,
+    component_arch_drift, component_control_plane, component_decision_quality,
+    component_delta_guard, component_evidence, component_fitness, component_model_drift,
+    component_model_validate, component_nfr, component_openspec_coverage, component_rule_weakened,
     component_secrets, component_sensors, component_spine_lint, component_trace,
     evidence_bundle_dirs,
 };
@@ -107,11 +108,11 @@ pub(super) fn run_inner(
             repo.display()
         )));
     }
-    let (mut route, route_auto, mut route_note) = if let Some(r) = route_override {
-        (r, false, format!("явный --route {r}"))
+    let (mut route, route_auto, mut route_note, route_triggers) = if let Some(r) = route_override {
+        (r, false, format!("явный --route {r}"), Vec::new())
     } else {
-        let (r, note) = auto_route(repo, base, limits, &options.diff_globs);
-        (r, true, note)
+        let (r, note, fired) = auto_route(repo, base, limits, &options.diff_globs);
+        (r, true, note, fired)
     };
     // П4: храповик маршрута — эффективный маршрут не ниже заявленного в
     // ROUTE.lock. Критический проект проверяется как Critical даже на чистом
@@ -158,10 +159,17 @@ pub(super) fn run_inner(
         .agent_range
         .as_deref()
         .and_then(|base| control::AgentRange::probe(repo, base));
-
+    // Имена обязательных для маршрута составляющих — до сборки: от них
+    // зависит severity находок `openspec_coverage` (F2: error при
+    // обязательности, иначе warn) и блокировка `model_drift`/`arch_drift`
+    // (C1/K6: error только по включению в `[gate.required]`).
+    let required_names = requirements.for_route(route);
     let mut components = vec![
         component_fitness(repo, &constraints, &options.exec, &options.overrides),
-        component_delta_guard(repo, base, &git),
+        // F1 (ADR-062): составляющая получает диапазон исполнителя — покрытие
+        // (дельта или change OpenSpec), созданное в диапазоне, не узаконивает
+        // правку (self_approved), как и ослабления для rule_weakened.
+        component_delta_guard(repo, base, &git, agent_range.as_ref()),
         // A3: пины контрольной плоскости пакета — правка Stop-хука,
         // `arch-harness.toml` или порогов рубрики не должна зеленеть молча.
         // Кейс без MANIFEST.json / старого пакета — SKIP.
@@ -180,6 +188,24 @@ pub(super) fn run_inner(
         // Н2: целостность модели — часть гейта на ЛЮБОМ маршруте (SKIP без
         // каталога model/); обязательность по маршрутам — в `[gate.required]`.
         component_model_validate(repo, route),
+        // C1: дрейф «модель ↔ код» — warn по умолчанию, error в
+        // `[gate.required]` маршрута.
+        component_model_drift(
+            repo,
+            options,
+            required_names.iter().any(|r| r == "model_drift"),
+        ),
+        // F2 (ADR-067): покрытие требований OpenSpec — на любом маршруте
+        // (SKIP без openspec/); блокирующей становится только через
+        // `[gate.required]` маршрута.
+        component_openspec_coverage(
+            repo,
+            &constraints,
+            base,
+            &git,
+            options.openspec_coverage,
+            required_names.iter().any(|r| r == "openspec_coverage"),
+        ),
     ];
     if matches!(route, Route::Standard | Route::Critical) {
         components.push(component_sensors(repo));
@@ -191,8 +217,8 @@ pub(super) fn run_inner(
     }
     // Н7: качество решений — необязательная составляющая; включается только
     // через `[gate.required]` (по умолчанию SKIP, чтобы не краснить чужие
-    // пайплайны без предупреждения).
-    let required_names = requirements.for_route(route);
+    // пайплайны без предупреждения). Обязательные маршрута — `required_names`
+    // вычислены выше, до сборки составляющих.
     // E3.3: составляющие видят ЭФФЕКТИВНЫЙ маршрут (после ROUTE.lock) — от него
     // зависит политика оговорок отчёта: `evidence_partial` на Critical уходит
     // человеку, на Fast/Standard остаётся предупреждением.
@@ -226,11 +252,23 @@ pub(super) fn run_inner(
         required_names.iter().any(|r| r == "semantic_quality"),
         options.decision_policy.for_route(options.route),
     ));
+    // K6: рёбра графа «как построено» против модели. Дорогая составляющая
+    // (снимок базы + обход рабочего дерева), по умолчанию SKIP: включение —
+    // [gate.required] маршрута (находки error) или [gate.arch_drift]
+    // enabled = true (находки warn).
+    components.push(component_arch_drift(
+        repo,
+        base,
+        &git,
+        &options,
+        required_names.iter().any(|r| r == "arch_drift"),
+    ));
     let mut report = GateReport {
         repo: repo.to_path_buf(),
         route,
         route_auto,
         route_note,
+        route_triggers,
         components,
         outcome: GateOutcome::Pass,
         required: requirements.for_route(route).to_vec(),

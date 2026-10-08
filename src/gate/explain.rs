@@ -124,6 +124,7 @@ mod tests {
             route: Route::Fast,
             route_auto: false,
             route_note: "auto".to_string(),
+            route_triggers: Vec::new(),
             components,
             outcome,
             required,

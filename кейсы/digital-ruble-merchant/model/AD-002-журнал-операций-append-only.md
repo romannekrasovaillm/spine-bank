@@ -4,7 +4,8 @@ type: ad
 title: "Журнал операций append-only"
 status: "ADOPTED"
 affects: [CMP-001, CMP-002]
-verified_by: [C-002]
+verified_by: [C-015]
+load_bearing: true
 ---
 
 - **Binds**: Журнал операций, Сверка с платформой ЦР

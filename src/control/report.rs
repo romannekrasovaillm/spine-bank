@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use super::exec::check;
 use super::registry::load_constraints_resolved;
 use super::rules::parse_constraints_file;
-use super::types::{BEHAVIOUR_RULE_KINDS, FitnessRule, LintIssue};
+use super::types::{FitnessRule, LintIssue};
 use crate::error::{HarnessError, Result};
 
 /// Обязательные заголовки спецификации (сенсор `required_sections`).
@@ -398,25 +398,37 @@ pub fn rules_report(repo: &Path, constraints: &Path) -> Result<String> {
     let _ = writeln!(out, "По типам: {}", join_counts(&by_kind));
     let _ = writeln!(out, "По severity: {}", join_counts(&by_severity));
 
-    // Доля правил, проверяющих ПОВЕДЕНИЕ (Н10 волны C 0.3.4): правило на
-    // упоминание — звено трассировки, а не проверка смысла. Метрика отвечает
-    // на вопрос «сколько в реестре настоящих проверок», который иначе
-    // приходится считать глазами по таблице типов.
-    let behaviour = rules
-        .iter()
-        .filter(|r| BEHAVIOUR_RULE_KINDS.contains(&r.kind.as_str()))
-        .count();
+    // Доля правил, проверяющих ПОВЕДЕНИЕ (Н10 волны C 0.3.4 → B1 волны B
+    // 0.3.14, ADR-065): заявляется ИЗМЕРЕНИЕМ зубьев (`.arch-handoff/teeth.json`
+    // пишет `arch-be rules teeth --save`), а не типом правила —
+    // `command_succeeds` с `command: 'true'` проверкой не является. Без файла
+    // измерения — честное «не измерено», а не «с зубьями».
     let total = rules.len();
-    let share = if total == 0 {
-        0.0
-    } else {
-        behaviour as f64 / total as f64 * 100.0
-    };
-    let _ = writeln!(
-        out,
-        "Проверяют поведение: {behaviour} из {total} ({share:.0}%) — типы {};          остальные проверяют наличие текста (звено трассировки, а не смысл)",
-        BEHAVIOUR_RULE_KINDS.join(", ")
-    );
+    let teeth = super::teeth::load(repo);
+    let (confirmed, _) = super::teeth::confirmed_share(&rules, teeth.as_ref());
+    match &teeth {
+        Some(measurement) => {
+            let share = if total == 0 {
+                0.0
+            } else {
+                confirmed as f64 / total as f64 * 100.0
+            };
+            let _ = writeln!(
+                out,
+                "Проверяют поведение (зубья подтверждены): {confirmed} из {total} ({share:.0}%) — \
+                 измерение {} (`{}`)",
+                measurement.measured_at,
+                super::teeth::TEETH_RESULT_REL
+            );
+        }
+        None => {
+            let _ = writeln!(
+                out,
+                "Проверяют поведение (зубья подтверждены): 0 из {total} — измерения нет; \
+                 тип правила зубьев не доказывает (замер: `arch-be rules teeth --save`)"
+            );
+        }
+    }
 
     let _ = writeln!(
         out,
@@ -515,6 +527,14 @@ pub fn rules_report(repo: &Path, constraints: &Path) -> Result<String> {
             );
         }
     }
+
+    // Зубья всех правил реестра по сохранённому измерению (B1): три группы —
+    // «проверяют поведение (зубья подтверждены)», «текст», «зубья не измерены».
+    let _ = write!(
+        out,
+        "{}",
+        super::teeth::render_groups(&rules, teeth.as_ref())
+    );
 
     // Зубы применённых шаблонов (П2): находка `executable_rule_toothless` —
     // «правило есть» ≠ «правило проверяет». В вердикт гейта находка не входит

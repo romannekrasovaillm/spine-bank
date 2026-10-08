@@ -55,3 +55,6 @@ dist/
 
 # Platform V arch-bench: тяжёлые прогоны (ячейки/логи) — в VCS не входят
 benchmarks/platformv-arch-bench/runs/
+
+# локальные worktree флота разработки
+.worktrees/

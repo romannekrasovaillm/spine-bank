@@ -63,6 +63,24 @@ pub(crate) enum EvidenceCmd {
         /// Каталог изменения.
         dir: PathBuf,
     },
+    /// Записать машинное evidence прогона (A1): выполняет команду и пишет
+    /// `.arch-handoff/evidence/<kind>.json` (команда, exit-код, время, HEAD,
+    /// хэш входов, итог). Отчёт о прогоне пишет машина, а не автор.
+    Record {
+        /// Вид записи: fitness (прогон реестра правил), tests (тесты),
+        /// skeleton (walking skeleton).
+        kind: String,
+        /// Каталог кейса/изменения (по умолчанию — текущий).
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        /// Команда прогона. Для fitness по умолчанию `arch-be control check .`;
+        /// для tests/skeleton — обязательна.
+        #[arg(long)]
+        cmd: Option<String>,
+        /// Таймаут прогона в секундах (0 — дефолт 900).
+        #[arg(long, default_value = "0")]
+        timeout_secs: u64,
+    },
 }
 
 #[derive(Subcommand)]
@@ -163,21 +181,34 @@ pub(crate) enum OpenspecCmd {
         #[arg(long)]
         force: bool,
     },
-    /// Гейт архивации change (точка CI перед `openspec archive`): exit 1,
-    /// если у требований change нет решения (ни детектора, ни unverifiable
-    /// с owner) или падает `control check`. Реализован только --archive
-    /// (roadmap: --change, --expiry — `docs/openspec.md`).
+    /// Гейт change (точка CI). Два режима:
+    /// `--archive <change-id>` — гейт архивации (перед `openspec archive`):
+    /// exit 1, если у требований change нет решения (ни детектора, ни
+    /// unverifiable с owner) или падает `control check`;
+    /// `--change <id>` — гейт активного change (F3, ADR-067): покрытие
+    /// требований его дельты, `delta_guard` с этим change как источником,
+    /// `control check` и маршрут по диффу диапазона change; exit 1 при
+    /// провале. (Roadmap: --expiry — `docs/openspec.md`.)
     Gate {
         /// Режим гейта: архивация change.
         #[arg(long)]
         archive: bool,
+        /// Режим гейта: активный change (MR, реализующий change) — id
+        /// задаётся значением флага: `openspec gate --change add-limits .`.
+        #[arg(long, value_name = "ID", conflicts_with = "archive")]
+        change: Option<String>,
         /// Корень репозитория с разметкой `OpenSpec`.
         root: PathBuf,
-        /// Идентификатор change (каталог openspec/changes/<id>).
-        change_id: String,
+        /// Идентификатор change (для --archive; при --change id идёт
+        /// значением флага).
+        change_id: Option<String>,
         /// Файл ограничений (умолчание — как у `coverage`).
         #[arg(long)]
         constraints: Option<PathBuf>,
+        /// База git для диффа диапазона change (только --change; по умолчанию
+        /// HEAD — рабочее дерево; для CI — напр. origin/main...HEAD).
+        #[arg(long)]
+        base: Option<String>,
     },
 }
 
@@ -250,13 +281,34 @@ pub(crate) fn cmd_evidence(cfg: &arch_harness::config::Config, cmd: EvidenceCmd)
                 "critical" => arch_harness::control::Route::Critical,
                 _ => arch_harness::control::Route::Standard,
             };
-            let (bundle, verdict) = arch_harness::evidence::pack(&dir, route)?;
+            // A2: уровень риска выводится из записи значимости (триггеры и
+            // источники — из диффа рабочего дерева), а не из рукописного
+            // RISK.md.
+            let limits = cfg
+                .significance
+                .limits()
+                .map_err(|e| anyhow::anyhow!("маршруты значимости: {e}"))?;
+            let significance = arch_harness::evidence::significance_record(
+                &dir,
+                route,
+                limits,
+                &cfg.significance.diff_globs(),
+            );
+            let (bundle, verdict) =
+                arch_harness::evidence::pack_with(&dir, route, Some(significance))?;
             println!("{}", verdict.summary);
             for item in &bundle.items {
                 println!("  + {:<20} {} ({} б)", item.key, item.path, item.size);
             }
             for miss in &verdict.missing {
                 println!("  ✗ ОТСУТСТВУЕТ: {miss}");
+            }
+            // Раздельный счёт церемонии (A2): что пишет автор, что выводит машина.
+            if let Some(p) = arch_harness::evidence::bundle_progress_split(&dir, route) {
+                println!(
+                    "Бандл: пишет автор {}/{} · выведет машина {}/{}",
+                    p.author_done, p.author_total, p.machine_done, p.machine_total
+                );
             }
             println!("Манифест: {}", dir.join("EVIDENCE.yaml").display());
             if !verdict.passed {
@@ -305,6 +357,51 @@ pub(crate) fn cmd_evidence(cfg: &arch_harness::config::Config, cmd: EvidenceCmd)
                 std::process::exit(1);
             }
         }
+        EvidenceCmd::Record {
+            kind,
+            dir,
+            cmd,
+            timeout_secs,
+        } => {
+            let kind: arch_harness::evidence::RecordKind = kind
+                .parse()
+                .map_err(|e: String| anyhow::anyhow!("evidence record: {e}"))?;
+            let dir = dir.unwrap_or_else(|| PathBuf::from("."));
+            let Some(command) = cmd.or_else(|| kind.default_command().map(str::to_string)) else {
+                anyhow::bail!(
+                    "для записи «{}» нет команды по умолчанию — укажите её: \
+                     arch-be evidence record {} --cmd \"…\"",
+                    kind.as_str(),
+                    kind.as_str()
+                );
+            };
+            let rec = arch_harness::evidence::record_run(&dir, kind, &command, timeout_secs)?;
+            println!(
+                "Запись прогона «{}»: {}",
+                kind.as_str(),
+                if rec.passed { "PASS" } else { "FAIL" }
+            );
+            println!(
+                "  команда: {} (exit {}, {:.1} с)",
+                rec.command,
+                rec.exit_code
+                    .map_or_else(|| "таймаут".to_string(), |c| c.to_string()),
+                rec.duration_secs
+            );
+            println!("  HEAD: {}", rec.head);
+            println!("  входы: {} ({})", rec.inputs_hash, rec.inputs_note);
+            if let Some(fp) = &rec.registry_fingerprint {
+                println!("  реестр: {fp}");
+            }
+            println!(
+                "  файл: {}",
+                arch_harness::evidence::record_path(&dir, kind).display()
+            );
+            if !rec.passed {
+                println!("Итог: FAIL — запись зафиксировала провал прогона");
+                std::process::exit(1);
+            }
+        }
     }
     Ok(())
 }
@@ -314,7 +411,14 @@ pub(crate) fn cmd_delta(cmd: DeltaCmd) -> Result<()> {
     let cwd = || std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     match cmd {
         DeltaCmd::New { name, repo } => {
-            let path = arch_harness::delta::new(&repo.unwrap_or_else(cwd), &name)?;
+            let root = repo.unwrap_or_else(cwd);
+            // F1 (ADR-062): репозиторий на чистом OpenSpec (`[delta] sources =
+            // ["openspec"]`) — DELTA.md не создаём (двойной учёт), изменение
+            // оформляется change'ом OpenSpec; markdown OpenSpec Spine не пишет.
+            if let Some(hint) = arch_harness::delta::openspec_only_hint(&root)? {
+                anyhow::bail!("{hint}");
+            }
+            let path = arch_harness::delta::new(&root, &name)?;
             println!("Дельта создана: {}", path.display());
         }
         DeltaCmd::List { repo } => {
@@ -372,7 +476,7 @@ pub(crate) fn cmd_delta(cmd: DeltaCmd) -> Result<()> {
 }
 
 /// `arch-be openspec`: адаптер `OpenSpec` — требования → покрытие fitness-правилами.
-pub(crate) fn cmd_openspec(cmd: OpenspecCmd) -> Result<()> {
+pub(crate) fn cmd_openspec(cfg: &Config, cmd: OpenspecCmd) -> Result<()> {
     match cmd {
         OpenspecCmd::Scan { root, json } => {
             let requirements = arch_harness::openspec::scan_requirements(&root)?;
@@ -427,15 +531,46 @@ pub(crate) fn cmd_openspec(cmd: OpenspecCmd) -> Result<()> {
         }
         OpenspecCmd::Gate {
             archive,
+            change,
             root,
             change_id,
             constraints,
+            base,
         } => {
+            // F3: гейт активного change (MR, реализующий change).
+            if let Some(change) = change {
+                if change_id.is_some() {
+                    anyhow::bail!(
+                        "с --change идентификатор задаётся значением флага, позиционный <change-id> не нужен"
+                    );
+                }
+                let limits = cfg
+                    .significance
+                    .limits()
+                    .map_err(|e| anyhow::anyhow!("маршруты значимости: {e}"))?;
+                let report = arch_harness::openspec::gate_change(
+                    &root,
+                    &change,
+                    constraints.as_deref(),
+                    base.as_deref(),
+                    limits,
+                    &cfg.significance.diff_globs(),
+                )?;
+                print!("{}", report.to_markdown());
+                if !report.passed {
+                    std::process::exit(1);
+                }
+                return Ok(());
+            }
             if !archive {
                 anyhow::bail!(
-                    "реализован только гейт --archive (roadmap: --change, --expiry — docs/openspec.md)"
+                    "укажите режим гейта: --archive <change-id> или --change <id> \
+                     (roadmap: --expiry — docs/openspec.md)"
                 );
             }
+            let Some(change_id) = change_id else {
+                anyhow::bail!("--archive требует <change-id> позиционным аргументом");
+            };
             let report =
                 arch_harness::openspec::gate_archive(&root, &change_id, constraints.as_deref())?;
             print!("{}", report.to_markdown());

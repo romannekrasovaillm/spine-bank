@@ -1,6 +1,12 @@
 route: Critical
-packed_at: 2026-09-20T09:34:45.382646040+03:00
+packed_at: 2026-10-08T05:29:07.586530391+03:00
 hash_alg: sha256
+significance:
+  route: Critical
+  score: 0
+  triggers: []
+  head: 74091d5202332617241d613a112f59d1e39a70f4
+  recorded_at: 2026-10-08T05:29:07.583428292+03:00
 items:
 - key: problem
   path: PROBLEM.md
@@ -10,10 +16,6 @@ items:
   path: docs/SPEC.md
   hash: fd802ba55a47eaaa1d6f8f78744433909d41ba0a7ad4f8ca14f03e72f9ac93e1
   size: 2608
-- key: risk_level
-  path: RISK.md
-  hash: 22f072bcfcfa58cdf2822fc4ee08ca401abccf4b2093047f393b30d21903925e
-  size: 2438
 - key: acceptance
   path: ACCEPTANCE.md
   hash: 5d3c317dbc3d7c6b20e9f90b67a69eb3cafe45175a0345c9af120cf408313a3e
@@ -36,8 +38,8 @@ items:
   size: 1876
 - key: walking_skeleton
   path: docs/WALKING-SKELETON.md
-  hash: 3af9a12d5cf698a5020126591ef9403441357bba053eecc9a5383e153f62e95e
-  size: 2621
+  hash: 33656f0d850f470f6d76b3b50102a4c7040796fdb89893ce34ee4d9fc8a87d5e
+  size: 3216
 - key: adversarial_review
   path: docs/REVIEW.md
   hash: 1167e076c56458fb429beef2cf247d928c44817845fc0bafd0ceeb85cd9e98e8
@@ -48,8 +50,8 @@ items:
   size: 2119
 - key: validation
   path: VALIDATION.md
-  hash: c016aa974f118886dea20ed5e9629800038e25e62e9080d493e928c209e78333
-  size: 2055
+  hash: 14815b9b8f539dd4d13501e279ac6dcdd4c61257186f55b235d45de99f498240
+  size: 2099
 - key: fitness_report
   path: reports/fitness.md
   hash: bf55c48daf70f38fb903731e0c02483353131f2e7502af26e35ec79417133315

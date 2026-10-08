@@ -4,7 +4,8 @@ type: ad
 title: "Получатель и лимиты проверяются до отправки поручения"
 status: "ADOPTED"
 affects: [CMP-002, CMP-004]
-verified_by: [C-006]
+verified_by: [C-006, C-020]
+load_bearing: true
 ---
 
 - **Binds**: Проверка получателей, Оркестратор выплат

@@ -1,0 +1,159 @@
+{
+  "schema": "arch-be/rules-teeth/v1",
+  "case": "кейсы/digital-ruble-merchant",
+  "measured_at": "2026-10-08T05:18:08.051508796+03:00",
+  "entries": [
+    {
+      "name": "spine_present",
+      "id": "C-001",
+      "kind": "file_exists",
+      "status": "confirmed",
+      "fingerprint": "88fa37e68d015e1b6c6dea2a07320778843df18f759531d352f155f1c521a55d",
+      "detail": "удаление файла ARCHITECTURE-SPINE.md — находок правила: 0 → 1 (зубья подтверждены)"
+    },
+    {
+      "name": "adr_alternatives",
+      "id": "C-002",
+      "kind": "each_file_must_contain",
+      "status": "confirmed",
+      "fingerprint": "05ae6e8b7d18a9acc8ac941af7d1ad518088e61b219db237c8b5653b79942a15",
+      "detail": "удаление совпадений pattern из docs/adr/ADR-001-идемпотентность-приёма-на-каждой-точке-входа.md, docs/adr/ADR-002-append-only-журнал-операций.md, docs/adr/ADR-003-разбор-неопределённого-исхода-по-данным-платформ.md, docs/adr/ADR-004-запрет-пдн-в-журнале-и-телеметрии.md, docs/adr/ADR-005-атомарная-проверка-лимитов.md, docs/adr/ADR-006-единый-адаптер-платформы-цр.md, docs/adr/ADR-007-обязательная-сверка-с-платформой.md — находок правила: 0 → 7 (зубья подтверждены)"
+    },
+    {
+      "name": "no_pan_in_tests",
+      "id": "C-003",
+      "kind": "must_not_contain",
+      "status": "confirmed",
+      "fingerprint": "d844a76444702e430d4c7db8ff163253d9876bb970820510a742df3035d1c97d",
+      "detail": "вставка строки под pattern в tests/payments_test.py — находок правила: 0 → 1 (зубья подтверждены)"
+    },
+    {
+      "name": "spine_binds",
+      "id": "C-004",
+      "kind": "must_contain",
+      "status": "confirmed",
+      "fingerprint": "7158a82f10dd17f5e37d8dc81aaf0c4ee4236f2b7011daef3bfcf15183630a93",
+      "detail": "удаление совпадений pattern из ARCHITECTURE-SPINE.md — находок правила: 0 → 1 (зубья подтверждены)"
+    },
+    {
+      "name": "spec_present",
+      "id": "C-005",
+      "kind": "file_exists",
+      "status": "confirmed",
+      "fingerprint": "b7d79dc164ffa3603e1a02407621767b889b09c81950c345f03be873d7a5ad25",
+      "detail": "удаление файла docs/spec/merchant-acceptance.md — находок правила: 0 → 1 (зубья подтверждены)"
+    },
+    {
+      "name": "problem_present",
+      "id": "C-006",
+      "kind": "file_exists",
+      "status": "confirmed",
+      "fingerprint": "e10b7664785b34056f6bbae886f6d2e4057c996337ded42d6f98ddfc8fc27233",
+      "detail": "удаление файла docs/PROBLEM.md — находок правила: 0 → 1 (зубья подтверждены)"
+    },
+    {
+      "name": "spec_ears",
+      "id": "C-007",
+      "kind": "must_contain",
+      "status": "confirmed",
+      "fingerprint": "02dbc1e3a19c42ecd486ae060233989ed0f12f21de56c575f5ad65ec1e95a1e5",
+      "detail": "удаление совпадений pattern из docs/SPEC.md — находок правила: 0 → 1 (зубья подтверждены)"
+    },
+    {
+      "name": "no_todo_in_model",
+      "id": "C-008",
+      "kind": "must_not_contain",
+      "status": "confirmed",
+      "fingerprint": "76a96a9073b07f4ece2171fb93d6101b8b53a575320c1dfaa52fc1aa1cb020d4",
+      "detail": "вставка строки под pattern в model/AD-001-каждая-операция-приёма-идемпотентна-по-ключу-пор.md — находок правила: 0 → 1 (зубья подтверждены)"
+    },
+    {
+      "name": "acceptance_present",
+      "id": "C-009",
+      "kind": "file_exists",
+      "status": "confirmed",
+      "fingerprint": "28d986f293b9703d0fd85210305cff33071b5a21ac892aac145e6509c0ecbe88",
+      "detail": "удаление файла docs/ACCEPTANCE.md — находок правила: 0 → 1 (зубья подтверждены)"
+    },
+    {
+      "name": "openapi_present",
+      "id": "C-010",
+      "kind": "file_exists",
+      "status": "confirmed",
+      "fingerprint": "f1318b95c7f01fdfcddf59c9042d365b6bacc5791ab793a37cfa4a3b61b7ec7b",
+      "detail": "удаление файла docs/contracts/openapi-merchant.yaml — находок правила: 0 → 1 (зубья подтверждены)"
+    },
+    {
+      "name": "spine_prevents",
+      "id": "C-011",
+      "kind": "must_contain",
+      "status": "confirmed",
+      "fingerprint": "51246e3440b655bd345353a1f4c7cc397ae23fcc483cfadd9221d399dbbc64b2",
+      "detail": "удаление совпадений pattern из ARCHITECTURE-SPINE.md — находок правила: 0 → 1 (зубья подтверждены)"
+    },
+    {
+      "name": "spine_rule",
+      "id": "C-012",
+      "kind": "must_contain",
+      "status": "confirmed",
+      "fingerprint": "e1d304e0634a24a05804ffd3d73ed7a2f1efa80217a212f795b460144eaa4d6e",
+      "detail": "удаление совпадений pattern из ARCHITECTURE-SPINE.md — находок правила: 0 → 1 (зубья подтверждены)"
+    },
+    {
+      "name": "walking_skeleton_present",
+      "id": "C-013",
+      "kind": "file_exists",
+      "status": "confirmed",
+      "fingerprint": "d2c220b5d8bc2f0228b67673e21ea327a16b45b238baca28bff34a2fe9553936",
+      "detail": "удаление файла docs/WALKING-SKELETON.md — находок правила: 0 → 1 (зубья подтверждены)"
+    },
+    {
+      "name": "idempotency_key_enforced",
+      "id": "C-014",
+      "kind": "command_succeeds",
+      "status": "confirmed",
+      "fingerprint": "148b146923764e3ff89e26aaa1c86ec64b9798abcd997ee0e185a6e0c90b8e1b",
+      "detail": "подмена реализации на нарушающую из шаблона 'idempotency-key' (skeleton/rule_templates/idempotency-key) — находок правила: 0 → 1 (зубья подтверждены)"
+    },
+    {
+      "name": "append_only_journal_enforced",
+      "id": "C-015",
+      "kind": "command_succeeds",
+      "status": "confirmed",
+      "fingerprint": "61d4d20ed493791e371ea4d42c203fcd00d40203112ad368e3403095882ffb89",
+      "detail": "подмена реализации на нарушающую из шаблона 'append-only-journal' (skeleton/rule_templates/append-only-journal) — находок правила: 0 → 1 (зубья подтверждены)"
+    },
+    {
+      "name": "unknown_outcome_no_resend",
+      "id": "C-016",
+      "kind": "command_succeeds",
+      "status": "confirmed",
+      "fingerprint": "95c446c6137a4af5bd469f228396b0614c6704d80b483db06df1a11defbc3d2c",
+      "detail": "подмена реализации на нарушающую из шаблона 'unknown-outcome-no-resend' (skeleton/rule_templates/unknown-outcome-no-resend) — находок правила: 0 → 1 (зубья подтверждены)"
+    },
+    {
+      "name": "no_pii_in_logs",
+      "id": "C-017",
+      "kind": "command_succeeds",
+      "status": "confirmed",
+      "fingerprint": "f54d70710b0f5d6236597289b5b5b0ec6532164b58eb6f86d06eac31d1234ead",
+      "detail": "подмена реализации на нарушающую из шаблона 'no-pii-in-logs' (skeleton/rule_templates/no-pii-in-logs) — находок правила: 0 → 1 (зубья подтверждены)"
+    },
+    {
+      "name": "validate_before_side_effect",
+      "id": "C-018",
+      "kind": "command_succeeds",
+      "status": "confirmed",
+      "fingerprint": "62294d2e3742520adbdf66d2b74cf766f84bd700ef96714ed354d37dcf7be474",
+      "detail": "подмена реализации на нарушающую из шаблона 'validate-before-side-effect' (skeleton/rule_templates/validate-before-side-effect) — находок правила: 0 → 1 (зубья подтверждены)"
+    },
+    {
+      "name": "no_card_data_in_code",
+      "id": "C-019",
+      "kind": "must_not_contain",
+      "status": "confirmed",
+      "fingerprint": "996f10b0740871088548e2bbb92f85acf53d0450dca9258410c8659035bca172",
+      "detail": "вставка строки под pattern в skeleton/rule_templates/append-only-journal/fakes.py — находок правила: 0 → 1 (зубья подтверждены)"
+    }
+  ]
+}

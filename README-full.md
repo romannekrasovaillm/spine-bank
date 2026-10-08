@@ -346,7 +346,14 @@ BMAD, Spec Kit, OpenSpec и др.):
   инструмента классифицируется по риску — `rm -rf` получает DENY на уровне
   R2, журнал фиксирует попытки (AI-Disrupt PDLC). `arch-be policy --check "<cmd>"`.
 - **Evidence Bundle** — аудиторский след как гейт выпуска:
-  `arch-be evidence pack/verify` с профилями Fast/Standard/Critical.
+  `arch-be evidence pack/verify` с профилями Fast/Standard/Critical; с 0.3.14
+  отчёты прогонов пишет машина — `arch-be evidence record fitness|tests|skeleton`
+  (рукописная строка «Итог: PASS» прогон не удостоверяет, ADR-066).
+- **Архитектурный дифф каждого PR** (0.3.14, ADR-063/064):
+  `arch-be arch-diff --base main` — что PR изменил в системе (связи,
+  хранилища, контракты, NFR, инварианты) с основаниями `файл:строка`, без
+  LLM; правка модели — одним `arch-diff accept`, доставка в PR — одним
+  обновляемым комментарием (`connect ci`, docs/arch-diff.md).
 - **Метрики**: `arch-be metrics` — сессии, инструменты, ошибки, токены/₽, баллы
   рубрик, pass rate бенчей + трансформационные KPI: approval theater (доля
   бездумных согласий), architecture drift (дрейф AGENTS.md по флоту),
@@ -960,7 +967,14 @@ Live mini-case: [`кейсы/fleet-spine-drift`](кейсы/fleet-spine-drift/) 
 
 - **R0–R5 autonomy levels** (`[policy] autonomy`): every tool call is risk-classified
   (`rm -rf` → DENY at R2), attempts journaled.
-- **Evidence Bundle** (`arch-be evidence pack/verify`), **delta-specs**
+- **Evidence Bundle** (`arch-be evidence pack/verify`), with machine-written
+  run records since 0.3.14 — `arch-be evidence record fitness|tests|skeleton`
+  (a handwritten "Итог: PASS" line no longer attests a run, ADR-066);
+  **architecture diff of every PR** (0.3.14, ADR-063/064): `arch-be arch-diff
+  --base main` shows what a PR changed in the system (edges, datastores,
+  contracts, NFR, invariants) with `file:line` evidence, LLM-free; the model
+  is updated by accepting the diff (`arch-diff accept`), CI delivery via one
+  self-updating MR/PR comment (`connect ci`, docs/arch-diff.md); **delta-specs**
   (OpenSpec state machine + `delta guard` CI gate, see "Layered model 5.2"
   above), **OpenSpec adapter** (`arch-be openspec scan|coverage|init|gate`,
   `docs/openspec.md`): SHALL/MUST requirements from `openspec/` mapped to

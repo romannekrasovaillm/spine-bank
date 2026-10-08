@@ -79,3 +79,33 @@ pub(super) fn make_uncommitted_repo(repo: &Path) {
     std::fs::write(repo.join("ARCHITECTURE-SPINE.md"), "# Spine\n").expect("spine");
     git(repo, &["init", "-q"]);
 }
+
+/// Записывает файл фикстуры с созданием родительских каталогов.
+pub(super) fn write_fixture(dir: &Path, rel: &str, text: &str) {
+    let path = dir.join(rel);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("mkdir");
+    }
+    std::fs::write(path, text).expect("write fixture");
+}
+
+/// Вывод git-команды в фикстуре (тестkit даёт `git`, но не отдаёт stdout;
+/// базовый коммит нужен как SHA). Идентичность коммиттера — как в `git`.
+pub(super) fn git_stdout(dir: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("GIT_AUTHOR_NAME", "t")
+        .env("GIT_AUTHOR_EMAIL", "t@t")
+        .env("GIT_COMMITTER_NAME", "t")
+        .env("GIT_COMMITTER_EMAIL", "t@t")
+        .output()
+        .expect("git");
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}

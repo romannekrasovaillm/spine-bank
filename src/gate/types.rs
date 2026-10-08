@@ -364,6 +364,9 @@ pub struct GateOptions {
     /// Составляющая `secrets` (C3): severity и область сканирования
     /// (секция `[gate.secrets]`).
     pub secrets: crate::config::SecretsConfig,
+    /// Составляющая `openspec_coverage` (F2, ADR-067): область покрытия
+    /// требований `OpenSpec` (секция `[gate.openspec_coverage]`).
+    pub openspec_coverage: crate::config::OpenspecCoverageConfig,
     /// Модель доверия `command_succeeds` (A3, ADR-053): снимок решения
     /// «исполнять ли команды реестра» для составляющей `fitness`. `Default` —
     /// детерминированный legacy-режим (исполнять, allow-файл не
@@ -383,6 +386,12 @@ pub struct GateOptions {
     /// ADR/override/дельта, впервые появившиеся или изменённые в диапазоне,
     /// ослабления не узаконивают (`self_approved`).
     pub agent_range: Option<String>,
+    /// Проверки дрейфа «модель ↔ код» (секция `[drift]`, волна C): флаг
+    /// `nfr_metric_check` протягивается в составляющую `model_drift` (C1).
+    pub drift: crate::config::DriftConfig,
+    /// Составляющая `arch_drift` (K6): включение вне `[gate.required]`
+    /// (секция `[gate.arch_drift]`); проверка дорогая, дефолт — выключена.
+    pub arch_drift: crate::config::ArchDriftConfig,
 }
 
 impl GateOptions {
@@ -401,10 +410,13 @@ impl GateOptions {
             rule_weakened: cfg.gate.rule_weakened.clone(),
             overrides: cfg.gate.overrides.clone(),
             secrets: cfg.gate.secrets,
+            openspec_coverage: cfg.gate.openspec_coverage,
             decision_policy: cfg.gate.decision_policy.clone(),
             exec: crate::cmd_trust::ExecPolicy::default(),
             route: None,
             agent_range: None,
+            drift: cfg.drift.clone(),
+            arch_drift: cfg.gate.arch_drift,
         }
     }
 }
@@ -427,6 +439,12 @@ pub struct GateReport {
     pub route_auto: bool,
     /// Заметка о маршруте: score и триггеры из диффа либо причина fail-safe.
     pub route_note: String,
+    /// Триггеры, по которым вычислен маршрут прогона (D1): пусты, когда
+    /// маршрут задан явно (`--route`) — тогда детектор диффа не запускался.
+    /// Паспорт вердикта по ним перечисляет недетектируемые триггеры,
+    /// оставшиеся слепыми ([`crate::control::DIFF_BLIND_TRIGGERS`]).
+    /// В конверт `gate-verdict/v1` не входит (представление, не вердикт).
+    pub route_triggers: Vec<String>,
     /// Составляющие в порядке прогона.
     pub components: Vec<GateComponent>,
     /// Итог: PASS / FAIL / INCOMPLETE (П1).
@@ -579,6 +597,7 @@ mod tests {
             route: Route::Fast,
             route_auto: false,
             route_note: "auto".to_string(),
+            route_triggers: Vec::new(),
             components: vec![
                 component("fitness", GateStatus::Pass, Vec::new()),
                 component("delta_guard", GateStatus::Pass, Vec::new()),

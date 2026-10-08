@@ -843,6 +843,7 @@ mod tests {
             route: Route::Fast,
             route_auto: true,
             route_note: "auto: score 0 (триггеров нет)".to_string(),
+            route_triggers: Vec::new(),
             components: vec![
                 GateComponent {
                     name: "fitness",
