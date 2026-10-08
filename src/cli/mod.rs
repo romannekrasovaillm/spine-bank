@@ -31,7 +31,7 @@ use arch_harness::llm::LlmRegistry;
 
 #[cfg(feature = "harness")]
 use agent::{RunOptions, cmd_run};
-use arch_diff::cmd_arch_diff;
+use arch_diff::{ArchDiffCmd, cmd_arch_diff, cmd_arch_diff_decide};
 use archify::{ArchifyCmd, cmd_archify};
 use archunit::{ArchunitCmd, cmd_archunit};
 #[cfg(feature = "harness")]
@@ -579,13 +579,17 @@ enum Cmd {
     /// между ревизиями — связи компонентов, внешние системы, хранилища,
     /// контракты, NFR, задетые инварианты, предложение правки модели.
     /// Информационный: exit 0, кроме --fail-on (тогда exit 1).
+    /// Подкоманды accept/reject (K5, ADR-064) — решения по предложениям
+    /// (дельта / журнал решений).
     ArchDiff {
+        #[command(subcommand)]
+        cmd: Option<ArchDiffCmd>,
         /// Корень репозитория.
         #[arg(long, default_value = ".")]
         repo: PathBuf,
         /// База диффа (ветка/тег/sha или диапазон A...B).
         #[arg(long)]
-        base: String,
+        base: Option<String>,
         /// Голова диффа (по умолчанию HEAD).
         #[arg(long)]
         head: Option<String>,
@@ -1569,15 +1573,19 @@ pub(crate) async fn run() -> Result<()> {
             format,
             trigger,
             fail_on,
-        }) => cmd_arch_diff(
-            &cfg,
-            &repo,
-            &base,
-            head.as_deref(),
-            &format,
-            &trigger,
-            &fail_on,
-        )?,
+            cmd,
+        }) => match cmd {
+            Some(sub) => cmd_arch_diff_decide(&cfg, &sub)?,
+            None => cmd_arch_diff(
+                &cfg,
+                &repo,
+                base.as_deref(),
+                head.as_deref(),
+                &format,
+                &trigger,
+                &fail_on,
+            )?,
+        },
         Some(Cmd::Archunit { cmd }) => cmd_archunit(cmd).await?,
         Some(Cmd::Connect {
             host,

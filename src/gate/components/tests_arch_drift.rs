@@ -92,7 +92,7 @@ fn write_reject_journal(dir: &Path, grounds: &Grounds) {
         }
         Grounds::Stale => format!("sha256:{}", "0".repeat(64)),
     };
-    let journal = crate::arch_diff::DecisionsJournal {
+    let journal = crate::arch_diff::DecisionJournal {
         schema: crate::arch_diff::ARCH_DIFF_DECISIONS_SCHEMA.to_string(),
         entries: vec![crate::arch_diff::DecisionEntry {
             edge_id: "import:CMP-001->CMP-004".to_string(),
@@ -100,7 +100,8 @@ fn write_reject_journal(dir: &Path, grounds: &Grounds) {
             reason: "законный прямой вызов, в модель не носить".to_string(),
             grounds_hash: hash,
             decided_at: "2026-10-08T12:00:00+03:00".to_string(),
-            source: "human".to_string(),
+            source: crate::arch_diff::DecisionSource::Human,
+            delta: None,
         }],
     };
     let path = dir.join(crate::arch_diff::ARCH_DIFF_DECISIONS_PATH);
