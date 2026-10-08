@@ -4,7 +4,8 @@ type: ad
 title: "Выплата идемпотентна по ключу (реестр, строка)"
 status: "ADOPTED"
 affects: [CMP-001, CMP-004]
-verified_by: [C-002]
+verified_by: [C-002, C-016]
+load_bearing: true
 ---
 
 - **Binds**: Приём реестров выплат, Оркестратор выплат

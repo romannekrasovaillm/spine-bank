@@ -4,7 +4,8 @@ type: cmp
 title: "Сверка с платформой"
 status: "designed"
 implements: [REQ-005, AD-007]
-depends_on: [CMP-003, CMP-004]
+depends_on: [CMP-003, CMP-004, CMP-006]
+code_roots: [skeleton/reconciliation]
 availability: 0.999
 replicas: 2
 rps_per_instance: 80.0

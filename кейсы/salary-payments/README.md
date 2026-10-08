@@ -19,11 +19,11 @@ arch-be bootstrap --status --dir кейсы/salary-payments   # спайн ✓ �
 | | |
 |---|---|
 | Маршрут | Critical (`.arch-handoff/ROUTE.lock`) |
-| Модель | 43 сущности: SYS, CAP×3, REQ×5, NFR×5, CMP×6, INT×3, AD×7, ADR×5, RISK×4, QAS×3, OWNER |
-| Правила | 15 (все `severity: error`) |
+| Модель | 43 сущности: SYS, CAP×3, REQ×5, NFR×5, CMP×6 (у всех `code_roots` на пакеты `skeleton/`), INT×3, AD×7 (5 несущих — `load_bearing`), ADR×5, RISK×4, QAS×3, OWNER |
+| Правила | 22 (все `severity: error`; 5 — исполняемые из шаблонов библиотеки, зубья 21/22 подтверждены `arch-be rules teeth`; C-022 — `context_boundary` по импортам скелета) |
 | Решения | 5 ADR с альтернативами и обратимостью, `docs/adr/` |
-| Walking skeleton | `skeleton/payouts.py`, 9 тестов, `python3 -m pytest tests/ -q` |
-| Бандл | 13 артефактов критического профиля, упакован `evidence pack` |
+| Walking skeleton | пакеты `skeleton/` по компонентам модели (registry, journal, recipients, platform, orchestrator, reconciliation), 9 тестов, `python3 -m pytest tests/ -q` |
+| Бандл | 12 артефактов критического профиля, упакован `evidence pack` |
 
 ## Вердикт
 
@@ -34,6 +34,18 @@ $ arch-be gate --repo . --route critical
 
 Одиннадцать составляющих, все PASS либо SKIP (по умолчанию выключена только
 `decision_quality`). Паспорт вердикта — `arch-be gate --repo . --explain`.
+
+## Модель привязана к коду (волна C4)
+
+У всех шести CMP проставлены `code_roots` на пакеты `skeleton/` (дельта
+`changes/code-roots`), а рёбра `depends_on` подкреплены реальными импортами —
+`arch-be model drift .` зелёный без единой находки. Правило C-022
+(`context_boundary`) краснит импорт через границу контекста без объявленного
+ребра (проверено мутантом «`from skeleton.platform import Platform` в
+`skeleton/recipients/`» — `[error] context_boundary: … CMP-002 → CMP-004 без
+depends_on в модели`). В `arch-harness.toml` кейса заявлена обязательная
+составляющая `model_drift` (`[gate.required]`): она вступит в силу после
+слияния волны C1 (текущий бинарь неизвестную составляющую игнорирует).
 
 ## Измерение защищённости (`arch-be redteam`)
 
@@ -48,13 +60,18 @@ arch-be redteam . --no-decision-quality
   `decision_quality`, а она требует судью, отличного от автора. В этом
   окружении судья — та же модель, что писала документы; отчёт по ADR-001
   поэтому помечен `judge_is_author` (см. `reports/rubric/`).
-- **D11 (код нарушает инвариант, правила на код нет) не пойман и не должен** —
-  это работа ревьюера.
+- **D11 (код нарушает инвариант) пойман механикой** — после волны B4
+  (дельта `changes/executable-invariants`) правило `C-021`
+  (`no_card_data_in_code`, PAN по `**/*.py`) закрыло каталоги вне `tests/`,
+  а пять исполняемых правил из шаблонов (C-016…C-020) проверяют несущие
+  инварианты прогоном, а не словом: лексический обход D18 («слово на месте,
+  логики нет») и подмена реализации D15 ловятся `fitness`.
 - Остальные 10 позиций пойманы: nfr (D1–D3), trace_check (D4), model_validate
   (D5, D12), rule_weakened (D7), fitness (D8, D11b), evidence_verify (D13, R).
 
-Правило `C-015` (`no_card_data_in_tests`) добавлено именно после этого
-измерения: без него D11b проходил мимо реестра.
+Правило `C-015` (`no_card_data_in_tests`) добавлено именно после первого
+измерения: без него D11b проходил мимо реестра; `C-021` — после повторного:
+D11 клал нарушение в `src/legacy/`, куда не смотрел ни один glob.
 
 ## Решения и их качество
 

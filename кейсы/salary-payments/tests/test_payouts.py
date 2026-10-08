@@ -3,17 +3,14 @@
 import os
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "skeleton"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from payouts import (  # noqa: E402
-    Journal,
-    Platform,
-    Row,
-    StopList,
-    partial_success,
-    process_registry,
-    reconcile,
-)
+from skeleton.journal import Journal  # noqa: E402
+from skeleton.orchestrator import partial_success, process_registry  # noqa: E402
+from skeleton.platform import Platform  # noqa: E402
+from skeleton.reconciliation import reconcile  # noqa: E402
+from skeleton.recipients import StopList  # noqa: E402
+from skeleton.registry import Row  # noqa: E402
 
 
 def rows(registry="R-1", count=3, amount=100_00):

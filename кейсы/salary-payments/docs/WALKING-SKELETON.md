@@ -9,8 +9,17 @@
 
 | Файл | Содержит |
 |---|---|
-| `skeleton/payouts.py` | строки реестра, журнал, стоп-лист, платформа (мок), построчная обработка, сверка |
+| `skeleton/registry/` | строки реестра (`Row`, `Outcome`) — CMP-006 |
+| `skeleton/journal/` | append-only журнал выплат — CMP-003 |
+| `skeleton/recipients/` | стоп-лист и лимит окна — CMP-002 |
+| `skeleton/platform/` | адаптер платформы (мок) — CMP-004 |
+| `skeleton/orchestrator/` | построчная обработка реестра — CMP-001 |
+| `skeleton/reconciliation/` | сверка по данным платформы — CMP-005 |
 | `tests/test_payouts.py` | 9 тестов свойств контура |
+
+Раскладка по пакетам повторяет модель: у каждого CMP есть `code_roots`,
+а импорты между пакетами следуют `depends_on` модели (правило C-022,
+`context_boundary`).
 
 ## Сквозной путь
 

@@ -4,7 +4,8 @@ type: ad
 title: "Персональные данные получателей не попадают в журнал и телеметрию"
 status: "ADOPTED"
 affects: [CMP-003]
-verified_by: [C-003]
+verified_by: [C-003, C-019, C-021]
+load_bearing: true
 ---
 
 - **Binds**: Журнал выплат, Телеметрия

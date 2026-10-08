@@ -4,7 +4,8 @@ type: ad
 title: "Неопределённый исход разрешается сверкой, а не повтором"
 status: "ADOPTED"
 affects: [CMP-004, CMP-005]
-verified_by: [C-004]
+verified_by: [C-004, C-018]
+load_bearing: true
 ---
 
 - **Binds**: Оркестратор выплат, Сверка с платформой

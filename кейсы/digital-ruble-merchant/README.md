@@ -10,7 +10,20 @@
 (правило `no_pan_in_tests` на `tests/**/*.py`), и то, что она ловить не должна
 (семантические ссылки и смысл решений).
 
-Состав: ARCHITECTURE-SPINE.md (9 инвариантов), CONSTRAINTS.yaml (13 правил),
-model/ (сущности CAP, SYS, CMP, INT, NFR, REQ, AD, ADR, RISK, OWNER, QAS),
-docs/adr/ (7 ADR), docs/spec/, docs/contracts/, tests/, evidence-бандл,
-активная дельта `changes/merchant-tsp`.
+Состав: ARCHITECTURE-SPINE.md (9 инвариантов, 5 несущих — `load_bearing`),
+CONSTRAINTS.yaml (19 правил: 5 исполняемых из шаблонов библиотеки с
+подтверждёнными зубьями + контентные; реестр расширен дельтой
+`changes/executable-invariants`), model/ (сущности CAP, SYS, CMP, INT, NFR,
+REQ, AD, ADR, RISK, OWNER, QAS), docs/adr/ (7 ADR), docs/spec/,
+docs/contracts/, tests/, evidence-бандл, активные дельты
+`changes/merchant-tsp` и `changes/executable-invariants`.
+
+## Доверие контура (волна B)
+
+Кейс несёт `arch-harness.toml` с `[trust] require_teeth = true`: ступень 3
+метрики `arch-be trust .` (запуск из каталога кейса) выдаётся только по
+измерению — `.arch-handoff/teeth.json` (`arch-be rules teeth --save`, 19/19
+с подтверждёнными зубьями) и `.arch-handoff/redteam.json`
+(`arch-be redteam . --save`, 11/14 = 79 % ≥ порога 78 %; кодовый слой
+3/3 = 100 %). Без файла измерения ступень 3 в строгом режиме недоступна —
+проверено снятием `teeth.json` (падает до 2 из 5).

@@ -1,0 +1,78 @@
+# Применённые шаблоны исполняемых правил — сгенерировано `arch-be rules template apply`.
+# Не редактируйте вручную: проверка зубов сверяет хэши файлов с этой записью.
+templates:
+  - id: append-only-journal
+    version: 1
+    ad: AD-2
+    lang: python
+    dir: skeleton/rule_templates/append-only-journal
+    command: 'python3 -m pytest -q -p no:cacheprovider skeleton/rule_templates/append-only-journal/test_append_only_journal.py'
+    files:
+      - path: skeleton/rule_templates/append-only-journal/README.md
+        sha256: 'c0da942956131ecd5066e935a2dba678145f70255e9d84a3984cc51a6ee74adb'
+      - path: skeleton/rule_templates/append-only-journal/fakes.py
+        sha256: '663e3cba93b005e7c34642df714244c05b46902e85665355ff1480bda3003f33'
+      - path: skeleton/rule_templates/append-only-journal/reference_impl.py
+        sha256: '168fa1f15336bdf3f1870bcfc5c3aa3dc139e86aa2f932a3eefc81e7b95cdcc4'
+      - path: skeleton/rule_templates/append-only-journal/test_append_only_journal.py
+        sha256: '3b79ffface153766af195bdce4bf716019efd8b1d33baa6bd6bf7c9487887d7c'
+  - id: idempotency-key
+    version: 1
+    ad: AD-1
+    lang: python
+    dir: skeleton/rule_templates/idempotency-key
+    command: 'python3 -m pytest -q -p no:cacheprovider skeleton/rule_templates/idempotency-key/test_idempotency_key.py'
+    files:
+      - path: skeleton/rule_templates/idempotency-key/README.md
+        sha256: '514f00559c67c48e4d37df5848d3c65f8c5013c70e386c473184cd3747f0dc78'
+      - path: skeleton/rule_templates/idempotency-key/fakes.py
+        sha256: '413b2d84f179a8f37e1b2d7970ed2fd4a934d0629f9760d783dfb102e53b0960'
+      - path: skeleton/rule_templates/idempotency-key/reference_impl.py
+        sha256: '790e075efa3218e4570cda642d597439cba92d1e71f4b7e114890ae26c48dd45'
+      - path: skeleton/rule_templates/idempotency-key/test_idempotency_key.py
+        sha256: '7312538e548c8a57159af29c6754a4384184db85b6037a6d7c488930e67f390d'
+  - id: no-pii-in-logs
+    version: 1
+    ad: AD-4
+    lang: python
+    dir: skeleton/rule_templates/no-pii-in-logs
+    command: 'python3 -m pytest -q -p no:cacheprovider skeleton/rule_templates/no-pii-in-logs/test_no_pii_in_logs.py'
+    files:
+      - path: skeleton/rule_templates/no-pii-in-logs/README.md
+        sha256: '34bc209af4f9621d797d7f2e09891af726a01c0a94816acb42c8ee506d02c47b'
+      - path: skeleton/rule_templates/no-pii-in-logs/fakes.py
+        sha256: 'b64439dc31d443615d5dffd473ab086e01badd457f9d9b2990c5f8ce652e3f98'
+      - path: skeleton/rule_templates/no-pii-in-logs/reference_impl.py
+        sha256: '45e808faafa74a555896776f592c34e16e254b922c0b95e279439d65a3170f5b'
+      - path: skeleton/rule_templates/no-pii-in-logs/test_no_pii_in_logs.py
+        sha256: '47032295aaf8bb15d9e6b00cb9959292d00b50431eba9f7768bca35c9023a746'
+  - id: unknown-outcome-no-resend
+    version: 1
+    ad: AD-3
+    lang: python
+    dir: skeleton/rule_templates/unknown-outcome-no-resend
+    command: 'python3 -m pytest -q -p no:cacheprovider skeleton/rule_templates/unknown-outcome-no-resend/test_unknown_outcome_no_resend.py'
+    files:
+      - path: skeleton/rule_templates/unknown-outcome-no-resend/README.md
+        sha256: '2fc7a8966511f7e30161f0867af1f29aef388da4cfae10b27d8eda44f88f63fb'
+      - path: skeleton/rule_templates/unknown-outcome-no-resend/fakes.py
+        sha256: '3d16cd420f9b4c519b18a9f3d8999fb25fb9915f888623ea2c6056b4724966c1'
+      - path: skeleton/rule_templates/unknown-outcome-no-resend/reference_impl.py
+        sha256: 'a5a1bf06cf327f662df794b94ea738f5bb0fc675f135c61cf3869016b540066f'
+      - path: skeleton/rule_templates/unknown-outcome-no-resend/test_unknown_outcome_no_resend.py
+        sha256: 'c31d2cd07ea42583031bc96f3e77f20ee82bbfa3e3e771ec8e104028861e36dd'
+  - id: validate-before-side-effect
+    version: 1
+    ad: AD-5
+    lang: python
+    dir: skeleton/rule_templates/validate-before-side-effect
+    command: 'python3 -m pytest -q -p no:cacheprovider skeleton/rule_templates/validate-before-side-effect/test_validate_before_side_effect.py'
+    files:
+      - path: skeleton/rule_templates/validate-before-side-effect/README.md
+        sha256: 'a87bb6cdef95cc707a3ca3122cfc9370c9fadba843cf5dd3a39ef0bc9f86546e'
+      - path: skeleton/rule_templates/validate-before-side-effect/fakes.py
+        sha256: '83df056fde4a4e62f24b948639516b393a7ec5052072e6c5c18153e80c5e94a7'
+      - path: skeleton/rule_templates/validate-before-side-effect/reference_impl.py
+        sha256: 'd0bd91fa3a3c6f829053e91eb3c2749a46cecbbe4b027ba6fde891ac6687dfa2'
+      - path: skeleton/rule_templates/validate-before-side-effect/test_validate_before_side_effect.py
+        sha256: '22a65125db1f4250c30c55cefb20ec0d61e190cf96186062c1654313090cc638'
