@@ -2438,6 +2438,81 @@ fn review_broken_model_exits_1() {
         .stdout(contains("Итог: FAIL"));
 }
 
+/// Минимальный артефакт `arch-be/arch-diff/v1` для ящика ревью (K7).
+fn arch_diff_artifact(route: &str, with_edge: bool) -> String {
+    let edges = if with_edge {
+        r#"[{"from": "CMP-001", "to": "CMP-004", "kind": "import", "evidence": ["s/writer.py:2"], "model_status": "not_in_model"}]"#
+    } else {
+        "[]"
+    };
+    format!(
+        "{{\"schema\": \"arch-be/arch-diff/v1\", \"arch_be\": \"0.3.14\", \
+         \"base\": \"aaaa\", \"head\": \"bbbb\", \"added_nodes\": [], \"removed_nodes\": [], \
+         \"added_edges\": {edges}, \"removed_edges\": [], \"declared_unused\": [], \
+         \"invariants_touched\": [], \"adrs_touched\": [], \"contract_changes\": [], \
+         \"nfr_shifts\": [], \"route\": {{\"route\": \"{route}\", \"score\": 1, \
+         \"triggers\": [], \"evidence\": [], \"undeclared\": []}}, \"proposals\": []}}"
+    )
+}
+
+/// `arch-be review inbox <ROOT>` (K7, эксперимент): непустой дифф попадает
+/// в ящик (critical выше standard), пустой — отфильтрован, битый JSON —
+/// предупреждение и пропуск, exit 0 (информационная команда).
+#[test]
+fn review_inbox_filters_sorts_and_warns() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().join("fleet");
+    std::fs::create_dir_all(root.join("pay-core")).expect("mkdir");
+    std::fs::create_dir_all(root.join("shop")).expect("mkdir");
+    std::fs::create_dir_all(root.join("blog")).expect("mkdir");
+    std::fs::write(
+        root.join("pay-core/arch-diff.json"),
+        arch_diff_artifact("critical", true),
+    )
+    .expect("critical");
+    std::fs::write(
+        root.join("shop/arch-diff-mr7.json"),
+        arch_diff_artifact("standard", true),
+    )
+    .expect("standard");
+    // Пустой дифф — в ящик не попадает.
+    std::fs::write(
+        root.join("blog/arch-diff.json"),
+        arch_diff_artifact("fast", false),
+    )
+    .expect("empty");
+    // Битый JSON — предупреждение и пропуск.
+    std::fs::write(root.join("blog/arch-diff-mr9.json"), "{битый").expect("broken");
+
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("review").arg("inbox").arg(root.as_os_str());
+    let out = cmd.assert().success();
+    let text = String::from_utf8_lossy(&out.get_output().stdout).into_owned();
+    assert!(text.contains("Непустых диффов: 2"), "{text}");
+    assert!(text.contains("пустых отфильтровано: 1"), "{text}");
+    assert!(text.contains("пропущено с предупреждением: 1"), "{text}");
+    assert!(
+        text.find("critical").expect("critical") < text.find("standard").expect("standard"),
+        "critical выше standard: {text}"
+    );
+    assert!(text.contains("[warn]"), "{text}");
+
+    // JSON-форма: схема review-inbox/v1, счётчики, записи.
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("review")
+        .arg("inbox")
+        .arg(root.as_os_str())
+        .arg("--format")
+        .arg("json");
+    let out = cmd.assert().success();
+    let json: serde_json::Value =
+        serde_json::from_slice(&out.get_output().stdout).expect("stdout — валидный JSON");
+    assert_eq!(json["schema"], "arch-be/review-inbox/v1");
+    assert_eq!(json["non_empty"], 2);
+    assert_eq!(json["empty_filtered"], 1);
+    assert_eq!(json["entries"][0]["route"], "critical");
+}
+
 /// `arch-be model impact <dir> --id`: радиус изменения — затронутые сущности,
 /// правило с владельцем, контракт INT, «с кем согласовывать»; exit 0
 /// (отчёт, не гейт). `--json` — машиночитаемая форма.
@@ -3256,6 +3331,86 @@ fn redteam_measures_merchant_case_detection_share() {
     cmd.assert()
         .code(1)
         .stdout(predicates::str::contains("Итог: FAIL"));
+}
+
+/// E3 (эксперимент): `redteam --corpus <dir>` — патчи корпуса как мутаторы.
+/// Пойманный дефект (PAN в tests/** — правило C-003 кейса) и непойманный
+/// (f64-деньги: правила класса в реестре кейса нет — честный пробел), файл
+/// не-unified-diff отброшен при загрузке; прогон информационный — exit 0
+/// при наличии непойманной позиции; `--save` несовместим (clap).
+#[test]
+fn redteam_corpus_applies_patches_and_stays_informational() {
+    let case = Path::new(env!("CARGO_MANIFEST_DIR")).join("кейсы/digital-ruble-merchant");
+    let tmp = tempfile::tempdir().expect("tmp");
+    let corpus = tmp.path().join("corpus");
+    std::fs::create_dir_all(&corpus).expect("corpus");
+    // Пойманный: PAN-литерал в новом тесте (C-003: must_not_contain PAN по tests/**/*.py).
+    std::fs::write(
+        corpus.join("01-pan.patch"),
+        "diff --git a/tests/notify_test.py b/tests/notify_test.py\nnew file mode 100644\n\
+         --- /dev/null\n+++ b/tests/notify_test.py\n@@ -0,0 +1,3 @@\n\
+         +PAN = '4111 1111 1111 1111'\n+def test_notify():\n+    assert PAN\n",
+    )
+    .expect("patch 01");
+    // Непойманный: деньги в float — правила класса в реестре кейса нет.
+    std::fs::write(
+        corpus.join("02-f64.patch"),
+        "diff --git a/skeleton/payments/total.py b/skeleton/payments/total.py\nnew file mode 100644\n\
+         --- /dev/null\n+++ b/skeleton/payments/total.py\n@@ -0,0 +1,2 @@\n\
+         +def total_rub(parts):\n+    return sum(parts)\n",
+    )
+    .expect("patch 02");
+    // Не unified diff — отбрасывается при загрузке с причиной.
+    std::fs::write(
+        corpus.join("03-journal.patch"),
+        "протокол прогона, не патч\n",
+    )
+    .expect("patch 03");
+
+    let mut cmd = arch_cmd(tmp.path());
+    let out = cmd
+        .arg("redteam")
+        .arg(case.as_os_str())
+        .arg("--corpus")
+        .arg(corpus.as_os_str())
+        .output()
+        .expect("прогон arch-be");
+    // Информационный прогон: непойманная позиция корпуса не краснит exit.
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("Корпус (E3, эксперимент)"), "{text}");
+    assert!(text.contains("применилось: 2"), "{text}");
+    assert!(text.contains("поймано гейтом: 1/2"), "{text}");
+    assert!(
+        text.contains("01-pan.patch") && text.contains("пойман: fitness"),
+        "{text}"
+    );
+    assert!(
+        text.contains("02-f64.patch") && text.contains("НЕ ПОЙМАН"),
+        "{text}"
+    );
+    assert!(
+        text.contains("03-journal.patch") && text.contains("нет заголовков unified diff"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("Итог:"),
+        "у корпуса нет приёмочного итога: {text}"
+    );
+
+    // --save несовместим с --corpus (измерение корпуса — не вход метрики доверия).
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("redteam")
+        .arg(case.as_os_str())
+        .arg("--corpus")
+        .arg(corpus.as_os_str())
+        .arg("--save");
+    cmd.assert().failure();
 }
 
 /// W2: машинный формат отчёта — JSON-схема с картой обнаружения.

@@ -368,6 +368,16 @@ enum Cmd {
         /// харнесс, — в ядре LLM нет. В долю обнаружения они не входят.
         #[arg(long, value_name = "КАТАЛОГ")]
         keep_semantic: Option<PathBuf>,
+        /// ЭКСПЕРИМЕНТАЛЬНЫЙ режим (E3, исследование): вместо каталога
+        /// мутаторов — внешний корпус патчей (`*.patch`/`*.diff`, unified
+        /// diff; например, из журналов прогонов харнессов). Каждый патч
+        /// применяется к копии кейса как мутатор (`git apply`), дальше —
+        /// обычный конвейер гейта. Прогон информационный: exit-код от доли
+        /// поимки корпуса не зависит (порог не задан), несовместим с
+        /// `--save` (измерение корпуса — не измерение защищённости кейса
+        /// для метрики доверия). Разбор — docs/experiments/redteam-corpus.md.
+        #[arg(long, value_name = "DIR", conflicts_with = "save")]
+        corpus: Option<PathBuf>,
     },
     /// Составное архитектурное ревью репозитория одним ответом (бэклог
     /// волны 3, п.13): маршрут значимости из git-диффа + весь контур
@@ -375,9 +385,14 @@ enum Cmd {
     /// спайна, трассировка; на Standard/Critical — NFR и evidence) +
     /// целостность модели + линт контрактов OpenAPI/AsyncAPI.
     /// Провал любой секции — exit 1 (механически, как у `gate`).
+    /// Подкоманда `inbox <ROOT>` (K7, эксперимент) — ящик ревью по флоту:
+    /// непустые архитектурные диффы из артефактов CI набора репозиториев.
     Review {
-        /// Репозиторий.
-        dir: PathBuf,
+        /// Репозиторий (не нужен при подкоманде `inbox`).
+        dir: Option<PathBuf>,
+        /// Подкоманда (K7: `inbox` — ящик ревью по артефактам CI флота).
+        #[command(subcommand)]
+        cmd: Option<ReviewCmd>,
         /// База git для диффа и сравнения правил (по умолчанию — рабочее
         /// дерево против HEAD; голая ревизия или готовый диапазон A...HEAD).
         #[arg(long)]
@@ -674,6 +689,25 @@ enum RedteamCmd {
     SemanticScore {
         /// Каталог, переданный `redteam --keep-semantic`.
         dir: PathBuf,
+        /// Формат вывода: text (дефолт) | json.
+        #[arg(long, default_value = "text", value_name = "FORMAT")]
+        format: String,
+    },
+}
+
+/// Подкоманды `arch-be review` (K7, P2 — эксперимент).
+#[derive(Subcommand)]
+enum ReviewCmd {
+    /// ЭКСПЕРИМЕНТАЛЬНАЯ (K7, P2): ящик ревью архитектора по флоту.
+    /// Рекурсивно читает JSON-артефакты `arch-be/arch-diff/v1` под ROOT
+    /// (файлы, не сервис — как реестры ADR-033) и показывает открытые
+    /// изменения с НЕПУСТЫМ диффом по убыванию маршрута и числа задетых
+    /// инвариантов; пустые диффы в ящик не попадают. Толерантный ридер:
+    /// битый JSON или чужая схема — предупреждение и пропуск. Только чтение
+    /// файлов; информационная команда (exit 0), без влияния на `review <dir>`.
+    Inbox {
+        /// Корень набора репозиториев (каталог с артефактами CI).
+        root: PathBuf,
         /// Формат вывода: text (дефолт) | json.
         #[arg(long, default_value = "text", value_name = "FORMAT")]
         format: String,
@@ -1294,6 +1328,7 @@ pub(crate) async fn run() -> Result<()> {
             no_decision_quality,
             save,
             keep_semantic,
+            corpus,
         }) => {
             // Подкоманда `semantic-score` читает уже сохранённые клоны: сам
             // прогон кейса не нужен и кейс не обязателен.
@@ -1336,22 +1371,39 @@ pub(crate) async fn run() -> Result<()> {
                      `arch-be redteam semantic-score <каталог>`"
                 );
             };
-            let report = arch_harness::redteam::run_with_options(
-                &case,
-                &arch_harness::redteam::RedteamOptions {
-                    min_detection,
-                    // E2: порог кодовой доли — из конфига, по умолчанию не задан
-                    // ([РЕШЕНИЕ ЧЕЛОВЕКА] задания 0.3.14).
-                    min_code_detection: cfg.redteam.min_code_detection,
-                    decision_quality: !no_decision_quality,
-                    keep_semantic: keep_semantic.clone(),
-                },
-            )?;
-            if save {
-                // Сохраняем в ИСХОДНЫЙ кейс: прогон шёл в копии.
-                let path = arch_harness::redteam::save_summary(&case, &report)?;
-                eprintln!("Итог измерения сохранён: {}", path.display());
-            }
+            let report = if let Some(corpus_dir) = corpus.as_deref() {
+                // E3 (эксперимент): внешний корпус патчей вместо каталога
+                // мутаторов. Информационный прогон: без --save (несовместимо
+                // на уровне clap) и без exit 1 по доле поимки корпуса.
+                arch_harness::redteam::corpus::run_corpus(
+                    &case,
+                    corpus_dir,
+                    &arch_harness::redteam::RedteamOptions {
+                        min_detection,
+                        min_code_detection: cfg.redteam.min_code_detection,
+                        decision_quality: !no_decision_quality,
+                        keep_semantic: keep_semantic.clone(),
+                    },
+                )?
+            } else {
+                let report = arch_harness::redteam::run_with_options(
+                    &case,
+                    &arch_harness::redteam::RedteamOptions {
+                        min_detection,
+                        // E2: порог кодовой доли — из конфига, по умолчанию не задан
+                        // ([РЕШЕНИЕ ЧЕЛОВЕКА] задания 0.3.14).
+                        min_code_detection: cfg.redteam.min_code_detection,
+                        decision_quality: !no_decision_quality,
+                        keep_semantic: keep_semantic.clone(),
+                    },
+                )?;
+                if save {
+                    // Сохраняем в ИСХОДНЫЙ кейс: прогон шёл в копии.
+                    let path = arch_harness::redteam::save_summary(&case, &report)?;
+                    eprintln!("Итог измерения сохранён: {}", path.display());
+                }
+                report
+            };
             match format.trim().to_ascii_lowercase().as_str() {
                 "json" => {
                     let out = report.to_json();
@@ -1363,7 +1415,9 @@ pub(crate) async fn run() -> Result<()> {
                 "markdown" | "md" => print!("{}", arch_harness::redteam::render_markdown(&report)),
                 _ => print!("{}", report.render()),
             }
-            if !report.passed() {
+            // Корпусный прогон (E3) информационный: доля поимки корпуса —
+            // измерение, а не приёмка, exit-код от неё не зависит.
+            if corpus.is_none() && !report.passed() {
                 std::process::exit(1);
             }
         }
@@ -1374,7 +1428,30 @@ pub(crate) async fn run() -> Result<()> {
             constraints,
             json,
             no_exec,
+            cmd,
         }) => {
+            // K7 (эксперимент): ящик ревью по артефактам CI флота — репозиторий
+            // не нужен, флаги прогона (--base/--constraints/--json/--no-exec)
+            // к чтению артефактов неприменимы.
+            if let Some(ReviewCmd::Inbox { root, format }) = cmd {
+                let report = arch_harness::review_inbox::scan(&root)?;
+                if format.trim().eq_ignore_ascii_case("json") {
+                    let out = arch_harness::review_inbox::to_json(&report);
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string())
+                    );
+                } else {
+                    print!("{}", arch_harness::review_inbox::render(&report));
+                }
+                return Ok(());
+            }
+            let Some(dir) = dir else {
+                anyhow::bail!(
+                    "укажите репозиторий: `arch-be review <dir>` или подкоманду \
+                     `arch-be review inbox <ROOT>`"
+                );
+            };
             // Пороги маршрутов — из конфига ([significance], ADR-034).
             let limits = cfg
                 .significance

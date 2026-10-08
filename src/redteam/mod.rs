@@ -16,8 +16,9 @@
 //!   решения), названы такими в отчёте, а не спрятаны в знаменатель.
 //!
 //! Разбиение модуля (0.3.14, лимит длины продуктового файла): `mutators` —
-//! каталог [`MUTATORS`] и правки кейса-мутанта; здесь — типы ожидания и слоя,
-//! прогон, отчёты и доли обнаружения.
+//! каталог [`MUTATORS`] и правки кейса-мутанта; `corpus` — внешний корпус
+//! патчей (E3, эксперимент за флагом `--corpus`); здесь — типы ожидания и
+//! слоя, прогон, отчёты и доли обнаружения.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -27,6 +28,7 @@ use crate::control::Route;
 use crate::error::{HarnessError, Result};
 use crate::gate::{self, GateOptions, GateOutcome, GateReport, GateRequirements, GateStatus};
 
+pub mod corpus;
 pub(crate) mod mutators;
 pub(crate) use mutators::MUTATORS;
 
@@ -211,6 +213,11 @@ pub struct RedteamReport {
     /// Клоны смысловых мутантов, сохранённые `--keep-semantic` (ADR-051, S5):
     /// в них хост кладёт отчёты судьи, их читает `semantic-score`.
     pub semantic_kept: Vec<PathBuf>,
+    /// Сводка корпусного прогона (E3, `redteam --corpus`): `Some` только у
+    /// прогона по внешнему корпусу патчей. Позиции корпуса — отдельные
+    /// строки вне знаменателя доли обнаружения; поле аддитивное, поведение
+    /// стандартного прогона не меняется.
+    pub corpus: Option<corpus::CorpusRunInfo>,
 }
 
 /// Сохранённый итог мутационного прогона (`.arch-handoff/redteam.json`,
@@ -715,12 +722,19 @@ impl RedteamReport {
             "Мутационное тестирование пакета: {}",
             self.case.display()
         );
-        let _ = writeln!(
-            out,
-            "Каталог мутаторов: {} (в долю входят только дефекты)",
-            self.detections.len()
-        );
-        out.push('\n');
+        // E3: корпусный прогон — шапка со сводкой патчей вместо строки
+        // про каталог мутаторов (позиции корпуса — вне знаменателя доли).
+        if let Some(info) = &self.corpus {
+            out.push_str(&corpus::render_summary(info));
+            out.push('\n');
+        } else {
+            let _ = writeln!(
+                out,
+                "Каталог мутаторов: {} (в долю входят только дефекты)",
+                self.detections.len()
+            );
+            out.push('\n');
+        }
         for d in &self.detections {
             let (mark, who) = match (&d.caught_by, d.skipped.as_deref()) {
                 (_, Some(reason)) => ("—", format!("пропущен: {reason}")),
@@ -746,6 +760,18 @@ impl RedteamReport {
                 (None, None) => ("✗", format!("НЕ ПОЙМАН (ожидался: {})", d.expected_by)),
             };
             let _ = writeln!(out, "  [{mark}] {:<5} {:<52} {who}", d.id, d.title);
+        }
+        // E3: у корпусного прогона нет приёмочной доли и вердикта PASS/FAIL
+        // (позиции вне знаменателя; порог — решение архитектора после
+        // калибровки): вместо итога — доли по слоям корпуса и дисклеймер.
+        if self.corpus.is_some() {
+            let _ = writeln!(
+                out,
+                "\nКорпусные позиции в долю обнаружения не входят (отдельные строки, как D15+); \
+                 прогон информационный — exit-код от доли поимки корпуса не зависит."
+            );
+            out.push_str(&self.render_layers());
+            return out;
         }
         let _ = writeln!(
             out,
@@ -795,6 +821,18 @@ impl RedteamReport {
                 )
             })
             .collect::<serde_json::Map<String, serde_json::Value>>();
+        // E3: сводка корпусного прогона — аддитивный ключ; у стандартного
+        // прогона его нет, читатели схемы v1 не ломаются.
+        let corpus = self.corpus.as_ref().map(|info| {
+            serde_json::json!({
+                "dir": info.dir.display().to_string(),
+                "found": info.found,
+                "applied": info.applied,
+                "caught": info.caught,
+                "not_applicable": info.not_applicable,
+                "rejected": info.rejected,
+            })
+        });
         serde_json::json!({
             "schema": "arch-be/redteam-report/v1",
             "case": self.case.display().to_string(),
@@ -808,6 +846,7 @@ impl RedteamReport {
             "control_ok": self.control_ok,
             "control_note": self.control_note,
             "passed": self.passed(),
+            "corpus": corpus,
         })
     }
 }
@@ -818,19 +857,28 @@ pub fn render_markdown(report: &RedteamReport) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "# Мутационное тестирование пакета\n");
     let _ = writeln!(out, "Кейс: `{}`\n", report.case.display());
-    let _ = writeln!(
-        out,
-        "**Доля обнаружения: {}/{} = {:.0}%** (порог {:.0}%), контроль аттестации: {}\n",
-        report.scored_caught(),
-        report.scored_total(),
-        report.detection_ratio() * 100.0,
-        report.min_detection * 100.0,
-        if report.control_ok {
-            "пройден"
-        } else {
-            "не пройден"
-        }
-    );
+    // E3: корпусный прогон — сводка патчей вместо итоговой доли (приёмочной
+    // доли у корпуса нет: позиции вне знаменателя).
+    if let Some(info) = &report.corpus {
+        let _ = writeln!(out, "{}", corpus::render_summary(info));
+    }
+    // E3: у корпусного прогона приёмочной доли нет — строка о стандартном
+    // наборе вводила бы в заблуждение; сводка корпуса напечатана выше.
+    if report.corpus.is_none() {
+        let _ = writeln!(
+            out,
+            "**Доля обнаружения: {}/{} = {:.0}%** (порог {:.0}%), контроль аттестации: {}\n",
+            report.scored_caught(),
+            report.scored_total(),
+            report.detection_ratio() * 100.0,
+            report.min_detection * 100.0,
+            if report.control_ok {
+                "пройден"
+            } else {
+                "не пройден"
+            }
+        );
+    }
     // E2: доли по слоям — отдельными строками, порог суммарной доли не меняется.
     for layer in [Layer::DocsModel, Layer::Code] {
         match report.layer_ratio(layer) {
@@ -1335,6 +1383,7 @@ pub fn run_with_options(case: &Path, options: &RedteamOptions) -> Result<Redteam
         control_ok,
         control_note,
         semantic_kept: kept,
+        corpus: None,
     })
 }
 
@@ -1422,6 +1471,7 @@ mod tests {
             control_ok: true,
             control_note: None,
             semantic_kept: Vec::new(),
+            corpus: None,
         };
         let path = save_summary(&case, &report).expect("save");
         assert!(
@@ -1547,6 +1597,7 @@ mod tests {
             control_ok: true,
             control_note: None,
             semantic_kept: Vec::new(),
+            corpus: None,
         };
         // Пропущенный (нет входа) выпадает из знаменателя, семантический —
         // остаётся: он обязан НЕ ловиться, и доля это учитывает.
@@ -1863,6 +1914,7 @@ mod tests {
             control_ok: true,
             control_note: None,
             semantic_kept: Vec::new(),
+            corpus: None,
         };
         let md = render_markdown(&report);
         assert!(
