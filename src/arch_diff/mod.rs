@@ -4,6 +4,10 @@
 //! строкам подключения, контракты) и рёбра (импорты, обращения, контрактные
 //! ссылки) с основаниями `файл:строка` — и дифф двух ревизий (`arch_diff`).
 //!
+//! K5 (ADR-064): принятие предложений диффа дельтой (`accept`) и журнал
+//! решений (`decisions`, `.arch-handoff/arch-diff-decisions.json`) —
+//! решённое ребро не предлагается повторно, пока не изменились основания.
+//!
 //! Границы: core (без сети, TUI и LLM, AD-2), read-only по отношению к
 //! рабочему дереву (снимки читаются из git), детерминизм (правило 10:
 //! повторный прогон на тех же коммитах даёт байт-в-байт тот же результат).
@@ -15,13 +19,22 @@
 //! классификация контрактов — [`crate::contract_diff`], NFR — [`crate::nfr`],
 //! маршрут значимости — [`crate::control::score_with_sources`].
 
+mod accept;
 mod as_built;
+mod decisions;
 mod diff;
 mod report;
 mod snapshot;
 mod types;
 
+pub use accept::{
+    AcceptReport, DecideInput, RejectReport, accept_proposals, load_journal, reject_proposal,
+};
 pub use as_built::{as_built, as_built_with};
+pub use decisions::{
+    ACTOR_ENV, DECISIONS_PATH, DECISIONS_SCHEMA, Decision, DecisionEntry, DecisionJournal,
+    DecisionSource, detect_source,
+};
 pub use diff::{
     ArchDiff, ArchDiffInput, ContractChange, ContractClass, DeclaredEdge, EdgeChange, FailOn,
     InvariantHit, ModelProposal, ModelStatus, NfrShift, ProposalKind, RouteInfo, RuleGuard,

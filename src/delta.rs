@@ -57,13 +57,33 @@ const DELTA_TEMPLATE: &str = "# Дельта: {name}
 - [ ] <проверяемый критерий>
 ";
 
+/// Имя дельты свободно: нет ни активной, ни архивной дельты с таким именем.
+#[must_use]
+pub fn name_free(repo: &Path, name: &str) -> bool {
+    !repo.join("changes").join(name).exists() && !repo.join("changes/archive").join(name).exists()
+}
+
 /// Создаёт каркас дельты `changes/<name>/DELTA.md`.
 ///
 /// # Errors
 /// Каталог существует, ошибка записи.
 pub fn new(repo: &Path, name: &str) -> Result<PathBuf> {
+    let content = DELTA_TEMPLATE.replace("{name}", name).replace(
+        "{date}",
+        &chrono::Local::now().format("%Y-%m-%d").to_string(),
+    );
+    new_with_body(repo, name, &content)
+}
+
+/// Создаёт дельту `changes/<name>/DELTA.md` с готовым телом (K5, ADR-064):
+/// та же проверка занятости имени, что у [`new`], но содержимое пишет
+/// вызывающий (машинное происхождение тела — `arch-diff accept`).
+///
+/// # Errors
+/// Имя занято (активная или архивная дельта), ошибка записи.
+pub fn new_with_body(repo: &Path, name: &str, body: &str) -> Result<PathBuf> {
     let dir = repo.join("changes").join(name);
-    if dir.exists() || repo.join("changes/archive").join(name).exists() {
+    if !name_free(repo, name) {
         return Err(HarnessError::Control(format!(
             "дельта '{name}' уже существует (активная или в архиве): {}",
             dir.display()
@@ -71,11 +91,7 @@ pub fn new(repo: &Path, name: &str) -> Result<PathBuf> {
     }
     std::fs::create_dir_all(&dir).map_err(|e| HarnessError::io(&dir, e))?;
     let path = dir.join("DELTA.md");
-    let content = DELTA_TEMPLATE.replace("{name}", name).replace(
-        "{date}",
-        &chrono::Local::now().format("%Y-%m-%d").to_string(),
-    );
-    std::fs::write(&path, content).map_err(|e| HarnessError::io(&path, e))?;
+    std::fs::write(&path, body).map_err(|e| HarnessError::io(&path, e))?;
     Ok(path)
 }
 

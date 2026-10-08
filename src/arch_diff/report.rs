@@ -230,7 +230,11 @@ pub fn render_md(diff: &ArchDiff) -> String {
         let _ = writeln!(out, "\nЗатронутые ADR: {}", diff.adrs_touched.join(", "));
     }
     if !diff.proposals.is_empty() {
-        let _ = writeln!(out, "\nПредложение модели (принятие — волна K5):");
+        let _ = writeln!(
+            out,
+            "\nПредложения модели (принять: arch-be arch-diff accept <n…> --base <база>; \
+             отклонить: arch-be arch-diff reject <n> --base <база> --reason \"…\"):"
+        );
         for p in &diff.proposals {
             let warn = if p.conflicts.is_empty() {
                 String::new()

@@ -176,11 +176,14 @@ pub enum ProposalKind {
     NewEntity,
 }
 
-/// Пронумерованное предложение правки модели (только формирование и вывод;
-/// принятие/отклонение — волна K5).
+/// Пронумерованное предложение правки модели. Принятие/отклонение — K5
+/// (`arch-diff accept`/`reject`, ADR-064): `edge_id` + `grounds_hash` —
+/// ключ журнала решений.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ModelProposal {
-    /// Номер предложения (1-based, стабильный порядок диффа).
+    /// Номер предложения (1-based; решённые журналом исчезают из списка,
+    /// номера остальных сохраняются — на номер ссылаются `accept`/`reject`
+    /// одного сеанса, ADR-064).
     pub n: usize,
     /// Вид правки.
     pub kind: ProposalKind,
@@ -190,6 +193,14 @@ pub struct ModelProposal {
     pub summary: String,
     /// Инварианты, которым правка противоречит (пометка ⚠ в выводе).
     pub conflicts: Vec<String>,
+    /// Стабильный id объекта решения (K5, ADR-064): `<kind>:<from>-><to>`
+    /// для рёбер, `node:<id узла>` для новых компонентов. Аддитивное поле
+    /// `arch-be/arch-diff/v1` (ADR-063: добавление поля — минорно).
+    pub edge_id: String,
+    /// Хэш оснований предложения (sha256 списка `файл:строка` ребра; для
+    /// узла — его id). Основания изменились — решённое ребро предлагается
+    /// снова (ADR-064).
+    pub grounds_hash: String,
 }
 
 /// Архитектурный дифф `base..head` (машинный контракт — `arch-be/arch-diff/v1`,
@@ -220,7 +231,8 @@ pub struct ArchDiff {
     pub nfr_shifts: Vec<NfrShift>,
     /// Маршрут значимости и триггеры с источниками.
     pub route: RouteInfo,
-    /// Предложения правки модели (пронумерованные).
+    /// Предложения правки модели (пронумерованные; уже без решённых журналом
+    /// `.arch-handoff/arch-diff-decisions.json` — K5, ADR-064).
     pub proposals: Vec<ModelProposal>,
 }
 
@@ -799,6 +811,18 @@ fn next_id(model: Option<&Model>, prefix: &str) -> String {
     format!("{prefix}{:03}", max + 1)
 }
 
+/// Ключ журнала решений (K5, ADR-064): `<kind>:<from>-><to>` для ребра,
+/// `node:<id>` для предложения по новому узлу.
+pub(crate) fn proposal_edge_id(kind: EdgeKind, from: &str, to: &str) -> String {
+    format!("{}:{}->{}", kind.label(), from, to)
+}
+
+/// Хэш оснований предложения: sha256 списка `файл:строка` ребра (для узла —
+/// его id). Основания изменились — решение журнала перестаёт действовать.
+fn grounds_hash_of(grounds: &str) -> String {
+    crate::hash::sha256_hex(grounds.as_bytes())
+}
+
 /// Предложения правки модели по добавленным рёбрам/узлам вне модели (K3
 /// только выводит; принятие — волна K5). Правка, противоречащая задетому
 /// инварианту, помечается его id в `conflicts`.
@@ -822,6 +846,8 @@ fn proposals(
             })
             .map(|h| h.ad_id.clone())
             .collect();
+        let edge_id = proposal_edge_id(edge.kind, &edge.from, &edge.to);
+        let grounds_hash = grounds_hash_of(&edge.evidence.join("\n"));
         match edge.kind {
             EdgeKind::Import => {
                 let (Some(source_id), Some(target_id)) = (
@@ -846,6 +872,8 @@ fn proposals(
                     summary: format!("{file}: depends_on += {target_id}"),
                     file,
                     conflicts,
+                    edge_id,
+                    grounds_hash,
                 });
             }
             EdgeKind::Connect => {
@@ -863,6 +891,8 @@ fn proposals(
                         edge.from
                     ),
                     conflicts,
+                    edge_id,
+                    grounds_hash,
                 });
             }
             EdgeKind::ContractRef => {
@@ -874,6 +904,8 @@ fn proposals(
                     file: format!("model/{id}-{}.md", crate::control::kebab_slug(path)),
                     summary: format!("новая сущность {id} с contract: {path}"),
                     conflicts,
+                    edge_id,
+                    grounds_hash,
                 });
             }
         }
@@ -891,6 +923,8 @@ fn proposals(
             file: format!("model/{id}-{}.md", crate::control::kebab_slug(dir)),
             summary: format!("новый CMP {id} с code_roots: [{dir}]"),
             conflicts: Vec::new(),
+            edge_id: format!("node:{}", node.id),
+            grounds_hash: grounds_hash_of(&node.id),
         });
     }
     for (i, p) in out.iter_mut().enumerate() {
@@ -980,7 +1014,11 @@ pub fn arch_diff(repo: &Path, input: &ArchDiffInput) -> Result<ArchDiff> {
     let contracts = contract_changes(&base, &head, input.globs)?;
     let nfr = nfr_shifts(&base, &head);
     let route = route_info(repo, &base, &head, input)?;
-    let proposals = proposals(&head, &added_edges, &added_nodes, &invariants);
+    let mut proposals = proposals(&head, &added_edges, &added_nodes, &invariants);
+    // K5 (ADR-064): решённое журналом (`.arch-handoff/arch-diff-decisions.json`)
+    // не предлагается повторно, пока не изменились основания ребра; номера
+    // оставшихся предложений сохраняются (accept/reject ссылаются на них).
+    super::decisions::suppress_decided(repo, &mut proposals)?;
 
     Ok(ArchDiff {
         base: base.snapshot.rev.clone(),
@@ -1485,6 +1523,24 @@ pub(crate) mod tests {
             .expect("AD-2");
         let rule = ad.rules.iter().find(|r| r.id == "C-007").expect("C-007");
         assert_eq!(rule.teeth, TeethClass::Confirmed);
+    }
+
+    /// Битый журнал решений (K5) — громкая ошибка диффа, а не молчаливый
+    /// сброс решений: потерянные отказы хуже упавшего прогона.
+    #[test]
+    fn corrupt_decisions_journal_fails_diff() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let repo = dir.path().join("case");
+        std::fs::create_dir_all(&repo).expect("mkdir");
+        fixture_case(&repo);
+        git_repo(&repo);
+        fixture_agent_change(&repo);
+        commit_all(&repo, "change");
+        write_file(&repo, ".arch-handoff/arch-diff-decisions.json", "{битый");
+
+        let globs = DiffGlobs::default();
+        let err = arch_diff(&repo, &input(&globs, "main~1")).expect_err("битый журнал");
+        assert!(err.to_string().contains("не разбирается"), "{err}");
     }
 
     /// `--fail-on` (K3): срабатывают только названные условия; пустой список
