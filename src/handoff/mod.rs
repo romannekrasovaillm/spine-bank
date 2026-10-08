@@ -124,6 +124,116 @@ fn render_spec_from_sources(spec_files: &[PathBuf]) -> String {
     out
 }
 
+/// Собирает RUBRIC.yaml пакета с критерием требований change `OpenSpec` (F6,
+/// ADR-067): поверх якорной `handoff_quality` (когда она есть) добавляется
+/// критерий `openspec_change_requirements` с перечнем id и SHALL-текстов;
+/// без якоря (или при нечитаемом якоре) — рубрика из одного этого критерия.
+///
+/// Якорь разбирается как YAML-документ, а не конкатенируется текстом:
+/// ключ `criteria` находится структурно, порядок ключей и комментарии якоря
+/// на запись не влияют (пакетная копия — рабочий файл; канонический текст
+/// якоря живёт в assets).
+///
+/// # Errors
+/// Якорь невалиден как YAML, либо сгенерированная рубрика не разбирается
+/// движком рубрик (самовалидация генератора — как у CONSTRAINTS.yaml).
+fn render_rubric_with_change(
+    anchor: Option<&str>,
+    change_id: &str,
+    requirements: &[crate::openspec::Requirement],
+) -> Result<String> {
+    use std::fmt::Write as _;
+    let mut description = format!(
+        "Реализация обязана покрыть требования change '{change_id}' (полные тексты — \
+         в ARCHITECTURE.md и SPEC.md пакета):\n"
+    );
+    for r in requirements {
+        let _ = writeln!(
+            description,
+            "- {} — «{}»: {}",
+            r.id,
+            r.title,
+            r.statements.join(" ")
+        );
+    }
+    let anchors = std::collections::BTreeMap::from([
+        (
+            1u8,
+            "Требования change проигнорированы: реализация не покрывает их и не объясняет отступлений"
+                .to_string(),
+        ),
+        (
+            3u8,
+            "Часть требований change покрыта; отступления названы, но не по каждому с причиной"
+                .to_string(),
+        ),
+        (
+            5u8,
+            "Каждое требование change покрыто реализацией либо сознательно отклонено с причиной \
+             в conflicts_with_prior_decisions"
+                .to_string(),
+        ),
+    ]);
+    let criterion = crate::rubric::Criterion {
+        id: "openspec_change_requirements".to_string(),
+        name: format!("Требования change '{change_id}'"),
+        description,
+        weight: 3.0,
+        anchors,
+        evidence_on: crate::rubric::EvidenceOn::default(),
+        evidence_roles: Vec::new(),
+        coverage: None,
+        blocking: false,
+    };
+    let criterion_value = serde_yaml_ng::to_value(&criterion)
+        .map_err(|e| HarnessError::Harness(format!("рубрика change: {e}")))?;
+    let anchor_doc = anchor.and_then(|text| serde_yaml_ng::from_str(text).ok());
+    let doc = if let Some(serde_yaml_ng::Value::Mapping(mut mapping)) = anchor_doc {
+        let key = serde_yaml_ng::Value::from("criteria");
+        // Двухшаговая проверка (get → get_mut/insert): условный займ одним
+        // match NLL не разрешает (классический случай).
+        if mapping
+            .get(&key)
+            .is_some_and(serde_yaml_ng::Value::is_sequence)
+        {
+            if let Some(serde_yaml_ng::Value::Sequence(seq)) = mapping.get_mut(&key) {
+                seq.push(criterion_value);
+            }
+        } else {
+            // Якорь без списка criteria (или с кривым) — критерий образует
+            // список сам.
+            mapping.insert(key, serde_yaml_ng::Value::Sequence(vec![criterion_value]));
+        }
+        serde_yaml_ng::Value::Mapping(mapping)
+    } else {
+        let rubric = crate::rubric::Rubric {
+            name: "handoff_openspec_change".to_string(),
+            description: format!(
+                "Приёмка handoff-пакета по требованиям change OpenSpec '{change_id}' (F6): \
+                 якорной рубрики handoff_quality в assets нет — критерий один"
+            ),
+            scale_max: 5,
+            criteria: vec![criterion],
+            origin: "dynamic".to_string(),
+            pack: None,
+        };
+        serde_yaml_ng::to_value(&rubric)
+            .map_err(|e| HarnessError::Harness(format!("рубрика change: {e}")))?
+    };
+    let text = serde_yaml_ng::to_string(&doc)
+        .map_err(|e| HarnessError::Harness(format!("рубрика change: {e}")))?;
+    // Самовалидация генератора: рубрика обязана читаться движком ДО записи
+    // в пакет — битый файл исполнителю недопустим (прецедент — дефект A1
+    // CONSTRAINTS.yaml).
+    serde_yaml_ng::from_str::<crate::rubric::Rubric>(&text).map_err(|e| {
+        HarnessError::Harness(format!(
+            "сгенерированная RUBRIC.yaml не разбирается: {e} — дефект генератора, \
+             а не данных change"
+        ))
+    })?;
+    Ok(text)
+}
+
 /// Дефолтные fitness-правила под стек репозитория (по маркерным файлам):
 /// Cargo.toml → Rust; pyproject.toml/requirements.txt/setup.py → Python;
 /// go.mod → Go; package.json → Node; иначе — минимальный общий набор.
@@ -287,15 +397,30 @@ pub struct HandoffPacket {
     /// тронут». `None` — реестр в пакете не писался.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub constraints_action: Option<String>,
+    /// Change `OpenSpec`, из которого собран пакет (F6, ADR-067).
+    /// Аддитивное поле 0.3.14.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openspec_change: Option<String>,
+    /// Требований change вписано в рубрику пакета (0 — change не задан или
+    /// требований нет). Аддитивное поле 0.3.14.
+    #[serde(default)]
+    pub openspec_requirements: usize,
 }
 
 /// Опции генерации пакета (T-02).
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct HandoffOptions {
     /// Перезаписать пакетную копию реестра правил (`--refresh-constraints`):
     /// по умолчанию существующий файл пакета не трогается — правки
     /// архитектора сохраняются.
     pub refresh_constraints: bool,
+    /// Change `OpenSpec` как источник пакета (F6, ADR-067): `proposal.md`,
+    /// `design.md`, `tasks.md` и дельты спек change кладутся в пакет как
+    /// `--spec` (первыми: лесенка усечения epic-context режет прозу с хвоста,
+    /// и предмет задачи не должен попасть под сокращение), требования change —
+    /// критерием рубрики пакета. Markdown `OpenSpec` только читается (правило
+    /// 9, `docs/openspec.md`).
+    pub openspec_change: Option<String>,
 }
 
 /// Метаданные пакета (`MANIFEST.json`).
@@ -328,6 +453,9 @@ struct Manifest<'a> {
     /// `control_plane`. Аддитивное поле: старые пакеты (без него) гейт
     /// пропускает — обратная совместимость.
     control_plane: BTreeMap<String, Option<crate::control_plane::Pin>>,
+    /// Change `OpenSpec` — источник пакета (F6, ADR-067); аддитивное поле.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    openspec_change: Option<&'a str>,
 }
 
 /// Модель-автор кода из контракта передачи (E5.3): `MANIFEST.json` пакета
@@ -409,6 +537,29 @@ pub fn generate_handoff_opts(
             repo.display()
         )));
     }
+    // Опции читаются через поля (значение потребляется деструктурированием —
+    // HandoffOptions перестал быть Copy с полем `openspec_change`, F6).
+    let HandoffOptions {
+        refresh_constraints,
+        openspec_change,
+    } = opts;
+    // F6 (ADR-067): change OpenSpec как источник пакета — proposal/design/
+    // tasks и дельты спек change идут как --spec (ПЕРВЫМИ: лесенка усечения
+    // epic-context режет прозу с хвоста, и предмет задачи не должен попасть
+    // под сокращение), требования change — в рубрику пакета (ниже). Порог
+    // контекста Critical считается уже по объединённому набору.
+    let mut spec_files: Vec<PathBuf> = spec_files.to_vec();
+    let mut change_requirements: Vec<crate::openspec::Requirement> = Vec::new();
+    if let Some(change_id) = &openspec_change {
+        let mut merged = crate::openspec::change_packet_files(repo, change_id)?;
+        change_requirements = crate::openspec::change_requirements(repo, change_id)?;
+        merged.append(&mut spec_files);
+        // Дедуп по пути с сохранением порядка: один и тот же файл, переданный
+        // и через --spec, и через change, не должен давать две секции.
+        let mut seen = std::collections::BTreeSet::new();
+        merged.retain(|p| seen.insert(p.clone()));
+        spec_files = merged;
+    }
     let baseline = ensure_git_baseline(repo);
     let rollback_text =
         rollback.map_or_else(|| default_rollback(baseline.hash.as_deref()), str::to_owned);
@@ -452,7 +603,7 @@ pub fn generate_handoff_opts(
     }
 
     // ARCHITECTURE.md — всегда перезаписывается (компиляция актуальных спек).
-    let arch_md = compile_epic_context(spec_files)?;
+    let arch_md = compile_epic_context(&spec_files)?;
     let arch_path = dir.join("ARCHITECTURE.md");
     std::fs::write(&arch_path, &arch_md).map_err(|e| HarnessError::io(&arch_path, e))?;
     let epic_chars = arch_md.chars().count();
@@ -484,7 +635,7 @@ pub fn generate_handoff_opts(
     let constraints_path = dir.join("CONSTRAINTS.yaml");
     let root_registry = repo.join(crate::control::ROOT_CONSTRAINTS_PATH);
     let mut constraints_action: Option<String> = None;
-    if !constraints_path.exists() || opts.refresh_constraints {
+    if !constraints_path.exists() || refresh_constraints {
         let (text, action) = if root_registry.is_file() {
             let text = std::fs::read_to_string(&root_registry)
                 .map_err(|e| HarnessError::io(&root_registry, e))?;
@@ -518,7 +669,7 @@ pub fn generate_handoff_opts(
         let spec_body = if spec_files.is_empty() {
             SPEC_TEMPLATE.to_string()
         } else {
-            render_spec_from_sources(spec_files)
+            render_spec_from_sources(&spec_files)
         };
         std::fs::write(&spec_path, format!("{SPEC_MACHINE_BANNER}\n{spec_body}"))
             .map_err(|e| HarnessError::io(&spec_path, e))?;
@@ -536,18 +687,57 @@ pub fn generate_handoff_opts(
         .map_err(|e| HarnessError::io(&rollback_path, e))?;
     }
 
-    // RUBRIC.yaml — только при отсутствии и только если есть якорная рубрика.
+    // RUBRIC.yaml — только при отсутствии; с change OpenSpec (F6) требования
+    // change идут в рубрику критерием `openspec_change_requirements` (поверх
+    // якорной `handoff_quality`, а без неё — рубрикой из одного критерия).
+    // Существующая рубрика архитектора не затирается: требования не
+    // вписываются, и это — предупреждение пакета, а не молчание.
     let rubric_path = dir.join("RUBRIC.yaml");
-    if !rubric_path.exists() {
+    if rubric_path.exists() {
+        if let Some(change_id) = openspec_change.as_deref() {
+            if !change_requirements.is_empty() {
+                warnings.push(format!(
+                    "RUBRIC.yaml пакета уже существует и не затирается — требования change \
+                     '{change_id}' не вписаны; добавьте критерий openspec_change_requirements \
+                     вручную по списку из ARCHITECTURE.md"
+                ));
+            }
+        }
+    } else {
         let anchor = cfg.paths.rubrics_dir().join("handoff_quality.yaml");
-        if anchor.is_file() {
-            std::fs::copy(&anchor, &rubric_path).map_err(|e| HarnessError::io(&rubric_path, e))?;
+        match (&openspec_change, change_requirements.is_empty()) {
+            (Some(change_id), false) => {
+                let anchor_text = std::fs::read_to_string(&anchor).ok();
+                let text = render_rubric_with_change(
+                    anchor_text.as_deref(),
+                    change_id,
+                    &change_requirements,
+                )?;
+                std::fs::write(&rubric_path, text)
+                    .map_err(|e| HarnessError::io(&rubric_path, e))?;
+            }
+            (Some(change_id), true) => {
+                warnings.push(format!(
+                    "change '{change_id}' не несёт требований (в specs/ нет SHALL/MUST) — \
+                     в рубрику пакета ничего не добавлено"
+                ));
+                if anchor.is_file() {
+                    std::fs::copy(&anchor, &rubric_path)
+                        .map_err(|e| HarnessError::io(&rubric_path, e))?;
+                }
+            }
+            _ => {
+                if anchor.is_file() {
+                    std::fs::copy(&anchor, &rubric_path)
+                        .map_err(|e| HarnessError::io(&rubric_path, e))?;
+                }
+            }
         }
     }
 
     // adr/ — копии ADR-файлов; существующие копии не затираем.
     let mut adr_copies = Vec::new();
-    for spec in spec_files {
+    for spec in &spec_files {
         if is_adr_file(spec) {
             let Some(name) = spec.file_name() else {
                 continue;
@@ -578,6 +768,7 @@ pub fn generate_handoff_opts(
         baseline_commit: baseline.hash.clone(),
         rollback_plan: &rollback_text,
         control_plane,
+        openspec_change: openspec_change.as_deref(),
     };
     let manifest_path = dir.join("MANIFEST.json");
     let manifest_text = serde_json::to_string_pretty(&manifest)?;
@@ -609,6 +800,8 @@ pub fn generate_handoff_opts(
         recommended_timeout_secs: timeout,
         warnings,
         constraints_action,
+        openspec_change,
+        openspec_requirements: change_requirements.len(),
     })
 }
 
@@ -1410,7 +1603,8 @@ impl Tool for HandoffCreateTool {
                     "spec": {"type": "array", "items": {"type": "string"}, "description": "Пути к спецификациям/ADR (md), опционально"},
                     "rollback": {"type": "string", "description": "Явный план отката (шаги, сигналы, владелец решения); по умолчанию — откат на baseline-коммит"},
                     "route": {"type": "string", "enum": ["fast", "standard", "critical"], "description": "Маршрут значимости из significance_score: задаёт рекомендованный таймаут прогона (fast=1800с, standard=3600с, critical=7200с); по умолчанию standard"},
-                    "refresh_constraints": {"type": "boolean", "description": "Перезаписать существующий пакетный CONSTRAINTS.yaml (T-02): без флага файл пакета не трогается — правки архитектора сохраняются"}
+                    "refresh_constraints": {"type": "boolean", "description": "Перезаписать существующий пакетный CONSTRAINTS.yaml (T-02): без флага файл пакета не трогается — правки архитектора сохраняются"},
+                    "openspec_change": {"type": "string", "description": "Change OpenSpec как источник пакета (F6): proposal.md/design.md/tasks.md и дельты спек openspec/changes/<id>/ кладутся в пакет как spec, требования change — критерием openspec_change_requirements в RUBRIC.yaml; порог контекста Critical считается с их учётом"}
                 },
                 "required": ["task"]
             }),
@@ -1460,6 +1654,11 @@ impl Tool for HandoffCreateTool {
                 .get("refresh_constraints")
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
+            // F6: change OpenSpec как источник пакета (ADR-067).
+            openspec_change: args
+                .get("openspec_change")
+                .and_then(Value::as_str)
+                .map(str::to_string),
         };
         match generate_handoff_opts(&repo, task, &spec, &self.cfg, rollback, route, opts) {
             Ok(packet) => {
@@ -1498,6 +1697,14 @@ impl Tool for HandoffCreateTool {
                      (harness_run подхватит из MANIFEST.json, если не задан явно).",
                     packet.recommended_timeout_secs
                 );
+                // F6: источник пакета — change OpenSpec (требования — в рубрике).
+                if let Some(change) = &packet.openspec_change {
+                    let _ = write!(
+                        out,
+                        "\nOpenSpec change: {change} (требований в рубрике пакета: {}).",
+                        packet.openspec_requirements
+                    );
+                }
                 if packet.git_dirty_tracked {
                     out.push_str(
                         "\nВНИМАНИЕ: есть незакоммиченные изменения отслеживаемых файлов — \

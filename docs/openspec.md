@@ -161,6 +161,22 @@ Exit code: 0 всегда, кроме `--strict` — тогда 1 при нал�
   паспорта), а не находка.
 - Осиротевшие `covers:` (F4) видны и в гейте — warn-находка `covers_orphan`.
 
+## Handoff из change (F6, ADR-067)
+
+`arch-be handoff … --openspec-change <id>`: в пакет кладутся `proposal.md`,
+`design.md`, `tasks.md` и дельты спек change (`openspec/changes/<id>/`) — как
+`--spec` (контент попадает в `ARCHITECTURE.md` и собранный `SPEC.md`, ссылки —
+в `MANIFEST.json`, поле `openspec_change`). Файлы change идут первыми:
+лесенка усечения epic-context режет прозу с хвоста, и предмет задачи не
+должен попасть под сокращение. Порог контекста маршрута Critical считается с
+их учётом. Требования change добавляются в `RUBRIC.yaml` пакета критерием
+`openspec_change_requirements` (id + SHALL-тексты) — приёмка по требованиям,
+а не по пересказу. Существующая `RUBRIC.yaml` пакета не затирается:
+требования не вписываются, и пакет предупреждает. Markdown OpenSpec только
+читается — Spine его не пишет (правило 9).
+
+То же в MCP-инструменте `handoff_create` (параметр `openspec_change`).
+
 ## Change OpenSpec — источник покрытия `delta_guard` (F1, ADR-062)
 
 Гейт прямых правок спайна (`arch-be delta guard`, составляющая `delta_guard`
