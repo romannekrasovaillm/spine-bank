@@ -385,9 +385,14 @@ enum Cmd {
     /// спайна, трассировка; на Standard/Critical — NFR и evidence) +
     /// целостность модели + линт контрактов OpenAPI/AsyncAPI.
     /// Провал любой секции — exit 1 (механически, как у `gate`).
+    /// Подкоманда `inbox <ROOT>` (K7, эксперимент) — ящик ревью по флоту:
+    /// непустые архитектурные диффы из артефактов CI набора репозиториев.
     Review {
-        /// Репозиторий.
-        dir: PathBuf,
+        /// Репозиторий (не нужен при подкоманде `inbox`).
+        dir: Option<PathBuf>,
+        /// Подкоманда (K7: `inbox` — ящик ревью по артефактам CI флота).
+        #[command(subcommand)]
+        cmd: Option<ReviewCmd>,
         /// База git для диффа и сравнения правил (по умолчанию — рабочее
         /// дерево против HEAD; голая ревизия или готовый диапазон A...HEAD).
         #[arg(long)]
@@ -684,6 +689,25 @@ enum RedteamCmd {
     SemanticScore {
         /// Каталог, переданный `redteam --keep-semantic`.
         dir: PathBuf,
+        /// Формат вывода: text (дефолт) | json.
+        #[arg(long, default_value = "text", value_name = "FORMAT")]
+        format: String,
+    },
+}
+
+/// Подкоманды `arch-be review` (K7, P2 — эксперимент).
+#[derive(Subcommand)]
+enum ReviewCmd {
+    /// ЭКСПЕРИМЕНТАЛЬНАЯ (K7, P2): ящик ревью архитектора по флоту.
+    /// Рекурсивно читает JSON-артефакты `arch-be/arch-diff/v1` под ROOT
+    /// (файлы, не сервис — как реестры ADR-033) и показывает открытые
+    /// изменения с НЕПУСТЫМ диффом по убыванию маршрута и числа задетых
+    /// инвариантов; пустые диффы в ящик не попадают. Толерантный ридер:
+    /// битый JSON или чужая схема — предупреждение и пропуск. Только чтение
+    /// файлов; информационная команда (exit 0), без влияния на `review <dir>`.
+    Inbox {
+        /// Корень набора репозиториев (каталог с артефактами CI).
+        root: PathBuf,
         /// Формат вывода: text (дефолт) | json.
         #[arg(long, default_value = "text", value_name = "FORMAT")]
         format: String,
@@ -1404,7 +1428,30 @@ pub(crate) async fn run() -> Result<()> {
             constraints,
             json,
             no_exec,
+            cmd,
         }) => {
+            // K7 (эксперимент): ящик ревью по артефактам CI флота — репозиторий
+            // не нужен, флаги прогона (--base/--constraints/--json/--no-exec)
+            // к чтению артефактов неприменимы.
+            if let Some(ReviewCmd::Inbox { root, format }) = cmd {
+                let report = arch_harness::review_inbox::scan(&root)?;
+                if format.trim().eq_ignore_ascii_case("json") {
+                    let out = arch_harness::review_inbox::to_json(&report);
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string())
+                    );
+                } else {
+                    print!("{}", arch_harness::review_inbox::render(&report));
+                }
+                return Ok(());
+            }
+            let Some(dir) = dir else {
+                anyhow::bail!(
+                    "укажите репозиторий: `arch-be review <dir>` или подкоманду \
+                     `arch-be review inbox <ROOT>`"
+                );
+            };
             // Пороги маршрутов — из конфига ([significance], ADR-034).
             let limits = cfg
                 .significance

@@ -2438,6 +2438,81 @@ fn review_broken_model_exits_1() {
         .stdout(contains("Итог: FAIL"));
 }
 
+/// Минимальный артефакт `arch-be/arch-diff/v1` для ящика ревью (K7).
+fn arch_diff_artifact(route: &str, with_edge: bool) -> String {
+    let edges = if with_edge {
+        r#"[{"from": "CMP-001", "to": "CMP-004", "kind": "import", "evidence": ["s/writer.py:2"], "model_status": "not_in_model"}]"#
+    } else {
+        "[]"
+    };
+    format!(
+        "{{\"schema\": \"arch-be/arch-diff/v1\", \"arch_be\": \"0.3.14\", \
+         \"base\": \"aaaa\", \"head\": \"bbbb\", \"added_nodes\": [], \"removed_nodes\": [], \
+         \"added_edges\": {edges}, \"removed_edges\": [], \"declared_unused\": [], \
+         \"invariants_touched\": [], \"adrs_touched\": [], \"contract_changes\": [], \
+         \"nfr_shifts\": [], \"route\": {{\"route\": \"{route}\", \"score\": 1, \
+         \"triggers\": [], \"evidence\": [], \"undeclared\": []}}, \"proposals\": []}}"
+    )
+}
+
+/// `arch-be review inbox <ROOT>` (K7, эксперимент): непустой дифф попадает
+/// в ящик (critical выше standard), пустой — отфильтрован, битый JSON —
+/// предупреждение и пропуск, exit 0 (информационная команда).
+#[test]
+fn review_inbox_filters_sorts_and_warns() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().join("fleet");
+    std::fs::create_dir_all(root.join("pay-core")).expect("mkdir");
+    std::fs::create_dir_all(root.join("shop")).expect("mkdir");
+    std::fs::create_dir_all(root.join("blog")).expect("mkdir");
+    std::fs::write(
+        root.join("pay-core/arch-diff.json"),
+        arch_diff_artifact("critical", true),
+    )
+    .expect("critical");
+    std::fs::write(
+        root.join("shop/arch-diff-mr7.json"),
+        arch_diff_artifact("standard", true),
+    )
+    .expect("standard");
+    // Пустой дифф — в ящик не попадает.
+    std::fs::write(
+        root.join("blog/arch-diff.json"),
+        arch_diff_artifact("fast", false),
+    )
+    .expect("empty");
+    // Битый JSON — предупреждение и пропуск.
+    std::fs::write(root.join("blog/arch-diff-mr9.json"), "{битый").expect("broken");
+
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("review").arg("inbox").arg(root.as_os_str());
+    let out = cmd.assert().success();
+    let text = String::from_utf8_lossy(&out.get_output().stdout).into_owned();
+    assert!(text.contains("Непустых диффов: 2"), "{text}");
+    assert!(text.contains("пустых отфильтровано: 1"), "{text}");
+    assert!(text.contains("пропущено с предупреждением: 1"), "{text}");
+    assert!(
+        text.find("critical").expect("critical") < text.find("standard").expect("standard"),
+        "critical выше standard: {text}"
+    );
+    assert!(text.contains("[warn]"), "{text}");
+
+    // JSON-форма: схема review-inbox/v1, счётчики, записи.
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("review")
+        .arg("inbox")
+        .arg(root.as_os_str())
+        .arg("--format")
+        .arg("json");
+    let out = cmd.assert().success();
+    let json: serde_json::Value =
+        serde_json::from_slice(&out.get_output().stdout).expect("stdout — валидный JSON");
+    assert_eq!(json["schema"], "arch-be/review-inbox/v1");
+    assert_eq!(json["non_empty"], 2);
+    assert_eq!(json["empty_filtered"], 1);
+    assert_eq!(json["entries"][0]["route"], "critical");
+}
+
 /// `arch-be model impact <dir> --id`: радиус изменения — затронутые сущности,
 /// правило с владельцем, контракт INT, «с кем согласовывать»; exit 0
 /// (отчёт, не гейт). `--json` — машиночитаемая форма.
