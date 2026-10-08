@@ -30,7 +30,11 @@ pub(super) async fn run_lines_on(server: McpServe, input: &[&str]) -> Vec<Value>
     // spawn требует 'static: пачка клонируется в owned-строки заранее.
     let owned: Vec<String> = input.iter().map(|s| (*s).to_string()).collect();
     let (read_end, mut write_end) = tokio::io::duplex(64 * 1024);
-    let (out_read, out_write) = tokio::io::duplex(64 * 1024);
+    // Буфер ответов обязан вместить ВСЮ пачку: читатель стартует после цикла,
+    // и при переполнении — дедлок (цикл ждёт дренаж, читатель — завершение
+    // цикла). tools/list реестра уже перешагнул 64 КБ (F2/F6 0.3.14);
+    // 1 МБ — запас на рост реестра инструментов.
+    let (out_read, out_write) = tokio::io::duplex(1024 * 1024);
     let writer_task = tokio::spawn(async move {
         for line in owned {
             write_end.write_all(line.as_bytes()).await.expect("запись");

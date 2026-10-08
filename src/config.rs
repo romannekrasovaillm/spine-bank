@@ -1065,7 +1065,8 @@ impl SignificanceConfig {
 ///
 /// Имена — имена составляющих `arch-be gate`: `fitness`, `delta_guard`,
 /// `rule_weakened`, `spine_lint`, `trace_check`, `sensors`, `nfr`,
-/// `evidence_verify`. Пустой список = на маршруте обязательных нет.
+/// `evidence_verify`, `decision_quality`, `semantic_quality`, `secrets`,
+/// `openspec_coverage`. Пустой список = на маршруте обязательных нет.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GateConfig {
@@ -1093,6 +1094,44 @@ pub struct GateConfig {
     /// `arch_drift` в `[gate.required]` маршрута (тогда находки блокируют)
     /// либо флагом здесь (находки — warn).
     pub arch_drift: ArchDriftConfig,
+    /// Составляющая `openspec_coverage` (F2 волны F 0.3.14, ADR-067): покрытие
+    /// требований `OpenSpec` правилами реестра — область проверки.
+    #[serde(default)]
+    pub openspec_coverage: OpenspecCoverageConfig,
+}
+
+/// Настройки составляющей гейта `openspec_coverage` (F2): секция
+/// `[gate.openspec_coverage]`. Только область: включение в блокирующие — через
+/// `[gate.required]` маршрута (образец — `decision_quality`), ужесточений
+/// без явного решения проекта нет.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OpenspecCoverageConfig {
+    /// Область проверки (дефолт `changed` — дешёвый режим потока доработок).
+    pub scope: OpenspecCoverageScope,
+}
+
+/// Область покрытия требований `OpenSpec` в составляющей гейта (F2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenspecCoverageScope {
+    /// Требования дельт активных changes, затронутых диффом `base..дерево`,
+    /// плюс требования живых спек, чьи файлы изменены (дефолт).
+    #[default]
+    Changed,
+    /// Все требования — как `openspec coverage`.
+    All,
+}
+
+impl OpenspecCoverageScope {
+    /// Метка области для детали составляющей.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Changed => "changed",
+            Self::All => "all",
+        }
+    }
 }
 
 /// Severity находки `BodyChanged` анти-ослабления реестра (A1).

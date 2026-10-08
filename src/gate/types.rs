@@ -364,6 +364,9 @@ pub struct GateOptions {
     /// Составляющая `secrets` (C3): severity и область сканирования
     /// (секция `[gate.secrets]`).
     pub secrets: crate::config::SecretsConfig,
+    /// Составляющая `openspec_coverage` (F2, ADR-067): область покрытия
+    /// требований `OpenSpec` (секция `[gate.openspec_coverage]`).
+    pub openspec_coverage: crate::config::OpenspecCoverageConfig,
     /// Модель доверия `command_succeeds` (A3, ADR-053): снимок решения
     /// «исполнять ли команды реестра» для составляющей `fitness`. `Default` —
     /// детерминированный legacy-режим (исполнять, allow-файл не
@@ -407,6 +410,7 @@ impl GateOptions {
             rule_weakened: cfg.gate.rule_weakened.clone(),
             overrides: cfg.gate.overrides.clone(),
             secrets: cfg.gate.secrets,
+            openspec_coverage: cfg.gate.openspec_coverage,
             decision_policy: cfg.gate.decision_policy.clone(),
             exec: crate::cmd_trust::ExecPolicy::default(),
             route: None,

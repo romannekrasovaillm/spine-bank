@@ -64,7 +64,12 @@ constraints:
 - **SHALL всего** — уникальных требований (specs + дельты активных changes,
   дубли по id слиты);
 - **покрыто детектором** — есть правило с `covers:` без признака
-  `unverifiable`;
+  `unverifiable`; число расщепляется по доказательности (F2, связка с
+  волной B): **с подтверждёнными зубьями** (запись `confirmed` в
+  `.arch-handoff/teeth.json`, отпечаток правила сошёлся) и **покрыто
+  текстом** (зубья не подтверждены: не измерялись — честное «не
+  проверялось», либо измерены беззубыми) — покрытие требований не должно
+  быть формальным;
 - **unverifiable с owner** — только заглушки `unverifiable: true` с
   назначенным owner (осознанный долг ручного контроля);
 - **без решения** — ни детектора, ни unverifiable с owner; список поимённо.
@@ -113,6 +118,65 @@ Exit code: 0 всегда, кроме `--strict` — тогда 1 при нал�
 хотя бы одно требование дельты `changes/<change-id>/specs/` — «без решения»,
 либо падает `control check` по файлу ограничений. Иначе PASS, exit 0.
 
+### `arch-be openspec gate --change <ID> <ROOT> [--constraints <PATH>] [--base <REF>]` (F3, ADR-067)
+
+Гейт активного change — для MR, реализующего конкретный change. Одним
+вызовом:
+
+1. **покрытие требований дельты change** (F2 в области change): требование
+   без решения — `requirement_uncovered`, exit 1; покрытие текстом (зубья
+   правил не подтверждены) показывается отдельным счётчиком;
+2. **`delta_guard` с этим change как источником** (F1): правки защищённых
+   путей (`model/`, `ARCHITECTURE-SPINE.md`, `CONSTRAINTS.yaml`) обязаны
+   упоминаться в `proposal.md`/`design.md`/`tasks.md`/`specs/**` активного
+   change;
+3. **`control check`** по реестру правил;
+4. **маршрут значимости по диффу** `base..HEAD` (детектор триггеров, как у
+   `gate --route auto`): печатается в шапке отчёта; `--base` — для CI
+   (напр. `origin/main...HEAD`), по умолчанию `HEAD` (рабочее дерево).
+
+Без git-репозитория `delta_guard` и маршрут честно помечаются недоступными
+(не притворяются пройденными), вердикт решают покрытие и `control check`.
+Провал любой части — **exit 1**.
+
+## Составляющая `openspec_coverage` единого гейта (F2, ADR-067)
+
+Покрытие требований OpenSpec — часть `arch-be gate`: составляющая
+прогоняется на любом маршруте; без каталога `openspec/` — SKIP с явной
+пометкой (паспорт вердикта показывает её в блоке «не проверено»).
+
+- **Блокировка — решением проекта**: находка `requirement_uncovered`
+  (требование без решения) — `error`, если `openspec_coverage` входит в
+  `[gate.required]` маршрута в `arch-harness.toml`/`config.toml`, иначе
+  `warn`. Пример: `[gate.required] critical = [..., "openspec_coverage"]`.
+- **Область** (`[gate.openspec_coverage] scope`): `changed` (дефолт) —
+  требования дельт активных changes, затронутых диффом `base..дерево`, плюс
+  требования живых спек, чьи файлы изменены; `all` — всё, как
+  `openspec coverage`.
+- **Зубья покрытия**: правило, покрывающее требование, обязано иметь
+  подтверждённые зубья (волна B, `arch-be rules teeth --save`); без них
+  требование засчитывается «покрыто текстом» — отдельной строкой детали.
+  Правила, измеренные беззубыми, дают warn-находку `requirement_text_only`.
+  Нет файла измерения — «зубья не измерены» в границах вердикта (блок 2
+  паспорта), а не находка.
+- Осиротевшие `covers:` (F4) видны и в гейте — warn-находка `covers_orphan`.
+
+## Handoff из change (F6, ADR-067)
+
+`arch-be handoff … --openspec-change <id>`: в пакет кладутся `proposal.md`,
+`design.md`, `tasks.md` и дельты спек change (`openspec/changes/<id>/`) — как
+`--spec` (контент попадает в `ARCHITECTURE.md` и собранный `SPEC.md`, ссылки —
+в `MANIFEST.json`, поле `openspec_change`). Файлы change идут первыми:
+лесенка усечения epic-context режет прозу с хвоста, и предмет задачи не
+должен попасть под сокращение. Порог контекста маршрута Critical считается с
+их учётом. Требования change добавляются в `RUBRIC.yaml` пакета критерием
+`openspec_change_requirements` (id + SHALL-тексты) — приёмка по требованиям,
+а не по пересказу. Существующая `RUBRIC.yaml` пакета не затирается:
+требования не вписываются, и пакет предупреждает. Markdown OpenSpec только
+читается — Spine его не пишет (правило 9).
+
+То же в MCP-инструменте `handoff_create` (параметр `openspec_change`).
+
 ## Change OpenSpec — источник покрытия `delta_guard` (F1, ADR-062)
 
 Гейт прямых правок спайна (`arch-be delta guard`, составляющая `delta_guard`
@@ -151,8 +215,6 @@ Exit code: 0 всегда, кроме `--strict` — тогда 1 при нал�
 
 - **sync**: спайн поверх design.md — подтверждённые кандидаты из
   `SPINE.draft.md` в `ARCHITECTURE-SPINE.md` с обратной ссылкой на change.
-- **gate --change <id>**: гейт активного change (proposal/tasks как контекст,
-  покрытие дельты до archive).
 - **gate --expiry**: правила, порождённые из archived changes, получают
   expiry/owner из истории archive; просроченные — в отчёт.
 - **config.yaml rules → черновики правил**: маппинг per-artifact rules

@@ -192,6 +192,11 @@ enum Cmd {
         /// без флага правки архитектора в пакете сохраняются.
         #[arg(long)]
         refresh_constraints: bool,
+        /// Change `OpenSpec` как источник пакета (F6, ADR-067): proposal.md,
+        /// design.md, tasks.md и дельты спек change кладутся как --spec,
+        /// требования change — критерием в RUBRIC.yaml пакета.
+        #[arg(long)]
+        openspec_change: Option<String>,
     },
     /// Прогнать кодовый харнесс по handoff-пакету. Только сборка `harness`.
     #[cfg(feature = "harness")]
@@ -773,6 +778,7 @@ pub(crate) async fn run() -> Result<()> {
             rollback,
             route,
             refresh_constraints,
+            openspec_change,
         }) => {
             if !cfg.harnesses.contains_key(&harness) {
                 anyhow::bail!(
@@ -791,6 +797,7 @@ pub(crate) async fn run() -> Result<()> {
                 route,
                 arch_harness::handoff::HandoffOptions {
                     refresh_constraints,
+                    openspec_change,
                 },
             )?;
             println!("Handoff-пакет: {}", packet.dir.display());
@@ -798,6 +805,13 @@ pub(crate) async fn run() -> Result<()> {
                 println!("  {}", f.display());
             }
             println!("epic-context ≈ {} токенов", packet.epic_context_tokens);
+            // F6: источник пакета — change OpenSpec (требования — в рубрике).
+            if let Some(change) = &packet.openspec_change {
+                println!(
+                    "OpenSpec change: {change} (требований в рубрике пакета: {})",
+                    packet.openspec_requirements
+                );
+            }
             match &packet.baseline {
                 Some(h) => println!(
                     "git: {}baseline {h} (якорь отката)",
@@ -1538,7 +1552,7 @@ pub(crate) async fn run() -> Result<()> {
             println!("экспортировано {n} строк → {}", out.display());
         }
         Some(Cmd::Delta { cmd }) => cmd_delta(cmd)?,
-        Some(Cmd::Openspec { cmd }) => cmd_openspec(cmd)?,
+        Some(Cmd::Openspec { cmd }) => cmd_openspec(&cfg, cmd)?,
         Some(Cmd::AgentsMd { cmd }) => cmd_agents_md(&cfg, cmd)?,
         #[cfg(feature = "harness")]
         Some(Cmd::Cron { cmd }) => cmd_cron(&cfg, cmd).await?,

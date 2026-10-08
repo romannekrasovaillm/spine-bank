@@ -675,6 +675,7 @@ mod tests {
 - **trace_check** — SKIP — нет каталога model/
 - **model_validate** — SKIP — нет каталога model/
 - **model_drift** — SKIP — нет каталога model/
+- **openspec_coverage** — SKIP — нет каталога openspec/ — разметки OpenSpec нет, покрытие требований не проверяется
 - **decision_quality** — SKIP — не включена: добавьте 'decision_quality' в [gate.required] нужного маршрута
 - **secrets** — PASS — область: changed, просканировано файлов: 0, находок: 0 (error: 0)
 - **semantic_quality** — SKIP — не включена: добавьте 'semantic_quality' в [gate.required] нужного маршрута
@@ -696,6 +697,7 @@ mod tests {
 - **trace_check** — нет каталога model/ (не обязательна для маршрута)
 - **model_validate** — нет каталога model/ (не обязательна для маршрута)
 - **model_drift** — нет каталога model/ (не обязательна для маршрута)
+- **openspec_coverage** — нет каталога openspec/ — разметки OpenSpec нет, покрытие требований не проверяется (не обязательна для маршрута)
 - **decision_quality** — не включена: добавьте 'decision_quality' в [gate.required] нужного маршрута (не обязательна для маршрута)
 - **semantic_quality** — не включена: добавьте 'semantic_quality' в [gate.required] нужного маршрута (не обязательна для маршрута)
 - **arch_drift** — не включена: добавьте 'arch_drift' в [gate.required] нужного маршрута или задайте [gate.arch_drift] enabled = true (проверка дорогая: снимки ревизий git) (не обязательна для маршрута)
@@ -746,6 +748,7 @@ arch-be gate --repo кейс --format json > verdict.json && arch-be gate --repo
 - **trace_check** — SKIP — нет каталога model/
 - **model_validate** — SKIP — нет каталога model/
 - **model_drift** — SKIP — нет каталога model/
+- **openspec_coverage** — SKIP — нет каталога openspec/ — разметки OpenSpec нет, покрытие требований не проверяется
 - **decision_quality** — SKIP — не включена: добавьте 'decision_quality' в [gate.required] нужного маршрута
 - **secrets** — PASS — область: changed, просканировано файлов: 0, находок: 0 (error: 0)
 - **semantic_quality** — SKIP — не включена: добавьте 'semantic_quality' в [gate.required] нужного маршрута
@@ -767,6 +770,7 @@ arch-be gate --repo кейс --format json > verdict.json && arch-be gate --repo
 - **trace_check** — нет каталога model/ (не обязательна для маршрута)
 - **model_validate** — нет каталога model/ (не обязательна для маршрута)
 - **model_drift** — нет каталога model/ (не обязательна для маршрута)
+- **openspec_coverage** — нет каталога openspec/ — разметки OpenSpec нет, покрытие требований не проверяется (не обязательна для маршрута)
 - **decision_quality** — не включена: добавьте 'decision_quality' в [gate.required] нужного маршрута (не обязательна для маршрута)
 - **semantic_quality** — не включена: добавьте 'semantic_quality' в [gate.required] нужного маршрута (не обязательна для маршрута)
 - **arch_drift** — не включена: добавьте 'arch_drift' в [gate.required] нужного маршрута или задайте [gate.arch_drift] enabled = true (проверка дорогая: снимки ревизий git) (не обязательна для маршрута)
