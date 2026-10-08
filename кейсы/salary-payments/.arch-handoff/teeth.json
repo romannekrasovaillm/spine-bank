@@ -1,7 +1,7 @@
 {
   "schema": "arch-be/rules-teeth/v1",
   "case": "кейсы/salary-payments",
-  "measured_at": "2026-10-08T05:37:29.867609243+03:00",
+  "measured_at": "2026-10-08T06:44:52.503050001+03:00",
   "entries": [
     {
       "name": "spine_present",
@@ -170,6 +170,14 @@
       "status": "confirmed",
       "fingerprint": "996f10b0740871088548e2bbb92f85acf53d0450dca9258410c8659035bca172",
       "detail": "вставка строки под pattern в skeleton/__init__.py — находок правила: 0 → 1 (зубья подтверждены)"
+    },
+    {
+      "name": "context_boundary_skeleton",
+      "id": "C-022",
+      "kind": "context_boundary",
+      "status": "unknown",
+      "fingerprint": "05832bf85478111650658a261986e37ad0c5c37a2030ffa534d899ed5cf87dd0",
+      "detail": "тип 'context_boundary' мутатором не поддержан — зубья не измерены"
     }
   ]
 }

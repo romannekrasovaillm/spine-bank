@@ -4,7 +4,8 @@ type: cmp
 title: "Адаптер платформы цифрового рубля"
 status: "designed"
 implements: [REQ-003, REQ-004, AD-003]
-depends_on: [CMP-003]
+depends_on: [CMP-006]
+code_roots: [skeleton/platform]
 availability: 0.999
 replicas: 2
 rps_per_instance: 150.0

@@ -5,6 +5,7 @@ title: "Журнал выплат"
 status: "designed"
 implements: [REQ-003, AD-002]
 depends_on: [CMP-006]
+code_roots: [skeleton/journal]
 availability: 0.9995
 replicas: 3
 rps_per_instance: 500.0

@@ -4,7 +4,8 @@ type: cmp
 title: "Оркестратор выплат"
 status: "designed"
 implements: [REQ-001, REQ-002, REQ-003, AD-001]
-depends_on: [CMP-002, CMP-003, CMP-004]
+depends_on: [CMP-002, CMP-003, CMP-004, CMP-006]
+code_roots: [skeleton/orchestrator]
 availability: 0.9995
 replicas: 2
 rps_per_instance: 250.0

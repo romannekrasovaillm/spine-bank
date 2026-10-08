@@ -4,7 +4,8 @@ type: cmp
 title: "Проверка получателей и лимитов окна"
 status: "designed"
 implements: [REQ-001, AD-005]
-depends_on: [CMP-003]
+depends_on: [CMP-006]
+code_roots: [skeleton/recipients]
 availability: 0.999
 replicas: 2
 rps_per_instance: 300.0

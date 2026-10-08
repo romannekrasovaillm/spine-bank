@@ -2,7 +2,8 @@
 
 ## Что проверено
 
-Walking skeleton (`skeleton/payouts.py`, 9 тестов, `tests/test_payouts.py`)
+Walking skeleton (пакеты `skeleton/` по компонентам модели, 9 тестов,
+`tests/test_payouts.py`)
 проверяет свойства контура, а не отдельные функции:
 
 - реестр проводится построчно и фиксируется журналом;

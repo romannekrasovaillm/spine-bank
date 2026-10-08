@@ -207,3 +207,13 @@ rules:
     owner: OWNER-001
     expiry: 2027-12-31
     effort_hours: 1
+  - id: C-022
+    name: context_boundary_skeleton
+    type: context_boundary
+    glob: "skeleton/**/*.py"
+    severity: error
+    rationale: 'импорты между пакетами скелета обязаны следовать depends_on модели: обход границы контекста (импорт мимо объявленного ребра) — находка'
+    fix_hint: 'либо удалите пересекающий импорт, либо оформите новую зависимость дельтой: depends_on в model/CMP-* и строка в DELTA.md'
+    owner: OWNER-001
+    expiry: 2027-12-31
+    effort_hours: 1

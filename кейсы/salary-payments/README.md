@@ -19,11 +19,11 @@ arch-be bootstrap --status --dir кейсы/salary-payments   # спайн ✓ �
 | | |
 |---|---|
 | Маршрут | Critical (`.arch-handoff/ROUTE.lock`) |
-| Модель | 43 сущности: SYS, CAP×3, REQ×5, NFR×5, CMP×6, INT×3, AD×7 (5 несущих — `load_bearing`), ADR×5, RISK×4, QAS×3, OWNER |
-| Правила | 21 (все `severity: error`; 5 — исполняемые из шаблонов библиотеки, зубья подтверждены `arch-be rules teeth`) |
+| Модель | 43 сущности: SYS, CAP×3, REQ×5, NFR×5, CMP×6 (у всех `code_roots` на пакеты `skeleton/`), INT×3, AD×7 (5 несущих — `load_bearing`), ADR×5, RISK×4, QAS×3, OWNER |
+| Правила | 22 (все `severity: error`; 5 — исполняемые из шаблонов библиотеки, зубья 21/22 подтверждены `arch-be rules teeth`; C-022 — `context_boundary` по импортам скелета) |
 | Решения | 5 ADR с альтернативами и обратимостью, `docs/adr/` |
-| Walking skeleton | `skeleton/payouts.py`, 9 тестов, `python3 -m pytest tests/ -q` |
-| Бандл | 13 артефактов критического профиля, упакован `evidence pack` |
+| Walking skeleton | пакеты `skeleton/` по компонентам модели (registry, journal, recipients, platform, orchestrator, reconciliation), 9 тестов, `python3 -m pytest tests/ -q` |
+| Бандл | 12 артефактов критического профиля, упакован `evidence pack` |
 
 ## Вердикт
 
@@ -34,6 +34,18 @@ $ arch-be gate --repo . --route critical
 
 Одиннадцать составляющих, все PASS либо SKIP (по умолчанию выключена только
 `decision_quality`). Паспорт вердикта — `arch-be gate --repo . --explain`.
+
+## Модель привязана к коду (волна C4)
+
+У всех шести CMP проставлены `code_roots` на пакеты `skeleton/` (дельта
+`changes/code-roots`), а рёбра `depends_on` подкреплены реальными импортами —
+`arch-be model drift .` зелёный без единой находки. Правило C-022
+(`context_boundary`) краснит импорт через границу контекста без объявленного
+ребра (проверено мутантом «`from skeleton.platform import Platform` в
+`skeleton/recipients/`» — `[error] context_boundary: … CMP-002 → CMP-004 без
+depends_on в модели`). В `arch-harness.toml` кейса заявлена обязательная
+составляющая `model_drift` (`[gate.required]`): она вступит в силу после
+слияния волны C1 (текущий бинарь неизвестную составляющую игнорирует).
 
 ## Измерение защищённости (`arch-be redteam`)
 

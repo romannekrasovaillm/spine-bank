@@ -4,6 +4,7 @@ type: cmp
 title: "Хранилище реестров и снимков журнала"
 status: "designed"
 implements: [REQ-001, AD-002]
+code_roots: [skeleton/registry]
 availability: 0.9999
 replicas: 3
 rps_per_instance: 400.0
