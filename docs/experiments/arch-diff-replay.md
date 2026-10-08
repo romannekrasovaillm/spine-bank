@@ -9,7 +9,7 @@ merge-коммиты волн 0.3.14 (`wave-D/F/A/B+E/K`, `t2-gate1/gate2/cases/
 Команда воспроизведения (по каждому коммиту `C`):
 
 ```bash
-arch-be arch-diff --repo /home/roman/spine-bank --base C^1 --head C --format json
+arch-be arch-diff --repo <repo> --base C^1 --head C --format json
 ```
 
 ## Состав выборки

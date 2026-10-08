@@ -1222,6 +1222,29 @@ pub fn run(case: &Path, min_detection: f64, decision_quality: bool) -> Result<Re
     )
 }
 
+/// Причины «эталон не зелёный» для сообщения preflight: проваленные
+/// составляющие и — отдельно — обязательные, оставшиеся без входа (SKIP на
+/// Critical даёт INCOMPLETE: без них список был бы пустым, а причина отказа —
+/// непонятной; случай hermetic-контура без pytest, B4 0.3.14).
+pub(crate) fn not_green_reasons(reference: &crate::gate::GateReport) -> String {
+    let mut parts: Vec<String> = reference
+        .components
+        .iter()
+        .filter(|c| c.status == GateStatus::Fail)
+        .map(|c| format!("провалена {}", c.name))
+        .collect();
+    parts.extend(
+        reference
+            .not_checked
+            .iter()
+            .map(|name| format!("обязательная {name} без входа (SKIP)")),
+    );
+    if parts.is_empty() {
+        return format!("итог {:?} без названных составляющих", reference.outcome);
+    }
+    parts.join(", ")
+}
+
 /// Мутационный прогон с опциями.
 ///
 /// # Errors
@@ -1245,18 +1268,12 @@ pub fn run_with_options(case: &Path, options: &RedteamOptions) -> Result<Redteam
     }
     let reference = gate_report(&reference_root, decision_quality)?;
     if reference.outcome != GateOutcome::Pass {
-        let failed: Vec<String> = reference
-            .components
-            .iter()
-            .filter(|c| c.status == GateStatus::Fail)
-            .map(|c| c.name.to_string())
-            .collect();
         return Err(HarnessError::Control(format!(
             "кейс {} не зелёный на маршруте Critical — мутационный прогон мерил бы \
-             сломанный пакет (провалены: {}); красноглазый эталон не даёт отличить \
+             сломанный пакет ({}); красноглазый эталон не даёт отличить \
              «дефект пойман» от «пакет уже сломан»",
             case.display(),
-            failed.join(", ")
+            not_green_reasons(&reference)
         )));
     }
     let mut detections = Vec::new();

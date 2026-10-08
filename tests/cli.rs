@@ -3274,6 +3274,12 @@ fn a4_without_manifest_is_a_finding_not_io_error() {
 /// (D6, D10) по-прежнему обязаны оставаться невидимыми для механики.
 #[test]
 fn redteam_measures_merchant_case_detection_share() {
+    // B4: зелёный прогон кейса требует pytest (шаблонные правила с зубьями);
+    // без него гейт кейса честно INCOMPLETE (exit 3) — тест скипается.
+    if !pytest_available() {
+        eprintln!("skipped: no pytest");
+        return;
+    }
     let case = Path::new(env!("CARGO_MANIFEST_DIR")).join("кейсы/digital-ruble-merchant");
     let tmp = tempfile::tempdir().expect("tmp");
     let mut cmd = arch_cmd(tmp.path());
@@ -3340,6 +3346,12 @@ fn redteam_measures_merchant_case_detection_share() {
 /// при наличии непойманной позиции; `--save` несовместим (clap).
 #[test]
 fn redteam_corpus_applies_patches_and_stays_informational() {
+    // B4: зелёный прогон кейса требует pytest (шаблонные правила с зубьями);
+    // без него гейт кейса честно INCOMPLETE (exit 3) — тест скипается.
+    if !pytest_available() {
+        eprintln!("skipped: no pytest");
+        return;
+    }
     let case = Path::new(env!("CARGO_MANIFEST_DIR")).join("кейсы/digital-ruble-merchant");
     let tmp = tempfile::tempdir().expect("tmp");
     let corpus = tmp.path().join("corpus");
@@ -3416,6 +3428,12 @@ fn redteam_corpus_applies_patches_and_stays_informational() {
 /// W2: машинный формат отчёта — JSON-схема с картой обнаружения.
 #[test]
 fn redteam_json_format_reports_detections() {
+    // B4: зелёный прогон кейса требует pytest (шаблонные правила с зубьями);
+    // без него гейт кейса честно INCOMPLETE (exit 3) — тест скипается.
+    if !pytest_available() {
+        eprintln!("skipped: no pytest");
+        return;
+    }
     let case = Path::new(env!("CARGO_MANIFEST_DIR")).join("кейсы/digital-ruble-merchant");
     let tmp = tempfile::tempdir().expect("tmp");
     let mut cmd = arch_cmd(tmp.path());
@@ -3473,6 +3491,12 @@ fn copy_case(from: &Path, to: &Path) {
 /// ступень доверия вниз вместе с метрикой.
 #[test]
 fn redteam_control_survives_delta_archival() {
+    // B4: зелёный прогон кейса требует pytest (шаблонные правила с зубьями);
+    // без него гейт кейса честно INCOMPLETE (exit 3) — тест скипается.
+    if !pytest_available() {
+        eprintln!("skipped: no pytest");
+        return;
+    }
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("кейсы/digital-ruble-merchant");
     let tmp = tempfile::tempdir().expect("tmp");
     let home = tmp.path();

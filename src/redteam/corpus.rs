@@ -290,17 +290,11 @@ pub fn run_corpus(
     }
     let reference = super::gate_report(&reference_root, options.decision_quality)?;
     if reference.outcome != crate::gate::GateOutcome::Pass {
-        let failed: Vec<String> = reference
-            .components
-            .iter()
-            .filter(|c| c.status == GateStatus::Fail)
-            .map(|c| c.name.to_string())
-            .collect();
         return Err(HarnessError::Control(format!(
             "кейс {} не зелёный на маршруте Critical — корпусный прогон мерил бы \
-             сломанный пакет (провалены: {})",
+             сломанный пакет ({})",
             case.display(),
-            failed.join(", ")
+            super::not_green_reasons(&reference)
         )));
     }
 
