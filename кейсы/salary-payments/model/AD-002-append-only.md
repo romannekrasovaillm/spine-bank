@@ -4,7 +4,8 @@ type: ad
 title: "Журнал выплат append-only"
 status: "ADOPTED"
 affects: [CMP-003]
-verified_by: [C-005]
+verified_by: [C-005, C-017]
+load_bearing: true
 ---
 
 - **Binds**: Журнал выплат, Сверка с платформой

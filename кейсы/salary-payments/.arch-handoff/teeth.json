@@ -1,0 +1,175 @@
+{
+  "schema": "arch-be/rules-teeth/v1",
+  "case": "кейсы/salary-payments",
+  "measured_at": "2026-10-08T05:37:29.867609243+03:00",
+  "entries": [
+    {
+      "name": "spine_present",
+      "id": "C-001",
+      "kind": "file_exists",
+      "status": "confirmed",
+      "fingerprint": "88fa37e68d015e1b6c6dea2a07320778843df18f759531d352f155f1c521a55d",
+      "detail": "удаление файла ARCHITECTURE-SPINE.md — находок правила: 0 → 1 (зубья подтверждены)"
+    },
+    {
+      "name": "idempotency_key_in_code",
+      "id": "C-002",
+      "kind": "must_contain",
+      "status": "confirmed",
+      "fingerprint": "cf54e56b6e7d93eb8fe786ddeebe80d9d0d753670edca04d96f4f48bd10ab670",
+      "detail": "удаление совпадений pattern из skeleton/journal/__init__.py, skeleton/platform/__init__.py, skeleton/reconciliation/__init__.py, skeleton/registry/__init__.py — находок правила: 0 → 1 (зубья подтверждены)"
+    },
+    {
+      "name": "no_pii_in_skeleton",
+      "id": "C-003",
+      "kind": "must_not_contain",
+      "status": "confirmed",
+      "fingerprint": "fe0b5fc667c82987ef9bb98a3ac4f7ee7f31deb093a407ffd01a33d07fbbdfdf",
+      "detail": "вставка строки под pattern в skeleton/__init__.py — находок правила: 0 → 1 (зубья подтверждены)"
+    },
+    {
+      "name": "reconciliation_in_code",
+      "id": "C-004",
+      "kind": "must_contain",
+      "status": "confirmed",
+      "fingerprint": "5c4fdceba70f77cf29ef1333ffa22512f00e94e3782d535bd3170cfe142bc042",
+      "detail": "удаление совпадений pattern из skeleton/reconciliation/__init__.py — находок правила: 0 → 1 (зубья подтверждены)"
+    },
+    {
+      "name": "append_only_journal_in_code",
+      "id": "C-005",
+      "kind": "must_contain",
+      "status": "confirmed",
+      "fingerprint": "684f60857cc18f8aa18321f4154daee9d0d501373595d38aa0ca2ab3c0e7626d",
+      "detail": "удаление совпадений pattern из skeleton/journal/__init__.py, skeleton/reconciliation/__init__.py — находок правила: 0 → 1 (зубья подтверждены)"
+    },
+    {
+      "name": "limits_checked_before_send",
+      "id": "C-006",
+      "kind": "must_contain",
+      "status": "confirmed",
+      "fingerprint": "8c68ff046b1e56c29469b8fb90b4e249b531555b0a35261a66794e3a8185a816",
+      "detail": "удаление совпадений pattern из skeleton/orchestrator/__init__.py, skeleton/recipients/__init__.py — находок правила: 0 → 1 (зубья подтверждены)"
+    },
+    {
+      "name": "partial_success_handled",
+      "id": "C-007",
+      "kind": "must_contain",
+      "status": "confirmed",
+      "fingerprint": "5b7c9bb8620b6ae500eb69fc4081a50ea0e673a99dd42e2f6495dd2baf8b8240",
+      "detail": "удаление совпадений pattern из skeleton/orchestrator/__init__.py — находок правила: 0 → 1 (зубья подтверждены)"
+    },
+    {
+      "name": "spine_binds",
+      "id": "C-008",
+      "kind": "must_contain",
+      "status": "confirmed",
+      "fingerprint": "7158a82f10dd17f5e37d8dc81aaf0c4ee4236f2b7011daef3bfcf15183630a93",
+      "detail": "удаление совпадений pattern из ARCHITECTURE-SPINE.md — находок правила: 0 → 1 (зубья подтверждены)"
+    },
+    {
+      "name": "adr_alternatives",
+      "id": "C-009",
+      "kind": "each_file_must_contain",
+      "status": "confirmed",
+      "fingerprint": "05ae6e8b7d18a9acc8ac941af7d1ad518088e61b219db237c8b5653b79942a15",
+      "detail": "удаление совпадений pattern из docs/adr/ADR-001-klyuch-idempotentnosti.md, docs/adr/ADR-002-ochered-porucheniy.md, docs/adr/ADR-003-razbor-po-dannym-platformy.md, docs/adr/ADR-004-postrochnaya-atomarnost.md, docs/adr/ADR-005-sverka-po-snimku.md — находок правила: 0 → 5 (зубья подтверждены)"
+    },
+    {
+      "name": "spec_present",
+      "id": "C-010",
+      "kind": "file_exists",
+      "status": "confirmed",
+      "fingerprint": "4955ee896b1ad46f4507780b65baf34c334d879f167930d305ae753b5796add0",
+      "detail": "удаление файла docs/spec/salary-acceptance.md — находок правила: 0 → 1 (зубья подтверждены)"
+    },
+    {
+      "name": "spec_ears",
+      "id": "C-011",
+      "kind": "must_contain",
+      "status": "confirmed",
+      "fingerprint": "02dbc1e3a19c42ecd486ae060233989ed0f12f21de56c575f5ad65ec1e95a1e5",
+      "detail": "удаление совпадений pattern из docs/SPEC.md — находок правила: 0 → 1 (зубья подтверждены)"
+    },
+    {
+      "name": "reconciliation_report_present",
+      "id": "C-012",
+      "kind": "file_exists",
+      "status": "confirmed",
+      "fingerprint": "f40fb2cab0e24e1cbeb195733a352ec52dffa93a88ea2b7487c3a191b1ea66a0",
+      "detail": "удаление файла docs/reconciliation.md — находок правила: 0 → 1 (зубья подтверждены)"
+    },
+    {
+      "name": "skeleton_trace_present",
+      "id": "C-013",
+      "kind": "file_exists",
+      "status": "confirmed",
+      "fingerprint": "d2c220b5d8bc2f0228b67673e21ea327a16b45b238baca28bff34a2fe9553936",
+      "detail": "удаление файла docs/WALKING-SKELETON.md — находок правила: 0 → 1 (зубья подтверждены)"
+    },
+    {
+      "name": "decision_a3_present",
+      "id": "C-014",
+      "kind": "file_exists",
+      "status": "confirmed",
+      "fingerprint": "438a5395d825062e13c01e2dd39af249bec1c3df3a106a1fbd44df8bcee168d5",
+      "detail": "удаление файла DECISION.md — находок правила: 0 → 1 (зубья подтверждены)"
+    },
+    {
+      "name": "no_card_data_in_tests",
+      "id": "C-015",
+      "kind": "must_not_contain",
+      "status": "confirmed",
+      "fingerprint": "d844a76444702e430d4c7db8ff163253d9876bb970820510a742df3035d1c97d",
+      "detail": "вставка строки под pattern в tests/test_payouts.py — находок правила: 0 → 1 (зубья подтверждены)"
+    },
+    {
+      "name": "idempotency_key_enforced",
+      "id": "C-016",
+      "kind": "command_succeeds",
+      "status": "confirmed",
+      "fingerprint": "148b146923764e3ff89e26aaa1c86ec64b9798abcd997ee0e185a6e0c90b8e1b",
+      "detail": "подмена реализации на нарушающую из шаблона 'idempotency-key' (skeleton/rule_templates/idempotency-key) — находок правила: 0 → 1 (зубья подтверждены)"
+    },
+    {
+      "name": "append_only_journal_enforced",
+      "id": "C-017",
+      "kind": "command_succeeds",
+      "status": "confirmed",
+      "fingerprint": "61d4d20ed493791e371ea4d42c203fcd00d40203112ad368e3403095882ffb89",
+      "detail": "подмена реализации на нарушающую из шаблона 'append-only-journal' (skeleton/rule_templates/append-only-journal) — находок правила: 0 → 1 (зубья подтверждены)"
+    },
+    {
+      "name": "unknown_outcome_no_resend",
+      "id": "C-018",
+      "kind": "command_succeeds",
+      "status": "confirmed",
+      "fingerprint": "95c446c6137a4af5bd469f228396b0614c6704d80b483db06df1a11defbc3d2c",
+      "detail": "подмена реализации на нарушающую из шаблона 'unknown-outcome-no-resend' (skeleton/rule_templates/unknown-outcome-no-resend) — находок правила: 0 → 1 (зубья подтверждены)"
+    },
+    {
+      "name": "no_pii_in_logs",
+      "id": "C-019",
+      "kind": "command_succeeds",
+      "status": "confirmed",
+      "fingerprint": "f54d70710b0f5d6236597289b5b5b0ec6532164b58eb6f86d06eac31d1234ead",
+      "detail": "подмена реализации на нарушающую из шаблона 'no-pii-in-logs' (skeleton/rule_templates/no-pii-in-logs) — находок правила: 0 → 1 (зубья подтверждены)"
+    },
+    {
+      "name": "validate_before_side_effect",
+      "id": "C-020",
+      "kind": "command_succeeds",
+      "status": "confirmed",
+      "fingerprint": "62294d2e3742520adbdf66d2b74cf766f84bd700ef96714ed354d37dcf7be474",
+      "detail": "подмена реализации на нарушающую из шаблона 'validate-before-side-effect' (skeleton/rule_templates/validate-before-side-effect) — находок правила: 0 → 1 (зубья подтверждены)"
+    },
+    {
+      "name": "no_card_data_in_code",
+      "id": "C-021",
+      "kind": "must_not_contain",
+      "status": "confirmed",
+      "fingerprint": "996f10b0740871088548e2bbb92f85acf53d0450dca9258410c8659035bca172",
+      "detail": "вставка строки под pattern в skeleton/__init__.py — находок правила: 0 → 1 (зубья подтверждены)"
+    }
+  ]
+}

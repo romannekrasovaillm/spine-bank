@@ -130,3 +130,80 @@ rules:
     owner: OWNER-001
     expiry: 2027-12-31
     effort_hours: 1
+  - id: C-016
+    name: idempotency_key_enforced
+    type: command_succeeds
+    command: 'python3 -m pytest -q -p no:cacheprovider skeleton/rule_templates/idempotency-key/test_idempotency_key.py'
+    timeout_secs: 120
+    severity: error
+    ad: AD-1
+    rationale: 'инвариант идемпотентности проверяется исполнением: повторная доставка с тем же ключом не создаёт второй эффект'
+    fix_hint: 'перенести проверку со скелета на настоящую точку входа: команда правила должна прогонять тесты вашего кода, а не эталонной реализации из шаблона'
+    skill: fitness-functions
+    owner: OWNER-001
+    expiry: 2027-12-31
+    effort_hours: 2
+  - id: C-017
+    name: append_only_journal_enforced
+    type: command_succeeds
+    command: 'python3 -m pytest -q -p no:cacheprovider skeleton/rule_templates/append-only-journal/test_append_only_journal.py'
+    timeout_secs: 120
+    severity: error
+    ad: AD-2
+    rationale: 'инвариант журнала проверяется исполнением: правка не меняет запись, удаления нет, исправление приходит отдельной компенсирующей записью'
+    fix_hint: 'перенести проверку со скелета на настоящий журнал: команда правила должна прогонять тесты вашего кода, а не эталонной реализации из шаблона'
+    skill: fitness-functions
+    owner: OWNER-001
+    expiry: 2027-12-31
+    effort_hours: 2
+  - id: C-018
+    name: unknown_outcome_no_resend
+    type: command_succeeds
+    command: 'python3 -m pytest -q -p no:cacheprovider skeleton/rule_templates/unknown-outcome-no-resend/test_unknown_outcome_no_resend.py'
+    timeout_secs: 120
+    severity: error
+    ad: AD-3
+    rationale: 'неопределённый исход проверяется исполнением: повторная отправка при UNKNOWN запрещена, операция закрывается запросом статуса'
+    fix_hint: 'перенести проверку со скелета на настоящую точку входа: команда правила должна прогонять тесты вашего кода, а не эталонной реализации из шаблона'
+    skill: fitness-functions
+    owner: OWNER-001
+    expiry: 2027-12-31
+    effort_hours: 2
+  - id: C-019
+    name: no_pii_in_logs
+    type: command_succeeds
+    command: 'python3 -m pytest -q -p no:cacheprovider skeleton/rule_templates/no-pii-in-logs/test_no_pii_in_logs.py'
+    timeout_secs: 120
+    severity: error
+    ad: AD-4
+    rationale: 'инвариант «персональные данные не покидают сценарий» проверяется исполнением: захваченная телеметрия сканируется регулярными выражениями форматов после прогона сценария'
+    fix_hint: 'перенести проверку со скелета на настоящий сценарий: команда правила должна прогонять ваш сценарий и сканировать его телеметрию, а не эталонную реализацию из шаблона'
+    skill: fitness-functions
+    owner: OWNER-001
+    expiry: 2027-12-31
+    effort_hours: 2
+  - id: C-020
+    name: validate_before_side_effect
+    type: command_succeeds
+    command: 'python3 -m pytest -q -p no:cacheprovider skeleton/rule_templates/validate-before-side-effect/test_validate_before_side_effect.py'
+    timeout_secs: 120
+    severity: error
+    ad: AD-5
+    rationale: 'инвариант «проверка раньше эффекта» проверяется исполнением: провал предусловия не оставляет за собой исполненное обращение и списанный лимит'
+    fix_hint: 'перенести проверку со скелета на настоящую точку входа: команда правила должна прогонять тесты вашего кода, а не эталонной реализации из шаблона'
+    skill: fitness-functions
+    owner: OWNER-001
+    expiry: 2027-12-31
+    effort_hours: 2
+  - id: C-021
+    name: no_card_data_in_code
+    type: must_not_contain
+    glob: "**/*.py"
+    pattern: 'PAN'
+    severity: error
+    ad: AD-4
+    rationale: 'карточные данные не попадают ни в один python-источник кейса: C-015 закрывал только tests/, а нарушение в остальном коде (класс D11) уходило мимо реестра'
+    fix_hint: 'убрать карточные данные из исходника; журналируются только идентификаторы операций (AD-4)'
+    owner: OWNER-001
+    expiry: 2027-12-31
+    effort_hours: 1

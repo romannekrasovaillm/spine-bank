@@ -1322,9 +1322,11 @@ mod tests_executable_invariant_per_ad {
         assert!(legacy.templates.is_empty(), "и шаблонов не предлагает");
     }
 
-    /// Снимок на эталонном кейсе: детектор называет КАЖДЫЙ инвариант, а для
-    /// пяти инвариантов `кейсы/salary-payments` ожидаемый шаблон задан
-    /// заданием и сверяется поимённо.
+    /// Снимок на эталонном кейсе: после волны B4 (дельта
+    /// `changes/executable-invariants` в `кейсы/salary-payments`) инварианты
+    /// AD-001…AD-005 покрыты исполняемыми правилами из шаблонов библиотеки —
+    /// детектор по ним молчит. Названы обязаны остаться ровно два инварианта
+    /// без поведенческой проверки — с прежними ожидаемыми шаблонами.
     #[test]
     fn salary_payments_snapshot_names_every_ad_with_its_template() {
         let case = Path::new(env!("CARGO_MANIFEST_DIR")).join("кейсы/salary-payments");
@@ -1335,25 +1337,33 @@ mod tests_executable_invariant_per_ad {
             .collect();
         got.sort();
         let expect = [
-            ("AD-001", "idempotency-key"),
-            ("AD-002", "append-only-journal"),
-            ("AD-003", "unknown-outcome-no-resend"),
-            ("AD-004", "no-pii-in-logs"),
-            ("AD-005", "validate-before-side-effect"),
             ("AD-006", "unknown-outcome-no-resend"),
             ("AD-007", "append-only-journal"),
         ];
-        assert_eq!(got.len(), expect.len(), "названы все инварианты: {got:?}");
-        for (ad, want) in expect {
+        assert_eq!(
+            got,
+            expect
+                .iter()
+                .map(|(a, t)| (a.to_string(), t.to_string()))
+                .collect::<Vec<_>>(),
+            "покрытые шаблонами инварианты (B4) молчат, текстовые названы: {got:?}"
+        );
+        // B4: несущие инварианты AD-001…AD-005 закрыты правилами C-016…C-020 —
+        // кандидатов по ним быть не должно.
+        for covered in ["AD-001", "AD-002", "AD-003", "AD-004", "AD-005"] {
             assert!(
-                got.iter().any(|(a, t)| a == ad && t == want),
-                "{ad} → {want}, получено {got:?}"
+                !got.iter().any(|(a, _)| a == covered),
+                "{covered} покрыт исполняемым правилом (B4), кандидата быть не должно: {got:?}"
             );
         }
     }
 
-    /// Снимок второго эталонного кейса: девять инвариантов, у одного паттерн
-    /// честно не распознан (интеграция через адаптер — не из восьми паттернов).
+    /// Снимок второго эталонного кейса: после волны B4 (дельта
+    /// `changes/executable-invariants` в `кейсы/digital-ruble-merchant`)
+    /// несущие AD-001, AD-002, AD-003, AD-004, AD-006 покрыты исполняемыми
+    /// правилами — названы обязаны остаться четыре инварианта; у одного
+    /// паттерн честно не распознан (интеграция через адаптер — не из восьми
+    /// паттернов).
     #[test]
     fn digital_ruble_merchant_snapshot_names_every_ad() {
         let case = Path::new(env!("CARGO_MANIFEST_DIR")).join("кейсы/digital-ruble-merchant");
@@ -1361,8 +1371,8 @@ mod tests_executable_invariant_per_ad {
         let ads = per_ad(&report);
         assert_eq!(
             ads.len(),
-            9,
-            "девять инвариантов названы: {:?}",
+            4,
+            "оставшиеся непокрытые инварианты названы: {:?}",
             ids(&report)
         );
         let unrecognized = ads
@@ -1372,6 +1382,14 @@ mod tests_executable_invariant_per_ad {
         assert_eq!(unrecognized, 1, "ровно один паттерн не распознан");
         for c in &ads {
             assert!(c.yaml.is_some(), "{} без фрагмента", c.id);
+        }
+        // B4: покрытые несущие инварианты кандидатов не дают.
+        for covered in ["AD-001", "AD-002", "AD-003", "AD-004", "AD-006"] {
+            assert!(
+                !ads.iter().any(|c| c.ad.as_deref() == Some(covered)),
+                "{covered} покрыт исполняемым правилом (B4): {:?}",
+                ids(&report)
+            );
         }
     }
 }

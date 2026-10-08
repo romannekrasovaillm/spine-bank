@@ -3191,8 +3191,12 @@ fn a4_without_manifest_is_a_finding_not_io_error() {
 ///
 /// Тест держит ДВА свойства инструмента, а не только число: доля считается по
 /// 14 позициям раздела 7 (R и контроль D14 в неё не входят), и семантические
-/// дефекты (D6, D10, D11) НЕ должны ловиться — если механика начнёт их ловить,
-/// это регресс, а не успех.
+/// дефекты не должны ловиться механикой смысла. Волна B4 (0.3.14, дельта
+/// `changes/executable-invariants` в кейсе) пересмотрела D11: класс «код
+/// нарушает инвариант, правил на код нет» в кейсе закрыт правилом C-019
+/// (`no_card_data_in_code`, PAN по `**/*.py`) — D11 ловится `fitness`, и это
+/// задуманное закрытие слепой зоны `src/`, а не регресс. Смысловые дефекты
+/// (D6, D10) по-прежнему обязаны оставаться невидимыми для механики.
 #[test]
 fn redteam_measures_merchant_case_detection_share() {
     let case = Path::new(env!("CARGO_MANIFEST_DIR")).join("кейсы/digital-ruble-merchant");
@@ -3211,14 +3215,23 @@ fn redteam_measures_merchant_case_detection_share() {
     assert_eq!(out.status.code(), Some(0), "вывод: {text}");
     assert!(text.contains("11/14"), "ожидалась доля 11 из 14: {text}");
     assert!(text.contains("контроль аттестации: да"), "{text}");
-    // Семантика обязана остаться невидимой механике.
-    for id in ["D6", "D10", "D11"] {
+    // Семантика обязана остаться невидимой механике (D6, D10); D11 после B4
+    // ловится механикой — и это приёмка B4, а не регресс.
+    for id in ["D6", "D10"] {
         let line = text
             .lines()
             .find(|l| l.contains(id) && l.contains("не пойман и не должен"))
             .unwrap_or_else(|| panic!("{id} обязан быть не пойман: {text}"));
         assert_ne!(line, "");
     }
+    let d11 = text
+        .lines()
+        .find(|l| l.contains("D11") && !l.contains("D11b"))
+        .unwrap_or_else(|| panic!("строка D11 обязана быть в карте: {text}"));
+    assert!(
+        d11.contains("пойман") && d11.contains("fitness"),
+        "D11 после B4 обязан ловиться fitness (C-019): {d11}"
+    );
     // Дефекты, которые обязаны ловиться, названы с инструментом.
     for (id, tool) in [
         ("D1", "nfr"),
