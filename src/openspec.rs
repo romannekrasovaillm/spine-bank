@@ -388,22 +388,28 @@ fn parse_spec_file(
 /// (`openspec/changes/<id>/specs/**/*.md`; `changes/archive/` — история,
 /// не сканируется). Порядок результата детерминирован (файл, строка).
 ///
+/// Живых спек может ещё не быть (первый change проекта — нормальное
+/// состояние): отсутствие `openspec/specs` при наличии `openspec/changes` —
+/// не ошибка (та же толерантность, что у [`scan_scenarios`]).
+///
 /// # Errors
-/// `openspec/specs` отсутствует (репозиторий без разметки `OpenSpec`),
-/// файл спеки не читается.
+/// Нет ни `openspec/specs`, ни `openspec/changes` (репозиторий без разметки
+/// `OpenSpec`); файл спеки не читается.
 pub fn scan_requirements(root: &Path) -> Result<Vec<Requirement>> {
     let specs_dir = root.join("openspec/specs");
-    if !specs_dir.is_dir() {
+    let changes_dir = root.join("openspec/changes");
+    if !specs_dir.is_dir() && !changes_dir.is_dir() {
         return Err(HarnessError::Control(format!(
             "openspec/specs не найден в {} — адаптер читает репозиторий с разметкой OpenSpec",
             root.display()
         )));
     }
     let mut out = Vec::new();
-    for file in collect_md(&specs_dir) {
-        parse_spec_file(&file, root, &ReqSource::Spec, &mut out)?;
+    if specs_dir.is_dir() {
+        for file in collect_md(&specs_dir) {
+            parse_spec_file(&file, root, &ReqSource::Spec, &mut out)?;
+        }
     }
-    let changes_dir = root.join("openspec/changes");
     if changes_dir.is_dir() {
         let mut change_dirs: Vec<PathBuf> = std::fs::read_dir(&changes_dir)
             .map_err(|e| HarnessError::io(&changes_dir, e))?
@@ -2051,6 +2057,29 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let err = scan_requirements(dir.path()).expect_err("без openspec/specs — ошибка");
         assert!(err.to_string().contains("openspec/specs не найден"));
+    }
+
+    /// Репозиторий с одним лишь change (первый change проекта, живых спек
+    /// ещё нет) — нормальное состояние `OpenSpec`, а не «сбой»: сканируются
+    /// дельты changes (как уже умеет `scan_scenarios`).
+    #[test]
+    fn scan_tolerates_repo_with_only_changes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write(
+            &dir.path()
+                .join("openspec/changes/add-limits/specs/payments/spec.md"),
+            DELTA_SPEC_MD,
+        );
+        let reqs = scan_requirements(dir.path()).expect("scan по одним changes");
+        assert_eq!(reqs.len(), 1);
+        assert!(matches!(
+            &reqs[0].source,
+            ReqSource::Change { change } if change == "add-limits"
+        ));
+        // И покрытие считается (все требования — из дельты).
+        let report = coverage(dir.path(), None).expect("coverage");
+        assert_eq!(report.total, 1);
+        assert_eq!(report.unresolved, 1);
     }
 
     #[test]

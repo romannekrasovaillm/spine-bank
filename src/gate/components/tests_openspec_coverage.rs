@@ -410,6 +410,53 @@ fn openspec_coverage_reports_orphan_covers_as_warn() {
     );
 }
 
+/// Репозиторий с одним лишь change (без `openspec/specs/` — первый change
+/// проекта): составляющая работает, а не падает «сбоем выполнения» — дефект
+/// найден приёмкой F2 (до фикса — FAIL «openspec/specs не найден»).
+#[test]
+fn openspec_coverage_works_on_change_only_repo() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("mkdir");
+    write_fixture(&repo, "ARCHITECTURE-SPINE.md", "# Spine\n");
+    write_fixture(&repo, "src/lib.rs", "pub fn charge() -> u64 { 1 }\n");
+    write_fixture(
+        &repo,
+        "CONSTRAINTS.yaml",
+        "rules:\n  - name: spine_present\n    type: file_exists\n    path: \"ARCHITECTURE-SPINE.md\"\n    severity: error\n",
+    );
+    write_fixture(
+        &repo,
+        "openspec/changes/add-limits/specs/payments/spec.md",
+        "## ADDED Requirements\n\n### Requirement: Лимиты идемпотентны\n\
+         Повторный вызов MUST NOT менять лимит.\n",
+    );
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "init"]);
+    let report = run_f2(&repo, &requirements_with_openspec(), &opts_all());
+    let component = component_of(&report);
+    assert_eq!(
+        component.status,
+        GateStatus::Fail,
+        "непокрытый SHALL change — красный, а не сбой: {}",
+        render(&report)
+    );
+    assert!(
+        component
+            .findings
+            .iter()
+            .any(|f| f.rule.as_deref() == Some("requirement_uncovered")),
+        "{:?}",
+        component.findings
+    );
+    assert!(
+        !component.detail.contains("сбой"),
+        "это не сбой выполнения: {}",
+        component.detail
+    );
+}
+
 /// Пишет `.arch-handoff/teeth.json` с заданным статусом для правила
 /// `no_f64_money` (отпечаток — по живому правилу реестра фикстуры).
 fn write_teeth(repo: &Path, status: &str) {
