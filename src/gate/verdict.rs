@@ -5,10 +5,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::components::{
-    component_control_plane, component_decision_quality, component_delta_guard, component_evidence,
-    component_fitness, component_model_drift, component_model_validate, component_nfr,
-    component_rule_weakened, component_secrets, component_sensors, component_spine_lint,
-    component_trace, evidence_bundle_dirs,
+    component_arch_drift, component_control_plane, component_decision_quality,
+    component_delta_guard, component_evidence, component_fitness, component_model_drift,
+    component_model_validate, component_nfr, component_rule_weakened, component_secrets,
+    component_sensors, component_spine_lint, component_trace, evidence_bundle_dirs,
 };
 use super::git::{ConstraintsPath, GitProbe, constraints_label};
 use super::route::{
@@ -237,6 +237,17 @@ pub(super) fn run_inner(
         &git,
         required_names.iter().any(|r| r == "semantic_quality"),
         options.decision_policy.for_route(options.route),
+    ));
+    // K6: рёбра графа «как построено» против модели. Дорогая составляющая
+    // (снимок базы + обход рабочего дерева), по умолчанию SKIP: включение —
+    // [gate.required] маршрута (находки error) или [gate.arch_drift]
+    // enabled = true (находки warn).
+    components.push(component_arch_drift(
+        repo,
+        base,
+        &git,
+        &options,
+        required_names.iter().any(|r| r == "arch_drift"),
     ));
     let mut report = GateReport {
         repo: repo.to_path_buf(),

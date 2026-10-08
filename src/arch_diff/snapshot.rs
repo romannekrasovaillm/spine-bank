@@ -190,6 +190,88 @@ pub fn snapshot_at(repo: &Path, rev: &str) -> Result<Snapshot> {
     })
 }
 
+/// Метка «ревизии» снимка рабочего дерева (K6): голова диффа составляющей
+/// `arch_drift` — не коммит, а текущее состояние файлов. Поле `rev` такого
+/// снимка не sha: в аттестации и сравнениях ревизий участвовать не может.
+pub const WORKTREE_REV: &str = "worktree";
+
+/// Строит снимок РАБОЧЕГО ДЕРЕВА `repo` (K6): та же форма, что у
+/// [`snapshot_at`], но источник — файловая система, поэтому видны
+/// незакоммиченные правки (гейт проверяет именно их). Обход — тот же контур,
+/// что у дрейфа модели: без dot-каталогов и служебных
+/// [`crate::survey::SKIP_DIRS`]; `.arch-handoff/CONSTRAINTS.yaml`
+/// дочитывается отдельно (реестр головы нужен материализации кейса), остальное
+/// содержимое `.arch-handoff/` в снимок не идёт (технические файлы контура).
+///
+/// Детерминизм в рамках одного состояния дерева: множества отсортированы,
+/// повторный прогон на неизменном дереве даёт тот же снимок.
+///
+/// # Errors
+/// Каталог недоступен/не читается, файлов для чтения больше
+/// [`MAX_SNAPSHOT_CONTENT_FILES`].
+pub fn snapshot_worktree(repo: &Path) -> Result<Snapshot> {
+    let mut files = BTreeSet::new();
+    // (путь, размер) — как ls_tree: размер нужен отбору содержимого.
+    let mut sized: BTreeMap<String, u64> = BTreeMap::new();
+    let walker = walkdir::WalkDir::new(repo).follow_links(false).into_iter();
+    for entry in walker.filter_entry(|e| {
+        if e.depth() > 0 && e.file_type().is_dir() {
+            let name = e.file_name().to_string_lossy();
+            !(name.starts_with('.') || crate::survey::SKIP_DIRS.contains(&name.as_ref()))
+        } else {
+            true
+        }
+    }) {
+        let entry = entry.map_err(|e| {
+            HarnessError::Control(format!("arch-diff: обход {}: {e}", repo.display()))
+        })?;
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let rel = entry
+            .path()
+            .strip_prefix(repo)
+            .map_err(|e| HarnessError::Control(format!("arch-diff: относительный путь: {e}")))?
+            .to_string_lossy()
+            .replace('\\', "/");
+        let size = entry.metadata().map_or(0, |m| m.len());
+        files.insert(rel.clone());
+        sized.insert(rel, size);
+    }
+    // Реестр правил головы из `.arch-handoff/` (каталог исключён обходом,
+    // но материализация кейса ждёт его содержимое — как у git-снимка).
+    let handoff_constraints = repo.join(".arch-handoff/CONSTRAINTS.yaml");
+    if let Ok(meta) = handoff_constraints.metadata() {
+        if meta.is_file() {
+            let rel = ".arch-handoff/CONSTRAINTS.yaml".to_string();
+            files.insert(rel.clone());
+            sized.insert(rel, meta.len());
+        }
+    }
+    let to_read: Vec<&String> = sized
+        .iter()
+        .filter(|(p, size)| **size <= MAX_FILE_BYTES && needs_content(p))
+        .map(|(p, _)| p)
+        .collect();
+    if to_read.len() > MAX_SNAPSHOT_CONTENT_FILES {
+        return Err(HarnessError::Control(format!(
+            "arch-diff: в рабочем дереве более {MAX_SNAPSHOT_CONTENT_FILES} сканируемых файлов — \
+             снимок отклонён (ограничение bounded-работы); сузьте репозиторий или поднимите лимит"
+        )));
+    }
+    let mut contents = BTreeMap::new();
+    for path in to_read {
+        let text = std::fs::read_to_string(repo.join(path))
+            .map_err(|e| HarnessError::io(repo.join(path), e))?;
+        contents.insert(path.clone(), text);
+    }
+    Ok(Snapshot {
+        rev: WORKTREE_REV.to_string(),
+        files,
+        contents,
+    })
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;

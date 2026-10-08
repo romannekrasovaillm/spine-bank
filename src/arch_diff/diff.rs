@@ -399,7 +399,9 @@ fn host_of_node(node_id: &str) -> Option<&str> {
 
 /// Статус ребра в модели: import — по `depends_on` CMP; connect — по
 /// упоминанию хоста в INT/SYS; contract — по полю `contract` INT (ADR-035).
-fn edge_model_status(
+/// `pub(crate)`: составляющая гейта `arch_drift` (K6) сверяет рёбра рабочего
+/// дерева той же функцией — семантика «в модели / нет в модели» одна.
+pub(crate) fn edge_model_status(
     graph: &ArchGraph,
     model: Option<&Model>,
     edge: &ArchEdge,

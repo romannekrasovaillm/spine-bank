@@ -386,6 +386,9 @@ pub struct GateOptions {
     /// Проверки дрейфа «модель ↔ код» (секция `[drift]`, волна C): флаг
     /// `nfr_metric_check` протягивается в составляющую `model_drift` (C1).
     pub drift: crate::config::DriftConfig,
+    /// Составляющая `arch_drift` (K6): включение вне `[gate.required]`
+    /// (секция `[gate.arch_drift]`); проверка дорогая, дефолт — выключена.
+    pub arch_drift: crate::config::ArchDriftConfig,
 }
 
 impl GateOptions {
@@ -409,6 +412,7 @@ impl GateOptions {
             route: None,
             agent_range: None,
             drift: cfg.drift.clone(),
+            arch_drift: cfg.gate.arch_drift,
         }
     }
 }

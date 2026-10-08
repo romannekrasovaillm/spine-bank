@@ -1087,6 +1087,12 @@ pub struct GateConfig {
     /// Составляющая `secrets` (C3 волны C 0.3.12): литеральные секреты в
     /// исходниках — детекторы [`crate::secrets::builtin_rules`].
     pub secrets: SecretsConfig,
+    /// Составляющая `arch_drift` (K6 волны K 0.3.14): рёбра графа «как
+    /// построено» против модели. Дорогая (снимок базовой ревизии + обход
+    /// рабочего дерева), поэтому по умолчанию SKIP: включается записью
+    /// `arch_drift` в `[gate.required]` маршрута (тогда находки блокируют)
+    /// либо флагом здесь (находки — warn).
+    pub arch_drift: ArchDriftConfig,
 }
 
 /// Severity находки `BodyChanged` анти-ослабления реестра (A1).
@@ -1176,6 +1182,20 @@ pub struct SecretsConfig {
     pub severity: SecretSeverity,
     /// Область сканирования (дефолт `changed`).
     pub scope: SecretScope,
+}
+
+/// Настройки составляющей `arch_drift` (K6): секция `[gate.arch_drift]`.
+///
+/// Составляющая строит граф «как построено» дважды (базовая ревизия git +
+/// рабочее дерево) и потому дорогая: по умолчанию она SKIP и включение —
+/// осознанное решение проекта (обратная совместимость, правило 4).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ArchDriftConfig {
+    /// Включить `arch_drift` вне `[gate.required]`: находки о рёбрах вне
+    /// модели и отклонённых рёбрах в коде — warn. `false` (дефолт) —
+    /// составляющая не прогоняется, если не названа в `[gate.required]`.
+    pub enabled: bool,
 }
 
 /// Настройки проверки overrides (A2): секция `[gate.overrides]`.

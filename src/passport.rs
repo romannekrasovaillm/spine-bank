@@ -678,6 +678,7 @@ mod tests {
 - **decision_quality** — SKIP — не включена: добавьте 'decision_quality' в [gate.required] нужного маршрута
 - **secrets** — PASS — область: changed, просканировано файлов: 0, находок: 0 (error: 0)
 - **semantic_quality** — SKIP — не включена: добавьте 'semantic_quality' в [gate.required] нужного маршрута
+- **arch_drift** — SKIP — не включена: добавьте 'arch_drift' в [gate.required] нужного маршрута или задайте [gate.arch_drift] enabled = true (проверка дорогая: снимки ревизий git)
 
 \* — обязательна для маршрута Fast; остальные — сверх неё.
 
@@ -697,6 +698,7 @@ mod tests {
 - **model_drift** — нет каталога model/ (не обязательна для маршрута)
 - **decision_quality** — не включена: добавьте 'decision_quality' в [gate.required] нужного маршрута (не обязательна для маршрута)
 - **semantic_quality** — не включена: добавьте 'semantic_quality' в [gate.required] нужного маршрута (не обязательна для маршрута)
+- **arch_drift** — не включена: добавьте 'arch_drift' в [gate.required] нужного маршрута или задайте [gate.arch_drift] enabled = true (проверка дорогая: снимки ревизий git) (не обязательна для маршрута)
 
 ## Аттестация
 
@@ -747,6 +749,7 @@ arch-be gate --repo кейс --format json > verdict.json && arch-be gate --repo
 - **decision_quality** — SKIP — не включена: добавьте 'decision_quality' в [gate.required] нужного маршрута
 - **secrets** — PASS — область: changed, просканировано файлов: 0, находок: 0 (error: 0)
 - **semantic_quality** — SKIP — не включена: добавьте 'semantic_quality' в [gate.required] нужного маршрута
+- **arch_drift** — SKIP — не включена: добавьте 'arch_drift' в [gate.required] нужного маршрута или задайте [gate.arch_drift] enabled = true (проверка дорогая: снимки ревизий git)
 
 \* — обязательна для маршрута Fast; остальные — сверх неё.
 
@@ -766,6 +769,7 @@ arch-be gate --repo кейс --format json > verdict.json && arch-be gate --repo
 - **model_drift** — нет каталога model/ (не обязательна для маршрута)
 - **decision_quality** — не включена: добавьте 'decision_quality' в [gate.required] нужного маршрута (не обязательна для маршрута)
 - **semantic_quality** — не включена: добавьте 'semantic_quality' в [gate.required] нужного маршрута (не обязательна для маршрута)
+- **arch_drift** — не включена: добавьте 'arch_drift' в [gate.required] нужного маршрута или задайте [gate.arch_drift] enabled = true (проверка дорогая: снимки ревизий git) (не обязательна для маршрута)
 
 ## Аттестация
 

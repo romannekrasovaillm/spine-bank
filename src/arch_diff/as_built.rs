@@ -6,7 +6,7 @@ use std::path::Path;
 
 use regex::Regex;
 
-use super::snapshot::{Snapshot, snapshot_at};
+use super::snapshot::{Snapshot, snapshot_at, snapshot_worktree};
 use super::types::{ArchEdge, ArchGraph, ArchNode, EdgeKind, MAX_EDGE_EVIDENCE, NodeKind};
 use crate::control::{DiffGlobs, content_looks_like_contract, looks_like_config};
 use crate::error::{HarnessError, Result};
@@ -99,6 +99,22 @@ impl RevisionScan {
 /// во временный каталог + граф.
 pub(crate) fn scan_revision(repo: &Path, rev: &str, globs: &DiffGlobs) -> Result<RevisionScan> {
     let snap = snapshot_at(repo, rev)?;
+    let (case, model) = materialize_case(&snap)?;
+    let graph = build_graph(&snap, model.as_ref(), globs)?;
+    Ok(RevisionScan {
+        snapshot: snap,
+        graph,
+        model,
+        case,
+    })
+}
+
+/// Сканирует РАБОЧЕЕ ДЕРЕВО (K6): то же, что [`scan_revision`], но по снимку
+/// файловой системы — видны незакоммиченные правки. Голова диффа составляющей
+/// гейта `arch_drift` (git-ревизий свободных не тратим: работа агента ещё не
+/// закоммичена).
+pub(crate) fn scan_worktree(repo: &Path, globs: &DiffGlobs) -> Result<RevisionScan> {
+    let snap = snapshot_worktree(repo)?;
     let (case, model) = materialize_case(&snap)?;
     let graph = build_graph(&snap, model.as_ref(), globs)?;
     Ok(RevisionScan {
