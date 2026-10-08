@@ -1,6 +1,6 @@
 //! Составляющие гейта (B1): `fitness`, `delta_guard`, `rule_weakened`,
 //! `spine_lint`, `trace_check`, `sensors`, `nfr`, `evidence_verify`,
-//! `model_validate`, `decision_quality`.
+//! `model_validate`, `decision_quality`, `model_drift` (C1).
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -13,6 +13,10 @@ use super::git::{
 use super::types::{GateComponent, GateFinding, GateOptions};
 use crate::control::{self, Route};
 use crate::{delta, evidence, nfr, trace};
+
+mod model_drift;
+
+pub(in crate::gate) use model_drift::component_model_drift;
 
 /// Составляющая `fitness`: прогон `CONSTRAINTS.yaml` ([`control::check`]).
 ///
@@ -1829,5 +1833,7 @@ pub(super) fn component_decision_quality(
 mod tests;
 #[cfg(test)]
 mod tests_delta_guard_openspec;
+#[cfg(test)]
+mod tests_model_drift;
 #[cfg(test)]
 mod tests_secrets;

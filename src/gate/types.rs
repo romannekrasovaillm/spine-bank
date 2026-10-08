@@ -383,6 +383,9 @@ pub struct GateOptions {
     /// ADR/override/дельта, впервые появившиеся или изменённые в диапазоне,
     /// ослабления не узаконивают (`self_approved`).
     pub agent_range: Option<String>,
+    /// Проверки дрейфа «модель ↔ код» (секция `[drift]`, волна C): флаг
+    /// `nfr_metric_check` протягивается в составляющую `model_drift` (C1).
+    pub drift: crate::config::DriftConfig,
 }
 
 impl GateOptions {
@@ -405,6 +408,7 @@ impl GateOptions {
             exec: crate::cmd_trust::ExecPolicy::default(),
             route: None,
             agent_range: None,
+            drift: cfg.drift.clone(),
         }
     }
 }

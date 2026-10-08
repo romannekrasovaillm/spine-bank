@@ -6,9 +6,9 @@ use std::process::Command;
 
 use super::components::{
     component_control_plane, component_decision_quality, component_delta_guard, component_evidence,
-    component_fitness, component_model_validate, component_nfr, component_rule_weakened,
-    component_secrets, component_sensors, component_spine_lint, component_trace,
-    evidence_bundle_dirs,
+    component_fitness, component_model_drift, component_model_validate, component_nfr,
+    component_rule_weakened, component_secrets, component_sensors, component_spine_lint,
+    component_trace, evidence_bundle_dirs,
 };
 use super::git::{ConstraintsPath, GitProbe, constraints_label};
 use super::route::{
@@ -159,6 +159,9 @@ pub(super) fn run_inner(
         .as_deref()
         .and_then(|base| control::AgentRange::probe(repo, base));
 
+    // Имена обязательных составляющих маршрута нужны и базовому набору (C1:
+    // `model_drift` переводит свои error в блокирующие только по включению).
+    let required_names = requirements.for_route(route);
     let mut components = vec![
         component_fitness(repo, &constraints, &options.exec, &options.overrides),
         // F1 (ADR-062): составляющая получает диапазон исполнителя — покрытие
@@ -183,6 +186,13 @@ pub(super) fn run_inner(
         // Н2: целостность модели — часть гейта на ЛЮБОМ маршруте (SKIP без
         // каталога model/); обязательность по маршрутам — в `[gate.required]`.
         component_model_validate(repo, route),
+        // C1: дрейф «модель ↔ код» — warn по умолчанию, error в
+        // `[gate.required]` маршрута.
+        component_model_drift(
+            repo,
+            options,
+            required_names.iter().any(|r| r == "model_drift"),
+        ),
     ];
     if matches!(route, Route::Standard | Route::Critical) {
         components.push(component_sensors(repo));
@@ -195,7 +205,6 @@ pub(super) fn run_inner(
     // Н7: качество решений — необязательная составляющая; включается только
     // через `[gate.required]` (по умолчанию SKIP, чтобы не краснить чужие
     // пайплайны без предупреждения).
-    let required_names = requirements.for_route(route);
     // E3.3: составляющие видят ЭФФЕКТИВНЫЙ маршрут (после ROUTE.lock) — от него
     // зависит политика оговорок отчёта: `evidence_partial` на Critical уходит
     // человеку, на Fast/Standard остаётся предупреждением.
