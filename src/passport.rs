@@ -674,6 +674,7 @@ mod tests {
 - **spine_lint** \* — PASS — находок: 0 (error: 0)
 - **trace_check** — SKIP — нет каталога model/
 - **model_validate** — SKIP — нет каталога model/
+- **openspec_coverage** — SKIP — нет каталога openspec/ — разметки OpenSpec нет, покрытие требований не проверяется
 - **decision_quality** — SKIP — не включена: добавьте 'decision_quality' в [gate.required] нужного маршрута
 - **secrets** — PASS — область: changed, просканировано файлов: 0, находок: 0 (error: 0)
 - **semantic_quality** — SKIP — не включена: добавьте 'semantic_quality' в [gate.required] нужного маршрута
@@ -693,6 +694,7 @@ mod tests {
 - **control_plane** — нет MANIFEST.json — пинов контрольной плоскости нет (не обязательна для маршрута)
 - **trace_check** — нет каталога model/ (не обязательна для маршрута)
 - **model_validate** — нет каталога model/ (не обязательна для маршрута)
+- **openspec_coverage** — нет каталога openspec/ — разметки OpenSpec нет, покрытие требований не проверяется (не обязательна для маршрута)
 - **decision_quality** — не включена: добавьте 'decision_quality' в [gate.required] нужного маршрута (не обязательна для маршрута)
 - **semantic_quality** — не включена: добавьте 'semantic_quality' в [gate.required] нужного маршрута (не обязательна для маршрута)
 
@@ -741,6 +743,7 @@ arch-be gate --repo кейс --format json > verdict.json && arch-be gate --repo
 - **spine_lint** \* — PASS — находок: 0 (error: 0)
 - **trace_check** — SKIP — нет каталога model/
 - **model_validate** — SKIP — нет каталога model/
+- **openspec_coverage** — SKIP — нет каталога openspec/ — разметки OpenSpec нет, покрытие требований не проверяется
 - **decision_quality** — SKIP — не включена: добавьте 'decision_quality' в [gate.required] нужного маршрута
 - **secrets** — PASS — область: changed, просканировано файлов: 0, находок: 0 (error: 0)
 - **semantic_quality** — SKIP — не включена: добавьте 'semantic_quality' в [gate.required] нужного маршрута
@@ -760,6 +763,7 @@ arch-be gate --repo кейс --format json > verdict.json && arch-be gate --repo
 - **control_plane** — нет MANIFEST.json — пинов контрольной плоскости нет (не обязательна для маршрута)
 - **trace_check** — нет каталога model/ (не обязательна для маршрута)
 - **model_validate** — нет каталога model/ (не обязательна для маршрута)
+- **openspec_coverage** — нет каталога openspec/ — разметки OpenSpec нет, покрытие требований не проверяется (не обязательна для маршрута)
 - **decision_quality** — не включена: добавьте 'decision_quality' в [gate.required] нужного маршрута (не обязательна для маршрута)
 - **semantic_quality** — не включена: добавьте 'semantic_quality' в [gate.required] нужного маршрута (не обязательна для маршрута)
 

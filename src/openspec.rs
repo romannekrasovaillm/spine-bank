@@ -528,6 +528,25 @@ pub enum CoverageStatus {
     Unresolved,
 }
 
+/// Доказательность покрытия детектором (F2, ADR-067): связка с измерением
+/// зубьев правил (волна B, `.arch-handoff/teeth.json`, схема
+/// `arch-be/rules-teeth/v1`). Покрытие требования не должно быть формальным:
+/// правило, которое демонстрируемо не ловит нарушение, — не покрытие
+/// поведением, а покрытие текстом.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TeethEvidence {
+    /// Хотя бы одно покрывающее правило-детектор имеет подтверждённые зубья
+    /// (запись `confirmed`, отпечаток правила сошёлся).
+    Confirmed,
+    /// Все покрывающие правила-детекторы измерены, и ни у одного зубьев нет
+    /// (`toothless`/`trivial`/`glob_empty`) — покрытие формально.
+    MeasuredNoTeeth,
+    /// Зубья не измерялись: нет файла измерения, нет записи о правиле или
+    /// отпечаток не сошёлся (правило правили после измерения).
+    NotMeasured,
+}
+
 /// Требование с присвоенным статусом покрытия.
 #[derive(Debug, Clone, Serialize)]
 pub struct CoveredRequirement {
@@ -537,6 +556,10 @@ pub struct CoveredRequirement {
     pub status: CoverageStatus,
     /// Имена правил, перечисляющих требование в `covers:`.
     pub via: Vec<String>,
+    /// Доказательность покрытия детектором (F2): зубья покрывающих правил по
+    /// сохранённому измерению. `Some` только при статусе `Covered`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub teeth: Option<TeethEvidence>,
 }
 
 /// Кандидат на перелинковку осиротевшей ссылки `covers:` (F4): требование
@@ -598,6 +621,20 @@ pub struct CoverageReport {
     /// поле 0.3.14; на счётчики и exit-коды не влияет (warn-уровень).
     #[serde(default)]
     pub orphans: Vec<CoverOrphan>,
+    /// Из покрытых детектором — с подтверждёнными зубьями (F2, ADR-067).
+    /// Аддитивное поле 0.3.14.
+    #[serde(default)]
+    pub covered_teeth: usize,
+    /// Из покрытых детектором — «текстом»: зубья не подтверждены (не
+    /// измерялись или измерены беззубыми). `covered = covered_teeth +
+    /// covered_text`. Аддитивное поле 0.3.14.
+    #[serde(default)]
+    pub covered_text: usize,
+    /// Файл измерения зубьев, из которого прочитаны статусы (F2): `None` —
+    /// зубья не измерялись вовсе, и «покрыто текстом» означает лишь «не
+    /// проверялось». В JSON не сериализуется (путь — деталь прогона).
+    #[serde(skip_serializing)]
+    pub teeth_file: Option<PathBuf>,
 }
 
 impl CoverageReport {
@@ -627,6 +664,16 @@ impl CoverageReport {
         }
         let _ = writeln!(out, "\nSHALL всего: {}", self.total);
         let _ = writeln!(out, "- покрыто детектором: {}", self.covered);
+        // F2: «покрыто детектором» расщепляется по доказательности — зубья
+        // правил (волна B): покрытие не должно быть формальным.
+        if self.covered > 0 {
+            let _ = writeln!(out, "  - с подтверждёнными зубьями: {}", self.covered_teeth);
+            let _ = writeln!(
+                out,
+                "  - покрыто текстом (зубья не подтверждены): {}",
+                self.covered_text
+            );
+        }
         let _ = writeln!(out, "- unverifiable с owner: {}", self.unverifiable);
         let _ = writeln!(out, "- без решения: {}", self.unresolved);
 
@@ -671,6 +718,40 @@ impl CoverageReport {
             let _ = writeln!(out, "- нет");
         }
 
+        // F2: «покрыто текстом» — отдельная строка отчёта: правила есть, но
+        // их зубья не подтверждены измерением (`arch-be rules teeth --save`).
+        if self.covered_text > 0 {
+            let _ = writeln!(out, "\n## Покрыто текстом (зубья правил не подтверждены)");
+            if self.teeth_file.is_none() {
+                let _ = writeln!(
+                    out,
+                    "Измерения нет ({} отсутствует) — «текстом» здесь означает «не проверялось»; \
+                     прогоните `arch-be rules teeth --save`.",
+                    crate::control::teeth::TEETH_RESULT_REL
+                );
+            }
+            for item in &self.items {
+                if item.status == CoverageStatus::Covered
+                    && item.teeth != Some(TeethEvidence::Confirmed)
+                {
+                    let r = &item.requirement;
+                    let mark = match item.teeth {
+                        Some(TeethEvidence::MeasuredNoTeeth) => "измерено беззубым",
+                        _ => "зубья не измерены",
+                    };
+                    let _ = writeln!(
+                        out,
+                        "- {} — {} ({}:{}, правила: {} — {mark})",
+                        r.id,
+                        r.title,
+                        r.file.display(),
+                        r.line,
+                        item.via.join(", ")
+                    );
+                }
+            }
+        }
+
         // F4: осиротевшие ссылки covers: — правка текста требования меняет его
         // id, и правило молча теряет цель. Warn-уровень: видно в отчёте, гейт
         // не ломает.
@@ -713,11 +794,78 @@ impl CoverageReport {
     }
 }
 
+/// Контекст зубьев для классификации покрытия (F2): сохранённое измерение
+/// (`.arch-handoff/teeth.json`) и полный резолв реестра — отпечаток правила
+/// сверяется по живым полям, иначе вчерашний замер засчитывался бы на
+/// сегодняшнюю редакцию правила.
+struct TeethContext {
+    /// Сохранённое измерение зубьев.
+    report: crate::control::teeth::TeethReport,
+    /// Полный резолв реестра, из которого прочитаны `covers:`.
+    rules: Vec<crate::control::FitnessRule>,
+}
+
+/// Читает контекст зубьев для репозитория и файла ограничений. Толерантный
+/// ридер: нет файла измерения или реестр не резолвится (например, скелет
+/// `CONSTRAINTS.from-openspec.yaml` без `type`) — `None`, все покрытия
+/// получат [`TeethEvidence::NotMeasured`] («не проверялось», а не «зубьев
+/// нет»).
+fn load_teeth_context(root: &Path, constraints: Option<&Path>) -> Option<TeethContext> {
+    let report = crate::control::teeth::load(root)?;
+    let rules = constraints
+        .and_then(|p| crate::control::load_constraints_resolved(p).ok())
+        .map(|r| r.rules)
+        .unwrap_or_default();
+    Some(TeethContext { report, rules })
+}
+
+/// Доказательность покрытия требования зубьями его правил-детекторов:
+/// `Confirmed`, если хотя бы одно правило с подтверждёнными зубьями;
+/// `MeasuredNoTeeth`, если ВСЕ измерены и беззубы; иначе `NotMeasured`
+/// (хотя бы одно правило не измерено — «зубьев нет» утверждать нельзя).
+fn teeth_evidence(covering: &[&CoverRule], ctx: Option<&TeethContext>) -> Option<TeethEvidence> {
+    use crate::control::teeth::TeethStatus;
+
+    let detectors: Vec<&&CoverRule> = covering.iter().filter(|r| !r.unverifiable).collect();
+    if detectors.is_empty() {
+        return None;
+    }
+    // Измерения нет вовсе (нет teeth.json) — честное «не измерено»,
+    // а не отсутствие данных: потребитель различает это по полю отчёта
+    // `teeth_file` (`None` — «не проверялось», а не «зубьев нет»).
+    let Some(ctx) = ctx else {
+        return Some(TeethEvidence::NotMeasured);
+    };
+    let mut any_unmeasured = false;
+    for cover_rule in detectors {
+        let status = cover_rule
+            .name
+            .as_deref()
+            .and_then(|name| ctx.rules.iter().find(|fr| fr.name == name))
+            .and_then(|fr| ctx.report.status_of(fr));
+        match status {
+            Some(TeethStatus::Confirmed) => return Some(TeethEvidence::Confirmed),
+            Some(TeethStatus::Toothless | TeethStatus::Trivial | TeethStatus::GlobEmpty) => {}
+            Some(TeethStatus::Unknown) | None => any_unmeasured = true,
+        }
+    }
+    Some(if any_unmeasured {
+        TeethEvidence::NotMeasured
+    } else {
+        TeethEvidence::MeasuredNoTeeth
+    })
+}
+
 /// Классифицирует требование по карточкам правил: детектор (хотя бы одно
 /// покрывающее правило без `unverifiable`) → unverifiable с owner →
 /// без решения. Заглушка `unverifiable` с пустым owner — это ещё НЕ решение
 /// (свежий скелет `openspec init`), требование остаётся «без решения».
-fn classify(requirement: &Requirement, rules: &[CoverRule]) -> CoveredRequirement {
+/// Для покрытых детектором добавляется доказательность зубьев (F2).
+fn classify(
+    requirement: &Requirement,
+    rules: &[CoverRule],
+    teeth: Option<&TeethContext>,
+) -> CoveredRequirement {
     let covering: Vec<&CoverRule> = rules
         .iter()
         .filter(|r| r.covers.iter().any(|c| c == &requirement.id))
@@ -736,10 +884,16 @@ fn classify(requirement: &Requirement, rules: &[CoverRule]) -> CoveredRequiremen
     } else {
         CoverageStatus::Unresolved
     };
+    let teeth = if status == CoverageStatus::Covered {
+        teeth_evidence(&covering, teeth)
+    } else {
+        None
+    };
     CoveredRequirement {
         requirement: requirement.clone(),
         status,
         via,
+        teeth,
     }
 }
 
@@ -759,12 +913,19 @@ fn unique_by_id(requirements: Vec<Requirement>) -> Vec<Requirement> {
 /// первое (в порядке файл/строка, детерминированно) непокрытое требование
 /// той же capability.
 ///
+/// `known` — все идентификаторы ПОЛНОГО сканирования (в области `changed`
+/// шире отфильтрованного списка: иначе ссылка на требование вне области
+/// выглядела бы осиротевшей — ложные срабатывания недопустимы).
+///
 /// Идентификаторы без префикса `openspec:` адаптеру не принадлежат и не
 /// проверяются (поле `covers:` может ссылаться на что-то иное — ложные
 /// срабатывания недопустимы). Дубль id у двух правил — одна находка с обоими
 /// именами.
-fn find_orphans(items: &[CoveredRequirement], rules: &[CoverRule]) -> Vec<CoverOrphan> {
-    let known: BTreeSet<&str> = items.iter().map(|i| i.requirement.id.as_str()).collect();
+fn find_orphans(
+    known: &BTreeSet<String>,
+    items: &[CoveredRequirement],
+    rules: &[CoverRule],
+) -> Vec<CoverOrphan> {
     // Группировка «id → правила» в порядке появления (детерминизм отчёта).
     let mut by_id: Vec<(String, Vec<String>)> = Vec::new();
     for rule in rules {
@@ -773,7 +934,7 @@ fn find_orphans(items: &[CoveredRequirement], rules: &[CoverRule]) -> Vec<CoverO
             .clone()
             .unwrap_or_else(|| "<без имени>".to_string());
         for id in &rule.covers {
-            if !id.starts_with(ID_PREFIX) || known.contains(id.as_str()) {
+            if !id.starts_with(ID_PREFIX) || known.contains(id) {
                 continue;
             }
             if let Some((_, names)) = by_id.iter_mut().find(|(k, _)| k == id) {
@@ -826,7 +987,34 @@ fn find_orphans(items: &[CoveredRequirement], rules: &[CoverRule]) -> Vec<CoverO
 /// `openspec/specs` отсутствует, явно заданный файл ограничений не
 /// читается/невалиден, файл спеки не читается.
 pub fn coverage(root: &Path, constraints: Option<&Path>) -> Result<CoverageReport> {
-    let requirements = unique_by_id(scan_requirements(root)?);
+    coverage_scoped(root, constraints, None)
+}
+
+/// [`coverage`] с областью (F2): `changed = Some(files)` — только требования
+/// дельт активных changes, у которых хотя бы один файл каталога
+/// `openspec/changes/<id>/` входит в `files`, и требования живых спек, чей
+/// файл изменён; `None` — всё (поведение `openspec coverage`).
+///
+/// Осиротевшие `covers:` (F4) считаются по ПОЛНОМУ сканированию требований:
+/// ссылка на требование вне области — не сирота.
+///
+/// # Errors
+/// Как у [`coverage`].
+pub fn coverage_scoped(
+    root: &Path,
+    constraints: Option<&Path>,
+    changed: Option<&[String]>,
+) -> Result<CoverageReport> {
+    let scanned = scan_requirements(root)?;
+    let known: BTreeSet<String> = scanned.iter().map(|r| r.id.clone()).collect();
+    let requirements = match changed {
+        None => scanned,
+        Some(files) => scanned
+            .into_iter()
+            .filter(|r| in_changed_scope(r, files))
+            .collect(),
+    };
+    let requirements = unique_by_id(requirements);
     // Единый резолвер (E2): явный путь → пакетная копия → корневая; дрейф
     // двух копий (корневая новее пакетной — частый случай) — пометкой,
     // а не молчаливым покрытием по устаревшей копии.
@@ -841,20 +1029,49 @@ pub fn coverage(root: &Path, constraints: Option<&Path>) -> Result<CoverageRepor
         Some(p) => load_cover_rules(p)?,
         None => Vec::new(),
     };
-    let items: Vec<CoveredRequirement> = requirements.iter().map(|r| classify(r, &rules)).collect();
+    // F2: зубья покрывающих правил — по сохранённому измерению (волна B);
+    // толерантный ридер: нет файла — «зубья не измерены», а не «зубьев нет».
+    let teeth = load_teeth_context(root, path.as_deref());
+    let items: Vec<CoveredRequirement> = requirements
+        .iter()
+        .map(|r| classify(r, &rules, teeth.as_ref()))
+        .collect();
     let count = |status: CoverageStatus| items.iter().filter(|i| i.status == status).count();
-    let orphans = find_orphans(&items, &rules);
+    let covered_teeth = items
+        .iter()
+        .filter(|i| i.teeth == Some(TeethEvidence::Confirmed))
+        .count();
+    let orphans = find_orphans(&known, &items, &rules);
+    let covered = count(CoverageStatus::Covered);
+    let covered_text = covered - covered_teeth;
     Ok(CoverageReport {
         root: root.to_path_buf(),
         constraints: path,
         constraints_drift: drift,
         total: items.len(),
-        covered: count(CoverageStatus::Covered),
+        covered,
         unverifiable: count(CoverageStatus::Unverifiable),
         unresolved: count(CoverageStatus::Unresolved),
         items,
         orphans,
+        covered_teeth,
+        covered_text,
+        teeth_file: teeth.map(|_| root.join(crate::control::teeth::TEETH_RESULT_REL)),
     })
+}
+
+/// Требование в области `changed` (F2): живая спека — её файл изменён;
+/// требование дельты — change затронут диффом (хотя бы один файл каталога
+/// `openspec/changes/<id>/` в списке изменённых).
+fn in_changed_scope(requirement: &Requirement, changed: &[String]) -> bool {
+    let file = requirement.file.to_string_lossy();
+    match &requirement.source {
+        ReqSource::Spec => changed.iter().any(|f| f.as_str() == file.as_ref()),
+        ReqSource::Change { change } => {
+            let prefix = format!("openspec/changes/{change}/");
+            changed.iter().any(|f| f.starts_with(&prefix))
+        }
+    }
 }
 
 /// Кандидат в спайн из design.md: заголовок секции решений/ограничений.
@@ -1142,6 +1359,65 @@ impl GateReport {
     }
 }
 
+/// Каталог активного change (`openspec/changes/<id>`): существует и не в
+/// архиве. Общая проверка гейтов change (`gate_archive`, `gate_change`) и
+/// handoff из change (F6).
+///
+/// # Errors
+/// Change не найден (или уже в архиве — об этом подсказка в тексте).
+pub fn active_change_dir(root: &Path, change_id: &str) -> Result<PathBuf> {
+    let change_dir = root.join("openspec/changes").join(change_id);
+    if !change_dir.is_dir() {
+        let archived = root.join("openspec/changes/archive").join(change_id);
+        let hint = if archived.is_dir() {
+            " — change уже в архиве (openspec/changes/archive/)"
+        } else {
+            ""
+        };
+        return Err(HarnessError::Control(format!(
+            "change '{change_id}' не найден: {}{hint}",
+            change_dir.display()
+        )));
+    }
+    Ok(change_dir)
+}
+
+/// Требования дельты активного change (`openspec/changes/<id>/specs/**/*.md`;
+/// порядок детерминирован: файл, строка). Парсится напрямую, без
+/// `openspec/specs`: у репозитория могут быть только changes.
+///
+/// # Errors
+/// Change не найден (см. [`active_change_dir`]), файл спеки не читается.
+pub fn change_requirements(root: &Path, change_id: &str) -> Result<Vec<Requirement>> {
+    let change_dir = active_change_dir(root, change_id)?;
+    let mut out = Vec::new();
+    let source = ReqSource::Change {
+        change: change_id.to_string(),
+    };
+    for file in collect_md(&change_dir.join("specs")) {
+        parse_spec_file(&file, root, &source, &mut out)?;
+    }
+    out.sort_by(|a, b| a.file.cmp(&b.file).then(a.line.cmp(&b.line)));
+    Ok(out)
+}
+
+/// Файлы-носители change для handoff-пакета (F6): `proposal.md`, `design.md`,
+/// `tasks.md` (только существующие) и дельты спек `specs/**/*.md` — в этом
+/// порядке, пути абсолютные.
+///
+/// # Errors
+/// Change не найден (см. [`active_change_dir`]).
+pub fn change_packet_files(root: &Path, change_id: &str) -> Result<Vec<PathBuf>> {
+    let change_dir = active_change_dir(root, change_id)?;
+    let mut out: Vec<PathBuf> = ["proposal.md", "design.md", "tasks.md"]
+        .iter()
+        .map(|name| change_dir.join(name))
+        .filter(|p| p.is_file())
+        .collect();
+    out.extend(collect_md(&change_dir.join("specs")));
+    Ok(out)
+}
+
 /// Гейт архивации change (точка CI перед `openspec archive`): FAIL, если
 /// хотя бы одно требование дельты `changes/<change_id>/specs/` — «без
 /// решения» (нет ни детектора, ни unverifiable с owner), либо падает
@@ -1156,28 +1432,10 @@ pub fn gate_archive(
     change_id: &str,
     constraints: Option<&Path>,
 ) -> Result<GateReport> {
-    let change_dir = root.join("openspec/changes").join(change_id);
-    if !change_dir.is_dir() {
-        let archived = root.join("openspec/changes/archive").join(change_id);
-        let hint = if archived.is_dir() {
-            " — change уже в архиве (openspec/changes/archive/)"
-        } else {
-            ""
-        };
-        return Err(HarnessError::Control(format!(
-            "change '{change_id}' не найден: {}{hint}",
-            change_dir.display()
-        )));
-    }
+    active_change_dir(root, change_id)?;
     // Дельта change парсится напрямую: scan_requirements требует
     // openspec/specs, а у репозитория могут быть только changes.
-    let mut delta_reqs = Vec::new();
-    let source = ReqSource::Change {
-        change: change_id.to_string(),
-    };
-    for file in collect_md(&change_dir.join("specs")) {
-        parse_spec_file(&file, root, &source, &mut delta_reqs)?;
-    }
+    let delta_reqs = change_requirements(root, change_id)?;
 
     let path = match constraints {
         Some(p) => Some(p.to_path_buf()),
@@ -1187,9 +1445,10 @@ pub fn gate_archive(
         Some(p) => load_cover_rules(p)?,
         None => Vec::new(),
     };
+    let teeth = load_teeth_context(root, path.as_deref());
     let items: Vec<CoveredRequirement> = unique_by_id(delta_reqs)
         .iter()
-        .map(|r| classify(r, &rules))
+        .map(|r| classify(r, &rules, teeth.as_ref()))
         .collect();
     let total = items.len();
     let uncovered: Vec<CoveredRequirement> = items
@@ -1246,10 +1505,12 @@ impl Tool for OpenspecCoverageTool {
                           всего / покрыто детектором / unverifiable с owner / без решения, \
                           непокрытые поимённо; осиротевшие ссылки covers: на исчезнувший id — \
                           covers_orphans с кандидатом на перелинковку (F4, warn-уровень). \
-                          Ответ — JSON: passed + счётчики \
-                          total/covered/unverifiable/unresolved + unresolved_items + \
-                          report_markdown. passed=false только в strict-режиме при \
-                          требованиях «без решения»"
+                          Покрытие детектором расщеплено по зубьям правил (F2): covered_teeth \
+                          (подтверждены измерением .arch-handoff/teeth.json) и covered_text \
+                          (покрытие текстом). Ответ — JSON: passed + счётчики \
+                          total/covered/covered_teeth/covered_text/unverifiable/unresolved + \
+                          unresolved_items + report_markdown. passed=false только в \
+                          strict-режиме при требованиях «без решения»"
                 .into(),
             parameters: json!({
                 "type": "object",
@@ -1330,6 +1591,10 @@ impl Tool for OpenspecCoverageTool {
             // Аддитивное поле 0.3.14 (F4): осиротевшие ссылки covers: —
             // id, правила, кандидат на перелинковку.
             "covers_orphans": report.orphans,
+            // Аддитивные поля 0.3.14 (F2): расщепление покрытия детектором по
+            // зубьям правил (волна B) — покрытие не должно быть формальным.
+            "covered_teeth": report.covered_teeth,
+            "covered_text": report.covered_text,
             "summary": summary,
             "report_markdown": report.to_markdown(),
         });
@@ -1732,6 +1997,169 @@ mod tests {
         let report = coverage(root, None).expect("coverage");
         assert_eq!(report.constraints_drift, None);
         assert!(!report.to_markdown().contains("drift"));
+    }
+
+    // --- F2 (ADR-067): зубья покрытия и область changed ---------------------
+
+    /// Пишет `.arch-handoff/teeth.json` с заданным статусом для правила
+    /// (отпечаток — по живому правилу реестра фикстуры: правка правила после
+    /// измерения обнуляет запись, и тест это учитывает порядком вызова).
+    fn write_teeth_fixture(root: &Path, rule_name: &str, status: &str) {
+        let resolved = crate::control::load_constraints_resolved(&root.join("CONSTRAINTS.yaml"))
+            .expect("реестр фикстуры");
+        let rule = resolved
+            .rules
+            .iter()
+            .find(|r| r.name == rule_name)
+            .expect("правило фикстуры");
+        let fingerprint = crate::control::teeth::rule_fingerprint(rule);
+        let json = format!(
+            "{{\"schema\":\"{}\",\"case\":\"{}\",\"measured_at\":\"2026-10-08T00:00:00+00:00\",\
+             \"entries\":[{{\"name\":\"{rule_name}\",\"kind\":\"must_contain\",\
+             \"status\":\"{status}\",\"fingerprint\":\"{fingerprint}\",\"detail\":\"тест\"}}]}}",
+            crate::control::teeth::TEETH_SCHEMA,
+            root.display()
+        );
+        write(&root.join(crate::control::teeth::TEETH_RESULT_REL), &json);
+    }
+
+    /// F2: покрытие детектором расщепляется по доказательности зубьев: без
+    /// измерения — «не проверялось» (`NotMeasured`), с confirmed — полное
+    /// покрытие, с измерением беззубым — «покрыто текстом» (`MeasuredNoTeeth`).
+    /// Счётчики сходятся: covered = `covered_teeth` + `covered_text`.
+    #[test]
+    fn coverage_splits_detector_coverage_by_teeth() {
+        let dir = fixture_repo();
+        let root = dir.path();
+        let covered_id = fixture_money_id();
+        write(
+            &root.join("CONSTRAINTS.yaml"),
+            &format!(
+                "rules:\n  - name: detector_rule\n    type: must_contain\n    glob: 'src/**'\n    pattern: 'minor_units'\n    covers: [\"{covered_id}\"]\n"
+            ),
+        );
+        // Без teeth.json: покрыто текстом, но «не измерено», а не «беззубо».
+        let report = coverage(root, None).expect("coverage");
+        assert_eq!(report.covered, 1);
+        assert_eq!(report.covered_teeth, 0);
+        assert_eq!(report.covered_text, 1);
+        assert!(report.teeth_file.is_none(), "измерения не было");
+        let item = report
+            .items
+            .iter()
+            .find(|i| i.requirement.id == covered_id)
+            .expect("требование");
+        assert_eq!(item.teeth, Some(TeethEvidence::NotMeasured));
+        let md = report.to_markdown();
+        assert!(
+            md.contains("покрыто текстом (зубья не подтверждены): 1"),
+            "{md}"
+        );
+        assert!(md.contains("## Покрыто текстом"), "{md}");
+        assert!(md.contains("зубья не измерены"), "{md}");
+
+        // Подтверждённые зубья — полное покрытие, «текстом» пусто.
+        write_teeth_fixture(root, "detector_rule", "confirmed");
+        let report = coverage(root, None).expect("coverage");
+        assert_eq!(report.covered_teeth, 1);
+        assert_eq!(report.covered_text, 0);
+        assert!(report.teeth_file.is_some());
+        let item = report
+            .items
+            .iter()
+            .find(|i| i.requirement.id == covered_id)
+            .expect("требование");
+        assert_eq!(item.teeth, Some(TeethEvidence::Confirmed));
+        assert!(
+            !report.to_markdown().contains("## Покрыто текстом"),
+            "секция «текстом» пуста при полном покрытии"
+        );
+
+        // Измерено беззубым — «покрыто текстом» с меткой «измерено беззубым».
+        write_teeth_fixture(root, "detector_rule", "toothless");
+        let report = coverage(root, None).expect("coverage");
+        assert_eq!(report.covered_text, 1);
+        let item = report
+            .items
+            .iter()
+            .find(|i| i.requirement.id == covered_id)
+            .expect("требование");
+        assert_eq!(item.teeth, Some(TeethEvidence::MeasuredNoTeeth));
+        assert!(report.to_markdown().contains("измерено беззубым"));
+    }
+
+    /// F2, область changed: требования дельт затронутых changes и изменённых
+    /// живых спек; незатронутое в отчёт не входит, а ссылка на него из
+    /// `covers:` сиротой не считается (известные id — из полного скана).
+    #[test]
+    fn coverage_scoped_limits_to_changed_and_keeps_orphans_honest() {
+        let dir = fixture_repo();
+        let root = dir.path();
+        let money_id = fixture_money_id();
+        let delta_id = requirement_id(
+            "payments",
+            &["Повторный колбэк MUST NOT менять состояние платежа.".to_string()],
+        );
+        write(
+            &root.join("CONSTRAINTS.yaml"),
+            &format!(
+                "rules:\n  - name: detector_rule\n    type: must_contain\n    glob: 'src/**'\n    pattern: 'x'\n    covers: [\"{money_id}\", \"{delta_id}\"]\n"
+            ),
+        );
+        // Область: только файлы живой спеки → требование change вне области…
+        let changed = vec!["openspec/specs/payments/spec.md".to_string()];
+        let report = coverage_scoped(root, None, Some(&changed)).expect("coverage");
+        assert_eq!(report.total, 2, "только требования живой спеки");
+        assert!(
+            report
+                .items
+                .iter()
+                .all(|i| i.requirement.source == ReqSource::Spec),
+            "change вне области"
+        );
+        // …но ссылка на его id — НЕ сирота (известен из полного скана).
+        assert!(report.orphans.is_empty(), "{:?}", report.orphans);
+        // Область: каталог change → его дельта входит целиком.
+        let changed = vec!["openspec/changes/add-callback/proposal.md".to_string()];
+        let report = coverage_scoped(root, None, Some(&changed)).expect("coverage");
+        assert_eq!(report.total, 1);
+        assert!(matches!(
+            &report.items[0].requirement.source,
+            ReqSource::Change { change } if change == "add-callback"
+        ));
+        // Пустая область — пустой отчёт (не «всё непокрыто»).
+        let report = coverage_scoped(root, None, Some(&[])).expect("coverage");
+        assert_eq!(report.total, 0);
+        assert_eq!(report.unresolved, 0);
+    }
+
+    /// F6: файлы-носители change для пакета — proposal/design/tasks (из
+    /// существующих) + дельты спек, в стабильном порядке.
+    #[test]
+    fn change_packet_files_collects_known_documents() {
+        let dir = fixture_repo();
+        let root = dir.path();
+        // proposal.md и tasks.md у change фикстуры нет — не выдумываются.
+        let files = change_packet_files(root, "add-callback").expect("файлы change");
+        let names: Vec<String> = files
+            .iter()
+            .map(|p| {
+                p.strip_prefix(root)
+                    .expect("внутри корня")
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "openspec/changes/add-callback/design.md".to_string(),
+                "openspec/changes/add-callback/specs/payments/spec.md".to_string(),
+            ],
+            "proposal.md нет — не выдумывается; порядок стабилен: {names:?}"
+        );
+        let err = change_packet_files(root, "no-such").expect_err("нет change");
+        assert!(err.to_string().contains("не найден"), "{err}");
     }
 
     #[test]
