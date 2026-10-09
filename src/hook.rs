@@ -135,6 +135,8 @@ fn run_fitness_hook(cfg: &Config, repo: &Path) -> Result<i32> {
             adr_dir: cfg.gate.overrides.adr_dir.clone(),
             max_horizon_months: cfg.gate.overrides.max_horizon_months,
         },
+        // ADR-046: ресурсы среды — детект по требованию правил (`None`).
+        resources: None,
     };
     let report = crate::control::check_anchored(repo, &constraints, &options, None)?;
     if !report.passed {

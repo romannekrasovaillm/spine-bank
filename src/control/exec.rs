@@ -17,8 +17,8 @@ use super::baseline;
 use super::registry::{evaluate_overrides, load_constraints_resolved};
 use super::rules::{DEFAULT_MANIFEST_GLOBS, manifest_deps};
 use super::types::{
-    FitnessReport, FitnessRule, LintIssue, RuleDuration, RuleKind, RulesFingerprint,
-    RunnerSkippedRule, SourceCount, UntrustedSkippedRule, normalize_severity,
+    FitnessReport, FitnessRule, LintIssue, RequiresSkippedRule, RuleDuration, RuleKind,
+    RulesFingerprint, RunnerSkippedRule, SourceCount, UntrustedSkippedRule, normalize_severity,
 };
 use crate::error::{HarnessError, Result};
 
@@ -167,6 +167,7 @@ pub fn check_with_options(
     let mut skipped: Vec<baseline::SkippedRule> = Vec::new();
     let mut runner_skipped: Vec<RunnerSkippedRule> = Vec::new();
     let mut untrusted_skipped: Vec<UntrustedSkippedRule> = Vec::new();
+    let mut requires_skipped: Vec<RequiresSkippedRule> = Vec::new();
     // A3: решение об исполнении команд реестра — ОДИН снимок на весь прогон
     // (модель доверия, ADR-053): no-exec (флаг/переменная/дефолт MCP) или
     // allow-файл, не совпадающий с отпечатком набора команд. Отпечаток
@@ -195,8 +196,29 @@ pub fn check_with_options(
     } else {
         crate::rule_templates::Runner::detect(None)
     };
+    // ADR-046: снимок ресурсов среды — ОДИН на прогон и только когда в реестре
+    // есть правило с непустым `requires` (детект `nvidia-smi`/hostname не нужен
+    // реестру без ресурсных правил). Явный снимок из опций (край/тесты) сильнее
+    // детекта.
+    let resources = if rule_refs.iter().any(|r| !r.requires.is_empty()) {
+        options.resources.unwrap_or_default()
+    } else {
+        crate::control::requires::AvailableResources::all()
+    };
     for rule in &rule_refs {
         let started = Instant::now();
+        // ADR-046: ресурс недоступен — правило даёт SKIP с причиной (не PASS и
+        // не FAIL): проверка не исполняется, в находки не попадает. Ресурс
+        // доступен — обычная семантика (SKIP — не лазейка).
+        if let Some(missing) = requires_missing(rule, resources) {
+            requires_skipped.push(RequiresSkippedRule {
+                rule: rule.name.clone(),
+                severity: normalize_severity(&rule.severity, &rule.name)?.to_string(),
+                reason: requires_skip_reason(&missing),
+                resources: missing,
+            });
+            continue;
+        }
         run_rule(
             rule,
             repo,
@@ -373,6 +395,18 @@ pub fn check_with_options(
             untrusted_skipped.len()
         );
     }
+    if !requires_skipped.is_empty() {
+        // ADR-046: ресурсный пропуск — «проверить не удалось на этой машине»:
+        // в сводке маркером с обязательной строкой прогона на стенде, в гейте —
+        // SKIP составляющей.
+        let names: Vec<&str> = requires_skipped.iter().map(|s| s.rule.as_str()).collect();
+        let _ = write!(
+            summary,
+            "; не прогонялись (нет ресурса: {}): {}",
+            names.join(", "),
+            crate::control::requires::STAND_RUN_LINE
+        );
+    }
     if let Some(fp) = &fingerprint {
         // Запись в String не может завершиться ошибкой — игнор безопасен.
         let _ = write!(
@@ -398,8 +432,32 @@ pub fn check_with_options(
         skipped_unknown,
         runner_skipped,
         untrusted_skipped,
+        requires_skipped,
         fingerprint,
     })
+}
+
+/// ADR-046: недоступные ресурсы правила (`requires`). `None` — правило не
+/// привязано к среде либо все ресурсы доступны (обычная семантика).
+fn requires_missing(
+    rule: &FitnessRule,
+    resources: crate::control::requires::AvailableResources,
+) -> Option<Vec<String>> {
+    if rule.requires.is_empty() {
+        return None;
+    }
+    let missing = resources.missing(&rule.requires);
+    (!missing.is_empty()).then_some(missing)
+}
+
+/// Причина ресурсного SKIP: перечисляет недоступные ресурсы и обязательную
+/// строку прогона на стенде ([`crate::control::requires::STAND_RUN_LINE`]).
+fn requires_skip_reason(missing: &[String]) -> String {
+    format!(
+        "недоступны ресурсы среды: {} — {}",
+        missing.join(", "),
+        crate::control::requires::STAND_RUN_LINE
+    )
 }
 
 /// Command-строки всех `command_succeeds`-правил набора (вербатим, в
@@ -2491,6 +2549,80 @@ mod tests {
             "{issues:?}"
         );
         assert!(skipped.is_empty(), "{skipped:?}");
+    }
+
+    // --- ADR-046: requires — SKIP при недоступном ресурсе, не PASS/FAIL ---
+
+    /// Ресурс недоступен — правило даёт SKIP с причиной (в `requires_skipped`),
+    /// команда/проверка НЕ исполняется и в находки не попадает.
+    #[test]
+    fn requires_absent_resource_skips_rule() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        // Правило без прав доступа: файла нет, значит при исполнении оно бы
+        // дало error. Но ресурс недоступен — правила касаться нельзя.
+        let constraints = write_file(
+            repo,
+            "CONSTRAINTS.yaml",
+            "rules:\n  - name: gpu_rule\n    type: file_exists\n    path: nope\n    requires: [cuda]\n",
+        );
+        let opts = baseline::CheckOptions {
+            resources: Some(crate::control::requires::AvailableResources::none()),
+            ..baseline::CheckOptions::default()
+        };
+        let report = check_with_options(repo, &constraints, &opts).unwrap();
+        assert_eq!(
+            report.requires_skipped.len(),
+            1,
+            "{:?}",
+            report.requires_skipped
+        );
+        let skip = &report.requires_skipped[0];
+        assert_eq!(skip.rule, "gpu_rule");
+        assert_eq!(skip.resources, vec!["cuda".to_string()]);
+        assert!(skip.reason.contains("cuda"), "{}", skip.reason);
+        assert!(
+            skip.reason
+                .contains(crate::control::requires::STAND_RUN_LINE),
+            "{}",
+            skip.reason
+        );
+        // SKIP — не находка: правило не краснеет.
+        assert!(report.passed, "{}", report.summary);
+        assert!(
+            report.issues.iter().all(|i| i.rule != "gpu_rule"),
+            "{:?}",
+            report.issues
+        );
+    }
+
+    /// Ресурс доступен — обычная семантика: правило исполняется (файла нет →
+    /// error-находка), `requires_skipped` пуст.
+    #[test]
+    fn requires_present_resource_runs_rule_normally() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        let constraints = write_file(
+            repo,
+            "CONSTRAINTS.yaml",
+            "rules:\n  - name: gpu_rule\n    type: file_exists\n    path: nope\n    requires: [cuda]\n",
+        );
+        let opts = baseline::CheckOptions {
+            resources: Some(crate::control::requires::AvailableResources::all()),
+            ..baseline::CheckOptions::default()
+        };
+        let report = check_with_options(repo, &constraints, &opts).unwrap();
+        assert!(
+            report.requires_skipped.is_empty(),
+            "{:?}",
+            report.requires_skipped
+        );
+        assert!(!report.passed, "{}", report.summary);
+        assert!(
+            report.issues.iter().any(|i| i.rule == "gpu_rule"),
+            "{:?}",
+            report.issues
+        );
     }
 
     /// A3: запрет исполнения (no-exec) — правило `command_succeeds` НЕ

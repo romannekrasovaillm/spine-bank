@@ -58,6 +58,8 @@ mod diff_triggers;
 mod exec;
 mod registry;
 pub(crate) mod report;
+/// Ресурсы среды, требуемые правилами (`requires:`, ADR-046) — см. модуль.
+pub mod requires;
 mod rules;
 mod score;
 mod shadow;
@@ -109,7 +111,7 @@ pub use tools::{
 };
 pub use types::{
     BEHAVIOUR_RULE_KINDS, FitnessReport, FitnessRule, LintIssue, OverrideEntry, OverrideInfo,
-    Route, RuleCard, RuleDuration, RulesFingerprint, RunnerSkippedRule, Significance,
-    SkippedUnknownRule, SourceCount, UntrustedSkippedRule,
+    RequiresSkippedRule, Route, RuleCard, RuleDuration, RulesFingerprint, RunnerSkippedRule,
+    Significance, SkippedUnknownRule, SourceCount, UntrustedSkippedRule,
 };
 pub(crate) use types::{RuleKind, normalize_severity};

@@ -26,13 +26,14 @@ pub(in crate::gate) use model_drift::component_model_drift;
 ///
 /// `exec` — снимок модели доверия `command_succeeds` (A3, ADR-053):
 /// пропущенные по no-exec/untrusted правила переводят составляющую в SKIP
-/// (см. [`exec_skip_detail`]) — «зелёный при неисполненных командах» был бы
+/// (см. [`skip_detail`]) — «зелёный при неисполненных командах» был бы
 /// молчаливой ложью.
 pub(super) fn component_fitness(
     repo: &Path,
     constraints: &ConstraintsPath,
     exec: &crate::cmd_trust::ExecPolicy,
     overrides: &crate::config::OverridesConfig,
+    resources: Option<control::requires::AvailableResources>,
 ) -> GateComponent {
     if !constraints.path.is_file() {
         // T-01: реестра нет НИГДЕ (резолвер пробует корень, затем
@@ -72,6 +73,9 @@ pub(super) fn component_fitness(
             adr_dir: overrides.adr_dir.clone(),
             max_horizon_months: overrides.max_horizon_months,
         },
+        // ADR-046: снимок ресурсов для правил `requires` (край/тесты —
+        // явный; `None` — детект внутри прогона реестра).
+        resources,
         ..control::baseline::CheckOptions::default()
     };
     let detail = |summary: &str| {
@@ -100,7 +104,7 @@ pub(super) fn component_fitness(
             // вердикт неполон, обязательная составляющая даёт INCOMPLETE.
             // A2: отсутствующий прогонщик (error-правила); A3: запрет доверия
             // (любое severity — пропуск по решению политики).
-            if let Some(skip_detail) = exec_skip_detail(&report) {
+            if let Some(skip_detail) = skip_detail(&report) {
                 return GateComponent::skip(
                     "fitness",
                     format!("{} — файл: {label}", detail(&skip_detail)),
@@ -123,9 +127,9 @@ pub(super) fn component_fitness(
     }
 }
 
-/// Деталь составляющей `fitness`, когда исполняемые правила не прогонялись.
+/// Деталь составляющей `fitness`, когда правила не прогонялись.
 ///
-/// Два вида пропусков с разной блокирующей семантикой:
+/// Три вида пропусков с разной блокирующей семантикой:
 ///
 /// - **A2** (`runner_skipped`, нет прогонщика pytest/mvn/JDK): блокирующими
 ///   считаются пропуски error-правил — составляющая обязана уйти в SKIP
@@ -137,20 +141,32 @@ pub(super) fn component_fitness(
 ///   окружения: зелёный PASS при неисполненных по политике правилах был бы
 ///   молчаливой ложью, а блок 3 паспорта обязан перечислить такие правила
 ///   (находка `command_untrusted`).
+/// - **ADR-046** (`requires_skipped`, нет ресурса среды — `cuda`/`stand`):
+///   блокирующий пропуск при ЛЮБОМ severity. Правило, привязанное к стенду
+///   или GPU, на неполном окружении не даёт ни PASS (ложь), ни FAIL
+///   (наказание за железо) — только SKIP с перечнем правил и обязательной
+///   строкой прогона на стенде.
 ///
 /// `None` — блокирующих пропусков нет.
-fn exec_skip_detail(report: &control::FitnessReport) -> Option<String> {
+fn skip_detail(report: &control::FitnessReport) -> Option<String> {
     let blocking_runners: Vec<&control::RunnerSkippedRule> = report
         .runner_skipped
         .iter()
         .filter(|s| s.severity == "error")
         .collect();
-    if blocking_runners.is_empty() && report.untrusted_skipped.is_empty() {
+    if blocking_runners.is_empty()
+        && report.untrusted_skipped.is_empty()
+        && report.requires_skipped.is_empty()
+    {
         return None;
     }
     let mut names: Vec<&str> = blocking_runners.iter().map(|s| s.rule.as_str()).collect();
     let mut reasons: Vec<&str> = blocking_runners.iter().map(|s| s.reason.as_str()).collect();
     for skip in &report.untrusted_skipped {
+        names.push(skip.rule.as_str());
+        reasons.push(skip.reason.as_str());
+    }
+    for skip in &report.requires_skipped {
         names.push(skip.rule.as_str());
         reasons.push(skip.reason.as_str());
     }

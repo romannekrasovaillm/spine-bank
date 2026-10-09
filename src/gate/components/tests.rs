@@ -511,9 +511,10 @@ fn runner_skip_detail_only_for_error_severity() {
         skipped_unknown: Vec::new(),
         runner_skipped,
         untrusted_skipped: Vec::new(),
+        requires_skipped: Vec::new(),
         fingerprint: None,
     };
-    let detail = exec_skip_detail(&report(vec![
+    let detail = skip_detail(&report(vec![
         skip("r_err", "error"),
         skip("r_warn", "warn"),
     ]))
@@ -525,10 +526,10 @@ fn runner_skip_detail_only_for_error_severity() {
     );
     assert!(detail.contains("pip install pytest"), "{detail}");
     assert!(
-        exec_skip_detail(&report(vec![skip("r_warn", "warn")])).is_none(),
+        skip_detail(&report(vec![skip("r_warn", "warn")])).is_none(),
         "warn-пропуски не меняют вердикт"
     );
-    assert!(exec_skip_detail(&report(Vec::new())).is_none());
+    assert!(skip_detail(&report(Vec::new())).is_none());
 }
 
 /// A3: пропуск по модели доверия (no-exec/untrusted) блокирует при ЛЮБОМ
@@ -551,6 +552,7 @@ fn untrusted_skip_detail_blocks_at_any_severity() {
         skipped_unknown: Vec::new(),
         runner_skipped: Vec::new(),
         untrusted_skipped,
+        requires_skipped: Vec::new(),
         fingerprint: None,
     };
     let skip = |rule: &str, severity: &str| control::UntrustedSkippedRule {
@@ -558,14 +560,14 @@ fn untrusted_skip_detail_blocks_at_any_severity() {
         severity: severity.to_string(),
         reason: crate::cmd_trust::deny_reason_text(crate::cmd_trust::DenyReason::NoExec),
     };
-    let detail = exec_skip_detail(&report(vec![skip("warn_rule", "warn")]))
+    let detail = skip_detail(&report(vec![skip("warn_rule", "warn")]))
         .expect("warn-пропуск по доверию блокирует (A3)");
     assert!(detail.contains("warn_rule"), "{detail}");
     assert!(
         detail.contains(crate::cmd_trust::COMMAND_UNTRUSTED),
         "маркер находки в детали: {detail}"
     );
-    assert!(exec_skip_detail(&report(Vec::new())).is_none());
+    assert!(skip_detail(&report(Vec::new())).is_none());
 }
 
 /// A3 в гейте целиком: реестр с command-правилом при no-exec — составляющая
@@ -642,6 +644,129 @@ fn gate_no_exec_skips_fitness_and_passport_lists_it() {
     );
     assert!(fitness_nc.required, "fitness обязательна для Fast");
 }
+
+// --- ADR-046: requires — ресурсный SKIP в гейте --------------------------
+
+/// `skip_detail` включает ресурсные пропуски при ЛЮБОМ severity (как A3):
+/// перечень правил + обязательная строка прогона на стенде.
+#[test]
+fn requires_skip_detail_lists_rules_and_stand_line() {
+    let report = |requires_skipped: Vec<control::RequiresSkippedRule>| control::FitnessReport {
+        repo: PathBuf::from("."),
+        passed: true,
+        issues: Vec::new(),
+        summary: String::new(),
+        durations: Vec::new(),
+        inherited: Vec::new(),
+        overrides: Vec::new(),
+        baseline: None,
+        skipped: Vec::new(),
+        changed_since: None,
+        changed_files: None,
+        skipped_unknown: Vec::new(),
+        runner_skipped: Vec::new(),
+        untrusted_skipped: Vec::new(),
+        requires_skipped,
+        fingerprint: None,
+    };
+    let skip = |rule: &str, severity: &str| control::RequiresSkippedRule {
+        rule: rule.to_string(),
+        severity: severity.to_string(),
+        resources: vec!["cuda".to_string()],
+        reason: format!(
+            "недоступны ресурсы среды: cuda — {}",
+            control::requires::STAND_RUN_LINE
+        ),
+    };
+    let detail = skip_detail(&report(vec![
+        skip("warn_rule", "warn"),
+        skip("err_rule", "error"),
+    ]))
+    .expect("ресурсный пропуск блокирует");
+    assert!(detail.contains("warn_rule"), "{detail}");
+    assert!(detail.contains("err_rule"), "{detail}");
+    assert!(
+        detail.contains(control::requires::STAND_RUN_LINE),
+        "{detail}"
+    );
+    assert!(skip_detail(&report(Vec::new())).is_none());
+}
+
+/// Реестр с правилом, привязанным к `cuda`, при недоступном ресурсе —
+/// составляющая `fitness` SKIP с перечнем правил и обязательной строкой;
+/// ресурс доступен — правило исполняется как обычно (FAIL при нарушении).
+#[test]
+fn gate_requires_absent_resource_skips_fitness_with_stand_line() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir_all(repo.join(".arch-handoff")).expect("mkdir");
+    std::fs::write(
+        repo.join(".arch-handoff/CONSTRAINTS.yaml"),
+        "rules:\n  - name: gpu_only\n    type: file_exists\n    path: \"NOPE.md\"\n    \
+         severity: error\n    requires: [cuda]\n",
+    )
+    .expect("constraints");
+    std::fs::write(repo.join("ARCHITECTURE-SPINE.md"), "# Spine\n").expect("spine");
+    // Ресурс недоступен: правило не прогоняется — SKIP, а не FAIL.
+    let absent = GateOptions {
+        resources: Some(control::requires::AvailableResources::none()),
+        ..GateOptions::default()
+    };
+    let report = run_opts(
+        &repo,
+        Some(crate::control::Route::Fast),
+        None,
+        None,
+        (50, 50),
+        &GateRequirements::default(),
+        &absent,
+    )
+    .expect("гейт");
+    let fitness = report
+        .components
+        .iter()
+        .find(|c| c.name == "fitness")
+        .expect("составляющая fitness");
+    assert_eq!(fitness.status, GateStatus::Skip, "{}", fitness.detail);
+    assert!(fitness.detail.contains("gpu_only"), "{}", fitness.detail);
+    assert!(
+        fitness.detail.contains(control::requires::STAND_RUN_LINE),
+        "{}",
+        fitness.detail
+    );
+    assert_eq!(
+        report.outcome,
+        GateOutcome::Incomplete,
+        "обязательная составляющая в SKIP — зелёный неполон"
+    );
+    // Ресурс доступен: обычная семантика — правило исполняется и краснеет.
+    let present = GateOptions {
+        resources: Some(control::requires::AvailableResources::all()),
+        ..GateOptions::default()
+    };
+    let report = run_opts(
+        &repo,
+        Some(crate::control::Route::Fast),
+        None,
+        None,
+        (50, 50),
+        &GateRequirements::default(),
+        &present,
+    )
+    .expect("гейт");
+    assert_eq!(status_of(&report, "fitness"), GateStatus::Fail);
+    assert!(
+        !report
+            .components
+            .iter()
+            .find(|c| c.name == "fitness")
+            .expect("fitness")
+            .detail
+            .contains(control::requires::STAND_RUN_LINE),
+        "ресурс доступен — не строки про стенд"
+    );
+}
+
 // --- составляющая `sensors` (D5) ----------------------------------------
 /// Пишет спецификацию в `<repo>/docs/spec/<name>`.
 fn write_spec(repo: &Path, name: &str, text: &str) {
@@ -1541,6 +1666,7 @@ fn fitness_message_distinguishes_absent_contour_from_wrong_path() {
         &implicit,
         &exec,
         &crate::config::OverridesConfig::default(),
+        None,
     );
     assert_eq!(component.status, GateStatus::Skip);
     assert!(
@@ -1558,6 +1684,7 @@ fn fitness_message_distinguishes_absent_contour_from_wrong_path() {
         &explicit,
         &exec,
         &crate::config::OverridesConfig::default(),
+        None,
     );
     assert_eq!(component.status, GateStatus::Skip);
     assert!(

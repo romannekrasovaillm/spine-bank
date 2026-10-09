@@ -294,6 +294,23 @@ impl FmtReport {
                 });
             }
         }
+        // ADR-046: правило, пропущенное из-за недоступного ресурса среды, —
+        // SKIP-группа, а не PASS: «проверка не прогонялась» обязано быть видно в
+        // машинных форматах (SARIF/JUnit/GitLab), иначе пропуск читался бы как
+        // зелёный. Деталь — причина с обязательной строкой прогона на стенде.
+        for skip in &report.requires_skipped {
+            if let Some(pos) = groups.iter().position(|g| g.name == skip.rule) {
+                groups[pos].status = GroupStatus::Skip;
+                groups[pos].detail.clone_from(&skip.reason);
+            } else {
+                groups.push(FmtGroup {
+                    name: skip.rule.clone(),
+                    status: GroupStatus::Skip,
+                    detail: skip.reason.clone(),
+                    findings: Vec::new(),
+                });
+            }
+        }
         finalize_groups(&mut groups);
         Self {
             tool: "arch-be control check",
@@ -1185,5 +1202,74 @@ mod tests {
             rest = &rest[close + 1..];
         }
         assert!(stack.is_empty(), "незакрытые теги {stack:?}: {text}");
+    }
+
+    /// ADR-046: правило, пропущенное из-за недоступного ресурса, в машинном
+    /// формате — SKIP-группа (а не PASS): «проверка не прогонялась» видно,
+    /// обязательная строка прогона на стенде — в детали.
+    #[test]
+    fn from_fitness_marks_requires_skipped_as_skip_group() {
+        use crate::control::{FitnessReport, RequiresSkippedRule, RuleDuration};
+        let report = FitnessReport {
+            repo: std::path::PathBuf::from("."),
+            passed: true,
+            issues: Vec::new(),
+            summary: "сводка".to_string(),
+            durations: vec![
+                RuleDuration {
+                    rule: "ran".to_string(),
+                    ms: 1,
+                },
+                RuleDuration {
+                    rule: "gpu_rule".to_string(),
+                    ms: 0,
+                },
+            ],
+            inherited: Vec::new(),
+            overrides: Vec::new(),
+            baseline: None,
+            skipped: Vec::new(),
+            changed_since: None,
+            changed_files: None,
+            skipped_unknown: Vec::new(),
+            runner_skipped: Vec::new(),
+            untrusted_skipped: Vec::new(),
+            requires_skipped: vec![RequiresSkippedRule {
+                rule: "gpu_rule".to_string(),
+                severity: "error".to_string(),
+                resources: vec!["cuda".to_string()],
+                reason: format!(
+                    "недоступны ресурсы среды: cuda — {}",
+                    crate::control::requires::STAND_RUN_LINE
+                ),
+            }],
+            fingerprint: None,
+        };
+        let fmt = FmtReport::from_fitness(&report);
+        let ran = fmt
+            .groups
+            .iter()
+            .find(|g| g.name == "ran")
+            .expect("группа ran");
+        assert_eq!(ran.status, GroupStatus::Pass);
+        let gpu = fmt
+            .groups
+            .iter()
+            .find(|g| g.name == "gpu_rule")
+            .expect("группа gpu_rule");
+        assert_eq!(
+            gpu.status,
+            GroupStatus::Skip,
+            "ресурсный пропуск — не PASS: {}",
+            gpu.detail
+        );
+        assert!(
+            gpu.detail
+                .contains(crate::control::requires::STAND_RUN_LINE),
+            "{}",
+            gpu.detail
+        );
+        let junit = render(ReportFormat::Junit, &fmt);
+        assert!(junit.contains("<skipped"), "{junit}");
     }
 }

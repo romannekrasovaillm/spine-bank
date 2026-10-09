@@ -282,7 +282,12 @@ fn parse_rules_tolerant(
     let mut out = Vec::with_capacity(values.len());
     for value in values {
         match serde_yaml_ng::from_value::<FitnessRule>(value.clone()) {
-            Ok(rule) => out.push(rule),
+            Ok(rule) => {
+                // ADR-046: схема `requires` — неизвестный ресурс ошибка
+                // реестра (опечатка молча превратила бы правило в вечный SKIP).
+                crate::control::requires::validate(&rule.name, &rule.requires)?;
+                out.push(rule);
+            }
             Err(e) => {
                 let Some((name, rule_type)) = unknown_rule_type(&value) else {
                     return Err(HarnessError::Control(format!(
@@ -533,5 +538,41 @@ mod tests {
             "rules:\n  - name: x\n    type: must_contain\n    glob: 123\n",
         );
         assert!(load_fitness_rules(&c).is_err(), "битая запись — ошибка");
+    }
+
+    // --- ADR-046: requires — ресурсы среды правила ---
+
+    /// `requires` читается (строка и список); отсутствие — пусто.
+    #[test]
+    fn requires_field_parses_string_and_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = write_file(
+            dir.path(),
+            "CONSTRAINTS.yaml",
+            "rules:\n  - name: gpu_only\n    type: file_exists\n    path: a\n    requires: [cuda]\n\
+             \x20 - name: stand_only\n    type: file_exists\n    path: b\n    requires: stand\n\
+             \x20 - name: plain\n    type: file_exists\n    path: c\n",
+        );
+        let rules = load_fitness_rules(&c).expect("разбор");
+        assert_eq!(rules[0].requires, vec!["cuda".to_string()]);
+        assert_eq!(rules[1].requires, vec!["stand".to_string()]);
+        assert!(rules[2].requires.is_empty(), "нет requires — пусто");
+    }
+
+    /// Неизвестный ресурс — ошибка РЕЕСТРА (не молчаливый SKIP): имя правила и
+    /// имя ресурса в тексте.
+    #[test]
+    fn unknown_requires_resource_is_registry_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = write_file(
+            dir.path(),
+            "CONSTRAINTS.yaml",
+            "rules:\n  - name: typo_rule\n    type: file_exists\n    path: a\n    requires: [quantum]\n",
+        );
+        let err = load_fitness_rules(&c).expect_err("неизвестный ресурс");
+        let text = err.to_string();
+        assert!(text.contains("typo_rule"), "{text}");
+        assert!(text.contains("quantum"), "{text}");
+        assert!(text.contains("cuda"), "перечень известных: {text}");
     }
 }

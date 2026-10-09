@@ -165,7 +165,13 @@ pub(super) fn run_inner(
     // (C1/K6: error только по включению в `[gate.required]`).
     let required_names = requirements.for_route(route);
     let mut components = vec![
-        component_fitness(repo, &constraints, &options.exec, &options.overrides),
+        component_fitness(
+            repo,
+            &constraints,
+            &options.exec,
+            &options.overrides,
+            options.resources,
+        ),
         // F1 (ADR-062): составляющая получает диапазон исполнителя — покрытие
         // (дельта или change OpenSpec), созданное в диапазоне, не узаконивает
         // правку (self_approved), как и ослабления для rule_weakened.

@@ -162,6 +162,24 @@ pub struct UntrustedSkippedRule {
     pub reason: String,
 }
 
+/// Правило, не прогонявшееся из-за недоступного ресурса среды (`requires:`,
+/// ADR-046): правило объявило `cuda`/`stand`, а среда их не предоставляет —
+/// SKIP с причиной, а не PASS (зелёный на неполном окружении — ложь) и не
+/// FAIL (наказание за отсутствие железа). Гейт переводит такой пропуск в SKIP
+/// составляющей `fitness` при любом severity и печатает
+/// [`crate::control::requires::STAND_RUN_LINE`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RequiresSkippedRule {
+    /// Имя правила.
+    pub rule: String,
+    /// Нормализованный severity правила (`error`/`warn`).
+    pub severity: String,
+    /// Недоступные ресурсы из `requires` (порядок объявления).
+    pub resources: Vec<String>,
+    /// Причина и обязательная строка прогона на стенде.
+    pub reason: String,
+}
+
 /// Счётчик правил по источнику (вывод `check` и `report`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SourceCount {
@@ -227,6 +245,11 @@ pub struct FitnessReport {
     /// `command_untrusted`, а не находка. Аддитивное поле SDK-контракта v1.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub untrusted_skipped: Vec<UntrustedSkippedRule>,
+    /// Правила, не прогонявшиеся из-за недоступного ресурса среды
+    /// (`requires:`, ADR-046): SKIP с причиной, а не находка. Аддитивное поле
+    /// SDK-контракта v1.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requires_skipped: Vec<RequiresSkippedRule>,
     /// Отпечаток состава реестра правил (П5). Аддитивное поле SDK-контракта v1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fingerprint: Option<RulesFingerprint>,
@@ -428,6 +451,12 @@ pub struct FitnessRule {
     #[serde(default)]
     #[allow(dead_code)]
     pub(super) covers: Vec<String>,
+    /// Ресурсы среды, необходимые правилу (ADR-046): `cuda` (GPU) и/или
+    /// `stand` (стенд GB10/Spark/Grace). Если ресурс недоступен, правило даёт
+    /// SKIP с причиной, а не PASS/FAIL. Пусто (дефолт) — правило исполняется
+    /// на любой машине (поведение существующих правил не меняется).
+    #[serde(default, deserialize_with = "de_string_or_list")]
+    pub(crate) requires: Vec<String>,
     /// Glob'ы манифестов зависимостей (для `deny_dependency`; строка или
     /// список). Пустой — auto: `**/Cargo.toml`, `**/pom.xml`,
     /// `**/requirements.txt`.

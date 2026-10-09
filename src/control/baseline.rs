@@ -119,6 +119,10 @@ pub struct CheckOptions {
     /// Политика overrides по ADR (A2): где искать ADR и какой горизонт
     /// `until` допустим. `Default` — `<repo>/docs/adr` и 12 месяцев.
     pub overrides: OverrideSettings,
+    /// Снимок доступности ресурсов среды для `requires` (ADR-046). `None`
+    /// (дефолт) — детект окружения выполняется только когда в реестре есть
+    /// правило с непустым `requires`; `Some` — явный снимок (край/тесты).
+    pub resources: Option<crate::control::requires::AvailableResources>,
 }
 
 /// Baseline-файл долга: снимок error-находок `control check`, которые гейт

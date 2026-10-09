@@ -392,6 +392,10 @@ pub struct GateOptions {
     /// Составляющая `arch_drift` (K6): включение вне `[gate.required]`
     /// (секция `[gate.arch_drift]`); проверка дорогая, дефолт — выключена.
     pub arch_drift: crate::config::ArchDriftConfig,
+    /// Снимок ресурсов среды для правил с `requires` (ADR-046). `None`
+    /// (дефолт) — детект окружения в составляющей `fitness`; `Some` — явный
+    /// снимок (тесты/края, где окружение надо зафиксировать).
+    pub resources: Option<control::requires::AvailableResources>,
 }
 
 impl GateOptions {
@@ -417,6 +421,7 @@ impl GateOptions {
             agent_range: None,
             drift: cfg.drift.clone(),
             arch_drift: cfg.gate.arch_drift,
+            resources: None,
         }
     }
 }
