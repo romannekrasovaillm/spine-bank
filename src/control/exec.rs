@@ -114,6 +114,12 @@ pub fn check_with_options(
     };
 
     let resolved = load_constraints_resolved(constraints)?;
+    // ADR-046 Am.3: схема `requires` — ресурс без зонда (встроенного или
+    // объявленного `[gate.requires.<имя>]`) ошибка РЕЕСТРА, а не молчаливый
+    // SKIP: опечатка не превращается в вечный пропуск.
+    for rule in &resolved.rules {
+        options.probes.validate(&rule.name, &rule.requires)?;
+    }
     if resolved.rules.is_empty() {
         // E8: файл, где ВСЕ правила с неизвестными типами, — это не
         // «нет правил», а чужой словарь; сообщение должно это различать.
@@ -197,11 +203,14 @@ pub fn check_with_options(
         crate::rule_templates::Runner::detect(None)
     };
     // ADR-046: снимок ресурсов среды — ОДИН на прогон и только когда в реестре
-    // есть правило с непустым `requires` (детект `nvidia-smi`/hostname не нужен
-    // реестру без ресурсных правил). Явный снимок из опций (край/тесты) сильнее
-    // детекта.
+    // есть правило с непустым `requires` (детект зондов не нужен реестру без
+    // ресурсных правил). Явный снимок из опций (край/тесты) сильнее детекта;
+    // иначе — снимок по реестру зондов конфига (ADR-046 Am.3).
     let resources = if rule_refs.iter().any(|r| !r.requires.is_empty()) {
-        options.resources.unwrap_or_default()
+        options
+            .resources
+            .clone()
+            .unwrap_or_else(|| options.probes.snapshot(repo))
     } else {
         crate::control::requires::AvailableResources::all()
     };
@@ -210,11 +219,11 @@ pub fn check_with_options(
         // ADR-046: ресурс недоступен — правило даёт SKIP с причиной (не PASS и
         // не FAIL): проверка не исполняется, в находки не попадает. Ресурс
         // доступен — обычная семантика (SKIP — не лазейка).
-        if let Some(missing) = requires_missing(rule, resources) {
+        if let Some(missing) = requires_missing(rule, &resources) {
             requires_skipped.push(RequiresSkippedRule {
                 rule: rule.name.clone(),
                 severity: normalize_severity(&rule.severity, &rule.name)?.to_string(),
-                reason: requires_skip_reason(&missing),
+                reason: requires_skip_reason(&missing, &options.probes),
                 resources: missing,
             });
             continue;
@@ -397,14 +406,15 @@ pub fn check_with_options(
     }
     if !requires_skipped.is_empty() {
         // ADR-046: ресурсный пропуск — «проверить не удалось на этой машине»:
-        // в сводке маркером с обязательной строкой прогона на стенде, в гейте —
+        // в сводке маркером с текстом зондов доступности ресурсов, в гейте —
         // SKIP составляющей.
         let names: Vec<&str> = requires_skipped.iter().map(|s| s.rule.as_str()).collect();
+        let notes = requires_skip_notes(&requires_skipped, &options.probes);
         let _ = write!(
             summary,
             "; не прогонялись (нет ресурса: {}): {}",
             names.join(", "),
-            crate::control::requires::STAND_RUN_LINE
+            notes
         );
     }
     if let Some(fp) = &fingerprint {
@@ -441,7 +451,7 @@ pub fn check_with_options(
 /// привязано к среде либо все ресурсы доступны (обычная семантика).
 fn requires_missing(
     rule: &FitnessRule,
-    resources: crate::control::requires::AvailableResources,
+    resources: &crate::control::requires::AvailableResources,
 ) -> Option<Vec<String>> {
     if rule.requires.is_empty() {
         return None;
@@ -450,14 +460,49 @@ fn requires_missing(
     (!missing.is_empty()).then_some(missing)
 }
 
-/// Причина ресурсного SKIP: перечисляет недоступные ресурсы и обязательную
-/// строку прогона на стенде ([`crate::control::requires::STAND_RUN_LINE`]).
-fn requires_skip_reason(missing: &[String]) -> String {
+/// Причина ресурсного SKIP: перечисляет недоступные ресурсы и тексты их
+/// зондов (note; для встроенных `cuda`/`stand` — обязательная строка прогона
+/// на стенде).
+fn requires_skip_reason(
+    missing: &[String],
+    probes: &crate::control::requires::ProbeRegistry,
+) -> String {
+    let notes = unique_notes(missing, probes);
     format!(
         "недоступны ресурсы среды: {} — {}",
         missing.join(", "),
-        crate::control::requires::STAND_RUN_LINE
+        notes
     )
+}
+
+/// Уникальные тексты зондов для списка недоступных ресурсов (порядок
+/// объявления, без повторов — один note на разные ресурсы печатается раз).
+fn unique_notes(resources: &[String], probes: &crate::control::requires::ProbeRegistry) -> String {
+    let mut notes: Vec<String> = Vec::new();
+    for resource in resources {
+        let note = probes.note(resource);
+        if !notes.contains(&note) {
+            notes.push(note);
+        }
+    }
+    notes.join("; ")
+}
+
+/// Тексты зондов всех ресурсных пропусков прогона (для строки сводки).
+fn requires_skip_notes(
+    skipped: &[RequiresSkippedRule],
+    probes: &crate::control::requires::ProbeRegistry,
+) -> String {
+    let mut notes: Vec<String> = Vec::new();
+    for skip in skipped {
+        for resource in &skip.resources {
+            let note = probes.note(resource);
+            if !notes.contains(&note) {
+                notes.push(note);
+            }
+        }
+    }
+    notes.join("; ")
 }
 
 /// Command-строки всех `command_succeeds`-правил набора (вербатим, в
@@ -2623,6 +2668,177 @@ mod tests {
             "{:?}",
             report.issues
         );
+    }
+
+    /// Конфиг зонда с одним заданным параметром (остальные — `None`).
+    fn probe_config(
+        kind: crate::control::requires::ProbeKind,
+        param: &str,
+        value: &str,
+        note: Option<&str>,
+    ) -> crate::control::requires::RequiresProbeConfig {
+        use crate::control::requires::RequiresProbeConfig;
+        let mut cfg = RequiresProbeConfig {
+            kind,
+            note: note.map(str::to_string),
+            path: None,
+            name: None,
+            var: None,
+            pattern: None,
+            cmd: None,
+        };
+        match param {
+            "path" => cfg.path = Some(value.to_string()),
+            "name" => cfg.name = Some(value.to_string()),
+            "var" => cfg.var = Some(value.to_string()),
+            "pattern" => cfg.pattern = Some(value.to_string()),
+            "cmd" => cfg.cmd = Some(value.to_string()),
+            _ => unreachable!("неизвестный параметр зонда"),
+        }
+        cfg
+    }
+
+    /// Реестр зондов из конфига.
+    fn probes(
+        cfg: &BTreeMap<String, crate::control::requires::RequiresProbeConfig>,
+    ) -> crate::control::requires::ProbeRegistry {
+        crate::control::requires::ProbeRegistry::from_config(cfg).expect("реестр из конфига")
+    }
+
+    /// (а) Произвольный НЕ-ML ресурс через конфиг: недоступен — SKIP с
+    /// настроенным note; доступен — правило исполняется обычной семантикой.
+    #[test]
+    fn config_declared_resource_skips_with_note_and_runs_when_available() {
+        use crate::control::requires::ProbeKind;
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        std::fs::write(repo.join("present"), b"x").unwrap();
+        let constraints = write_file(
+            repo,
+            "CONSTRAINTS.yaml",
+            "rules:\n  - name: db_rule\n    type: file_exists\n    path: present\n    requires: [oracle-client]\n",
+        );
+
+        // Ресурс недоступен (бинаря нет) — SKIP с настроенным note.
+        let absent = probes(&BTreeMap::from([(
+            "oracle-client".to_string(),
+            probe_config(
+                ProbeKind::Binary,
+                "name",
+                "arch-requires-absent-tool-xyz",
+                Some("нужен доступ к Оракулу"),
+            ),
+        )]));
+        let opts = baseline::CheckOptions {
+            probes: absent,
+            ..baseline::CheckOptions::default()
+        };
+        let report = check_with_options(repo, &constraints, &opts).unwrap();
+        assert_eq!(
+            report.requires_skipped.len(),
+            1,
+            "{:?}",
+            report.requires_skipped
+        );
+        let skip = &report.requires_skipped[0];
+        assert_eq!(skip.rule, "db_rule");
+        assert_eq!(skip.resources, vec!["oracle-client".to_string()]);
+        assert!(
+            skip.reason.contains("нужен доступ к Оракулу"),
+            "{}",
+            skip.reason
+        );
+        assert!(report.passed && report.issues.is_empty());
+
+        // Ресурс доступен (`sh` есть в PATH) — правило исполняется и проходит.
+        let available = probes(&BTreeMap::from([(
+            "oracle-client".to_string(),
+            probe_config(ProbeKind::Binary, "name", "sh", None),
+        )]));
+        let opts = baseline::CheckOptions {
+            probes: available,
+            ..baseline::CheckOptions::default()
+        };
+        let report = check_with_options(repo, &constraints, &opts).unwrap();
+        assert!(
+            report.requires_skipped.is_empty(),
+            "{:?}",
+            report.requires_skipped
+        );
+        assert!(report.passed, "{}", report.summary);
+    }
+
+    /// (б) Ресурс без зонда (ни встроенного, ни конфига) — ошибка РЕЕСТРА с
+    /// подсказкой объявить `[gate.requires.<имя>]` (fail-closed).
+    #[test]
+    fn unknown_requires_resource_is_registry_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        let constraints = write_file(
+            repo,
+            "CONSTRAINTS.yaml",
+            "rules:\n  - name: typo_rule\n    type: file_exists\n    path: a\n    requires: [quantum]\n",
+        );
+        let err = check_with_options(repo, &constraints, &baseline::CheckOptions::default())
+            .expect_err("неизвестный ресурс");
+        let text = err.to_string();
+        assert!(text.contains("typo_rule"), "{text}");
+        assert!(text.contains("quantum"), "{text}");
+        assert!(text.contains("gate.requires.quantum"), "{text}");
+    }
+
+    /// (в) Встроенный `cuda` переопределяется конфигом: конфиг-зонд побеждает
+    /// встроенный (датчик ресурса — файл-маркер, а не `/dev/nvidia0`).
+    #[test]
+    fn builtin_resource_is_overridden_by_config() {
+        use crate::control::requires::ProbeKind;
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        let constraints = write_file(
+            repo,
+            "CONSTRAINTS.yaml",
+            "rules:\n  - name: gpu_rule\n    type: file_exists\n    path: present\n    requires: [cuda]\n",
+        );
+        std::fs::write(repo.join("present"), b"x").unwrap();
+        // Конфиг переопределяет cuda: доступность = наличие маркера.
+        let overridden = probes(&BTreeMap::from([(
+            "cuda".to_string(),
+            probe_config(ProbeKind::File, "path", "gpu-marker", None),
+        )]));
+        // Маркера нет — SKIP (встроенный /dev/nvidia0 не консультируется).
+        let opts = baseline::CheckOptions {
+            probes: overridden.clone(),
+            ..baseline::CheckOptions::default()
+        };
+        let report = check_with_options(repo, &constraints, &opts).unwrap();
+        assert_eq!(
+            report.requires_skipped.len(),
+            1,
+            "{:?}",
+            report.requires_skipped
+        );
+        // Дефолтный note встроенного cuda заменён конфигом без note →
+        // нейтральный текст с именем ресурса.
+        assert!(
+            report.requires_skipped[0]
+                .reason
+                .contains("требуется среда с ресурсом cuda"),
+            "{}",
+            report.requires_skipped[0].reason
+        );
+        // Маркер появился — ресурс доступен, правило исполняется.
+        std::fs::write(repo.join("gpu-marker"), b"x").unwrap();
+        let opts = baseline::CheckOptions {
+            probes: overridden,
+            ..baseline::CheckOptions::default()
+        };
+        let report = check_with_options(repo, &constraints, &opts).unwrap();
+        assert!(
+            report.requires_skipped.is_empty(),
+            "{:?}",
+            report.requires_skipped
+        );
+        assert!(report.passed, "{}", report.summary);
     }
 
     /// A3: запрет исполнения (no-exec) — правило `command_succeeds` НЕ

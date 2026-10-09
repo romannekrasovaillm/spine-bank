@@ -123,6 +123,10 @@ pub struct CheckOptions {
     /// (дефолт) — детект окружения выполняется только когда в реестре есть
     /// правило с непустым `requires`; `Some` — явный снимок (край/тесты).
     pub resources: Option<crate::control::requires::AvailableResources>,
+    /// Реестр зондов `requires` (ADR-046 Am.3): как проверяются ресурсы.
+    /// `Default` — встроенные дефолты (`cuda`/`stand`); край передаёт реестр
+    /// из конфига `[gate.requires.<имя>]`.
+    pub probes: crate::control::requires::ProbeRegistry,
 }
 
 /// Baseline-файл долга: снимок error-находок `control check`, которые гейт

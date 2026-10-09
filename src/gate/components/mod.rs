@@ -34,7 +34,21 @@ pub(super) fn component_fitness(
     exec: &crate::cmd_trust::ExecPolicy,
     overrides: &crate::config::OverridesConfig,
     resources: Option<control::requires::AvailableResources>,
+    requires: &std::collections::BTreeMap<String, control::requires::RequiresProbeConfig>,
 ) -> GateComponent {
+    // ADR-046 Am.3: реестр зондов `requires` — встроенные дефолты плюс секции
+    // `[gate.requires.<имя>]`. Битая секция — красный гейт: без валидного
+    // зонда ресурсный SKIP неотличим от опечатки.
+    let probes = match control::requires::ProbeRegistry::from_config(requires) {
+        Ok(probes) => probes,
+        Err(e) => {
+            return GateComponent::fail(
+                "fitness",
+                format!("[gate.requires] невалиден: {e}"),
+                Vec::new(),
+            );
+        }
+    };
     if !constraints.path.is_file() {
         // T-01: реестра нет НИГДЕ (резолвер пробует корень, затем
         // `.arch-handoff/`) — это не «нечего прогонять» по недосмотру, а
@@ -76,6 +90,7 @@ pub(super) fn component_fitness(
         // ADR-046: снимок ресурсов для правил `requires` (край/тесты —
         // явный; `None` — детект внутри прогона реестра).
         resources,
+        probes,
         ..control::baseline::CheckOptions::default()
     };
     let detail = |summary: &str| {

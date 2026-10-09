@@ -1098,6 +1098,13 @@ pub struct GateConfig {
     /// требований `OpenSpec` правилами реестра — область проверки.
     #[serde(default)]
     pub openspec_coverage: OpenspecCoverageConfig,
+    /// Реестр зондов доступности ресурсов `requires` (ADR-046 Am.3): секции
+    /// `[gate.requires.<имя>]`. Зонд задаёт, как проверяется ресурс (файл,
+    /// бинарь, переменная, hostname, устройство, команда), и текст SKIP.
+    /// Переопределяет одноимённый встроенный зонд (`cuda`/`stand`); новый
+    /// ресурс, не объявленный здесь и не встроенный, — ошибка реестра.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub requires: BTreeMap<String, crate::control::requires::RequiresProbeConfig>,
 }
 
 /// Настройки составляющей гейта `openspec_coverage` (F2): секция

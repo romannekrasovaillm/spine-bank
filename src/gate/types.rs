@@ -396,6 +396,10 @@ pub struct GateOptions {
     /// (дефолт) — детект окружения в составляющей `fitness`; `Some` — явный
     /// снимок (тесты/края, где окружение надо зафиксировать).
     pub resources: Option<control::requires::AvailableResources>,
+    /// Реестр зондов `requires` из конфига `[gate.requires.<имя>]`
+    /// (ADR-046 Am.3): как проверяется доступность ресурса. Пусто — только
+    /// встроенные дефолты (`cuda`/`stand`) в составляющей `fitness`.
+    pub requires: std::collections::BTreeMap<String, control::requires::RequiresProbeConfig>,
 }
 
 impl GateOptions {
@@ -422,6 +426,7 @@ impl GateOptions {
             drift: cfg.drift.clone(),
             arch_drift: cfg.gate.arch_drift.clone(),
             resources: None,
+            requires: cfg.gate.requires.clone(),
         }
     }
 }

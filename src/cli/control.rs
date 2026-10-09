@@ -225,6 +225,10 @@ pub(crate) fn cmd_control(cfg: &arch_harness::config::Config, cmd: ControlCmd) -
                 // ADR-046: ресурсы среды для правил `requires` — детект по
                 // требованию правил (CLI-край снимок не фиксирует).
                 resources: None,
+                // ADR-046 Am.3: реестр зондов — из `[gate.requires.<имя>]`.
+                probes: arch_harness::control::requires::ProbeRegistry::from_config(
+                    &cfg.gate.requires,
+                )?,
             };
             // П5: сверка состава правил с git-базой — «правило выполняется»
             // плюс «правило ещё существует» в любом канале, не только в gate.

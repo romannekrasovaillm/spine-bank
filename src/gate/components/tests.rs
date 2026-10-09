@@ -1667,6 +1667,7 @@ fn fitness_message_distinguishes_absent_contour_from_wrong_path() {
         &exec,
         &crate::config::OverridesConfig::default(),
         None,
+        &std::collections::BTreeMap::new(),
     );
     assert_eq!(component.status, GateStatus::Skip);
     assert!(
@@ -1685,6 +1686,7 @@ fn fitness_message_distinguishes_absent_contour_from_wrong_path() {
         &exec,
         &crate::config::OverridesConfig::default(),
         None,
+        &std::collections::BTreeMap::new(),
     );
     assert_eq!(component.status, GateStatus::Skip);
     assert!(

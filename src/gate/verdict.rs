@@ -170,7 +170,8 @@ pub(super) fn run_inner(
             &constraints,
             &options.exec,
             &options.overrides,
-            options.resources,
+            options.resources.clone(),
+            &options.requires,
         ),
         // F1 (ADR-062): составляющая получает диапазон исполнителя — покрытие
         // (дельта или change OpenSpec), созданное в диапазоне, не узаконивает

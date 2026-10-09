@@ -137,6 +137,8 @@ fn run_fitness_hook(cfg: &Config, repo: &Path) -> Result<i32> {
         },
         // ADR-046: ресурсы среды — детект по требованию правил (`None`).
         resources: None,
+        // ADR-046 Am.3: реестр зондов — из `[gate.requires.<имя>]`.
+        probes: crate::control::requires::ProbeRegistry::from_config(&cfg.gate.requires)?,
     };
     let report = crate::control::check_anchored(repo, &constraints, &options, None)?;
     if !report.passed {

@@ -283,9 +283,10 @@ fn parse_rules_tolerant(
     for value in values {
         match serde_yaml_ng::from_value::<FitnessRule>(value.clone()) {
             Ok(rule) => {
-                // ADR-046: схема `requires` — неизвестный ресурс ошибка
-                // реестра (опечатка молча превратила бы правило в вечный SKIP).
-                crate::control::requires::validate(&rule.name, &rule.requires)?;
+                // Схема `requires` (неизвестный ресурс — ошибка реестра)
+                // проверяется в [`super::exec::check_with_options`]: только там
+                // известен реестр зондов конфига `[gate.requires.<имя>]`
+                // (ADR-046 Am.3) — плоский разбор конфига не видит.
                 out.push(rule);
             }
             Err(e) => {
@@ -559,20 +560,18 @@ mod tests {
         assert!(rules[2].requires.is_empty(), "нет requires — пусто");
     }
 
-    /// Неизвестный ресурс — ошибка РЕЕСТРА (не молчаливый SKIP): имя правила и
-    /// имя ресурса в тексте.
+    /// Плоский разбор схемы `requires` ресурсы НЕ валидирует: реестр зондов
+    /// живёт в конфиге `[gate.requires.<имя>]` и известен только движку
+    /// исполнения (ADR-046 Am.3) — там и проверяется (тест `exec`).
     #[test]
-    fn unknown_requires_resource_is_registry_error() {
+    fn parse_accepts_any_requires_resource() {
         let dir = tempfile::tempdir().unwrap();
         let c = write_file(
             dir.path(),
             "CONSTRAINTS.yaml",
-            "rules:\n  - name: typo_rule\n    type: file_exists\n    path: a\n    requires: [quantum]\n",
+            "rules:\n  - name: db_rule\n    type: file_exists\n    path: a\n    requires: [oracle-client]\n",
         );
-        let err = load_fitness_rules(&c).expect_err("неизвестный ресурс");
-        let text = err.to_string();
-        assert!(text.contains("typo_rule"), "{text}");
-        assert!(text.contains("quantum"), "{text}");
-        assert!(text.contains("cuda"), "перечень известных: {text}");
+        let rules = load_fitness_rules(&c).expect("разбор схемы");
+        assert_eq!(rules[0].requires, vec!["oracle-client".to_string()]);
     }
 }
