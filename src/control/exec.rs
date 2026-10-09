@@ -107,7 +107,7 @@ pub fn check_with_options(
     };
 
     let resolved = load_constraints_resolved(constraints)?;
-    // ADR-046 Am.3: схема `requires` — ресурс без зонда (встроенного или
+    // ADR-068 Am.3: схема `requires` — ресурс без зонда (встроенного или
     // объявленного `[gate.requires.<имя>]`) ошибка РЕЕСТРА, а не молчаливый
     // SKIP: опечатка не превращается в вечный пропуск.
     for rule in &resolved.rules {
@@ -195,10 +195,10 @@ pub fn check_with_options(
     } else {
         crate::rule_templates::Runner::detect(None)
     };
-    // ADR-046: снимок ресурсов среды — ОДИН на прогон и только когда в реестре
+    // ADR-068: снимок ресурсов среды — ОДИН на прогон и только когда в реестре
     // есть правило с непустым `requires` (детект зондов не нужен реестру без
     // ресурсных правил). Явный снимок из опций (край/тесты) сильнее детекта;
-    // иначе — снимок по реестру зондов конфига (ADR-046 Am.3).
+    // иначе — снимок по реестру зондов конфига (ADR-068 Am.3).
     let resources = if rule_refs.iter().any(|r| !r.requires.is_empty()) {
         options
             .resources
@@ -209,7 +209,7 @@ pub fn check_with_options(
     };
     for rule in &rule_refs {
         let started = Instant::now();
-        // ADR-046: ресурс недоступен — правило даёт SKIP с причиной (не PASS и
+        // ADR-068: ресурс недоступен — правило даёт SKIP с причиной (не PASS и
         // не FAIL): проверка не исполняется, в находки не попадает. Ресурс
         // доступен — обычная семантика (SKIP — не лазейка).
         if let Some(missing) = requires_missing(rule, &resources) {
@@ -398,7 +398,7 @@ pub fn check_with_options(
         );
     }
     if !requires_skipped.is_empty() {
-        // ADR-046: ресурсный пропуск — «проверить не удалось на этой машине»:
+        // ADR-068: ресурсный пропуск — «проверить не удалось на этой машине»:
         // в сводке маркером с текстом зондов доступности ресурсов, в гейте —
         // SKIP составляющей.
         let names: Vec<&str> = requires_skipped.iter().map(|s| s.rule.as_str()).collect();
@@ -440,7 +440,7 @@ pub fn check_with_options(
     })
 }
 
-/// ADR-046: недоступные ресурсы правила (`requires`). `None` — правило не
+/// ADR-068: недоступные ресурсы правила (`requires`). `None` — правило не
 /// привязано к среде либо все ресурсы доступны (обычная семантика).
 fn requires_missing(
     rule: &FitnessRule,
@@ -1739,7 +1739,7 @@ mod tests {
         assert!(skipped.is_empty(), "{skipped:?}");
     }
 
-    // --- ADR-046: requires — SKIP при недоступном ресурсе, не PASS/FAIL ---
+    // --- ADR-068: requires — SKIP при недоступном ресурсе, не PASS/FAIL ---
 
     /// Ресурс недоступен — правило даёт SKIP с причиной (в `requires_skipped`),
     /// команда/проверка НЕ исполняется и в находки не попадает.

@@ -222,10 +222,10 @@ pub(crate) fn cmd_control(cfg: &arch_harness::config::Config, cmd: ControlCmd) -
                     adr_dir: cfg.gate.overrides.adr_dir.clone(),
                     max_horizon_months: cfg.gate.overrides.max_horizon_months,
                 },
-                // ADR-046: ресурсы среды для правил `requires` — детект по
+                // ADR-068: ресурсы среды для правил `requires` — детект по
                 // требованию правил (CLI-край снимок не фиксирует).
                 resources: None,
-                // ADR-046 Am.3: реестр зондов — из `[gate.requires.<имя>]`.
+                // ADR-068 Am.3: реестр зондов — из `[gate.requires.<имя>]`.
                 probes: arch_harness::control::requires::ProbeRegistry::from_config(
                     &cfg.gate.requires,
                 )?,

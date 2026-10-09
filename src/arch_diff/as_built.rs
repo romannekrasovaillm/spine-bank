@@ -102,7 +102,7 @@ pub(crate) fn scan_revision(repo: &Path, rev: &str, globs: &DiffGlobs) -> Result
 }
 
 /// [`scan_revision`] с явными пределами снимка (`ignore`/`max_files` из
-/// `[gate.arch_drift]`, ADR-046 Am.2). База и голова диффа обязаны
+/// `[gate.arch_drift]`, ADR-068 Am.2). База и голова диффа обязаны
 /// сканироваться с ОДНИМИ пределами — иначе исключённый путь «исчезает» на
 /// одной стороне и рождает ложные рёбра.
 pub(crate) fn scan_revision_with(
@@ -126,7 +126,7 @@ pub(crate) fn scan_revision_with(
 /// файловой системы — видны незакоммиченные правки. Голова диффа составляющей
 /// гейта `arch_drift` (git-ревизий свободных не тратим: работа агента ещё не
 /// закоммичена). `limits` — пределы снимка (`ignore`/`max_files` из
-/// `[gate.arch_drift]`, ADR-046 Am.2).
+/// `[gate.arch_drift]`, ADR-068 Am.2).
 pub(crate) fn scan_worktree_with(
     repo: &Path,
     globs: &DiffGlobs,

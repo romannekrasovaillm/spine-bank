@@ -135,9 +135,9 @@ fn run_fitness_hook(cfg: &Config, repo: &Path) -> Result<i32> {
             adr_dir: cfg.gate.overrides.adr_dir.clone(),
             max_horizon_months: cfg.gate.overrides.max_horizon_months,
         },
-        // ADR-046: ресурсы среды — детект по требованию правил (`None`).
+        // ADR-068: ресурсы среды — детект по требованию правил (`None`).
         resources: None,
-        // ADR-046 Am.3: реестр зондов — из `[gate.requires.<имя>]`.
+        // ADR-068 Am.3: реестр зондов — из `[gate.requires.<имя>]`.
         probes: crate::control::requires::ProbeRegistry::from_config(&cfg.gate.requires)?,
     };
     let report = crate::control::check_anchored(repo, &constraints, &options, None)?;

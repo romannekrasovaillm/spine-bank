@@ -644,7 +644,7 @@ fn gate_no_exec_skips_fitness_and_passport_lists_it() {
     assert!(fitness_nc.required, "fitness обязательна для Fast");
 }
 
-// --- ADR-046: requires — ресурсный SKIP в гейте --------------------------
+// --- ADR-068: requires — ресурсный SKIP в гейте --------------------------
 
 /// `skip_detail` включает ресурсные пропуски при ЛЮБОМ severity (как A3):
 /// перечень правил + обязательная строка прогона на стенде.

@@ -330,7 +330,7 @@ fn arch_drift_skips_without_git() {
     );
 }
 
-/// ADR-046 Am.2: `max_files` из `[gate.arch_drift]` доходит до сканера —
+/// ADR-068 Am.2: `max_files` из `[gate.arch_drift]` доходит до сканера —
 /// заниженный лимит даёт FAIL с диагностикой, называющей конфиг-ключ.
 #[test]
 fn arch_drift_max_files_limit_names_config_key() {
@@ -359,7 +359,7 @@ fn arch_drift_max_files_limit_names_config_key() {
     );
 }
 
-/// ADR-046 Am.2: `ignore` из `[gate.arch_drift]` доходит до сканера —
+/// ADR-068 Am.2: `ignore` из `[gate.arch_drift]` доходит до сканера —
 /// исключённый `model/` исчезает из снимка, сверять рёбра не с чем (SKIP).
 #[test]
 fn arch_drift_ignore_reaches_scanner() {
