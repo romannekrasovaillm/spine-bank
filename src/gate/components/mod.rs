@@ -2046,10 +2046,16 @@ mod tests;
 #[cfg(test)]
 mod tests_arch_drift;
 #[cfg(test)]
+mod tests_control_plane;
+#[cfg(test)]
 mod tests_delta_guard_openspec;
 #[cfg(test)]
 mod tests_model_drift;
 #[cfg(test)]
 mod tests_openspec_coverage;
 #[cfg(test)]
+mod tests_quality;
+#[cfg(test)]
 mod tests_secrets;
+#[cfg(test)]
+mod tests_self_approved;
