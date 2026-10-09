@@ -484,7 +484,11 @@ CI-джобой `dogfood` (`arch-be control spine` + `arch-be control check .` +
   поломка), детектор тех-радара `deny_dependency` (Cargo.toml/pom.xml/
   requirements.txt), override только через ADR (rule+adr+until, протухает),
   `severity: block|warn`, отчёт вверх `arch-be control report --level corp
-  --json`.
+  --json`. **Ресурсы среды правила** — `requires: [<ресурс>]` (ADR-068):
+  без ресурса правило даёт SKIP с причиной, а не ложный FAIL, а состав
+  ресурсов и виды зонда (`file|binary|env|hostname|device|command`) объявляет
+  конфиг `[gate.requires.<имя>]` — ядро предметной области не знает
+  (`docs/control.md`).
 - **Handoff кодовым харнессам**: Claude Code, Qwen Code, OpenClaw, Hermes,
   Theseus, CodeWhale, Kimi Code — пакеты `.arch-handoff/` + прогон инструментом
   `harness_run` прямо из диалога (адаптер знает режим промпта, флаги
@@ -1002,7 +1006,12 @@ Live mini-case: [`кейсы/fleet-spine-drift`](кейсы/fleet-spine-drift/) 
   consciously) instead of a silent break; tech-radar `deny_dependency`
   detector (Cargo.toml/pom.xml/requirements.txt); overrides only via ADR
   (rule+adr+until, they expire); `severity: block|warn`; upward reporting
-  `arch-be control report --level corp --json`; judge
+  `arch-be control report --level corp --json`. **Rule environment
+  requirements** — `requires: [<resource>]` (ADR-068): without the resource a
+  rule yields SKIP with a reason instead of a false FAIL; the resource list
+  and probe kinds (`file|binary|env|hostname|device|command`) are declared by
+  config `[gate.requires.<name>]` — the core stays domain-agnostic
+  (`docs/control.md`); judge
   calibration
   gate: `arch-be bench run --golden` (MAE vs golden set, exit 1 above
   `judge.golden_max_mae`). **Continuous evals of the harness configuration**
