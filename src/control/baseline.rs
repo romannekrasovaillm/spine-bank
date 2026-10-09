@@ -119,11 +119,11 @@ pub struct CheckOptions {
     /// Политика overrides по ADR (A2): где искать ADR и какой горизонт
     /// `until` допустим. `Default` — `<repo>/docs/adr` и 12 месяцев.
     pub overrides: OverrideSettings,
-    /// Снимок доступности ресурсов среды для `requires` (ADR-046). `None`
+    /// Снимок доступности ресурсов среды для `requires` (ADR-068). `None`
     /// (дефолт) — детект окружения выполняется только когда в реестре есть
     /// правило с непустым `requires`; `Some` — явный снимок (край/тесты).
     pub resources: Option<crate::control::requires::AvailableResources>,
-    /// Реестр зондов `requires` (ADR-046 Am.3): как проверяются ресурсы.
+    /// Реестр зондов `requires` (ADR-068 Am.3): как проверяются ресурсы.
     /// `Default` — встроенные дефолты (`cuda`/`stand`); край передаёт реестр
     /// из конфига `[gate.requires.<имя>]`.
     pub probes: crate::control::requires::ProbeRegistry,

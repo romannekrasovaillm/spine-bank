@@ -17,7 +17,7 @@ const MAX_FILE_BYTES: u64 = 1024 * 1024;
 /// когда `[gate.arch_drift] max_files` не задан.
 pub const MAX_SNAPSHOT_CONTENT_FILES: usize = 2000;
 
-/// Пределы сканирования снимка (K6, ADR-046 Am.2): потолок числа читаемых
+/// Пределы сканирования снимка (K6, ADR-068 Am.2): потолок числа читаемых
 /// файлов и подстроки путей-исключений — из секции `[gate.arch_drift]`.
 ///
 /// `ignore` применяется И к снимку ревизии, И к снимку рабочего дерева:
@@ -202,7 +202,7 @@ pub fn snapshot_at(repo: &Path, rev: &str) -> Result<Snapshot> {
 }
 
 /// [`snapshot_at`] с явными пределами сканирования (лимит + `ignore` из
-/// `[gate.arch_drift]`, ADR-046 Am.2). `ignore` вычитает файлы и из списка, и
+/// `[gate.arch_drift]`, ADR-068 Am.2). `ignore` вычитает файлы и из списка, и
 /// из содержимого — симметрично снимку рабочего дерева.
 ///
 /// # Errors
@@ -266,7 +266,7 @@ pub fn snapshot_worktree(repo: &Path) -> Result<Snapshot> {
 }
 
 /// [`snapshot_worktree`] с явными пределами сканирования (лимит + `ignore` из
-/// `[gate.arch_drift]`, ADR-046 Am.2). `ignore` — подстроки относительных
+/// `[gate.arch_drift]`, ADR-068 Am.2). `ignore` — подстроки относительных
 /// путей: каталог под исключением не обходится, файл — не попадает ни в
 /// список, ни в содержимое.
 ///
@@ -436,7 +436,7 @@ pub(crate) mod tests {
         assert!(snapshot_at(&repo, "no-such-ref").is_err());
     }
 
-    // --- ADR-046 Am.2: ignore + max_files в сканере снимка ---
+    // --- ADR-068 Am.2: ignore + max_files в сканере снимка ---
 
     /// `ignore` (подстроки путей) вычитает файлы и из списка, и из содержимого
     /// снимка рабочего дерева; непричастные пути остаются.

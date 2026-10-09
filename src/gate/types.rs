@@ -392,12 +392,12 @@ pub struct GateOptions {
     /// Составляющая `arch_drift` (K6): включение вне `[gate.required]`
     /// (секция `[gate.arch_drift]`); проверка дорогая, дефолт — выключена.
     pub arch_drift: crate::config::ArchDriftConfig,
-    /// Снимок ресурсов среды для правил с `requires` (ADR-046). `None`
+    /// Снимок ресурсов среды для правил с `requires` (ADR-068). `None`
     /// (дефолт) — детект окружения в составляющей `fitness`; `Some` — явный
     /// снимок (тесты/края, где окружение надо зафиксировать).
     pub resources: Option<control::requires::AvailableResources>,
     /// Реестр зондов `requires` из конфига `[gate.requires.<имя>]`
-    /// (ADR-046 Am.3): как проверяется доступность ресурса. Пусто — только
+    /// (ADR-068 Am.3): как проверяется доступность ресурса. Пусто — только
     /// встроенные дефолты (`cuda`/`stand`) в составляющей `fitness`.
     pub requires: std::collections::BTreeMap<String, control::requires::RequiresProbeConfig>,
 }

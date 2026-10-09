@@ -58,7 +58,7 @@ mod diff_triggers;
 mod exec;
 mod registry;
 pub(crate) mod report;
-/// Ресурсы среды, требуемые правилами (`requires:`, ADR-046) — см. модуль.
+/// Ресурсы среды, требуемые правилами (`requires:`, ADR-068) — см. модуль.
 pub mod requires;
 mod rules;
 mod score;

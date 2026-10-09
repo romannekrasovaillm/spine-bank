@@ -36,7 +36,7 @@ pub(super) fn component_fitness(
     resources: Option<control::requires::AvailableResources>,
     requires: &std::collections::BTreeMap<String, control::requires::RequiresProbeConfig>,
 ) -> GateComponent {
-    // ADR-046 Am.3: реестр зондов `requires` — встроенные дефолты плюс секции
+    // ADR-068 Am.3: реестр зондов `requires` — встроенные дефолты плюс секции
     // `[gate.requires.<имя>]`. Битая секция — красный гейт: без валидного
     // зонда ресурсный SKIP неотличим от опечатки.
     let probes = match control::requires::ProbeRegistry::from_config(requires) {
@@ -87,7 +87,7 @@ pub(super) fn component_fitness(
             adr_dir: overrides.adr_dir.clone(),
             max_horizon_months: overrides.max_horizon_months,
         },
-        // ADR-046: снимок ресурсов для правил `requires` (край/тесты —
+        // ADR-068: снимок ресурсов для правил `requires` (край/тесты —
         // явный; `None` — детект внутри прогона реестра).
         resources,
         probes,
@@ -156,7 +156,7 @@ pub(super) fn component_fitness(
 ///   окружения: зелёный PASS при неисполненных по политике правилах был бы
 ///   молчаливой ложью, а блок 3 паспорта обязан перечислить такие правила
 ///   (находка `command_untrusted`).
-/// - **ADR-046** (`requires_skipped`, нет ресурса среды — `cuda`/`stand`):
+/// - **ADR-068** (`requires_skipped`, нет ресурса среды — `cuda`/`stand`):
 ///   блокирующий пропуск при ЛЮБОМ severity. Правило, привязанное к стенду
 ///   или GPU, на неполном окружении не даёт ни PASS (ложь), ни FAIL
 ///   (наказание за железо) — только SKIP с перечнем правил и обязательной

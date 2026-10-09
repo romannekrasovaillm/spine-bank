@@ -286,7 +286,7 @@ fn parse_rules_tolerant(
                 // Схема `requires` (неизвестный ресурс — ошибка реестра)
                 // проверяется в [`super::exec::check_with_options`]: только там
                 // известен реестр зондов конфига `[gate.requires.<имя>]`
-                // (ADR-046 Am.3) — плоский разбор конфига не видит.
+                // (ADR-068 Am.3) — плоский разбор конфига не видит.
                 out.push(rule);
             }
             Err(e) => {
@@ -541,7 +541,7 @@ mod tests {
         assert!(load_fitness_rules(&c).is_err(), "битая запись — ошибка");
     }
 
-    // --- ADR-046: requires — ресурсы среды правила ---
+    // --- ADR-068: requires — ресурсы среды правила ---
 
     /// `requires` читается (строка и список); отсутствие — пусто.
     #[test]
@@ -562,7 +562,7 @@ mod tests {
 
     /// Плоский разбор схемы `requires` ресурсы НЕ валидирует: реестр зондов
     /// живёт в конфиге `[gate.requires.<имя>]` и известен только движку
-    /// исполнения (ADR-046 Am.3) — там и проверяется (тест `exec`).
+    /// исполнения (ADR-068 Am.3) — там и проверяется (тест `exec`).
     #[test]
     fn parse_accepts_any_requires_resource() {
         let dir = tempfile::tempdir().unwrap();
