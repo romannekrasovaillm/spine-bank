@@ -1228,13 +1228,22 @@ pub struct SecretsConfig {
 /// Составляющая строит граф «как построено» дважды (базовая ревизия git +
 /// рабочее дерево) и потому дорогая: по умолчанию она SKIP и включение —
 /// осознанное решение проекта (обратная совместимость, правило 4).
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ArchDriftConfig {
     /// Включить `arch_drift` вне `[gate.required]`: находки о рёбрах вне
     /// модели и отклонённых рёбрах в коде — warn. `false` (дефолт) —
     /// составляющая не прогоняется, если не названа в `[gate.required]`.
     pub enabled: bool,
+    /// Потолок числа читаемых в снимок файлов (ADR-046 Am.2). `None` —
+    /// прежний дефолт [`crate::arch_diff::MAX_SNAPSHOT_CONTENT_FILES`] (2000).
+    /// Большие кейсы (легаси с `env/` на тысячи файлов) поднимают лимит, не
+    /// ломая границу bounded-работы для остальных.
+    pub max_files: Option<usize>,
+    /// Подстроки путей-исключений из снимка (ADR-046 Am.2): файлы, чей путь
+    /// содержит подстроку, не попадают ни в список, ни в содержимое. Пусто
+    /// (дефолт) — ничего не исключается.
+    pub ignore: Vec<String>,
 }
 
 /// Настройки проверки overrides (A2): секция `[gate.overrides]`.
@@ -2426,6 +2435,28 @@ mod tests {
         assert!(
             toml::from_str::<CodingHarnessConfig>("binary = 'x'\nmode = 'yolo'\n").is_err(),
             "неизвестный режим обязан падать, а не молча дефолтиться"
+        );
+    }
+
+    /// ADR-046 Am.2: `[gate.arch_drift]` принимает `max_files` и `ignore`;
+    /// пустая секция — прежние дефолты (лимит подставляет сканер, ignore пуст).
+    #[test]
+    fn gate_arch_drift_max_files_and_ignore_parse() {
+        let c: Config = toml::from_str(
+            "[gate.arch_drift]\nenabled = true\nmax_files = 5000\nignore = [\"env/\", \"vendor/\"]\n",
+        )
+        .expect("parse");
+        assert!(c.gate.arch_drift.enabled);
+        assert_eq!(c.gate.arch_drift.max_files, Some(5000));
+        assert_eq!(
+            c.gate.arch_drift.ignore,
+            vec!["env/".to_string(), "vendor/".to_string()]
+        );
+        let bare: Config = toml::from_str("[gate.arch_drift]\n").expect("parse");
+        assert_eq!(bare.gate.arch_drift.max_files, None);
+        assert!(
+            bare.gate.arch_drift.ignore.is_empty(),
+            "ignore по умолчанию пуст"
         );
     }
 }

@@ -19,7 +19,10 @@ use crate::gate::{GateOptions, GateOutcome, GateRequirements, GateStatus, render
 /// Опции с включённой составляющей (флаг конфига, предупреждающий режим).
 fn options_enabled() -> GateOptions {
     GateOptions {
-        arch_drift: crate::config::ArchDriftConfig { enabled: true },
+        arch_drift: crate::config::ArchDriftConfig {
+            enabled: true,
+            ..crate::config::ArchDriftConfig::default()
+        },
         ..GateOptions::default()
     }
 }
@@ -80,8 +83,12 @@ enum Grounds {
 fn write_reject_journal(dir: &Path, grounds: &Grounds) {
     let hash = match grounds {
         Grounds::Current => {
-            let scan = crate::arch_diff::scan_worktree(dir, &crate::control::DiffGlobs::default())
-                .expect("скан рабочего дерева");
+            let scan = crate::arch_diff::scan_worktree_with(
+                dir,
+                &crate::control::DiffGlobs::default(),
+                &crate::arch_diff::ScanLimits::default(),
+            )
+            .expect("скан рабочего дерева");
             let edge = scan
                 .graph
                 .edges
@@ -320,5 +327,63 @@ fn arch_drift_skips_without_git() {
         report.not_checked.iter().any(|n| n == "arch_drift"),
         "обязательная составляющая без входа — INCOMPLETE: {:?}",
         report.not_checked
+    );
+}
+
+/// ADR-046 Am.2: `max_files` из `[gate.arch_drift]` доходит до сканера —
+/// заниженный лимит даёт FAIL с диагностикой, называющей конфиг-ключ.
+#[test]
+fn arch_drift_max_files_limit_names_config_key() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let dir = tmp.path().join("repo");
+    make_edge_repo(&dir, true);
+    let options = GateOptions {
+        arch_drift: crate::config::ArchDriftConfig {
+            enabled: true,
+            max_files: Some(0),
+            ..crate::config::ArchDriftConfig::default()
+        },
+        ..GateOptions::default()
+    };
+    let report = run_gate(&dir, &required_with_arch_drift(), &options);
+    let comp = report
+        .components
+        .iter()
+        .find(|c| c.name == "arch_drift")
+        .expect("составляющая arch_drift");
+    assert_eq!(comp.status, GateStatus::Fail, "{}", comp.detail);
+    assert!(
+        comp.detail.contains("[gate.arch_drift] max_files"),
+        "диагностика обязана называть конфиг-ключ: {}",
+        comp.detail
+    );
+}
+
+/// ADR-046 Am.2: `ignore` из `[gate.arch_drift]` доходит до сканера —
+/// исключённый `model/` исчезает из снимка, сверять рёбра не с чем (SKIP).
+#[test]
+fn arch_drift_ignore_reaches_scanner() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let dir = tmp.path().join("repo");
+    make_edge_repo(&dir, true);
+    let options = GateOptions {
+        arch_drift: crate::config::ArchDriftConfig {
+            enabled: true,
+            ignore: vec!["model/".to_string()],
+            ..crate::config::ArchDriftConfig::default()
+        },
+        ..GateOptions::default()
+    };
+    let report = run_gate(&dir, &required_with_arch_drift(), &options);
+    let comp = report
+        .components
+        .iter()
+        .find(|c| c.name == "arch_drift")
+        .expect("составляющая arch_drift");
+    assert_eq!(comp.status, GateStatus::Skip, "{}", comp.detail);
+    assert!(
+        comp.detail.contains("нет читаемых сущностей"),
+        "{}",
+        comp.detail
     );
 }

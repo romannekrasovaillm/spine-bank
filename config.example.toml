@@ -702,6 +702,18 @@ memory_file = "~/.arch-harness/MEMORY.md"  # глобальная md-памят�
 #             "delta_guard", "sensors", "nfr", "evidence_verify",
 #             "semantic_quality"]
 
+# Составляющая `arch_drift` (K6): рёбра графа «как построено» против модели.
+# Дорогая (снимок базовой ревизии + обход рабочего дерева), по умолчанию SKIP:
+# включается записью `arch_drift` в `[gate.required]` маршрута (находки error)
+# либо флагом здесь (находки warn). Для больших кейсов (легаси на тысячи
+# файлов) лимит читаемых файлов поднимается, а служебные деревья исключаются
+# подстроками путей (ADR-046 Am.2):
+#
+# [gate.arch_drift]
+# enabled = true             # false (дефолт) — прогон только через [gate.required]
+# max_files = 2000           # потолок читаемых в снимок файлов (дефолт 2000)
+# ignore = ["env/", "vendor/"]  # подстроки путей-исключений (дефолт пусто)
+
 [gate.required]
 fast     = ["fitness", "spine_lint"]
 standard = ["fitness", "spine_lint", "trace_check", "rule_weakened", "nfr"]

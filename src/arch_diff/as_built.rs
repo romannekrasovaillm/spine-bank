@@ -6,7 +6,7 @@ use std::path::Path;
 
 use regex::Regex;
 
-use super::snapshot::{Snapshot, snapshot_at, snapshot_worktree};
+use super::snapshot::{Snapshot, snapshot_at_with, snapshot_worktree_with};
 use super::types::{ArchEdge, ArchGraph, ArchNode, EdgeKind, MAX_EDGE_EVIDENCE, NodeKind};
 use crate::control::{DiffGlobs, content_looks_like_contract, looks_like_config};
 use crate::error::{HarnessError, Result};
@@ -98,7 +98,20 @@ impl RevisionScan {
 /// Сканирует ревизию: снимок + материализация `model/` и реестра правил
 /// во временный каталог + граф.
 pub(crate) fn scan_revision(repo: &Path, rev: &str, globs: &DiffGlobs) -> Result<RevisionScan> {
-    let snap = snapshot_at(repo, rev)?;
+    scan_revision_with(repo, rev, globs, &super::snapshot::ScanLimits::default())
+}
+
+/// [`scan_revision`] с явными пределами снимка (`ignore`/`max_files` из
+/// `[gate.arch_drift]`, ADR-046 Am.2). База и голова диффа обязаны
+/// сканироваться с ОДНИМИ пределами — иначе исключённый путь «исчезает» на
+/// одной стороне и рождает ложные рёбра.
+pub(crate) fn scan_revision_with(
+    repo: &Path,
+    rev: &str,
+    globs: &DiffGlobs,
+    limits: &super::snapshot::ScanLimits,
+) -> Result<RevisionScan> {
+    let snap = snapshot_at_with(repo, rev, limits)?;
     let (case, model) = materialize_case(&snap)?;
     let graph = build_graph(&snap, model.as_ref(), globs)?;
     Ok(RevisionScan {
@@ -112,9 +125,14 @@ pub(crate) fn scan_revision(repo: &Path, rev: &str, globs: &DiffGlobs) -> Result
 /// Сканирует РАБОЧЕЕ ДЕРЕВО (K6): то же, что [`scan_revision`], но по снимку
 /// файловой системы — видны незакоммиченные правки. Голова диффа составляющей
 /// гейта `arch_drift` (git-ревизий свободных не тратим: работа агента ещё не
-/// закоммичена).
-pub(crate) fn scan_worktree(repo: &Path, globs: &DiffGlobs) -> Result<RevisionScan> {
-    let snap = snapshot_worktree(repo)?;
+/// закоммичена). `limits` — пределы снимка (`ignore`/`max_files` из
+/// `[gate.arch_drift]`, ADR-046 Am.2).
+pub(crate) fn scan_worktree_with(
+    repo: &Path,
+    globs: &DiffGlobs,
+    limits: &super::snapshot::ScanLimits,
+) -> Result<RevisionScan> {
+    let snap = snapshot_worktree_with(repo, limits)?;
     let (case, model) = materialize_case(&snap)?;
     let graph = build_graph(&snap, model.as_ref(), globs)?;
     Ok(RevisionScan {

@@ -37,7 +37,7 @@ pub use accept::{
     AcceptReport, DecideInput, RejectReport, accept_proposals, load_journal, reject_proposal,
 };
 pub use as_built::{as_built, as_built_with};
-pub(crate) use as_built::{scan_revision, scan_worktree};
+pub(crate) use as_built::{scan_revision_with, scan_worktree_with};
 pub use decisions::{
     ACTOR_ENV, ARCH_DIFF_DECISIONS_PATH, ARCH_DIFF_DECISIONS_SCHEMA, DECISIONS_PATH,
     DECISIONS_SCHEMA, Decision, DecisionEntry, DecisionJournal, DecisionSource, detect_source,
@@ -50,7 +50,10 @@ pub use diff::{
     TeethClass, TriggerHit, arch_diff, matched_failures,
 };
 pub use report::{render_json, render_md, render_mermaid, render_sarif};
-pub use snapshot::{Snapshot, resolve_rev, snapshot_at, snapshot_worktree};
+pub use snapshot::{
+    MAX_SNAPSHOT_CONTENT_FILES, ScanLimits, Snapshot, resolve_rev, snapshot_at, snapshot_at_with,
+    snapshot_worktree, snapshot_worktree_with,
+};
 pub use types::{
     ARCH_DIFF_SCHEMA, ArchEdge, ArchGraph, ArchNode, EdgeKind, MAX_EDGE_EVIDENCE, NodeKind,
 };

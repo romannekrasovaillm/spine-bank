@@ -13,8 +13,43 @@ use crate::error::{HarnessError, Result};
 const MAX_FILE_BYTES: u64 = 1024 * 1024;
 
 /// Потолок числа файлов, читаемых из ревизии (bounded-работа: по одному
-/// `git show` на файл, как у ландшафт-диффа [`crate::landscape`]).
-const MAX_SNAPSHOT_CONTENT_FILES: usize = 2000;
+/// `git show` на файл, как у ландшафт-диффа [`crate::landscape`]) — дефолт,
+/// когда `[gate.arch_drift] max_files` не задан.
+pub const MAX_SNAPSHOT_CONTENT_FILES: usize = 2000;
+
+/// Пределы сканирования снимка (K6, ADR-046 Am.2): потолок числа читаемых
+/// файлов и подстроки путей-исключений — из секции `[gate.arch_drift]`.
+///
+/// `ignore` применяется И к снимку ревизии, И к снимку рабочего дерева:
+/// асимметрия база/голова породила бы ложные рёбра (компонент «исчезает» на
+/// одной стороне диффа). Дефолт — прежнее поведение (лимит 2000, без
+/// исключений), поэтому существующие вызовы не меняются.
+#[derive(Debug, Clone)]
+pub struct ScanLimits {
+    /// Потолок числа файлов с содержимым.
+    pub max_content_files: usize,
+    /// Подстроки путей-исключений (пустая подстрока игнорируется).
+    pub ignore: Vec<String>,
+}
+
+impl Default for ScanLimits {
+    fn default() -> Self {
+        Self {
+            max_content_files: MAX_SNAPSHOT_CONTENT_FILES,
+            ignore: Vec::new(),
+        }
+    }
+}
+
+impl ScanLimits {
+    /// Путь исключён (содержит одну из непустых подстрок `ignore`).
+    #[must_use]
+    pub fn ignored(&self, path: &str) -> bool {
+        self.ignore
+            .iter()
+            .any(|pat| !pat.is_empty() && path.contains(pat.as_str()))
+    }
+}
 
 /// Снимок одной ревизии: пути всех файлов и содержимое текстовых файлов,
 /// нужных сканерам (исходники импортов, конфиги, контракты, модель).
@@ -157,25 +192,42 @@ fn show_file(repo: &Path, sha: &str, path: &str) -> Result<String> {
 }
 
 /// Строит снимок ревизии `rev` репозитория `repo` (рабочее дерево не
-/// изменяется; вся работа — чтением из git).
+/// изменяется; вся работа — чтением из git) с дефолтными пределами.
 ///
 /// # Errors
 /// Не git-репозиторий, ссылка не разрешается в коммит, файлов для чтения
 /// больше [`MAX_SNAPSHOT_CONTENT_FILES`].
 pub fn snapshot_at(repo: &Path, rev: &str) -> Result<Snapshot> {
+    snapshot_at_with(repo, rev, &ScanLimits::default())
+}
+
+/// [`snapshot_at`] с явными пределами сканирования (лимит + `ignore` из
+/// `[gate.arch_drift]`, ADR-046 Am.2). `ignore` вычитает файлы и из списка, и
+/// из содержимого — симметрично снимку рабочего дерева.
+///
+/// # Errors
+/// Как у [`snapshot_at`]; число файлов с содержимым больше
+/// `limits.max_content_files`.
+pub fn snapshot_at_with(repo: &Path, rev: &str, limits: &ScanLimits) -> Result<Snapshot> {
     let sha = resolve_rev(repo, rev)?;
     let entries = ls_tree(repo, &sha)?;
-    let files: BTreeSet<String> = entries.iter().map(|(p, _)| p.clone()).collect();
+    let files: BTreeSet<String> = entries
+        .iter()
+        .map(|(p, _)| p.clone())
+        .filter(|p| !limits.ignored(p))
+        .collect();
     let to_read: Vec<&String> = entries
         .iter()
-        .filter(|(p, size)| *size <= MAX_FILE_BYTES && needs_content(p))
+        .filter(|(p, size)| *size <= MAX_FILE_BYTES && needs_content(p) && !limits.ignored(p))
         .map(|(p, _)| p)
         .collect();
-    if to_read.len() > MAX_SNAPSHOT_CONTENT_FILES {
+    if to_read.len() > limits.max_content_files {
         return Err(HarnessError::Control(format!(
-            "arch-diff: в ревизии {} более {MAX_SNAPSHOT_CONTENT_FILES} сканируемых файлов — \
-             снимок отклонён (ограничение bounded-работы); сузьте репозиторий или поднимите лимит",
-            &sha[..sha.len().min(12)]
+            "arch-diff: в ревизии {} более {} сканируемых файлов — снимок отклонён \
+             (ограничение bounded-работы); поднимите [gate.arch_drift] max_files или \
+             исключите пути через [gate.arch_drift] ignore",
+            &sha[..sha.len().min(12)],
+            limits.max_content_files
         )));
     }
     let mut contents = BTreeMap::new();
@@ -210,11 +262,29 @@ pub const WORKTREE_REV: &str = "worktree";
 /// Каталог недоступен/не читается, файлов для чтения больше
 /// [`MAX_SNAPSHOT_CONTENT_FILES`].
 pub fn snapshot_worktree(repo: &Path) -> Result<Snapshot> {
+    snapshot_worktree_with(repo, &ScanLimits::default())
+}
+
+/// [`snapshot_worktree`] с явными пределами сканирования (лимит + `ignore` из
+/// `[gate.arch_drift]`, ADR-046 Am.2). `ignore` — подстроки относительных
+/// путей: каталог под исключением не обходится, файл — не попадает ни в
+/// список, ни в содержимое.
+///
+/// # Errors
+/// Как у [`snapshot_worktree`]; число файлов с содержимым больше
+/// `limits.max_content_files`.
+pub fn snapshot_worktree_with(repo: &Path, limits: &ScanLimits) -> Result<Snapshot> {
     let mut files = BTreeSet::new();
     // (путь, размер) — как ls_tree: размер нужен отбору содержимого.
     let mut sized: BTreeMap<String, u64> = BTreeMap::new();
     let walker = walkdir::WalkDir::new(repo).follow_links(false).into_iter();
     for entry in walker.filter_entry(|e| {
+        if let Ok(rel) = e.path().strip_prefix(repo) {
+            let rel = rel.to_string_lossy().replace('\\', "/");
+            if !rel.is_empty() && limits.ignored(&rel) {
+                return false;
+            }
+        }
         if e.depth() > 0 && e.file_type().is_dir() {
             let name = e.file_name().to_string_lossy();
             !(name.starts_with('.') || crate::survey::SKIP_DIRS.contains(&name.as_ref()))
@@ -253,10 +323,12 @@ pub fn snapshot_worktree(repo: &Path) -> Result<Snapshot> {
         .filter(|(p, size)| **size <= MAX_FILE_BYTES && needs_content(p))
         .map(|(p, _)| p)
         .collect();
-    if to_read.len() > MAX_SNAPSHOT_CONTENT_FILES {
+    if to_read.len() > limits.max_content_files {
         return Err(HarnessError::Control(format!(
-            "arch-diff: в рабочем дереве более {MAX_SNAPSHOT_CONTENT_FILES} сканируемых файлов — \
-             снимок отклонён (ограничение bounded-работы); сузьте репозиторий или поднимите лимит"
+            "arch-diff: в рабочем дереве более {} сканируемых файлов — снимок отклонён \
+             (ограничение bounded-работы); поднимите [gate.arch_drift] max_files или \
+             исключите пути через [gate.arch_drift] ignore",
+            limits.max_content_files
         )));
     }
     let mut contents = BTreeMap::new();
@@ -362,5 +434,72 @@ pub(crate) mod tests {
         std::fs::create_dir_all(&repo).expect("mkdir");
         git_repo(&repo);
         assert!(snapshot_at(&repo, "no-such-ref").is_err());
+    }
+
+    // --- ADR-046 Am.2: ignore + max_files в сканере снимка ---
+
+    /// `ignore` (подстроки путей) вычитает файлы и из списка, и из содержимого
+    /// снимка рабочего дерева; непричастные пути остаются.
+    #[test]
+    fn worktree_ignore_filters_paths_and_contents() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("mkdir");
+        write_file(&repo, "env/conf.yaml", "a: 1\n");
+        write_file(&repo, "vendor/lib.yaml", "b: 2\n");
+        write_file(&repo, "src/app.yaml", "c: 3\n");
+        let limits = ScanLimits {
+            max_content_files: MAX_SNAPSHOT_CONTENT_FILES,
+            ignore: vec!["env/".to_string(), "vendor/".to_string()],
+        };
+        let snap = snapshot_worktree_with(&repo, &limits).expect("снимок");
+        assert!(snap.files.contains("src/app.yaml"), "{:?}", snap.files);
+        assert!(!snap.files.contains("env/conf.yaml"), "{:?}", snap.files);
+        assert!(!snap.files.contains("vendor/lib.yaml"), "{:?}", snap.files);
+        assert_eq!(snap.content("src/app.yaml"), Some("c: 3\n"));
+        assert!(snap.content("env/conf.yaml").is_none());
+    }
+
+    /// Тот же `ignore` применяется к снимку ревизии (база диффа): иначе
+    /// асимметрия база/голова порождает ложные рёбра.
+    #[test]
+    fn revision_ignore_filters_paths() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("mkdir");
+        write_file(&repo, "env/conf.yaml", "a: 1\n");
+        write_file(&repo, "src/app.yaml", "c: 3\n");
+        git_repo(&repo);
+        let limits = ScanLimits {
+            max_content_files: MAX_SNAPSHOT_CONTENT_FILES,
+            ignore: vec!["env/".to_string()],
+        };
+        let snap = snapshot_at_with(&repo, "HEAD", &limits).expect("снимок");
+        assert!(snap.files.contains("src/app.yaml"), "{:?}", snap.files);
+        assert!(!snap.files.contains("env/conf.yaml"), "{:?}", snap.files);
+    }
+
+    /// Превышение лимита — ошибка, называющая конфиг-ключ
+    /// `[gate.arch_drift] max_files` (диагностика обязана указывать, что крутить).
+    #[test]
+    fn worktree_limit_exceeded_names_config_key() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("mkdir");
+        write_file(&repo, "src/a.yaml", "a: 1\n");
+        write_file(&repo, "src/b.yaml", "b: 2\n");
+        let limits = ScanLimits {
+            max_content_files: 1,
+            ignore: Vec::new(),
+        };
+        let err = snapshot_worktree_with(&repo, &limits).expect_err("лимит");
+        let text = err.to_string();
+        assert!(text.contains("[gate.arch_drift] max_files"), "{text}");
+        // Поднятый лимит — проходит.
+        let ok = ScanLimits {
+            max_content_files: 10,
+            ignore: Vec::new(),
+        };
+        assert!(snapshot_worktree_with(&repo, &ok).is_ok());
     }
 }

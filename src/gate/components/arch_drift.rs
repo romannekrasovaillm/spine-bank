@@ -92,7 +92,18 @@ pub(in crate::gate) fn component_arch_drift(
             );
         }
     };
-    let base_scan = match arch_diff::scan_revision(repo, rev, &options.diff_globs) {
+    // ADR-046 Am.2: пределы снимка из `[gate.arch_drift]` — `max_files`
+    // (большие легаси-кейсы) и `ignore` (подстроки путей, напр. `env/`). Одни
+    // и те же пределы для базы и головы: иначе исключённый путь исчезнет на
+    // одной стороне и родит ложные рёбра.
+    let limits = arch_diff::ScanLimits {
+        max_content_files: options
+            .arch_drift
+            .max_files
+            .unwrap_or(arch_diff::MAX_SNAPSHOT_CONTENT_FILES),
+        ignore: options.arch_drift.ignore.clone(),
+    };
+    let base_scan = match arch_diff::scan_revision_with(repo, rev, &options.diff_globs, &limits) {
         Ok(scan) => scan,
         Err(e) => {
             return GateComponent::fail(
@@ -102,7 +113,7 @@ pub(in crate::gate) fn component_arch_drift(
             );
         }
     };
-    let head_scan = match arch_diff::scan_worktree(repo, &options.diff_globs) {
+    let head_scan = match arch_diff::scan_worktree_with(repo, &options.diff_globs, &limits) {
         Ok(scan) => scan,
         Err(e) => {
             return GateComponent::fail(

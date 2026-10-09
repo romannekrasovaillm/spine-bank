@@ -420,7 +420,7 @@ impl GateOptions {
             route: None,
             agent_range: None,
             drift: cfg.drift.clone(),
-            arch_drift: cfg.gate.arch_drift,
+            arch_drift: cfg.gate.arch_drift.clone(),
             resources: None,
         }
     }
