@@ -5085,3 +5085,58 @@ fn survey_relative_root_forms_match_absolute() {
         .failure()
         .stderr(contains("survey_empty_walk"));
 }
+
+/// B9: пользовательская ошибка CLI не печатает стектрейс, даже когда
+/// `RUST_BACKTRACE=1` (типично для CI, где дефолтный `anyhow`-Debug сыпал
+/// стеком `<unknown>`-кадров). Край печатает `Error: …` + `Caused by`, а
+/// полный стек — только по явному `ARCH_BE_DEBUG=1`.
+#[test]
+fn b9_cli_error_hides_backtrace_under_rust_backtrace_env() {
+    let home = tempfile::tempdir().expect("tempdir home");
+    // Пользовательская ошибка: файл ограничений не существует — anyhow-цепочка
+    // с источником (os error 2), ранее печаталась Debug-ом со стеком.
+    let ghost = home.path().join("ghost").join("CONSTRAINTS.yaml");
+    let out = arch_cmd(home.path())
+        .env("RUST_BACKTRACE", "1")
+        .args([
+            "control",
+            "check",
+            home.path().to_str().expect("utf8"),
+            "--constraints",
+            ghost.to_str().expect("utf8"),
+        ])
+        .output()
+        .expect("spawn arch-be");
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(out.status.code(), Some(1), "вывод: {all}");
+    assert!(all.contains("Error: "), "нет края `Error:`: {all}");
+    assert!(
+        all.contains("Caused by:"),
+        "нет цепочки `Caused by:`: {all}"
+    );
+    assert!(
+        !all.contains("stack backtrace") && !all.contains("<unknown>"),
+        "стектрейс обязан прятаться за ARCH_BE_DEBUG: {all}"
+    );
+
+    // Явный ARCH_BE_DEBUG=1 возвращает полный Debug-вывод со стеком.
+    let out = arch_cmd(home.path())
+        .env("RUST_BACKTRACE", "1")
+        .env("ARCH_BE_DEBUG", "1")
+        .args([
+            "control",
+            "check",
+            home.path().to_str().expect("utf8"),
+            "--constraints",
+            ghost.to_str().expect("utf8"),
+        ])
+        .output()
+        .expect("spawn arch-be debug");
+    let all = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "вывод: {all}");
+    assert!(all.contains("Error: "), "нет края `Error:`: {all}");
+}
