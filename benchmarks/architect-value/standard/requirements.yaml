@@ -1,0 +1,116 @@
+# requirements.yaml — карта выразимости стандарта «Java-сервисы» (приложение C).
+#
+# Метрика 7 таблицы §9: «требования стандарта механизованы» — доля требований
+# S1–S12, для которых в `CONSTRAINTS.java-services.yaml` есть ИСПОЛНЯЕМАЯ проверка
+# (`type` ≠ `unverifiable`). Считается прогонщиком `runners/control_standard.py`
+# по фактическому содержимому CONSTRAINTS-файла, а не по этой карте (карта —
+# ожидание, зафиксированное до прогона).
+#
+#   baseline_expressibility = 7   (на 0.3.17: S1, S3, S4, S6, S7, S8, S11)
+#   target_expressibility   = 11  (цель 0.4.0, волна S)
+#
+# `expressible`: yes — полная исполняемая проверка; partial — правило есть, но
+# покрытие частичное (считается выразимым); no — `unverifiable: true`.
+# `wave_s_upgrade` — чем закрывается разрыв (см. §3 задачи).
+version: "2026.10"
+standard: JAVA-SERVICES
+source: "TASK-Spine-0.4.0-architect-value.md §C.1"
+baseline_expressibility: 7
+target_expressibility: 11
+requirements:
+  - id: S1
+    title: "Тех-радар Hold: встраиваемые СУБД (h2, hsqldb) не в runtime прода"
+    rule_id: JSS-001
+    rule_type: deny_dependency
+    expressible: partial
+    baseline: yes
+    note: "Maven разбирается; Gradle — нет; scope (test/runtime) не различается."
+    wave_s_upgrade: "парсинг build.gradle + scope-aware deny_dependency (applies_to)"
+  - id: S2
+    title: "log4j-core < 2.17.1 запрещён"
+    rule_id: JSS-002
+    rule_type: null
+    expressible: no
+    baseline: no
+    note: "Диапазоны версий не выражаются."
+    wave_s_upgrade: "парсинг диапазонов версий манифестов"
+  - id: S3
+    title: "Каждый бизнес-сервис публикует OpenAPI"
+    rule_id: JSS-003
+    rule_type: dir_must_have_file
+    expressible: yes
+    baseline: yes
+    note: "Хрупкий glob (`**/src/main/resources` как признак сервиса)."
+    wave_s_upgrade: "each_module по признаку сервиса"
+  - id: S4
+    title: "Actuator в каждом сервисе"
+    rule_id: JSS-004
+    rule_type: each_file_must_contain
+    expressible: yes
+    baseline: yes
+    note: "Корневой манифест-агрегатор исключён."
+    wave_s_upgrade: "each_module по набору сервисов"
+  - id: S5
+    title: "Исходящие вызовы только через circuit breaker"
+    rule_id: JSS-005
+    rule_type: null
+    expressible: no
+    baseline: no
+    note: "Условное правило."
+    wave_s_upgrade: "условные правила (applies_to + pattern вызова)"
+  - id: S6
+    title: "Домен не зависит от адаптеров/фреймворка"
+    rule_id: JSS-006
+    rule_type: dependency_direction
+    expressible: yes
+    baseline: yes
+    note: "B4 нормализует слэш/точечную нотацию; FQN без import и wildcard слепы."
+    wave_s_upgrade: "ArchUnit-мост (type: archunit) ловит FQN/wildcard"
+  - id: S7
+    title: "Входящий адаптер не обращается к исходящему"
+    rule_id: JSS-007
+    rule_type: dependency_direction
+    expressible: yes
+    baseline: yes
+    note: "То же ограничение, что у S6."
+    wave_s_upgrade: "ArchUnit-мост (type: archunit)"
+  - id: S8
+    title: "Нет паролей литералом в конфиге"
+    rule_id: JSS-008
+    rule_type: must_not_contain
+    expressible: yes
+    baseline: yes
+    note: "Построчная проверка; многострочные формы слепы."
+    wave_s_upgrade: "multiline: true"
+  - id: S9
+    title: "Database-per-service"
+    rule_id: JSS-009
+    rule_type: null
+    expressible: no
+    baseline: no
+    note: "Нужна карта БД↔сервис."
+    wave_s_upgrade: "модель БД + context_boundary"
+  - id: S10
+    title: "Исходящие хосты только из реестра интеграций"
+    rule_id: JSS-010
+    rule_type: null
+    expressible: no
+    baseline: no
+    note: "Нужен реестр интеграций (INT-*)."
+    wave_s_upgrade: "реестр интеграций в модели"
+  - id: S11
+    title: "Java 17+"
+    rule_id: JSS-011
+    rule_type: must_contain
+    expressible: yes
+    baseline: yes
+    note: "Хрупкий regex; нестандартные формы версии не покрыты."
+    wave_s_upgrade: "парсинг версий манифестов"
+  - id: S12
+    title: "Нет field injection"
+    rule_id: JSS-012
+    rule_type: null
+    expressible: no
+    baseline: no
+    note: "Требуется многострочный шаблон «аннотация над полем»."
+    wave_s_upgrade: "multiline: true"

@@ -1,0 +1,98 @@
+# ground_truth/boutique.yaml — эталон приложения B (Online Boutique).
+# Источник истины: kubernetes-manifests/*.yaml (env *_ADDR) +
+# kustomize/components/shopping-assistant/shoppingassistantservice.yaml.
+# Пиннутый SHA — repos.lock (38e7348).
+repo: boutique
+sha: 38e7348eb289eb5b87c0c6e8cb19ced0449dc389
+level: microservices
+provenance: kubernetes-manifests/, kustomize/components/shopping-assistant/
+
+components:
+  - name: adservice
+    kind: service
+  - name: cartservice
+    kind: service
+  - name: checkoutservice
+    kind: service
+  - name: currencyservice
+    kind: service
+  - name: emailservice
+    kind: service
+  - name: frontend
+    kind: service
+  - name: loadgenerator
+    kind: service
+  - name: paymentservice
+    kind: service
+  - name: productcatalogservice
+    kind: service
+  - name: recommendationservice
+    kind: service
+  - name: shippingservice
+    kind: service
+  - name: shoppingassistantservice
+    kind: service
+
+edges:
+  - from: cartservice
+    to: redis-cart
+    via: env
+  - from: checkoutservice
+    to: cartservice
+    via: env
+  - from: checkoutservice
+    to: currencyservice
+    via: env
+  - from: checkoutservice
+    to: emailservice
+    via: env
+  - from: checkoutservice
+    to: paymentservice
+    via: env
+  - from: checkoutservice
+    to: productcatalogservice
+    via: env
+  - from: checkoutservice
+    to: shippingservice
+    via: env
+  - from: frontend
+    to: adservice
+    via: env
+  - from: frontend
+    to: cartservice
+    via: env
+  - from: frontend
+    to: checkoutservice
+    via: env
+  - from: frontend
+    to: currencyservice
+    via: env
+  - from: frontend
+    to: productcatalogservice
+    via: env
+  - from: frontend
+    to: recommendationservice
+    via: env
+  - from: frontend
+    to: shippingservice
+    via: env
+  - from: frontend
+    to: shoppingassistantservice
+    via: env
+  - from: loadgenerator
+    to: frontend
+    via: env
+  - from: recommendationservice
+    to: productcatalogservice
+    via: env
+
+stores:
+  - name: redis-cart
+    kind: redis
+    via: env
+
+external:
+  - name: alloydb
+    via: env
+  - name: vertex-ai
+    via: env

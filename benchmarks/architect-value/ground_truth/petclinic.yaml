@@ -1,0 +1,104 @@
+# ground_truth/petclinic.yaml — эталон приложения B (Spring PetClinic microservices).
+# Источник истины: root pom.xml (<modules>), */src/main/resources/application.yml
+# (config / lb://-маршруты), код genai-service (VectorStoreController, AIDataProvider).
+# Пиннутый SHA — repos.lock (1d76b00).
+repo: petclinic
+sha: 1d76b00d683e86b62867a6bf59530f8ab301244f
+level: microservices
+provenance: pom.xml, spring-petclinic-api-gateway/application.yml, genai-service/
+
+components:
+  - name: admin-server
+    kind: service
+  - name: api-gateway
+    kind: service
+  - name: config-server
+    kind: service
+  - name: customers-service
+    kind: service
+  - name: discovery-server
+    kind: service
+  - name: genai-service
+    kind: service
+  - name: vets-service
+    kind: service
+  - name: visits-service
+    kind: service
+
+# Бизнес-рёбра (без инфраструктурных config/discovery).
+edges:
+  - from: api-gateway
+    to: customers-service
+    via: route
+  - from: api-gateway
+    to: vets-service
+    via: route
+  - from: api-gateway
+    to: visits-service
+    via: route
+  - from: api-gateway
+    to: genai-service
+    via: route
+  - from: genai-service
+    to: vets-service
+    via: stub
+  - from: genai-service
+    to: customers-service
+    via: stub
+
+# Инфраструктурные рёбра — в метрику 3 не входят (учтены отдельно).
+infra_edges:
+  - from: admin-server
+    to: config-server
+    via: env
+  - from: admin-server
+    to: discovery-server
+    via: env
+  - from: api-gateway
+    to: config-server
+    via: env
+  - from: api-gateway
+    to: discovery-server
+    via: env
+  - from: customers-service
+    to: config-server
+    via: env
+  - from: customers-service
+    to: discovery-server
+    via: env
+  - from: genai-service
+    to: config-server
+    via: env
+  - from: genai-service
+    to: discovery-server
+    via: env
+  - from: vets-service
+    to: config-server
+    via: env
+  - from: vets-service
+    to: discovery-server
+    via: env
+  - from: visits-service
+    to: config-server
+    via: env
+  - from: visits-service
+    to: discovery-server
+    via: env
+
+# СУБД по сервису (database-per-service).
+stores:
+  - name: customers-db
+    kind: mysql
+    via: env
+  - name: vets-db
+    kind: mysql
+    via: env
+  - name: visits-db
+    kind: mysql
+    via: env
+
+external:
+  - name: openai
+    via: env
+  - name: azure-openai
+    via: env

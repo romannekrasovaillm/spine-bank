@@ -1,0 +1,119 @@
+# buckpal_c2.yaml — засевы C.2 (12 дефектов в buckpal) для метрики 8.
+#
+# Источник: `TASK-Spine-0.4.0-architect-value.md` §C.2. Каждый засев — ОДНА
+# правка чистого клона buckpal (pinned SHA ниже) → `control check` стандартом
+# `standard/CONSTRAINTS.java-services.yaml` → поймано ли правило-владелец.
+#
+#   Прогонщик: `runners/seed_buckpal.py` (копия клона → правка → check → отчёт).
+#   Метрика 8 (§9): детекция Java-нотацией / slash | до 2/12 / 7/12 | 0.4.0 ≥11/12.
+#
+# `owner_rule` — правило-владелец в стандарте. `detection`:
+#   caught — правило-владелец даёт находку на засеве;
+#   missed — находок нет (слепое пятно типа правила);
+#   clean  — контроль ложного срабатывания (правка НЕ должна давать находок).
+# `expected_baseline` — исход §C.2 на 0.3.16; `expected_target` — цель 0.4.0
+# (любой нотацией). Прогонщик печатает ФАКТ на текущем бинаре; расхождение с
+# `expected_baseline` — запись в DEVIATIONS.md, порог §9 не двигается.
+version: "2026.10"
+suite: C2
+repo: buckpal
+base_sha: dc819c66640be4f42100a622b9e97b1e82ad75a7
+standard: standard/CONSTRAINTS.java-services.yaml
+insert_position: eof
+seeds:
+  - id: V01
+    title: "import адаптера в домене"
+    target: src/main/java/io/reflectoring/buckpal/application/domain/model/Account.java
+    insert: "import io.reflectoring.buckpal.adapter.out.persistence.AccountJpaEntity;"
+    owner_rule: s6_domain_independent
+    notation: slash
+    expected_baseline: caught
+    expected_target: caught
+  - id: V02
+    title: "FQN адаптера в домене (без import)"
+    target: src/main/java/io/reflectoring/buckpal/application/domain/model/Account.java
+    insert: "private io.reflectoring.buckpal.adapter.out.persistence.AccountJpaEntity leaked;"
+    owner_rule: s6_domain_independent
+    notation: java
+    expected_baseline: missed
+    expected_target: caught
+  - id: V03
+    title: "import репозитория persistence во входящем web-адаптере"
+    target: src/main/java/io/reflectoring/buckpal/adapter/in/web/SendMoneyController.java
+    insert: "import io.reflectoring.buckpal.adapter.out.persistence.SpringDataAccountRepository;"
+    owner_rule: s7_inbound_no_outbound
+    notation: slash
+    expected_baseline: caught
+    expected_target: caught
+  - id: V04
+    title: "wildcard-import адаптера в домене"
+    target: src/main/java/io/reflectoring/buckpal/application/domain/model/Account.java
+    insert: "import io.reflectoring.buckpal.adapter.out.persistence.*;"
+    owner_rule: s6_domain_independent
+    notation: slash
+    expected_baseline: missed
+    expected_target: caught
+  - id: V05
+    title: "jakarta.persistence в домене"
+    target: src/main/java/io/reflectoring/buckpal/application/domain/model/Account.java
+    insert: "import jakarta.persistence.Entity;"
+    owner_rule: s6_domain_independent
+    notation: slash
+    expected_baseline: caught
+    expected_target: caught
+  - id: V06
+    title: "static-import из адаптера в домене"
+    target: src/main/java/io/reflectoring/buckpal/application/domain/model/Account.java
+    insert: "import static io.reflectoring.buckpal.adapter.out.persistence.AccountMapper.mapToEntity;"
+    owner_rule: s6_domain_independent
+    notation: slash
+    expected_baseline: caught
+    expected_target: caught
+  - id: V07
+    title: "пароль литералом в application.yml"
+    target: src/main/resources/application.yml
+    insert: "password: hunter2"
+    owner_rule: s8_no_literal_password
+    notation: n/a
+    expected_baseline: caught
+    expected_target: caught
+  - id: V08
+    title: "h2 runtimeOnly в build.gradle (Gradle)"
+    target: build.gradle
+    insert: "dependencies { runtimeOnly 'com.h2database:h2' }"
+    owner_rule: s1_no_embedded_db_in_prod
+    notation: gradle
+    expected_baseline: missed
+    expected_target: caught
+  - id: V09
+    title: "hsqldb в build.gradle (Gradle)"
+    target: build.gradle
+    insert: "dependencies { runtimeOnly 'org.hsqldb:hsqldb' }"
+    owner_rule: s1_no_embedded_db_in_prod
+    notation: gradle
+    expected_baseline: missed
+    expected_target: caught
+  - id: V10
+    title: "Spring Web в домене"
+    target: src/main/java/io/reflectoring/buckpal/application/domain/model/Account.java
+    insert: "import org.springframework.web.bind.annotation.RestController;"
+    owner_rule: s6_domain_independent
+    notation: slash
+    expected_baseline: caught
+    expected_target: caught
+  - id: V11
+    title: "new <FQN> исходящего адаптера во web-адаптере"
+    target: src/main/java/io/reflectoring/buckpal/adapter/in/web/SendMoneyController.java
+    insert: "Object x = new io.reflectoring.buckpal.adapter.out.persistence.AccountJpaEntity();"
+    owner_rule: s7_inbound_no_outbound
+    notation: java
+    expected_baseline: missed
+    expected_target: caught
+  - id: V12
+    title: "закомментированный import (контроль ложного срабатывания)"
+    target: src/main/java/io/reflectoring/buckpal/application/domain/model/Account.java
+    insert: "// import io.reflectoring.buckpal.adapter.out.persistence.AccountJpaEntity;"
+    owner_rule: s6_domain_independent
+    notation: slash
+    expected_baseline: clean
+    expected_target: clean

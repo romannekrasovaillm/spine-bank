@@ -1,0 +1,153 @@
+# CONSTRAINTS.java-services.yaml — стандарт «Java-сервисы» (приложение C задачи).
+#
+# 12 требований S1–S12, зафиксированных в `TASK-Spine-0.4.0-architect-value.md`
+# §C.1. Задача P1 — механизовать их ровно настолько, насколько это позволяют
+# типы правил 0.3.17, и ЗАФИКСИРОВАТЬ долю выразимых (метрика 7 таблицы §9).
+#
+# Ожидание на 0.3.17 — 7 из 12 (исполняемая проверка есть у S1, S3, S4, S6, S7,
+# S8, S11). Остальные (S2, S5, S9, S10, S12) помечены `unverifiable: true`:
+# движок их не исполняет, они видны в отчёте как осознанно неполные. Цель 0.4.0
+# (волна S) — ≥ 11/12; карта апгрейда — в `requirements.yaml`.
+#
+# Схема — src/control/types.rs (FitnessRule). Типы: must_contain,
+# must_not_contain, each_file_must_contain, file_exists, dir_must_have_file,
+# max_age, command_succeeds, dependency_direction, context_boundary, archunit,
+# deny_dependency. Шаблонные карточки (owner/rationale/reference/expiry) движок
+# переносит в находки и читает обход `change_impact`.
+version: "2026.10"
+id: JAVA-SERVICES
+rules:
+  # S1. Встраиваемые СУБД (h2, hsqldb) не в runtime прода.
+  # Выразимо ЧАСТИЧНО: deny_dependency разбирает `pom.xml` (Maven), но не
+  # build.gradle (Gradle — тех-радар §2.4, metric 10) и не различает scope
+  # (test/runtime попадают наравне с compile). Gradle-выражение — волна S.
+  - id: JSS-001
+    name: s1_no_embedded_db_in_prod
+    type: deny_dependency
+    manifests: ["**/pom.xml"]
+    deny: [h2, hsqldb]
+    severity: warn
+    owner: "@arch-board"
+    rationale: "Тех-радар Hold: встраиваемые СУБД (h2, hsqldb) недопустимы в runtime прода."
+    reference: "TECH-RADAR hold-embedded-db"
+
+  # S2. log4j-core < 2.17.1 запрещён. Диапазоны версий в манифестах имеющимся
+  # набором правил не выражаются (нужен парсинг версий — волна S).
+  - id: JSS-002
+    name: s2_log4j_min_version
+    unverifiable: true
+    severity: error
+    owner: "@dka-security"
+    rationale: "log4j-core < 2.17.1 запрещён; нужен разбор диапазонов версий — не выразимо."
+
+  # S3. Каждый бизнес-сервис публикует OpenAPI. Выразимо хрупким glob'ом ×
+  # dir_must_have_file (признак сервиса — каталог `src/main/resources`).
+  - id: JSS-003
+    name: s3_openapi_per_service
+    type: dir_must_have_file
+    glob: "**/src/main/resources"
+    path: "openapi.yaml"
+    severity: warn
+    owner: "@arch-board"
+    rationale: "Каждый сервис публикует машиночитаемый контракт OpenAPI."
+    reference: "AD-API-CONTRACT"
+
+  # S4. actuator в каждом сервисе. Выразимо × each_file_must_contain по манифесту
+  # сборки; корневой манифест-агрегатор исключается (он не сервис).
+  - id: JSS-004
+    name: s4_actuator_per_service
+    type: each_file_must_contain
+    glob: ["**/pom.xml", "**/build.gradle", "**/build.gradle.kts"]
+    exclude_glob: ["pom.xml", "build.gradle", "build.gradle.kts"]
+    pattern: "spring-boot-starter-actuator"
+    severity: warn
+    owner: "@sre"
+    rationale: "Каждый сервис отдаёт health/metrics через actuator."
+
+  # S5. Исходящие вызовы — только через circuit breaker. Условное правило
+  # (зависит от того, есть ли у вызова сетевой характер) — не выразимо.
+  - id: JSS-005
+    name: s5_outbound_circuit_breaker
+    unverifiable: true
+    severity: warn
+    owner: "@arch-board"
+    rationale: "Исходящие вызовы идут только через circuit breaker — условное правило."
+
+  # S6. Домен не зависит от адаптеров и фреймворка. Выразимо ×
+  # dependency_direction (B4 нормализует и слэш-, и точечную нотацию для *.java);
+  # текстовая проверка импортов слепа к FQN-обращениям без import (V02/V11) и
+  # к wildcard-импорту — это ловит только ArchUnit-мост (C.3).
+  - id: JSS-006
+    name: s6_domain_independent
+    type: dependency_direction
+    glob: "**/application/domain/**/*.java"
+    forbid:
+      - "io/reflectoring/buckpal/adapter"
+      - "org/springframework"
+      - "jakarta/persistence"
+      - "javax/persistence"
+    severity: error
+    owner: "@arch-board"
+    rationale: "Домен не зависит от адаптеров и фреймворка (AD-LAYER-DOMAIN, hexagonal)."
+    reference: "AD-LAYER-DOMAIN"
+
+  # S7. Входящий адаптер не обращается к исходящему напрямую (только через порт).
+  - id: JSS-007
+    name: s7_inbound_no_outbound
+    type: dependency_direction
+    glob: "**/adapter/in/**/*.java"
+    forbid:
+      - "io/reflectoring/buckpal/adapter/out"
+    severity: error
+    owner: "@arch-board"
+    rationale: "Входящий адаптер не зависит от исходящего (AD-LAYER-PORTS)."
+    reference: "AD-LAYER-PORTS"
+
+  # S8. Нет паролей литералом в конфиге. Выразимо × must_not_contain построчно;
+  # проверка слепа к многострочным и нестандартным формам (волна S — scope).
+  - id: JSS-008
+    name: s8_no_literal_password
+    type: must_not_contain
+    glob: ["**/application*.yml", "**/application*.yaml"]
+    pattern: "^\\s*password\\s*:\\s*['\"]?[A-Za-z0-9_]"
+    severity: warn
+    owner: "@dka-security"
+    rationale: "Пароли не хранятся литералом в конфиге — только из секрет-хранилища."
+
+  # S9. database-per-service. Требует карты БД↔сервис — текстовая проверка
+  # не отличает общую схему от раздельных баз. Не выразимо без модели.
+  - id: JSS-009
+    name: s9_database_per_service
+    unverifiable: true
+    severity: warn
+    owner: "@dka-data"
+    rationale: "Database-per-service — нужна карта БД↔сервис, текстовая проверка слепа."
+
+  # S10. Исходящие хосты — только из реестра интеграций. Нужен реестр INT-* и
+  # сопоставление с конфигами — не выразимо набором правил 0.3.17.
+  - id: JSS-010
+    name: s10_hosts_from_registry
+    unverifiable: true
+    severity: warn
+    owner: "@arch-board"
+    rationale: "Исходящие хосты — только из реестра интеграций (INT-*); нужна модель."
+
+  # S11. Java 17+. Выразимо хрупким regex по манифесту сборки (pom/gradle);
+  # произвольные формы версии не покрываются.
+  - id: JSS-011
+    name: s11_java_17_plus
+    type: must_contain
+    glob: ["**/pom.xml", "**/build.gradle", "**/build.gradle.kts"]
+    pattern: "(?i)(<java\\.version>\\s*(?:1[7-9]|2[0-9])|VERSION_(?:17|21)|sourceCompatibility\\s*=\\s*['\"]?(?:1[7-9]|2[0-9]))"
+    severity: warn
+    owner: "@arch-board"
+    rationale: "Сборка на Java 17+."
+
+  # S12. Нет field injection (@Autowired на поле). Проверка требует
+  # многострочного шаблона «аннотация над полем» — построчный движок её не берёт.
+  - id: JSS-012
+    name: s12_no_field_injection
+    unverifiable: true
+    severity: warn
+    owner: "@arch-board"
+    rationale: "Нет field injection (@Autowired на поле) — многострочный шаблон."

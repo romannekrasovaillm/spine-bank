@@ -1,0 +1,51 @@
+# ground_truth/buckpal.yaml — эталон приложения B (гексагон, Gradle).
+# Источник истины: собственные ArchUnit-правила репо —
+# src/test/java/io/reflectoring/buckpal/DependencyRuleTests.java.
+# Пиннутый SHA — repos.lock (dc819c6).
+repo: buckpal
+sha: dc819c66640be4f42100a622b9e97b1e82ad75a7
+level: package
+provenance: src/test/java/io/reflectoring/buckpal/DependencyRuleTests.java
+
+# Зоны = пакеты верхнего уровня (name: z.name в DependencyRuleTests).
+components:
+  - name: application.domain
+    kind: package
+  - name: application.port
+    kind: package
+  - name: adapter.in.web
+    kind: package
+  - name: adapter.out.persistence
+    kind: package
+
+# Разрешённые зависимости между зонами (по правилам ArchUnit; направление from→to).
+edges:
+  - from: adapter.in.web
+    to: application.port
+    via: import
+  - from: adapter.out.persistence
+    to: application.port
+    via: import
+
+# application.domain не зависит ни от адаптеров, ни от портов:
+# ожидаемые «нулевые» зависимости (инвариант гексагона).
+forbidden_edges:
+  - from: application.domain
+    to: adapter.in.web
+    via: import
+  - from: application.domain
+    to: adapter.out.persistence
+    via: import
+  - from: application.domain
+    to: application.port
+    via: import
+  - from: adapter.in.web
+    to: adapter.out.persistence
+    via: import
+
+stores:
+  - name: account-db
+    kind: h2
+    via: env
+
+external: []

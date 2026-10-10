@@ -1,0 +1,37 @@
+# ground_truth/library.yaml — эталон приложения B (DDD, Maven, ddd-by-examples/library).
+# Источник истины: docs/ (карта контекстов) и пакеты io.pillopl.library.*.
+# Пиннутый SHA — repos.lock (5225ff7).
+repo: library
+sha: 5225ff7a0f0c1e0751b91cdd64f925cd001d7555
+level: contexts
+provenance: docs/, src/main/java/io/pillopl/library/
+
+# Контексты = bounded contexts верхнего уровня.
+components:
+  - name: lending
+    kind: context
+  - name: catalogue
+    kind: context
+  - name: commons
+    kind: context
+
+# Направление зависимостей: lending → catalogue и commons; catalogue → commons;
+# catalogue не зависит от lending (односторонняя связь контекстов).
+edges:
+  - from: lending
+    to: catalogue
+    via: import
+  - from: lending
+    to: commons
+    via: import
+  - from: catalogue
+    to: commons
+    via: import
+
+forbidden_edges:
+  - from: catalogue
+    to: lending
+    via: import
+
+stores: []
+external: []
