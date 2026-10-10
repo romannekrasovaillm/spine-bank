@@ -1117,9 +1117,15 @@ impl Tool for ReverseSurveyTool {
     }
 
     async fn call(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput> {
-        let Some(repo) = args.get("repo").and_then(Value::as_str) else {
+        // Каноническое имя — `path` (объявлено в spec как required); `repo` —
+        // историческое имя, сохранено для обратной совместимости (B2).
+        let Some(repo) = args
+            .get("path")
+            .or_else(|| args.get("repo"))
+            .and_then(Value::as_str)
+        else {
             return Ok(ToolOutput::err(
-                "reverse_survey: нужен параметр `repo` (каталог репозитория)",
+                "reverse_survey: обязательный аргумент 'path' (string; историческое имя 'repo') отсутствует",
             ));
         };
         let repo = ctx.resolve(repo);
@@ -1448,22 +1454,29 @@ mod tests {
             tmp.path().to_path_buf(),
             std::sync::Arc::new(crate::config::Config::default()),
         );
-        // Относительный путь от cwd.
+        // Канонический аргумент `path` (объявлен в spec как required) обязан
+        // работать так же, как историческое имя `repo` (B2).
         let out = tool
-            .call(json!({"repo": "repo", "out": "rev"}), &ctx)
+            .call(json!({"path": "repo", "out": "rev"}), &ctx)
             .await
             .expect("call");
         assert!(!out.is_error, "{}", out.content);
         assert!(out.content.contains("[confirmed]"), "{}", out.content);
         assert!(out.content.contains("rev/survey.md"), "{}", out.content);
         assert!(repo.join("rev/survey.md").is_file());
-        // Без repo — мягкая ошибка, не паника.
+        // Историческое имя `repo` продолжает работать (обратная совместимость).
+        let out = tool
+            .call(json!({"repo": "repo", "out": "rev2"}), &ctx)
+            .await
+            .expect("call repo");
+        assert!(!out.is_error, "{}", out.content);
+        // Без path/repo — мягкая ошибка, не паника; в тексте — каноническое имя.
         let out = tool.call(json!({}), &ctx).await.expect("call empty");
         assert!(out.is_error);
-        assert!(out.content.contains("repo"), "{}", out.content);
+        assert!(out.content.contains("path"), "{}", out.content);
         // Несуществующий репозиторий — мягкая ошибка.
         let out = tool
-            .call(json!({"repo": "ghost"}), &ctx)
+            .call(json!({"path": "ghost"}), &ctx)
             .await
             .expect("call ghost");
         assert!(out.is_error);
