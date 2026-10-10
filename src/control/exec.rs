@@ -1524,6 +1524,44 @@ mod tests {
         assert!(w.message.contains("'ghost_module'"), "{w:?}");
     }
 
+    /// B5 (0.4.0): для JVM текстовая проверка импортов честно слепа к
+    /// FQN-обращениям без `import` (например `new io.reflectoring.persistence.X()`).
+    /// Вакуумный префикс JVM-правила обязан назвать это и указать выход —
+    /// ArchUnit-мост (`type: archunit`), который видит байткод/типы, а не текст.
+    #[test]
+    fn fitness_dependency_direction_jvm_vacuous_suggests_archunit() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        write_file(
+            &repo,
+            "src/main/java/io/reflectoring/domain/DomainService.java",
+            "package io.reflectoring.domain;\nimport java.util.List;\n",
+        );
+        let constraints = write_file(
+            dir.path(),
+            "CONSTRAINTS.yaml",
+            "rules:\n\
+             \x20 - name: domain_pure\n\
+             \x20   type: dependency_direction\n\
+             \x20   glob: '**/*.java'\n\
+             \x20   forbid: ['io.reflectoring.persistence']\n",
+        );
+        let report = check(&repo, &constraints).unwrap();
+        let w = report
+            .issues
+            .iter()
+            .find(|i| i.rule == "rule_vacuous_prefix")
+            .unwrap_or_else(|| panic!("ожидался rule_vacuous_prefix: {:?}", report.issues));
+        assert!(
+            w.message.contains("ArchUnit"),
+            "FQN-слепота JVM-проверки не названа: {w:?}"
+        );
+        assert!(
+            w.message.contains("io.reflectoring.persistence"),
+            "префикс не назван: {w:?}"
+        );
+    }
+
     // --- context_boundary (ADR-030) ----------------------------------------
 
     /// Репозиторий с моделью из двух контекстов и python-кодом:

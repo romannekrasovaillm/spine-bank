@@ -423,14 +423,23 @@ pub(super) fn run_rule(
                         .iter()
                         .any(|m| crate::imports::module_prefix_match(m, &e.norm))
                     {
+                        let mut msg = format!(
+                            "префикс '{}' не встречается среди импортов → проверьте нотацию (правило '{}')",
+                            e.raw, rule.name
+                        );
+                        // B5 (0.4.0): для JVM/Python-нотации текстовая проверка
+                        // честно слепа к FQN-обращениям без import — называем
+                        // это и указываем выход (ArchUnit-мост по байткоду).
+                        if dotted {
+                            msg.push_str(
+                                "; FQN без import не анализируется — для JVM используйте ArchUnit-мост (type: archunit)",
+                            );
+                        }
                         let mut finding = LintIssue {
                             file: PathBuf::from("CONSTRAINTS.yaml"),
                             line: 0,
                             rule: "rule_vacuous_prefix".into(),
-                            message: format!(
-                                "префикс '{}' не встречается среди импортов → проверьте нотацию (правило '{}')",
-                                e.raw, rule.name
-                            ),
+                            message: msg,
                             severity: "warn".into(),
                             ..LintIssue::default()
                         };

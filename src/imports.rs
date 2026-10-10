@@ -89,7 +89,10 @@ pub fn extract_imports(rel: &str, content: &str) -> Result<Vec<ImportEdge>> {
             compile(r"^\s*from\s+([A-Za-z_][\w.]*)\s+import\b")?,
         ),
         "java" | "kt" => Matchers::Java(compile(
-            r"^\s*import\s+(?:static\s+)?([A-Za-z_][\w.]*)\s*;",
+            // B5 (0.4.0): wildcard-импорт `import a.b.*;` — зависимость на
+            // пакет целиком. Без `(?:\.\*)?` хвост `.*` не извлекался, и
+            // такие импорты были невидимы для dependency_direction.
+            r"^\s*import\s+(?:static\s+)?([A-Za-z_][\w.]*(?:\.\*)?)\s*;",
         )?),
         "go" => Matchers::Go(
             compile(r#"^\s*import\s+(?:[A-Za-z_][\w.]*\s+)?"([^"]+)""#)?,
@@ -435,6 +438,19 @@ mod tests {
         assert_eq!(kt, vec![("ru/bank/ledger/Core".to_string(), 1)]);
         let no_semicolon = modules("src/Intake.kt", "import ru.bank.ledger.Core\n");
         assert_eq!(no_semicolon, Vec::new(), "без ';' импорт не извлекается");
+    }
+
+    /// B5 (0.4.0): wildcard-импорт `import a.b.*;` — зависимость на пакет
+    /// целиком. Ранняя версия regex (`[A-Za-z_][\w.]*\s*;`) его не допускала
+    /// (`.*` перед `;`), и такие импорты не извлекались. Пакетные координаты
+    /// сохраняют хвост `/*`, поэтому префиксное совпадение с `a/b` работает.
+    #[test]
+    fn java_wildcard_import_extracted() {
+        let got = modules(
+            "src/main/java/io/reflectoring/domain/DomainService.java",
+            "package io.reflectoring.domain;\nimport io.reflectoring.persistence.*;\n",
+        );
+        assert_eq!(got, vec![("io/reflectoring/persistence/*".to_string(), 2)]);
     }
 
     #[test]
