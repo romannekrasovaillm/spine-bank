@@ -814,6 +814,48 @@ mod tests {
         );
     }
 
+    /// R1 (регресс): `.sln` объявляет проекты путями ФАЙЛОВ; тестовый проект
+    /// (`tests\*.tests.csproj`) не должен просачиваться компонентом, а каталог
+    /// модуля берёт имя юнита развёртывания (skaffold-контекст → `cartservice`).
+    #[test]
+    fn sln_test_project_not_component() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("mkdir");
+        write_file(
+            &repo,
+            "src/cartservice/cartservice.sln",
+            "Project(\"{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}\") = \"cartservice\", \"src\\cartservice.csproj\", \"{2348C29F}\"\nEndProject\nProject(\"{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}\") = \"cartservice.tests\", \"tests\\cartservice.tests.csproj\", \"{59825342}\"\nEndProject\n",
+        );
+        write_file(
+            &repo,
+            "src/cartservice/src/cartservice.csproj",
+            "<Project/>\n",
+        );
+        write_file(
+            &repo,
+            "src/cartservice/tests/cartservice.tests.csproj",
+            "<Project/>\n",
+        );
+        write_file(
+            &repo,
+            "skaffold.yaml",
+            "build:\n  artifacts:\n  - image: cartservice\n    context: src/cartservice/src\n",
+        );
+        write_file(
+            &repo,
+            "kubernetes-manifests/cartservice.yaml",
+            "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: cartservice\nspec:\n  template:\n    spec:\n      containers:\n      - name: server\n        image: cartservice\n",
+        );
+        git_repo(&repo);
+
+        let graph = as_built(&repo, "HEAD").expect("граф");
+        let ids: Vec<&str> = graph.nodes.iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(ids, vec!["dir:src/cartservice/src"], "{ids:?}");
+        let titles: BTreeSet<&str> = graph.nodes.iter().map(|n| n.title.as_str()).collect();
+        assert_eq!(titles, BTreeSet::from(["cartservice"]), "{titles:?}");
+    }
+
     /// Внешние системы (`sys:`) и хранилища (`store:`) из конфигов: схема
     /// классифицирует узел, userinfo срезается, петлевые пропускаются.
     #[test]

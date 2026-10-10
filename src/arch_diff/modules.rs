@@ -134,7 +134,13 @@ pub(crate) fn build_layout(snap: &Snapshot) -> BuildLayout {
         } else if name == "go.work" {
             go_work_uses(content)
         } else if is_sln_manifest(name) {
+            // `.sln` объявляет проекты путями ФАЙЛОВ (`src\cartservice.csproj`);
+            // модуль сборки — каталог проекта (путь файла в модули не берём,
+            // иначе тестовый проект `tests\*.tests.csproj` просочится в компонент).
             sln_projects(content)
+                .into_iter()
+                .map(|p| dir_of(&p))
+                .collect()
         } else if name == "package.json" {
             npm_workspaces(content).unwrap_or_default()
         } else {
@@ -494,6 +500,35 @@ mod tests {
         let layout = build_layout(&snap);
         assert!(layout.is_aggregator(""), "{:?}", layout.aggregators);
         assert!(layout.modules.contains("svc/a"), "{:?}", layout.modules);
+    }
+
+    /// `.sln` объявляет проекты ПУТЯМИ ФАЙЛОВ (`src\cartservice.csproj`);
+    /// модуль сборки — каталог проекта, а не путь файла. Тестовый проект
+    /// (`tests\cartservice.tests.csproj`) — в тестах, не в модулях
+    /// (регресс: путь файла просачивался кандидатом в компонент).
+    #[test]
+    fn sln_module_is_project_directory() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("mkdir");
+        write_file(
+            &repo,
+            "cartservice.sln",
+            "Project(\"{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}\") = \"cartservice\", \"src\\cartservice.csproj\", \"{2348C29F}\"\nEndProject\nProject(\"{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}\") = \"cartservice.tests\", \"tests\\cartservice.tests.csproj\", \"{59825342}\"\nEndProject\n",
+        );
+        write_file(&repo, "src/cartservice.csproj", "<Project/>\n");
+        write_file(&repo, "tests/cartservice.tests.csproj", "<Project/>\n");
+        let snap = snapshot(&repo);
+        let layout = build_layout(&snap);
+        assert!(layout.is_aggregator(""), "{:?}", layout.aggregators);
+        assert!(layout.modules.contains("src"), "{:?}", layout.modules);
+        assert!(layout.modules.contains("tests"), "{:?}", layout.modules);
+        assert!(
+            !layout.modules.iter().any(|m| m.ends_with(".csproj")),
+            "в модулях не должно быть путей файлов: {:?}",
+            layout.modules
+        );
+        assert!(layout.is_test("tests"), "{:?}", layout.tests);
     }
 
     /// Тестовый проект `*/tests/*.csproj` — не компонент.
