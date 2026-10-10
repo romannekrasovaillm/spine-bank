@@ -61,6 +61,9 @@ pub struct Config {
     pub trace: TraceConfig,
     /// Проверки дрейфа «модель ↔ код» (волна C: C3 за флагом).
     pub drift: DriftConfig,
+    /// Денилист обследования (B8 волны B): пути и хосты, не являющиеся
+    /// интеграциями (lock-файлы, лицензии, метаданные чартов, funding-ссылки).
+    pub survey: SurveyConfig,
     /// Пути к ассетам, отчётам и сессиям.
     pub paths: PathsConfig,
     /// Откуда конфиг загружен (нужно `harness_run` для горячего
@@ -1575,6 +1578,23 @@ pub struct DriftConfig {
     pub nfr_metric_check: bool,
 }
 
+/// Секция `[survey]`: денилист обследования (B8 волны B).
+///
+/// Списки **дополняют** встроенный набор (lock-файлы, лицензии, метаданные
+/// чартов, funding-хосты), а не заменяют его: пользователь может добавить
+/// свои пути/хосты, не теряя защиты по умолчанию. Совпадение пути — по
+/// имени файла или glob-суффиксу (`*.lock`); совпадение хоста — по
+/// равенству или dot-суффиксу (`example.com` покрывает `www.example.com`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SurveyConfig {
+    /// Дополнительные хосты, которые не считаются интеграциями.
+    pub ignore_hosts: Vec<String>,
+    /// Дополнительные пути/имена файлов, которые не сканируются как
+    /// источники интеграций.
+    pub ignore_paths: Vec<String>,
+}
+
 impl ExecutableRequired {
     /// Severity находки `ad-text-only` (`None` — находки нет).
     #[must_use]
@@ -1905,6 +1925,7 @@ impl Default for Config {
             evidence: EvidenceConfig::default(),
             trace: TraceConfig::default(),
             drift: DriftConfig::default(),
+            survey: SurveyConfig::default(),
             paths: PathsConfig::default(),
             loaded_from: None,
         }

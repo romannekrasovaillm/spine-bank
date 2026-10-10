@@ -378,6 +378,14 @@ enum Cmd {
         /// для метрики доверия). Разбор — docs/experiments/redteam-corpus.md.
         #[arg(long, value_name = "DIR", conflicts_with = "save")]
         corpus: Option<PathBuf>,
+        /// Режим «герметичного контура» (B7): на машине без прогонщика
+        /// (pytest/mvn/JDK) эталон красный только из-за слепоты окружения —
+        /// такой прогон состоится, а мутаторы, которым нужен отсутствующий
+        /// прогонщик, выйдут из знаменателя как «пропущен: неизмеримо без
+        /// прогонщика» (по образцу «нет входа»). Не маскирует реальные
+        /// провалы: эталон с FAIL-составляющей режимом не прощается.
+        #[arg(long)]
+        hermetic: bool,
     },
     /// Составное архитектурное ревью репозитория одним ответом (бэклог
     /// волны 3, п.13): маршрут значимости из git-диффа + весь контур
@@ -1329,6 +1337,7 @@ pub(crate) async fn run() -> Result<()> {
             save,
             keep_semantic,
             corpus,
+            hermetic,
         }) => {
             // Подкоманда `semantic-score` читает уже сохранённые клоны: сам
             // прогон кейса не нужен и кейс не обязателен.
@@ -1383,6 +1392,7 @@ pub(crate) async fn run() -> Result<()> {
                         min_code_detection: cfg.redteam.min_code_detection,
                         decision_quality: !no_decision_quality,
                         keep_semantic: keep_semantic.clone(),
+                        hermetic,
                     },
                 )?
             } else {
@@ -1395,6 +1405,7 @@ pub(crate) async fn run() -> Result<()> {
                         min_code_detection: cfg.redteam.min_code_detection,
                         decision_quality: !no_decision_quality,
                         keep_semantic: keep_semantic.clone(),
+                        hermetic,
                     },
                 )?;
                 if save {
@@ -1642,7 +1653,7 @@ pub(crate) async fn run() -> Result<()> {
         #[cfg(feature = "harness")]
         Some(Cmd::Worktree { cmd }) => cmd_worktree(&cfg, cmd).await?,
         Some(Cmd::Fleet { cmd }) => cmd_fleet(&cfg, cmd).await?,
-        Some(Cmd::Survey { repo, out }) => cmd_survey(&repo, out.as_deref())?,
+        Some(Cmd::Survey { repo, out }) => cmd_survey(&cfg, &repo, out.as_deref())?,
         Some(Cmd::ArchDiff {
             repo,
             base,

@@ -119,6 +119,104 @@ const EXCHANGE_DIR_NAMES: [&str; 7] = [
 /// Хосты-петлевые: не интеграции, из карты исключаются.
 const LOOPBACK_HOSTS: [&str; 4] = ["localhost", "127.0.0.1", "0.0.0.0", "::1"];
 
+/// Встроенный денилист хостов (B8 волны B): домены лицензий, funding-ссылки и
+/// прочая метаинформация — не интеграции. Совпадение по равенству или
+/// dot-суффиксу (`apache.org` покрывает `www.apache.org`).
+const BUILTIN_DENY_HOSTS: [&str; 13] = [
+    "apache.org",
+    "opensource.org",
+    "gnu.org",
+    "creativecommons.org",
+    "mit-license.org",
+    "mozilla.org",
+    "semver.org",
+    "paypal.me",
+    "patreon.com",
+    "opencollective.com",
+    "ko-fi.com",
+    "buymeacoffee.com",
+    "liberapay.com",
+];
+
+/// Встроенный денилист имён файлов (B8 волны B): lock-файлы и метаданные
+/// чартов — не источники интеграций и не объявления версий платформы.
+/// Запись `*.lock` — по суффиксу имени, остальные — по равенству.
+const BUILTIN_DENY_PATHS: [&str; 14] = [
+    "package-lock.json",
+    "npm-shrinkwrap.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "cargo.lock",
+    "gemfile.lock",
+    "composer.lock",
+    "poetry.lock",
+    "uv.lock",
+    "packages.lock.json",
+    "chart.yaml",
+    "chart.lock",
+    "flake.lock",
+    "*.lock",
+];
+
+/// Денилист обследования (B8 волны B): встроенный набор ∪ пользовательский
+/// `[survey]`. Списки дополняются, а не заменяются — встроенная защита от
+/// шума с lock-файлов и лицензий действует всегда.
+#[derive(Debug, Clone, Default)]
+struct SurveyDenylist {
+    /// Хосты (нижний регистр) без порта.
+    hosts: Vec<String>,
+    /// Имена файлов или glob-суффиксы (`*.lock`), нижний регистр.
+    paths: Vec<String>,
+}
+
+impl SurveyDenylist {
+    /// Встроенный денилист без пользовательских дополнений.
+    fn builtin() -> Self {
+        Self {
+            hosts: BUILTIN_DENY_HOSTS
+                .iter()
+                .map(|s| s.to_ascii_lowercase())
+                .collect(),
+            paths: BUILTIN_DENY_PATHS
+                .iter()
+                .map(|s| s.to_ascii_lowercase())
+                .collect(),
+        }
+    }
+
+    /// Встроенный денилист, дополненный секцией `[survey]` конфига.
+    fn from_config(cfg: &crate::config::SurveyConfig) -> Self {
+        let mut d = Self::builtin();
+        d.hosts
+            .extend(cfg.ignore_hosts.iter().map(|s| s.to_ascii_lowercase()));
+        d.paths
+            .extend(cfg.ignore_paths.iter().map(|s| s.to_ascii_lowercase()));
+        d
+    }
+
+    /// Хост (`host:port` или `host`) под запретом: равенство или dot-суффикс.
+    fn host_ignored(&self, host_port: &str) -> bool {
+        let host = host_port
+            .split(':')
+            .next()
+            .unwrap_or(host_port)
+            .trim()
+            .to_ascii_lowercase();
+        self.hosts
+            .iter()
+            .any(|deny| host == *deny || host.ends_with(&format!(".{deny}")))
+    }
+
+    /// Имя файла пути под запретом: `*.suffix` — по суффиксу, иначе по равенству.
+    fn path_ignored(&self, path: &str) -> bool {
+        let name = path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase();
+        self.paths.iter().any(|deny| match deny.strip_prefix('*') {
+            Some(suffix) => name.ends_with(suffix),
+            None => name == *deny,
+        })
+    }
+}
+
 /// Одна находка сканера: текст + доказательства `файл:строка`.
 #[derive(Debug, Clone)]
 struct Finding {
@@ -196,12 +294,13 @@ pub struct SurveyOutcome {
 struct RepoSnapshot {
     /// Относительные пути всех файлов (без `SKIP_DIRS` и dot-каталогов).
     files: Vec<String>,
-    /// Содержимое scannable-файлов: относительный путь → строки.
+    /// Содержимое scannable-файлов и манифестов сборки: путь → строки.
     contents: BTreeMap<String, Vec<String>>,
 }
 
 /// Читает репозиторий в память: обход без служебных и dot-каталогов,
-/// содержимое — только scannable-расширения до [`MAX_FILE_BYTES`].
+/// содержимое — scannable-расширения и манифесты сборки ([`is_manifest_file`])
+/// до [`MAX_FILE_BYTES`].
 fn snapshot(repo: &Path) -> Result<RepoSnapshot> {
     let mut files = Vec::new();
     let mut contents = BTreeMap::new();
@@ -235,6 +334,7 @@ fn snapshot(repo: &Path) -> Result<RepoSnapshot> {
             files.push(rel);
             continue;
         }
+        let name = rel.rsplit('/').next().unwrap_or(rel.as_str());
         let scannable = entry
             .path()
             .extension()
@@ -243,7 +343,10 @@ fn snapshot(repo: &Path) -> Result<RepoSnapshot> {
                 SCANNABLE_EXTENSIONS
                     .iter()
                     .any(|s| e.eq_ignore_ascii_case(s))
-            });
+            })
+            // Манифесты сборки (go.mod, *.csproj) могут не иметь известного
+            // расширения, но их содержимое нужно сканеру версий платформы (B8).
+            || is_manifest_file(name);
         if scannable && entry.metadata().map_or(0, |m| m.len()) <= MAX_FILE_BYTES {
             if let Ok(text) = std::fs::read_to_string(entry.path()) {
                 contents.insert(rel.clone(), text.lines().map(str::to_owned).collect());
@@ -290,6 +393,13 @@ fn ext_is(path: &str, exts: &[&str]) -> bool {
         .is_some_and(|ext| exts.iter().any(|e| ext.eq_ignore_ascii_case(e)))
 }
 
+/// Сканер по обходу каталогов: имя файла пути равно `file_name`; `root_only`
+/// ограничивает совпадение корнем репозитория (путь без `/`).
+fn file_matches(path: &str, file_name: &str, root_only: bool) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    name == file_name && (!root_only || !path.contains('/'))
+}
+
 /// Regex-сканер по строкам содержимого: первый capture (или всё совпадение)
 /// становится текстом находки, ссылка — `файл:строка`. Дедупликация по
 /// (метка, путь, строка).
@@ -299,9 +409,24 @@ fn scan_lines(
     pattern: &str,
     findings: &mut Vec<Finding>,
 ) -> Result<()> {
+    scan_lines_where(snap, label, pattern, findings, |_| true)
+}
+
+/// То же, но с фильтром по пути: сканируются только файлы, для которых
+/// `keep(path)` истинно (например, только манифесты или только `*.rs`).
+fn scan_lines_where(
+    snap: &RepoSnapshot,
+    label: &str,
+    pattern: &str,
+    findings: &mut Vec<Finding>,
+    keep: impl Fn(&str) -> bool,
+) -> Result<()> {
     let re =
         Regex::new(pattern).map_err(|e| HarnessError::Control(format!("шаблон `{label}`: {e}")))?;
     for (path, lines) in &snap.contents {
+        if !keep(path) {
+            continue;
+        }
         for (idx, line) in lines.iter().enumerate() {
             if findings.len() >= MAX_FINDINGS_PER_SCANNER {
                 return Ok(());
@@ -424,12 +549,15 @@ fn scan_structure(snap: &RepoSnapshot) -> (Vec<Finding>, Vec<(String, usize)>) {
 /// Сканер 2: точки входа — HTTP-роуты, консьюмеры очередей, джобы.
 fn scan_entry_points(snap: &RepoSnapshot) -> Result<Vec<Finding>> {
     let mut out = Vec::new();
-    // HTTP-роуты: axum, spring, express, fastapi/flask.
-    scan_lines(
+    // HTTP-роуты: axum, spring, express, fastapi/flask. axum — только Rust:
+    // `.route("/…")` есть и у Python (`@app.route`), иначе маршрут ложно
+    // помечался бы как axum (B8 волны B).
+    scan_lines_where(
         snap,
         "HTTP route (axum)",
         r#"\.route\(\s*"([^"]+)""#,
         &mut out,
+        |p| ext_is(p, &["rs"]),
     )?;
     scan_lines(
         snap,
@@ -576,13 +704,17 @@ pub(crate) const INTEGRATION_URL_PATTERN: &str = r#"(?i)\b(?:https?|postgres(?:q
 
 /// Сканер 4: интеграции — URL/строки подключения из конфигов → host:port.
 /// Значения проходят через редактор секретов (`src/secrets.rs`) — в карту
-/// не должны уехать ни userinfo, ни токены в query.
-fn scan_integrations(snap: &RepoSnapshot) -> Result<Vec<Finding>> {
+/// не должны уехать ни userinfo, ни токены в query. Денилист ([`SurveyDenylist`])
+/// отсекает lock-файлы, метаданные чартов, лицензии и funding-ссылки (B8).
+fn scan_integrations(snap: &RepoSnapshot, deny: &SurveyDenylist) -> Result<Vec<Finding>> {
     let re = Regex::new(INTEGRATION_URL_PATTERN)
         .map_err(|e| HarnessError::Control(format!("шаблон интеграций: {e}")))?;
     let redactor = crate::secrets::Redactor::with_builtin_rules();
     let mut by_host: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for (path, lines) in &snap.contents {
+        if deny.path_ignored(path) {
+            continue;
+        }
         let is_config = path.rsplit('.').next().is_some_and(|ext| {
             CONFIG_EXTENSIONS
                 .iter()
@@ -594,6 +726,9 @@ fn scan_integrations(snap: &RepoSnapshot) -> Result<Vec<Finding>> {
         for (idx, line) in lines.iter().enumerate() {
             for m in re.find_iter(line) {
                 if let Some(host) = extract_host_port(m.as_str()) {
+                    if deny.host_ignored(&host) {
+                        continue;
+                    }
                     let host = redactor.redact(&host);
                     let refs = by_host.entry(host).or_default();
                     let reference = file_line(path, idx);
@@ -833,19 +968,97 @@ fn scan_hidden_links(snap: &RepoSnapshot) -> Result<Vec<Finding>> {
     Ok(out)
 }
 
+/// Содержимое XML-тега (первого в тексте): `<tag>…</tag>` → `…`.
+fn tag_content<'a>(content: &'a str, tag: &str) -> Option<&'a str> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = content.find(&open)? + open.len();
+    let rest = &content[start..];
+    let end = rest.find(&close)?;
+    Some(rest[..end].trim())
+}
+
+/// Координата родителя `pom.xml` — `<groupId>:<artifactId> <version>` (или без
+/// версии, если `<version>` не объявлена). `None` — блока `<parent>` нет.
+fn pom_parent_coordinate(lines: &[String]) -> Option<String> {
+    let content = lines.join("\n");
+    let start = content.find("<parent>")? + "<parent>".len();
+    let rest = &content[start..];
+    let end = rest.find("</parent>")?;
+    let parent = &rest[..end];
+    let group = tag_content(parent, "groupId")?;
+    let artifact = tag_content(parent, "artifactId")?;
+    Some(match tag_content(parent, "version") {
+        Some(v) => format!("{group}:{artifact} {v}"),
+        None => format!("{group}:{artifact}"),
+    })
+}
+
 /// Сканер 8: ограничения платформы — объявленные версии из манифестов
-/// (edition/rust-version, requires-python, engines, go-директива).
+/// (edition/rust-version, requires-python, engines, go-директива, java,
+/// Spring Boot parent, `TargetFramework`). Версии берутся ТОЛЬКО из манифестов
+/// своих экосистем: `"engines"` из lock-файла — не «версия платформы» (B8).
 fn scan_platform(snap: &RepoSnapshot) -> Result<Vec<Finding>> {
     let mut out = Vec::new();
-    let patterns: [(&str, &str); 5] = [
-        ("rust edition", r#"^\s*edition\s*=\s*"[^"]+""#),
-        ("rust-version", r#"^\s*rust-version\s*=\s*"[^"]+""#),
-        ("requires-python", r#"^\s*requires-python\s*=\s*"[^"]+""#),
-        ("node engines", r#""engines"\s*:"#),
-        ("go-директива", r"^go\s+\d+\.\d+"),
+    // (файл-манифест, ярлык, шаблон, «только корень»). Без capture-группы в
+    // доказательство идёт вся строка; с группой — только значение.
+    let rules: [(&str, &str, &str, bool); 6] = [
+        (
+            "Cargo.toml",
+            "rust edition",
+            r#"^\s*edition\s*=\s*"[^"]+""#,
+            false,
+        ),
+        (
+            "Cargo.toml",
+            "rust-version",
+            r#"^\s*rust-version\s*=\s*"[^"]+""#,
+            false,
+        ),
+        (
+            "pyproject.toml",
+            "requires-python",
+            r#"^\s*requires-python\s*=\s*"[^"]+""#,
+            false,
+        ),
+        ("go.mod", "go-директива", r"^go\s+\d+\.\d+", false),
+        (
+            "package.json",
+            "node engines",
+            r#""node"\s*:\s*"([^"]+)""#,
+            true,
+        ),
+        (
+            "pom.xml",
+            "java version",
+            r"<java\.version>\s*([^<]+?)\s*</java\.version>",
+            false,
+        ),
     ];
-    for (label, pattern) in patterns {
-        scan_lines(snap, label, pattern, &mut out)?;
+    for (file, label, pattern, root_only) in rules {
+        scan_lines_where(snap, label, pattern, &mut out, |p| {
+            file_matches(p, file, root_only)
+        })?;
+    }
+    // .NET: целевой фреймворк из `*.csproj` (имя файла — по суффиксу).
+    scan_lines_where(
+        snap,
+        "dotnet TargetFramework",
+        r"<TargetFramework>\s*([^<]+?)\s*</TargetFramework>",
+        &mut out,
+        |p| p.rsplit('/').next().is_some_and(|n| n.ends_with(".csproj")),
+    )?;
+    // Spring Boot parent из pom.xml — координата родителя.
+    for (path, lines) in &snap.contents {
+        if !file_matches(path, "pom.xml", false) {
+            continue;
+        }
+        if let Some(coord) = pom_parent_coordinate(lines) {
+            push_unique(
+                &mut out,
+                Finding::one(format!("spring boot parent: {coord}"), file_line(path, 0)),
+            );
+        }
     }
     Ok(out)
 }
@@ -896,14 +1109,25 @@ pub fn scan(repo: &Path) -> Result<SurveyReport> {
     scan_at(repo, chrono::Local::now().date_naive())
 }
 
-/// Сборка карты с явной датой (детерминированные тесты frontmatter).
+/// Сборка карты с явной датой (детерминированные тесты frontmatter) и
+/// встроенным денилистом (без пользовательских дополнений `[survey]`).
 fn scan_at(repo: &Path, today: NaiveDate) -> Result<SurveyReport> {
+    scan_with(repo, today, &crate::config::SurveyConfig::default())
+}
+
+/// Сборка карты с явной датой и денилистом (B8 волны B).
+fn scan_with(
+    repo: &Path,
+    today: NaiveDate,
+    cfg: &crate::config::SurveyConfig,
+) -> Result<SurveyReport> {
     if !repo.is_dir() {
         return Err(HarnessError::Control(format!(
             "survey: репозиторий недоступен или не каталог: {}",
             repo.display()
         )));
     }
+    let deny = SurveyDenylist::from_config(cfg);
     let snap = snapshot(repo)?;
     let (structure, top_dirs) = scan_structure(&snap);
     let mut components = scan_stack(&snap);
@@ -928,7 +1152,7 @@ fn scan_at(repo: &Path, today: NaiveDate) -> Result<SurveyReport> {
         },
         Section {
             title: "Интеграции (host:port из конфигов)",
-            findings: scan_integrations(&snap)?,
+            findings: scan_integrations(&snap, &deny)?,
             gap_question: "Внешние интеграции не найдены в конфигах — с какими системами связь и по каким протоколам?",
         },
         Section {
@@ -1038,6 +1262,18 @@ pub fn render_notes_stub(report: &SurveyReport) -> String {
 /// # Errors
 /// Репозиторий недоступен; ошибки сканирования и записи файлов.
 pub fn run(repo: &Path, out: Option<&Path>) -> Result<SurveyOutcome> {
+    run_with(repo, out, &crate::config::SurveyConfig::default())
+}
+
+/// Прогон обследования с пользовательским денилистом `[survey]` (B8 волны B).
+///
+/// # Errors
+/// Репозиторий недоступен; ошибки сканирования и записи файлов.
+pub fn run_with(
+    repo: &Path,
+    out: Option<&Path>,
+    cfg: &crate::config::SurveyConfig,
+) -> Result<SurveyOutcome> {
     if !repo.is_dir() {
         return Err(HarnessError::Control(format!(
             "survey: репозиторий недоступен или не каталог: {}",
@@ -1055,7 +1291,7 @@ pub fn run(repo: &Path, out: Option<&Path>) -> Result<SurveyOutcome> {
         None => repo.join("docs/reverse"),
     };
     std::fs::create_dir_all(&out_dir).map_err(|e| HarnessError::io(&out_dir, e))?;
-    let report = scan(repo)?;
+    let report = scan_with(repo, chrono::Local::now().date_naive(), cfg)?;
     let survey_path = out_dir.join("survey.md");
     std::fs::write(&survey_path, render_markdown(&report))
         .map_err(|e| HarnessError::io(&survey_path, e))?;
@@ -1130,7 +1366,7 @@ impl Tool for ReverseSurveyTool {
         };
         let repo = ctx.resolve(repo);
         let out = args.get("out").and_then(Value::as_str).map(PathBuf::from);
-        let outcome = match run(&repo, out.as_deref()) {
+        let outcome = match run_with(&repo, out.as_deref(), &ctx.config.survey) {
             Ok(o) => o,
             Err(e) => return Ok(ToolOutput::err(format!("reverse_survey: {e}"))),
         };
@@ -1442,6 +1678,145 @@ mod tests {
         // Несуществующий репозиторий — внятная ошибка.
         let err = run(&tmp.path().join("ghost"), None).expect_err("ghost");
         assert!(err.to_string().contains("ghost"), "{err}");
+    }
+
+    /// B8: встроенный денилист путей и хостов — lock-файлы, лицензии,
+    /// funding-ссылки не являются интеграциями; `"engines"` из lock-файла —
+    /// не «версия платформы».
+    #[test]
+    fn survey_builtin_denylist_drops_lock_license_and_funding() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("repo");
+        // Lock-файл: `"engines"` (ложная «версия платформы») + funding-URL.
+        write_file(
+            &repo.join("package-lock.json"),
+            "{\n  \"packages\": {},\n  \"engines\": {\n    \"node\": \">=14\"\n  },\n  \"funding\": \"https://paypal.me/someone\"\n}\n",
+        );
+        // Метаданные чарта: home/sources — лицензии, не интеграции.
+        write_file(
+            &repo.join("deploy/Chart.yaml"),
+            "name: app\nhome: https://www.apache.org/licenses/\nsources:\n  - https://semver.org/\n",
+        );
+        // Обычный конфиг: реальная интеграция + лицензионные ссылки (по хосту).
+        write_file(
+            &repo.join("config/app.yaml"),
+            "db: \"postgres://u:p@real.internal.example:8443/ledger\"\n\
+             license: \"https://www.apache.org/licenses/LICENSE-2.0\"\n\
+             feed: \"https://semver.org/\"\n",
+        );
+        let report = scan(&repo).expect("scan");
+        let md = render_markdown(&report);
+        // Реальная интеграция — на месте.
+        assert!(
+            md.contains("внешний endpoint `real.internal.example:8443`"),
+            "{md}"
+        );
+        // Lock-файл, лицензии, funding и semver — отсеяны.
+        assert!(!md.contains("paypal.me"), "{md}");
+        assert!(!md.contains("apache.org"), "{md}");
+        assert!(!md.contains("semver.org"), "{md}");
+        // `"engines"` из lock-файла — не версия платформы.
+        assert!(!md.contains("node engines"), "{md}");
+    }
+
+    /// B8: версии платформы — только из манифестов (`java.version`, parent
+    /// Spring Boot, `go 1.x`, `engines.node` корневого `package.json`).
+    #[test]
+    fn survey_platform_versions_from_manifests_only() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("repo");
+        write_file(
+            &repo.join("pom.xml"),
+            "<project>\n  <parent>\n    <groupId>org.springframework.boot</groupId>\n    <artifactId>spring-boot-starter-parent</artifactId>\n    <version>3.2.0</version>\n  </parent>\n  <properties>\n    <java.version>17</java.version>\n  </properties>\n</project>\n",
+        );
+        write_file(&repo.join("go.mod"), "module example\n\ngo 1.21\n");
+        write_file(
+            &repo.join("package.json"),
+            "{\n  \"engines\": {\n    \"node\": \">=18\"\n  }\n}\n",
+        );
+        // Корневой package.json — источник версии; вложенный — нет.
+        write_file(
+            &repo.join("sub/package.json"),
+            "{\n  \"engines\": {\n    \"node\": \">=20\"\n  }\n}\n",
+        );
+        let report = scan(&repo).expect("scan");
+        let md = render_markdown(&report);
+        assert!(md.contains("java version: 17"), "{md}");
+        assert!(
+            md.contains(
+                "spring boot parent: org.springframework.boot:spring-boot-starter-parent 3.2.0"
+            ),
+            "{md}"
+        );
+        assert!(md.contains("go-директива: go 1.21"), "{md}");
+        assert!(md.contains("node engines: >=18"), "{md}");
+        assert!(
+            !md.contains(">=20"),
+            "вложенный package.json не источник версии: {md}"
+        );
+    }
+
+    /// B8: k8s-манифест с env `*_ADDR` — реальные интеграции, денилист их не ест.
+    #[test]
+    fn survey_k8s_env_addr_urls_are_integrations() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("repo");
+        write_file(
+            &repo.join("deploy/app.yaml"),
+            "env:\n  - name: DB_ADDR\n    value: \"postgres://user:pw@pg.internal.example:5432/db\"\n  - name: CACHE_ADDR\n    value: \"redis://cache.internal.example:6379\"\n",
+        );
+        let report = scan(&repo).expect("scan");
+        let md = render_markdown(&report);
+        assert!(md.contains("pg.internal.example:5432"), "{md}");
+        assert!(md.contains("cache.internal.example:6379"), "{md}");
+    }
+
+    /// B8: python-маршрут (`@app.route`) не помечается `axum`.
+    #[test]
+    fn python_route_not_labeled_axum() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("repo");
+        write_file(
+            &repo.join("svc/app.py"),
+            "@app.route(\"/pay\", methods=[\"POST\"])\ndef pay():\n    pass\n",
+        );
+        let report = scan(&repo).expect("scan");
+        let md = render_markdown(&report);
+        assert!(!md.contains("HTTP route (axum)"), "{md}");
+        assert!(md.contains("HTTP route (fastapi/flask)"), "{md}");
+    }
+
+    /// B8: `[survey] ignore_hosts/ignore_paths` расширяют встроенный денилист.
+    #[test]
+    fn survey_config_ignore_hosts_and_paths() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("repo");
+        write_file(
+            &repo.join("config/partners.yaml"),
+            "p: \"https://partner.example:9443/api\"\n",
+        );
+        write_file(
+            &repo.join("config/metrics.json"),
+            "{\n  \"sink\": \"https://metrics.example:8081/collect\"\n}\n",
+        );
+        write_file(
+            &repo.join("config/real.yaml"),
+            "svc: \"https://real.example:8080/api\"\n",
+        );
+        let cfg = crate::config::SurveyConfig {
+            ignore_hosts: vec!["partner.example".to_string()],
+            ignore_paths: vec!["metrics.json".to_string()],
+        };
+        let report = scan_with(
+            &repo,
+            NaiveDate::from_ymd_opt(2026, 9, 4).expect("date"),
+            &cfg,
+        )
+        .expect("scan");
+        let md = render_markdown(&report);
+        assert!(md.contains("внешний endpoint `real.example:8080`"), "{md}");
+        assert!(!md.contains("partner.example"), "{md}");
+        assert!(!md.contains("metrics.example"), "{md}");
     }
 
     #[tokio::test]

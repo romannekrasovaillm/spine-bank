@@ -424,6 +424,57 @@ fn manifest_dependency_names(manifest: &str, content: &str) -> BTreeSet<String> 
         .collect()
 }
 
+/// Содержимое XML-тега `<tag>…</tag>` (первого в тексте).
+fn tag_between(content: &str, tag: &str) -> Option<String> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = content.find(&open)? + open.len();
+    let rest = &content[start..];
+    let end = rest.find(&close)?;
+    Some(rest[..end].trim().to_string())
+}
+
+/// Координаты зависимостей `pom.xml` — `<groupId>:<artifactId>` по блокам
+/// `<dependency>` (B8 волны B). Раньше строки тегов разбирались по одной, и
+/// голая `<dependency>` превращалась в «нераспознанную строку».
+fn pom_dependency_names(content: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut rest = content;
+    while let Some(start) = rest.find("<dependency>") {
+        let after = &rest[start + "<dependency>".len()..];
+        let Some(end) = after.find("</dependency>") else {
+            break;
+        };
+        let block = &after[..end];
+        if let (Some(group), Some(artifact)) = (
+            tag_between(block, "groupId"),
+            tag_between(block, "artifactId"),
+        ) {
+            let coord = format!("{group}:{artifact}");
+            if !out.contains(&coord) {
+                out.push(coord);
+            }
+        }
+        rest = &after[end + "</dependency>".len()..];
+    }
+    out
+}
+
+/// Каталог нового компонента по пути добавленного исходника: для `X/src/…` и
+/// `src/X/…` — смысловой каталог компонента, а не первый попавшийся файл
+/// (`Hipster_WandIcon.svg`, `FallbackController.java`). Иначе — каталог файла;
+/// ссылка на конкретный файл для `new_component` не несёт смысла (B8 волны B).
+fn component_dir(path: &str) -> String {
+    let segs: Vec<&str> = path.split('/').collect();
+    if segs.len() >= 3 && segs[1] == "src" {
+        segs[0].to_string()
+    } else if segs.len() >= 3 && segs[0] == "src" {
+        segs[1].to_string()
+    } else {
+        segs[..segs.len().saturating_sub(1)].join("/")
+    }
+}
+
 /// Файл — конфиг по эвристике: расширение из списка или «config»/«application»/
 /// «settings» в имени (для детектора `new_datastore`).
 /// `pub(crate)`: та же эвристика отбирает конфиги в графе as-built (волна K).
@@ -796,7 +847,10 @@ pub fn detect_diff_triggers_with(
                 found.fire("new_component", &format!("добавлен манифест {path}"));
             }
             if segs.len() >= 2 && (segs[0] == "src" || (segs.len() >= 3 && segs[1] == "src")) {
-                found.fire("new_component", &format!("добавлены исходники {path}"));
+                found.fire(
+                    "new_component",
+                    &format!("добавлен компонент {}", component_dir(path)),
+                );
             }
             if globs
                 .components
@@ -876,19 +930,42 @@ pub fn detect_diff_triggers_with(
         // пропущенный новый вендор).
         if *code != 'D' && DEP_MANIFESTS.contains(&file_name) {
             if let Some(lines) = added.get(path.as_str()) {
-                let dep_lines: Vec<&str> = lines
-                    .iter()
-                    .filter(|l| looks_like_dependency_line(file_name, l))
-                    .map(String::as_str)
-                    .collect();
-                if !dep_lines.is_empty() {
-                    // Имена, уже бывшие в манифесте на базе диффа. Базы нет
-                    // (новый манифест, нет HEAD) — все строки считаются новыми
-                    // (прежнее поведение).
-                    let base_names: Option<BTreeSet<String>> = git_show_text(repo, &old_rev, path)
-                        .map(|content| manifest_dependency_names(file_name, &content));
-                    let mut new_names: Vec<String> = Vec::new();
-                    let mut updates: Vec<String> = Vec::new();
+                // Имена, уже бывшие в манифесте на базе диффа. Базы нет
+                // (новый манифест, нет HEAD) — все строки считаются новыми
+                // (прежнее поведение).
+                let base_names: Option<BTreeSet<String>> =
+                    git_show_text(repo, &old_rev, path).map(|content| {
+                        if file_name == "pom.xml" {
+                            pom_dependency_names(&content).into_iter().collect()
+                        } else {
+                            manifest_dependency_names(file_name, &content)
+                        }
+                    });
+                let mut new_names: Vec<String> = Vec::new();
+                let mut updates: Vec<String> = Vec::new();
+                if file_name == "pom.xml" {
+                    // pom.xml: имя зависимости — координата `groupId:artifactId`
+                    // по блоку `<dependency>`, а не отдельная строка тега (B8).
+                    for name in pom_dependency_names(&lines.join("\n")) {
+                        match &base_names {
+                            Some(base) if base.contains(&name) => {
+                                if !updates.contains(&name) {
+                                    updates.push(name);
+                                }
+                            }
+                            _ => {
+                                if !new_names.contains(&name) {
+                                    new_names.push(name);
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    let dep_lines: Vec<&str> = lines
+                        .iter()
+                        .filter(|l| looks_like_dependency_line(file_name, l))
+                        .map(String::as_str)
+                        .collect();
                     for l in dep_lines {
                         match dependency_name(file_name, l) {
                             Some(name) => match &base_names {
@@ -909,17 +986,17 @@ pub fn detect_diff_triggers_with(
                             )),
                         }
                     }
-                    if !new_names.is_empty() {
-                        found.fire(
-                            "new_vendor",
-                            &format!("новые зависимости в {path}: {}", new_names.join(", ")),
-                        );
-                    }
-                    for name in updates {
-                        found.notes.push(format!(
-                            "обновление зависимости {name} в {path} (смена версии, не новый вендор)"
-                        ));
-                    }
+                }
+                if !new_names.is_empty() {
+                    found.fire(
+                        "new_vendor",
+                        &format!("новые зависимости в {path}: {}", new_names.join(", ")),
+                    );
+                }
+                for name in updates {
+                    found.notes.push(format!(
+                        "обновление зависимости {name} в {path} (смена версии, не новый вендор)"
+                    ));
                 }
             }
         }
@@ -1776,6 +1853,69 @@ mod tests {
             "новый манифест — обновлений нет: {:?}",
             found.notes
         );
+    }
+
+    /// B8: основание `new_component` для нового компонента указывает на его
+    /// каталог, а не на первый попавшийся добавленный файл.
+    #[test]
+    fn new_component_basis_is_component_dir_not_first_asset_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = git_repo(dir.path());
+        // Внутри нового компонента — ассет сортируется раньше «настоящего» файла.
+        write_file(
+            &repo,
+            "payments/src/FallbackController.java",
+            "class FallbackController {}\n",
+        );
+        write_file(&repo, "payments/src/Hipster_WandIcon.svg", "<svg/>\n");
+        git_in(&repo, &["add", "."]);
+        git_in(&repo, &["commit", "-q", "-m", "new component"]);
+        let found = detect_diff_triggers(&repo, Some("HEAD~1")).unwrap();
+        assert!(
+            found.triggers.contains("new_component"),
+            "{:?}",
+            found.triggers
+        );
+        let ev = found.evidence.join("\n");
+        assert!(
+            ev.contains("payments"),
+            "основание указывает на компонент: {ev}"
+        );
+        assert!(
+            !ev.contains("Hipster_WandIcon.svg"),
+            "ассет — не основание: {ev}"
+        );
+        assert!(
+            !ev.contains("FallbackController.java"),
+            "файл — не основание: {ev}"
+        );
+    }
+
+    /// B8: `new_vendor` для `pom.xml` разбирает координату
+    /// `<groupId>:<artifactId>`, а не печатает «нераспознанную строку».
+    #[test]
+    fn new_vendor_pom_reports_group_artifact_coordinate() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = git_repo(dir.path());
+        write_file(
+            &repo,
+            "pom.xml",
+            "<project>\n  <dependencies>\n    <dependency>\n      <groupId>com.paypal</groupId>\n      <artifactId>paypal-sdk</artifactId>\n      <version>1.2.3</version>\n    </dependency>\n  </dependencies>\n</project>\n",
+        );
+        git_in(&repo, &["add", "."]);
+        git_in(&repo, &["commit", "-q", "-m", "add paypal sdk"]);
+        let found = detect_diff_triggers(&repo, Some("HEAD~1")).unwrap();
+        assert!(
+            found.triggers.contains("new_vendor"),
+            "{:?}",
+            found.triggers
+        );
+        let ev = found.evidence.join("\n");
+        assert!(
+            ev.contains("com.paypal:paypal-sdk"),
+            "координата в основании: {ev}"
+        );
+        assert!(!ev.contains("нераспознанная строка"), "{ev}");
     }
 
     /// D3(б): срабатывание `api_contract_change` сохраняется, а основание и

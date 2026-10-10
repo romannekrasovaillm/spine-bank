@@ -12,8 +12,9 @@ use super::resolve_constraints_cli;
 use arch_harness::config::Config;
 
 /// `arch-be survey <repo>`: обратное обследование legacy → docs/reverse/survey.md.
-pub(crate) fn cmd_survey(repo: &Path, out: Option<&Path>) -> Result<()> {
-    let outcome = arch_harness::survey::run(repo, out)?;
+/// Денилист путей/хостов берётся из секции `[survey]` конфига (B8 волны B).
+pub(crate) fn cmd_survey(cfg: &Config, repo: &Path, out: Option<&Path>) -> Result<()> {
+    let outcome = arch_harness::survey::run_with(repo, out, &cfg.survey)?;
     println!(
         "обследование `{}`: {} находок [confirmed], {} секций [gap]",
         outcome.report.repo_name,
