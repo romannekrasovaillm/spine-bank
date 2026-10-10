@@ -207,7 +207,10 @@ fn snapshot(repo: &Path) -> Result<RepoSnapshot> {
     let mut contents = BTreeMap::new();
     let walker = WalkDir::new(repo).follow_links(false).into_iter();
     for entry in walker.filter_entry(|e| {
-        if e.file_type().is_dir() {
+        // Корень обхода (`depth() == 0`) не фильтруем: у `WalkDir::new(".")`
+        // `file_name()` корня — ".", и dot-правило срезало бы весь обход
+        // (регрессия B1: `survey .` давал пустую карту при полной по `$PWD`).
+        if e.depth() > 0 && e.file_type().is_dir() {
             let name = e.file_name().to_string_lossy();
             // Dot-каталоги (.git, .github, .venv…) и служебные — вне обхода;
             // CI ищется точечно по известным путям, а не обходом.
@@ -249,6 +252,15 @@ fn snapshot(repo: &Path) -> Result<RepoSnapshot> {
             // в списке (безопасно: regex-сканеры по нему просто не пройдут).
         }
         files.push(rel);
+    }
+    // Обход не нашёл ни одного файла, хотя каталог непустой: почти наверняка
+    // ошибка корня/фильтра (B1), а не честно пустой репозиторий — молчаливая
+    // «пустая карта» опаснее явной ошибки.
+    if files.is_empty() && std::fs::read_dir(repo).is_ok_and(|mut d| d.next().is_some()) {
+        return Err(HarnessError::Control(format!(
+            "[error] survey_empty_walk — обход `{}` не нашёл ни одного файла при непустом каталоге → проверьте форму пути-корня (`.`/`./`/`..`) и фильтры обхода",
+            repo.display()
+        )));
     }
     files.sort();
     Ok(RepoSnapshot { files, contents })

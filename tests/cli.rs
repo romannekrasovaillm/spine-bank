@@ -4922,3 +4922,75 @@ fn openspec_gate_change_red_then_green() {
         .failure()
         .stderr(contains("change-id"));
 }
+
+/// B1 (волна 0.4.0): регрессия обхода корня. `WalkDir::new(".")` отдаёт
+/// корневой entry с `file_name() == "."`; фильтр dot-каталогов срезал весь
+/// обход, и `survey .` показывал пустую карту — при абсолютном пути всё
+/// находилось. Все относительные формы корня (`.`, `./`, `..`) обязаны
+/// дать тот же набор находок, что абсолютный путь; обход, пустой после
+/// скипов, — внятной ошибкой `survey_empty_walk`, а не «0 находок».
+#[test]
+fn survey_relative_root_forms_match_absolute() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let home = tmp.path();
+    let repo = home.join("repo");
+    std::fs::create_dir_all(repo.join("src")).expect("mkdir src");
+    std::fs::create_dir_all(repo.join("nested")).expect("mkdir nested");
+    std::fs::write(
+        repo.join("Cargo.toml"),
+        "[package]\nname = \"x\"\nedition = \"2021\"\n",
+    )
+    .expect("Cargo.toml");
+    std::fs::write(
+        repo.join("src/main.rs"),
+        "fn main() {}\n// axum: .route(\"/api/pay\", post(pay))\n",
+    )
+    .expect("main.rs");
+
+    // Число [confirmed]-находок из строки итога `<N> находок [confirmed]`.
+    // `--out` — вне репозитория: иначе первый прогон пишет docs/reverse/
+    // внутрь сканируемого дерева и меняет находки следующих.
+    let out_dir = home.join("out");
+    let confirmed = |dir: &Path, arg: &str| -> usize {
+        let assert = arch_cmd(home)
+            .current_dir(dir)
+            .args(["survey", arg])
+            .arg("--out")
+            .arg(out_dir.as_os_str())
+            .assert()
+            .success();
+        let out = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+        let line = out
+            .lines()
+            .find(|l| l.contains("находок"))
+            .unwrap_or_else(|| panic!("нет строки итога в: {out}"));
+        line.split("находок")
+            .next()
+            .and_then(|head| head.split_whitespace().last())
+            .and_then(|n| n.parse().ok())
+            .unwrap_or_else(|| panic!("не разобрал счёт находок в: {line}"))
+    };
+
+    let abs = confirmed(home, repo.to_str().expect("utf8"));
+    assert!(abs > 0, "фикстура обязана дать находки");
+    // Точка от корня репозитория.
+    assert_eq!(confirmed(&repo, "."), abs, "`survey .` — тот же набор");
+    // Форма `./`.
+    assert_eq!(confirmed(&repo, "./"), abs, "`survey ./` — тот же набор");
+    // Форма `..` из вложенного каталога.
+    assert_eq!(
+        confirmed(&repo.join("nested"), ".."),
+        abs,
+        "`survey ..` — тот же набор"
+    );
+
+    // Обход, пустой после скипов (только служебный каталог), — ошибка.
+    let empty = home.join("empty");
+    std::fs::create_dir_all(empty.join("target")).expect("mkdir target");
+    std::fs::write(empty.join("target/junk.rs"), "fn junk() {}\n").expect("junk");
+    arch_cmd(home)
+        .args(["survey", empty.to_str().expect("utf8")])
+        .assert()
+        .failure()
+        .stderr(contains("survey_empty_walk"));
+}
