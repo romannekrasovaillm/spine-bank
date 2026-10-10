@@ -201,6 +201,20 @@ jobs:
           if [ -n "$leaks" ]; then echo "$leaks"; exit 1; fi
           echo "personal paths: чисто"
 
+  selftest:
+    # B3 (0.3.17): метаморфный самотест вердикта — отдельная джоба CI.
+    # Поломка инварианта 8 (хук ищет подстроку `gate` вместо вызова шима
+    # `arch-be hook stop`) жила с 0.3.13 четыре релиза незамеченной: самотест
+    # вердикта сам выдавал неверный вердикт. Теперь прогон обязателен.
+    name: selftest (metamorphic verdict)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: cargo build
+      - run: ./target/debug/arch-be selftest
+
   eval-suite:
     # Continuous evals конфигурации харнесса (docs/evals.md): встроенный сьют
     # agent-config прогоняется герметично (временный дом, офлайн, без ключей),

@@ -350,6 +350,10 @@ pub fn run() -> SelftestReport {
     //    кейсе, собранном `bootstrap` (реестр в корне), — гейт не вызывался
     //    вовсе. Свойство проверяется на СГЕНЕРИРОВАННОМ хуке: контур,
     //    который в 0.3.5 починили в шаблоне, обязан остаться починенным.
+    //
+    //    B3 (0.3.17): с 0.3.13 хук — тонкий shim `arch-be hook stop`, слова
+    //    `gate` в нём нет (семантику знает бинарь). Проверяем именно вызов
+    //    шима — подстрока `gate` ложно краснила инвариант с четырёх релизов.
     let hooks_dir = fx.path().join("hooks-case");
     let _ = std::fs::create_dir_all(&hooks_dir);
     let connect_opts =
@@ -360,14 +364,14 @@ pub fn run() -> SelftestReport {
                 .unwrap_or_default();
             let guarded = settings.contains("[ -f .arch-handoff/CONSTRAINTS.yaml ]")
                 || settings.contains("[ -f CONSTRAINTS.yaml ]");
-            let calls_gate = settings.contains("gate");
+            let calls_hook = settings.contains("arch-be hook stop");
             record(
                 "hook_does_not_guess_registry_location",
-                !guarded && calls_gate,
+                !guarded && calls_hook,
                 format!(
-                    "хук: гарда по расположению реестра {}, вызов гейта {}",
+                    "хук: гарда по расположению реестра {}, вызов шима `arch-be hook stop` {}",
                     if guarded { "есть" } else { "нет" },
-                    if calls_gate { "есть" } else { "НЕТ" }
+                    if calls_hook { "есть" } else { "НЕТ" }
                 ),
             );
         }
@@ -429,4 +433,29 @@ pub fn run() -> SelftestReport {
     );
 
     SelftestReport { invariants }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// B3 (0.3.17): самотест обязан быть зелёным из коробки. Инвариант 8
+    /// проверяет вызов тонкого шима `arch-be hook stop`, а не подстроку
+    /// `gate` в `settings.json`: с 0.3.13 семантика хука живёт в бинаре, и
+    /// слова `gate` в сгенерированном shim'е нет — старая проверка ложно
+    /// краснила вердикт самотеста.
+    #[test]
+    fn invariant_8_passes_out_of_the_box() {
+        let report = run();
+        let inv = report
+            .invariants
+            .iter()
+            .find(|i| i.name == "hook_does_not_guess_registry_location")
+            .expect("инвариант 8 присутствует в отчёте");
+        assert!(
+            inv.passed,
+            "инвариант 8 должен быть зелёным: {}",
+            inv.detail
+        );
+    }
 }
