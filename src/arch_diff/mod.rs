@@ -29,6 +29,7 @@ mod accept;
 mod as_built;
 mod decisions;
 mod diff;
+mod modules;
 mod report;
 mod snapshot;
 mod types;
@@ -55,5 +56,6 @@ pub use snapshot::{
     snapshot_worktree, snapshot_worktree_with,
 };
 pub use types::{
-    ARCH_DIFF_SCHEMA, ArchEdge, ArchGraph, ArchNode, EdgeKind, MAX_EDGE_EVIDENCE, NodeKind,
+    ARCH_DIFF_SCHEMA, ArchEdge, ArchGraph, ArchNode, Confidence, EdgeKind, MAX_EDGE_EVIDENCE,
+    NodeKind, Via,
 };

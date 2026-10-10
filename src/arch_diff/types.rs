@@ -26,6 +26,8 @@ pub enum NodeKind {
     Datastore,
     /// Контракт (файл OpenAPI/AsyncAPI/protobuf по детектору T-05).
     Contract,
+    /// Топик брокера (Kafka/Rabbit): узел-посредник рёбер `calls` (R2).
+    Topic,
 }
 
 impl NodeKind {
@@ -37,6 +39,7 @@ impl NodeKind {
             Self::ExternalSystem => "external_system",
             Self::Datastore => "datastore",
             Self::Contract => "contract",
+            Self::Topic => "topic",
         }
     }
 }
@@ -70,6 +73,9 @@ pub enum EdgeKind {
     Connect,
     /// Публикация/реализация контракта (файл контракта в корне компонента).
     ContractRef,
+    /// Межсервисный вызов (R2): env-адрес, gateway-маршрут, gRPC-стаб,
+    /// подписка/публикация в топик брокера. Несёт `via` и `confidence`.
+    Calls,
 }
 
 impl EdgeKind {
@@ -80,8 +86,50 @@ impl EdgeKind {
             Self::Import => "import",
             Self::Connect => "connect",
             Self::ContractRef => "contract",
+            Self::Calls => "calls",
         }
     }
+}
+
+/// Способ, которым выведен межсервисный вызов `calls` (R2): из чего
+/// «прочитана» связь. Совпадает с ключом `via` эталонов (`env`/`route`/
+/// `stub`/`topic`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Via {
+    /// Переменная окружения `*_ADDR|*_URL|*_HOST|*_ENDPOINT` (k8s/compose).
+    Env,
+    /// Маршрут gateway/прокси (`lb://`, `http://<name>/…`).
+    Route,
+    /// Стаб клиента (gRPC `*Client`, Feign `@FeignClient`, `discoveryClient`).
+    Stub,
+    /// Топик брокера (Kafka/Rabbit: `@KafkaListener`, `basic_consume`, `send`).
+    Topic,
+}
+
+impl Via {
+    /// Метка способа для текста/JSON.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Env => "env",
+            Self::Route => "route",
+            Self::Stub => "stub",
+            Self::Topic => "topic",
+        }
+    }
+}
+
+/// Достоверность вывода ребра `calls` (R2): `confirmed` — база (адрес/стаб)
+/// однозначно называет службу; `inferred` — имя совпало с кандидатом, но
+/// основание косвенное.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Confidence {
+    /// Подтверждено: имя из основания совпало со службой/юнитом репозитория.
+    Confirmed,
+    /// Выведено: имя распознано кандидатом без точного совпадения.
+    Inferred,
 }
 
 /// Ребро графа as-built с основаниями `файл:строка` (отсортированы, без
@@ -96,6 +144,12 @@ pub struct ArchEdge {
     pub kind: EdgeKind,
     /// Основания `файл:строка` (детерминированный порядок).
     pub evidence: Vec<String>,
+    /// Способ вывода межсервисного вызова (только у `calls`, R2).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub via: Option<Via>,
+    /// Достоверность вывода (только у `calls`, R2).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<Confidence>,
 }
 
 /// Граф «как построено» по снимку одной ревизии.

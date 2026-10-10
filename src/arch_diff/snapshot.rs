@@ -172,6 +172,18 @@ fn needs_content(path: &str) -> bool {
     {
         return true;
     }
+    // R1: манифесты много­модульных сборок читаются для разбора агрегаторов
+    // (`<modules>`, `include`, `go.work`, `workspaces`, `.sln`); конфиги
+    // развёртывания (`compose`/k8s/`skaffold`) уже попадают по `yaml`.
+    if matches!(
+        lower_name.as_str(),
+        "pom.xml" | "settings.gradle" | "settings.gradle.kts" | "go.work"
+    ) || Path::new(name)
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("sln"))
+    {
+        return true;
+    }
     let ext = Path::new(path)
         .extension()
         .and_then(|e| e.to_str())
