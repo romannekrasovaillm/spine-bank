@@ -420,7 +420,7 @@ pub(crate) fn edge_model_status(
 ) -> Option<ModelStatus> {
     let model = model?;
     let found = match edge.kind {
-        EdgeKind::Import => {
+        EdgeKind::Import | EdgeKind::Calls => {
             let from_id = graph.node(&edge.from).and_then(|n| n.model_id.as_deref());
             let to_id = graph.node(&edge.to).and_then(|n| n.model_id.as_deref());
             match (from_id, to_id) {
@@ -851,7 +851,7 @@ fn proposals(
         let edge_id = proposal_edge_id(edge.kind, &edge.from, &edge.to);
         let grounds_hash = grounds_hash_of(&edge.evidence.join("\n"));
         match edge.kind {
-            EdgeKind::Import => {
+            EdgeKind::Import | EdgeKind::Calls => {
                 let (Some(source_id), Some(target_id)) = (
                     head.graph
                         .node(&edge.from)

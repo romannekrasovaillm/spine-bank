@@ -7,7 +7,9 @@ use std::path::Path;
 use regex::Regex;
 
 use super::snapshot::{Snapshot, snapshot_at_with, snapshot_worktree_with};
-use super::types::{ArchEdge, ArchGraph, ArchNode, EdgeKind, MAX_EDGE_EVIDENCE, NodeKind};
+use super::types::{
+    ArchEdge, ArchGraph, ArchNode, Confidence, EdgeKind, MAX_EDGE_EVIDENCE, NodeKind, Via,
+};
 use crate::control::{DiffGlobs, content_looks_like_contract, looks_like_config};
 use crate::error::{HarnessError, Result};
 use crate::imports;
@@ -180,10 +182,18 @@ fn materialize_case(snap: &Snapshot) -> Result<(Option<tempfile::TempDir>, Optio
     Ok((Some(tmp), model))
 }
 
-/// Собирает компоненты графа: CMP модели с `code_roots` плюс каталоги с
-/// манифестом сборки, не покрытые ни одним корнем (пометка `inferred` —
-/// тот же набор манифестов, что у `survey`/дрейфа модели).
+/// Собирает компоненты графа: CMP модели с `code_roots` плюс каталоги-
+/// кандидаты без покрывающего корня (пометка `inferred`).
+///
+/// R1: кандидаты — каталоги с манифестом сборки и модули, объявленные
+/// агрегатором (`<modules>`/`include`/`go.work`/`workspaces`/`.sln`); сам
+/// агрегирующий корень и каталоги тестовых проектов компонентами НЕ являются.
+/// Заголовок выведенного компонента — имя юнита развёртывания (сопряжение
+/// модуля сборки и deploy-юнита, [`super::modules::component_name`]), иначе
+/// имя каталога.
 fn collect_components(snap: &Snapshot, model: Option<&Model>) -> Vec<ComponentCtx> {
+    let layout = super::modules::build_layout(snap);
+    let topo = super::modules::deploy_topology(snap);
     let mut comps: Vec<ComponentCtx> = Vec::new();
     if let Some(model) = model {
         for e in &model.entities {
@@ -207,17 +217,25 @@ fn collect_components(snap: &Snapshot, model: Option<&Model>) -> Vec<ComponentCt
     }
     // Каталоги с манифестом сборки без покрывающего code_roots — компоненты
     // «по факту» (inferred): граф работает и без модели.
-    let mut manifest_dirs: BTreeSet<String> = BTreeSet::new();
+    let mut candidate_dirs: BTreeSet<String> = BTreeSet::new();
     for path in &snap.files {
         let name = path.rsplit('/').next().unwrap_or(path.as_str());
         if is_manifest_file(name) {
             let dir = path
                 .rsplit_once('/')
                 .map_or(String::new(), |(d, _)| d.to_string());
-            manifest_dirs.insert(dir);
+            candidate_dirs.insert(dir);
         }
     }
-    for dir in manifest_dirs {
+    // Объявленные агрегатором модули, реально существующие в ревизии
+    // (каталог модуля может не иметь манифеста в наборе `is_manifest_file`).
+    for m in &layout.modules {
+        if super::modules::dir_present(snap, m) {
+            candidate_dirs.insert(m.clone());
+        }
+    }
+    candidate_dirs.retain(|dir| !layout.is_aggregator(dir) && !layout.is_test(dir));
+    for dir in candidate_dirs {
         let covered = comps.iter().any(|c| {
             c.roots
                 .iter()
@@ -226,11 +244,7 @@ fn collect_components(snap: &Snapshot, model: Option<&Model>) -> Vec<ComponentCt
         if !covered {
             comps.push(ComponentCtx {
                 id: format!("dir:{}", if dir.is_empty() { "." } else { &dir }),
-                title: if dir.is_empty() {
-                    "(корень репозитория)".to_string()
-                } else {
-                    dir.clone()
-                },
+                title: super::modules::component_name(&dir, &topo),
                 inferred: true,
                 model_id: None,
                 roots: vec![dir],
@@ -263,12 +277,17 @@ fn owner_of_path(contexts: &[(usize, Vec<String>)], path: &str) -> Option<usize>
         .map(|(c, _)| *c)
 }
 
-/// Накопитель рёбер: (from, to, kind) → основания (множество — дедуп).
-type EdgeAcc = BTreeMap<(String, String, EdgeKind), BTreeSet<String>>;
+/// Ключ накопителя рёбер: (from, to, kind, via, confidence). `via`/`confidence`
+/// заполнены только у рёбер `calls` (R2) — ребрам прочих видов они `None`.
+type EdgeKey = (String, String, EdgeKind, Option<Via>, Option<Confidence>);
 
-/// Добавляет основание к ребру (создавая его).
+/// Накопитель рёбер: ключ → основания (множество — дедуп).
+type EdgeAcc = BTreeMap<EdgeKey, BTreeSet<String>>;
+
+/// Добавляет основание к ребру без способа/достоверности (import/connect/
+/// contract по построению).
 fn acc_edge(acc: &mut EdgeAcc, from: &str, to: &str, kind: EdgeKind, evidence: String) {
-    acc.entry((from.to_string(), to.to_string(), kind))
+    acc.entry((from.to_string(), to.to_string(), kind, None, None))
         .or_default()
         .insert(evidence);
 }
@@ -496,7 +515,7 @@ fn build_graph(snap: &Snapshot, model: Option<&Model>, globs: &DiffGlobs) -> Res
 
     let mut edges: Vec<ArchEdge> = acc
         .into_iter()
-        .map(|((from, to, kind), evidence)| {
+        .map(|((from, to, kind, via, confidence), evidence)| {
             let total = evidence.len();
             let mut ev: Vec<String> = evidence.into_iter().take(MAX_EDGE_EVIDENCE).collect();
             if total > MAX_EDGE_EVIDENCE {
@@ -507,10 +526,20 @@ fn build_graph(snap: &Snapshot, model: Option<&Model>, globs: &DiffGlobs) -> Res
                 to,
                 kind,
                 evidence: ev,
+                via,
+                confidence,
             }
         })
         .collect();
-    edges.sort_by(|a, b| (&a.from, &a.to, a.kind).cmp(&(&b.from, &b.to, b.kind)));
+    edges.sort_by(|a, b| {
+        (&a.from, &a.to, a.kind, a.via, a.confidence).cmp(&(
+            &b.from,
+            &b.to,
+            b.kind,
+            b.via,
+            b.confidence,
+        ))
+    });
     Ok(ArchGraph {
         rev: snap.rev.clone(),
         nodes: nodes.into_values().collect(),
@@ -730,6 +759,101 @@ mod tests {
             (edge.from.as_str(), edge.to.as_str()),
             ("dir:intake", "dir:ledger")
         );
+    }
+
+    /// R1: агрегирующий корень Maven — не компонент; модули получают имена
+    /// юнитов развёртывания из `docker-compose`; каталог тестового проекта
+    /// (`src/test`) — не компонент.
+    #[test]
+    fn multi_module_root_not_component() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("mkdir");
+        write_file(
+            &repo,
+            "pom.xml",
+            "<project><modules>\n<module>spring-petclinic-customers-service</module>\n<module>spring-petclinic-vets-service</module>\n</modules></project>\n",
+        );
+        write_file(
+            &repo,
+            "spring-petclinic-customers-service/pom.xml",
+            "<project/>\n",
+        );
+        write_file(
+            &repo,
+            "spring-petclinic-vets-service/pom.xml",
+            "<project/>\n",
+        );
+        write_file(
+            &repo,
+            "spring-petclinic-customers-service/src/test/pom.xml",
+            "<project/>\n",
+        );
+        write_file(
+            &repo,
+            "docker-compose.yml",
+            "services:\n  customers-service:\n    image: springcommunity/spring-petclinic-customers-service\n  vets-service:\n    image: springcommunity/spring-petclinic-vets-service\n",
+        );
+        git_repo(&repo);
+
+        let graph = as_built(&repo, "HEAD").expect("граф");
+        let ids: Vec<&str> = graph.nodes.iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "dir:spring-petclinic-customers-service",
+                "dir:spring-petclinic-vets-service"
+            ],
+            "{ids:?}"
+        );
+        let titles: BTreeSet<&str> = graph.nodes.iter().map(|n| n.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            BTreeSet::from(["customers-service", "vets-service"]),
+            "{titles:?}"
+        );
+    }
+
+    /// R1 (регресс): `.sln` объявляет проекты путями ФАЙЛОВ; тестовый проект
+    /// (`tests\*.tests.csproj`) не должен просачиваться компонентом, а каталог
+    /// модуля берёт имя юнита развёртывания (skaffold-контекст → `cartservice`).
+    #[test]
+    fn sln_test_project_not_component() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("mkdir");
+        write_file(
+            &repo,
+            "src/cartservice/cartservice.sln",
+            "Project(\"{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}\") = \"cartservice\", \"src\\cartservice.csproj\", \"{2348C29F}\"\nEndProject\nProject(\"{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}\") = \"cartservice.tests\", \"tests\\cartservice.tests.csproj\", \"{59825342}\"\nEndProject\n",
+        );
+        write_file(
+            &repo,
+            "src/cartservice/src/cartservice.csproj",
+            "<Project/>\n",
+        );
+        write_file(
+            &repo,
+            "src/cartservice/tests/cartservice.tests.csproj",
+            "<Project/>\n",
+        );
+        write_file(
+            &repo,
+            "skaffold.yaml",
+            "build:\n  artifacts:\n  - image: cartservice\n    context: src/cartservice/src\n",
+        );
+        write_file(
+            &repo,
+            "kubernetes-manifests/cartservice.yaml",
+            "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: cartservice\nspec:\n  template:\n    spec:\n      containers:\n      - name: server\n        image: cartservice\n",
+        );
+        git_repo(&repo);
+
+        let graph = as_built(&repo, "HEAD").expect("граф");
+        let ids: Vec<&str> = graph.nodes.iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(ids, vec!["dir:src/cartservice/src"], "{ids:?}");
+        let titles: BTreeSet<&str> = graph.nodes.iter().map(|n| n.title.as_str()).collect();
+        assert_eq!(titles, BTreeSet::from(["cartservice"]), "{titles:?}");
     }
 
     /// Внешние системы (`sys:`) и хранилища (`store:`) из конфигов: схема

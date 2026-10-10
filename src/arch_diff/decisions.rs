@@ -294,6 +294,8 @@ mod tests {
             to: "CMP-004".to_string(),
             kind: EdgeKind::Import,
             evidence: evidence.iter().map(|s| (*s).to_string()).collect(),
+            via: None,
+            confidence: None,
         }
     }
 

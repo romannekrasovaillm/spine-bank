@@ -108,8 +108,9 @@ pub(crate) const CONFIG_EXTENSIONS: [&str; 5] = ["yaml", "yml", "toml", "propert
 /// Имена каталогов миграций (включая «db/migrate» — по суффиксу пути).
 const MIGRATION_DIR_NAMES: [&str; 4] = ["migrations", "flyway", "liquibase", "alembic"];
 
-/// Имена каталогов тестов.
-const TEST_DIR_NAMES: [&str; 4] = ["tests", "test", "__tests__", "spec"];
+/// Имена каталогов тестов. `pub(crate)`: тот же набор использует отбор
+/// компонентов графа as-built (R1, тестовые проекты — не компоненты).
+pub(crate) const TEST_DIR_NAMES: [&str; 4] = ["tests", "test", "__tests__", "spec"];
 
 /// Имена каталогов файлового обмена (скрытые связи через drop-каталоги).
 const EXCHANGE_DIR_NAMES: [&str; 7] = [
