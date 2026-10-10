@@ -137,4 +137,4 @@ ok   boutique clone resolves: got=True want=True
 [SKIP] metric 14 (selftest из коробки): измеряется в CI (cargo test), не прогонщиком бенчмарка
 [SKIP] metric 17 (golden judge MAE / доля в диапазоне): требует API-ключ судьи — вне офлайн-прогона
 
-готово: /home/roman/.arch-harness/worktrees/spine-bank-42b7c6db0c05a788/claude-code-20261010134443/benchmarks/architect-value/results/0.3.17-2026-10-10 (run_all.log, summary.md)
+готово: /home/roman/spine-bank/benchmarks/architect-value/results/0.3.17-2026-10-10 (run_all.log, summary.md)
