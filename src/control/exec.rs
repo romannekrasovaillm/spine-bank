@@ -1285,8 +1285,13 @@ mod tests {
         );
         let report = check(&repo, &constraints).unwrap();
         assert!(!report.passed);
-        assert_eq!(report.issues.len(), 1, "{:?}", report.issues);
-        let i = &report.issues[0];
+        let errors: Vec<_> = report
+            .issues
+            .iter()
+            .filter(|i| i.severity == "error")
+            .collect();
+        assert_eq!(errors.len(), 1, "{:?}", report.issues);
+        let i = errors[0];
         assert_eq!(i.rule, "llm_no_agent");
         assert_eq!(i.line, 4, "инлайн-путь на 4-й строке: {i:?}");
         assert!(i.file.ends_with("src/llm/engine.rs"));
@@ -1294,6 +1299,16 @@ mod tests {
         assert!(
             !i.message.contains("tui"),
             "комментарий с упоминанием tui-модуля игнорируется: {i:?}"
+        );
+        // B4: `tui` не встречается среди импортов репозитория — префикс
+        // вакуумный, ожидается warn (не красит гейт).
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|i| i.rule == "rule_vacuous_prefix" && i.message.contains("'tui'")),
+            "ожидался warn о вакуумном префиксе 'tui': {:?}",
+            report.issues
         );
 
         // Чистый вариант: forbid только tui — нарушений нет.
@@ -1325,11 +1340,26 @@ mod tests {
         );
         let report = check(&repo, &constraints).unwrap();
         assert!(!report.passed);
-        assert_eq!(report.issues.len(), 1, "{:?}", report.issues);
+        let errors: Vec<_> = report
+            .issues
+            .iter()
+            .filter(|i| i.severity == "error")
+            .collect();
+        assert_eq!(errors.len(), 1, "{:?}", report.issues);
         assert!(
-            report.issues[0].message.contains("вне allow-списка"),
+            errors[0].message.contains("вне allow-списка"),
             "{:?}",
-            report.issues[0]
+            errors[0]
+        );
+        // B4: `error` не встречается среди импортов репозитория — вакуумный
+        // префикс даёт warn, но гейт не красит.
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|i| i.rule == "rule_vacuous_prefix" && i.message.contains("'error'")),
+            "ожидался warn о вакуумном префиксе 'error': {:?}",
+            report.issues
         );
     }
 
@@ -1424,6 +1454,112 @@ mod tests {
         assert_eq!(report.issues.len(), 1, "{:?}", report.issues);
         assert_eq!(report.issues[0].line, 2);
         assert!(report.issues[0].message.contains("services/legacy/db"));
+    }
+
+    /// B4 (0.4.0): привычная Java/Kotlin-нотация префикса (`io.reflectoring`)
+    /// должна совпадать с координатами импорта (`io/reflectoring/...`). До
+    /// фикса правило зеленело при любом коде: точечный префикс не совпадал
+    /// с слэш-координатой никогда.
+    #[test]
+    fn fitness_dependency_direction_java_notation_prefix_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        write_file(
+            &repo,
+            "src/main/java/io/reflectoring/domain/DomainService.java",
+            "package io.reflectoring.domain;\n\
+             import io.reflectoring.persistence.JpaEntity;\n",
+        );
+        let constraints = write_file(
+            dir.path(),
+            "CONSTRAINTS.yaml",
+            "rules:\n\
+             \x20 - name: domain_pure\n\
+             \x20   type: dependency_direction\n\
+             \x20   glob: '**/*.java'\n\
+             \x20   forbid: ['io.reflectoring.persistence']\n",
+        );
+        let report = check(&repo, &constraints).unwrap();
+        let errors: Vec<_> = report
+            .issues
+            .iter()
+            .filter(|i| i.severity == "error")
+            .collect();
+        assert_eq!(errors.len(), 1, "{:?}", report.issues);
+        assert!(
+            errors[0]
+                .message
+                .contains("io/reflectoring/persistence/JpaEntity"),
+            "{:?}",
+            errors[0]
+        );
+    }
+
+    /// B4 (0.4.0): префикс, которому не совпал ни один импорт репозитория, —
+    /// признак неверной нотации. Находка `rule_vacuous_prefix` уровня warn (не
+    /// краснит гейт), но делает молчаливое зелёное правило видимым.
+    #[test]
+    fn fitness_dependency_direction_vacuous_prefix_warns() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = deps_repo(dir.path());
+        let constraints = write_file(
+            dir.path(),
+            "CONSTRAINTS.yaml",
+            "rules:\n\
+             \x20 - name: llm_no_ghost\n\
+             \x20   type: dependency_direction\n\
+             \x20   glob: 'src/llm/**'\n\
+             \x20   forbid: ['ghost_module']\n",
+        );
+        let report = check(&repo, &constraints).unwrap();
+        assert!(report.passed, "warn не краснит гейт: {:?}", report.issues);
+        let w = report
+            .issues
+            .iter()
+            .find(|i| i.rule == "rule_vacuous_prefix")
+            .unwrap_or_else(|| {
+                panic!("ожидалась находка rule_vacuous_prefix: {:?}", report.issues)
+            });
+        assert_eq!(w.severity, "warn");
+        assert!(w.message.contains("'ghost_module'"), "{w:?}");
+    }
+
+    /// B5 (0.4.0): для JVM текстовая проверка импортов честно слепа к
+    /// FQN-обращениям без `import` (например `new io.reflectoring.persistence.X()`).
+    /// Вакуумный префикс JVM-правила обязан назвать это и указать выход —
+    /// ArchUnit-мост (`type: archunit`), который видит байткод/типы, а не текст.
+    #[test]
+    fn fitness_dependency_direction_jvm_vacuous_suggests_archunit() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        write_file(
+            &repo,
+            "src/main/java/io/reflectoring/domain/DomainService.java",
+            "package io.reflectoring.domain;\nimport java.util.List;\n",
+        );
+        let constraints = write_file(
+            dir.path(),
+            "CONSTRAINTS.yaml",
+            "rules:\n\
+             \x20 - name: domain_pure\n\
+             \x20   type: dependency_direction\n\
+             \x20   glob: '**/*.java'\n\
+             \x20   forbid: ['io.reflectoring.persistence']\n",
+        );
+        let report = check(&repo, &constraints).unwrap();
+        let w = report
+            .issues
+            .iter()
+            .find(|i| i.rule == "rule_vacuous_prefix")
+            .unwrap_or_else(|| panic!("ожидался rule_vacuous_prefix: {:?}", report.issues));
+        assert!(
+            w.message.contains("ArchUnit"),
+            "FQN-слепота JVM-проверки не названа: {w:?}"
+        );
+        assert!(
+            w.message.contains("io.reflectoring.persistence"),
+            "префикс не назван: {w:?}"
+        );
     }
 
     // --- context_boundary (ADR-030) ----------------------------------------

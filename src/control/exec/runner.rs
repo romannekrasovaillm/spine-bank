@@ -333,6 +333,17 @@ pub(super) fn run_rule(
         RuleKind::DependencyDirection => {
             let mode = deps_mode(rule)?;
             let globs = rule_globs(rule);
+            // B4: префиксы forbid/allow приводятся к координатам модулей по
+            // языку glob'а — привычная Java/Kotlin/Python-нотация
+            // `io.reflectoring.persistence` означает `io/reflectoring/...`.
+            // Без нормализации точечный префикс не совпадал со слэш-координатой
+            // никогда, и правило зеленело при любом коде.
+            let dotted = deps_dotted_notation(&globs);
+            let entries: Vec<DepsPrefix> = match &mode {
+                DepsMode::Forbid(v) | DepsMode::Allow(v) => {
+                    v.iter().map(|e| DepsPrefix::new(e, dotted)).collect()
+                }
+            };
             let mut files = Vec::new();
             for glob in &globs {
                 files.extend(collect_files(repo, glob)?);
@@ -363,35 +374,77 @@ pub(super) fn run_rule(
                         continue;
                     }
                     match &mode {
-                        DepsMode::Forbid(forbid) => {
-                            if let Some(entry) = forbid
+                        DepsMode::Forbid(_) => {
+                            if let Some(e) = entries
                                 .iter()
-                                .find(|e| crate::imports::module_prefix_match(module, e))
+                                .find(|e| crate::imports::module_prefix_match(module, &e.norm))
                             {
                                 issue(
                                     PathBuf::from(rel),
                                     edge.line,
                                     format!(
-                                        "dependency_direction: запрещённая зависимость '{module}' (forbid: '{entry}')"
+                                        "dependency_direction: запрещённая зависимость '{module}' (forbid: '{}')",
+                                        e.raw
                                     ),
                                 );
                             }
                         }
-                        DepsMode::Allow(allow) => {
-                            if !allow
+                        DepsMode::Allow(_) => {
+                            if !entries
                                 .iter()
-                                .any(|e| crate::imports::module_prefix_match(module, e))
+                                .any(|e| crate::imports::module_prefix_match(module, &e.norm))
                             {
+                                let list = entries
+                                    .iter()
+                                    .map(|e| e.raw.clone())
+                                    .collect::<Vec<_>>()
+                                    .join(", ");
                                 issue(
                                     PathBuf::from(rel),
                                     edge.line,
                                     format!(
-                                        "dependency_direction: зависимость '{module}' вне allow-списка ({})",
-                                        allow.join(", ")
+                                        "dependency_direction: зависимость '{module}' вне allow-списка ({list})"
                                     ),
                                 );
                             }
                         }
+                    }
+                }
+            }
+            // B4: вакуумность префикса. Префикс, которому за прогон не
+            // совпал ни один импорт ни одного файла репозитория, — почти
+            // всегда неверная нотация (правило зелёное, но ничего не
+            // проверяет). Уровень warn: нотация может быть оправдана
+            // (модуль ещё не появился), и гейт краснить не должен.
+            if !entries.is_empty() {
+                let modules = repo_import_modules(repo)?;
+                for e in &entries {
+                    if !modules
+                        .iter()
+                        .any(|m| crate::imports::module_prefix_match(m, &e.norm))
+                    {
+                        let mut msg = format!(
+                            "префикс '{}' не встречается среди импортов → проверьте нотацию (правило '{}')",
+                            e.raw, rule.name
+                        );
+                        // B5 (0.4.0): для JVM/Python-нотации текстовая проверка
+                        // честно слепа к FQN-обращениям без import — называем
+                        // это и указываем выход (ArchUnit-мост по байткоду).
+                        if dotted {
+                            msg.push_str(
+                                "; FQN без import не анализируется — для JVM используйте ArchUnit-мост (type: archunit)",
+                            );
+                        }
+                        let mut finding = LintIssue {
+                            file: PathBuf::from("CONSTRAINTS.yaml"),
+                            line: 0,
+                            rule: "rule_vacuous_prefix".into(),
+                            message: msg,
+                            severity: "warn".into(),
+                            ..LintIssue::default()
+                        };
+                        rule.apply_card(&mut finding);
+                        issues.push(finding);
                     }
                 }
             }
@@ -543,6 +596,62 @@ fn deps_mode(rule: &FitnessRule) -> Result<DepsMode<'_>> {
             rule.name
         ))),
     }
+}
+
+/// Запись `forbid`/`allow` правила `dependency_direction`: как записана в
+/// конфиге (`raw`) и её нормализованные координаты модулей (`norm`).
+struct DepsPrefix {
+    raw: String,
+    norm: String,
+}
+
+impl DepsPrefix {
+    /// Нормализует префикс под язык glob'а правила: для JVM/Python-нотации
+    /// (`io.reflectoring.persistence`) координаты модулей разделены `/`, а в
+    /// конфиге их пишут точками — приводим `.` → `/`. Иначе точечный
+    /// префикс не совпадает со слэш-координатой импорта никогда.
+    fn new(raw: &str, dotted: bool) -> Self {
+        let raw = raw.trim().to_string();
+        let norm = if dotted {
+            raw.replace('.', "/")
+        } else {
+            raw.clone()
+        };
+        Self { raw, norm }
+    }
+}
+
+/// Признак точечной нотации координат по языку glob'а правила:
+/// `*.java|*.kt|*.py` (JVM/Python пишут пакеты точками).
+fn deps_dotted_notation(globs: &[String]) -> bool {
+    globs.iter().any(|g| {
+        let ext = g.rsplit('.').next().unwrap_or_default();
+        matches!(ext, "java" | "kt" | "py")
+    })
+}
+
+/// Модульные пути всех импортов репозитория — для проверки «вакуумности»
+/// префикса: префикс, которому не совпал ни один импорт ни одного файла
+/// репозитория, почти наверняка записан в неверной нотации.
+fn repo_import_modules(repo: &Path) -> Result<Vec<String>> {
+    let mut modules = Vec::new();
+    for (rel, abs) in collect_files(repo, "**/*")? {
+        let ext = Path::new(&rel)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or_default();
+        if !crate::imports::IMPORT_EXTENSIONS.contains(&ext) {
+            continue;
+        }
+        let bytes = std::fs::read(&abs).map_err(|e| HarnessError::io(&abs, e))?;
+        let content = String::from_utf8_lossy(&bytes);
+        for edge in crate::imports::extract_imports(&rel, &content)? {
+            if !edge.module.starts_with('.') {
+                modules.push(edge.module);
+            }
+        }
+    }
+    Ok(modules)
 }
 
 /// Проверка `context_boundary` (ADR-030): импорты файлов не пересекают
