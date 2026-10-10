@@ -1194,6 +1194,11 @@ pub struct RedteamOptions {
     /// Куда сохранить клоны смысловых мутантов (ADR-051, S5): `None` — клоны
     /// удаляются, как раньше.
     pub keep_semantic: Option<PathBuf>,
+    /// Режим «герметичного контура» (B7): эталон, красный ТОЛЬКО из-за
+    /// отсутствующего прогонщика (pytest/mvn/JDK), не считается сломанным, а
+    /// мутаторы, которым нужен этот прогонщик, выходят из знаменателя как
+    /// «пропущен: неизмеримо без прогонщика» — по образцу «нет входа».
+    pub hermetic: bool,
 }
 
 impl Default for RedteamOptions {
@@ -1203,6 +1208,7 @@ impl Default for RedteamOptions {
             min_code_detection: None,
             decision_quality: true,
             keep_semantic: None,
+            hermetic: false,
         }
     }
 }
@@ -1233,16 +1239,88 @@ pub(crate) fn not_green_reasons(reference: &crate::gate::GateReport) -> String {
         .filter(|c| c.status == GateStatus::Fail)
         .map(|c| format!("провалена {}", c.name))
         .collect();
-    parts.extend(
-        reference
-            .not_checked
+    parts.extend(reference.not_checked.iter().map(|name| {
+        // B7: причина SKIP (недостающий прогонщик и команда установки) лежит
+        // в `detail` составляющей; без неё сообщение глухо называет лишь имя —
+        // «pytest не найден» архитектор видел только в `doctor`.
+        let detail = reference
+            .components
             .iter()
-            .map(|name| format!("обязательная {name} без входа (SKIP)")),
-    );
+            .find(|c| c.name == name.as_str())
+            .map(|c| c.detail.trim())
+            .filter(|d| !d.is_empty());
+        match detail {
+            Some(d) => format!("обязательная {name} без входа (SKIP): {d}"),
+            None => format!("обязательная {name} без входа (SKIP)"),
+        }
+    }));
     if parts.is_empty() {
         return format!("итог {:?} без названных составляющих", reference.outcome);
     }
     parts.join(", ")
+}
+
+/// Причина пропуска из-за отсутствующего прогонщика, извлечённая из `detail`
+/// составляющей: от префикса [`crate::rule_templates::RUNNER_ABSENT_PREFIX`]
+/// до служебного хвоста « — файл …». `None` — среди SKIP-составляющих нет
+/// пропуска по прогонщику (пропуск иной природы).
+pub(crate) fn runner_skip_note(report: &crate::gate::GateReport) -> Option<String> {
+    report.components.iter().find_map(|c| {
+        if c.status != GateStatus::Skip {
+            return None;
+        }
+        let from = &c.detail[c.detail.find(crate::rule_templates::RUNNER_ABSENT_PREFIX)?..];
+        Some(
+            from.split(" — файл")
+                .next()
+                .unwrap_or(from)
+                .trim()
+                .to_string(),
+        )
+    })
+}
+
+/// Эталон красный ТОЛЬКО из-за отсутствующего прогонщика: исход INCOMPLETE,
+/// ни одной FAIL-составляющей, и каждая непроверенная обязательная
+/// составляющая — SKIP с причиной «нет прогонщика». Именно такой эталон
+/// `--hermetic` (B7) вправе мерить: слепота окружения, а не сломанный кейс.
+pub(crate) fn runner_only_incomplete(report: &crate::gate::GateReport) -> bool {
+    if report.outcome != GateOutcome::Incomplete || report.not_checked.is_empty() {
+        return false;
+    }
+    if report
+        .components
+        .iter()
+        .any(|c| c.status == GateStatus::Fail)
+    {
+        return false;
+    }
+    report.not_checked.iter().all(|name| {
+        report
+            .components
+            .iter()
+            .find(|c| c.name == name.as_str())
+            .is_some_and(|c| {
+                c.status == GateStatus::Skip
+                    && c.detail
+                        .contains(crate::rule_templates::RUNNER_ABSENT_PREFIX)
+            })
+    })
+}
+
+/// Причина «пропущен: неизмеримо без прогонщика» для мутатора, который под
+/// `--hermetic` не поймал ничего (`failed_empty`) из-за отсутствующего
+/// прогонщика. `None` — обычный путь: режим выключен, дефект поймали или
+/// вердикт красный не из-за прогонщика.
+pub(crate) fn hermetic_skip(
+    report: &crate::gate::GateReport,
+    enabled: bool,
+    failed_empty: bool,
+) -> Option<String> {
+    if !enabled || !failed_empty {
+        return None;
+    }
+    runner_skip_note(report).map(|note| format!("неизмеримо без прогонщика: {note}"))
 }
 
 /// Мутационный прогон с опциями.
@@ -1267,7 +1345,11 @@ pub fn run_with_options(case: &Path, options: &RedteamOptions) -> Result<Redteam
         return Err(HarnessError::Control(format!("эталон: коммит: {e}")));
     }
     let reference = gate_report(&reference_root, decision_quality)?;
-    if reference.outcome != GateOutcome::Pass {
+    // B7: в `--hermetic` эталон, красный ИСКЛЮЧИТЕЛЬНО из-за отсутствующего
+    // прогонщика, — не «сломанный пакет», а слепое окружение. Мерить его
+    // можно; мутаторы без прогонщика выйдут из знаменателя ниже.
+    let hermetic_runner_skip = options.hermetic && runner_only_incomplete(&reference);
+    if reference.outcome != GateOutcome::Pass && !hermetic_runner_skip {
         return Err(HarnessError::Control(format!(
             "кейс {} не зелёный на маршруте Critical — мутационный прогон мерил бы \
              сломанный пакет ({}); красноглазый эталон не даёт отличить \
@@ -1374,6 +1456,22 @@ pub fn run_with_options(case: &Path, options: &RedteamOptions) -> Result<Redteam
                 in_ratio: m.in_ratio,
                 caught_by,
                 skipped: None,
+            });
+            continue;
+        }
+        // B7: в hermetic-режиме мутатор, не поймавший ничего ИЗ-ЗА
+        // отсутствующего прогонщика, честно выходит из знаменателя —
+        // «пропущен: неизмеримо без прогонщика …», а не глухое «не пойман».
+        if let Some(reason) = hermetic_skip(&report, options.hermetic, failed.is_empty()) {
+            detections.push(Detection {
+                id: m.id.to_string(),
+                title: m.title.to_string(),
+                expected,
+                layer: m.layer,
+                expected_by: m.by.to_string(),
+                in_ratio: m.in_ratio,
+                caught_by: None,
+                skipped: Some(reason),
             });
             continue;
         }
@@ -1939,5 +2037,158 @@ mod tests {
             "колонка смысловой рубрики: {md}"
         );
         assert!(md.contains("не пойман и не должен"), "{md}");
+    }
+
+    /// Составляющая гейта для сборки отчёта в тестах B7 (конструкторы
+    /// `GateComponent` — `pub(super)` в `gate::types`, поэтому соберём литералом).
+    fn gate_component(
+        name: &'static str,
+        status: GateStatus,
+        detail: &str,
+    ) -> crate::gate::GateComponent {
+        crate::gate::GateComponent {
+            name,
+            status,
+            detail: detail.to_string(),
+            findings: Vec::new(),
+            not_verified: Vec::new(),
+        }
+    }
+
+    /// Отчёт гейта из состава: `recompute()` выводит `not_checked`/`outcome`.
+    fn report_with(
+        components: Vec<crate::gate::GateComponent>,
+        required: Vec<&str>,
+    ) -> crate::gate::GateReport {
+        let mut report = crate::gate::GateReport {
+            repo: PathBuf::from("repo"),
+            route: Route::Critical,
+            route_auto: false,
+            route_note: String::new(),
+            route_triggers: Vec::new(),
+            components,
+            outcome: GateOutcome::Pass,
+            required: required.into_iter().map(str::to_string).collect(),
+            not_checked: Vec::new(),
+            inputs: Vec::new(),
+            attestation: String::new(),
+            passed: false,
+        };
+        report.recompute();
+        report
+    }
+
+    /// Эталон, красный ровно из-за отсутствующего прогонщика: `fitness` ушёл в
+    /// SKIP с причиной «нет прогонщика pytest: … (`python3 -m pip install pytest`)».
+    fn runnerless_report() -> crate::gate::GateReport {
+        report_with(
+            vec![gate_component(
+                "fitness",
+                GateStatus::Skip,
+                "исполняемые правила не прогонялись (r_no_pytest) — \
+                 нет прогонщика pytest: `python3 -m pip install pytest` \
+                 — файл: CONSTRAINTS.yaml",
+            )],
+            vec!["fitness"],
+        )
+    }
+
+    /// B7: неизмеримый эталон обязан назвать НЕДОСТАЮЩИЙ прогонщик и команду
+    /// установки. Без этого причина («pytest не найден») видна только в
+    /// `doctor`, а `redteam` краснеет глухим «обязательная fitness без входа».
+    #[test]
+    fn b7_not_green_reasons_names_missing_runner_and_install_hint() {
+        let report = runnerless_report();
+        let reason = not_green_reasons(&report);
+        assert!(
+            reason.contains("обязательная fitness без входа (SKIP)"),
+            "{reason}"
+        );
+        assert!(
+            reason.contains("нет прогонщика"),
+            "причина пропуска обязана называть прогонщика: {reason}"
+        );
+        assert!(
+            reason.contains("pip install pytest"),
+            "нужна команда установки: {reason}"
+        );
+    }
+
+    /// B7: `runner_skip_note` вырезает из detail только причину по прогонщику
+    /// (до служебного « — файл»), а на пропуске иной природы отвечает `None`.
+    #[test]
+    fn b7_runner_skip_note_extracts_hint_only() {
+        assert_eq!(
+            runner_skip_note(&runnerless_report()).as_deref(),
+            Some("нет прогонщика pytest: `python3 -m pip install pytest`")
+        );
+        let other = report_with(
+            vec![gate_component(
+                "fitness",
+                GateStatus::Skip,
+                "нет каталога model/ — файл: CONSTRAINTS.yaml",
+            )],
+            vec!["fitness"],
+        );
+        assert_eq!(runner_skip_note(&other), None, "пропуск не по прогонщику");
+    }
+
+    /// B7: `--hermetic` прощает ТОЛЬКО эталон, красный исключительно из-за
+    /// отсутствующего прогонщика. FAIL-составляющая или пропуск иной природы
+    /// (нет model/, нет ADR…) режимом не прощаются — иначе он маскировал бы
+    /// реальные провалы.
+    #[test]
+    fn b7_hermetic_excuses_only_runner_incomplete_reference() {
+        assert!(
+            runner_only_incomplete(&runnerless_report()),
+            "эталон только из-за прогонщика"
+        );
+        let failed = report_with(
+            vec![gate_component("fitness", GateStatus::Fail, "нарушений: 3")],
+            vec!["fitness"],
+        );
+        // FAIL перекрывает: исход Fail — не прощается.
+        assert!(!runner_only_incomplete(&failed), "FAIL не прощается");
+        let other_skip = report_with(
+            vec![gate_component(
+                "fitness",
+                GateStatus::Skip,
+                "нет каталога model/",
+            )],
+            vec!["fitness"],
+        );
+        assert!(
+            !runner_only_incomplete(&other_skip),
+            "пропуск не по прогонщику не прощается"
+        );
+        let green = report_with(
+            vec![gate_component("fitness", GateStatus::Pass, "ок")],
+            vec!["fitness"],
+        );
+        assert!(
+            !runner_only_incomplete(&green),
+            "зелёный — не предмет режима"
+        );
+    }
+
+    /// B7: `hermetic_skip` даёт причину «неизмеримо без прогонщика» только
+    /// когда режим включён, дефект не пойман и причина именно в прогонщике.
+    #[test]
+    fn b7_hermetic_skip_only_when_runner_missing_and_nothing_caught() {
+        let report = runnerless_report();
+        let reason = hermetic_skip(&report, true, true).expect("пропуск по прогонщику");
+        assert!(reason.contains("неизмеримо без прогонщика"), "{reason}");
+        assert!(reason.contains("pip install pytest"), "{reason}");
+        assert_eq!(hermetic_skip(&report, false, true), None, "режим выключен");
+        assert_eq!(hermetic_skip(&report, true, false), None, "дефект пойман");
+        let other = report_with(
+            vec![gate_component("fitness", GateStatus::Skip, "нет model/")],
+            vec!["fitness"],
+        );
+        assert_eq!(
+            hermetic_skip(&other, true, true),
+            None,
+            "пропуск не по прогонщику"
+        );
     }
 }

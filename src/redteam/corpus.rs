@@ -289,7 +289,11 @@ pub fn run_corpus(
         return Err(HarnessError::Control(format!("эталон: коммит: {e}")));
     }
     let reference = super::gate_report(&reference_root, options.decision_quality)?;
-    if reference.outcome != crate::gate::GateOutcome::Pass {
+    // B7: `--hermetic` — эталон, красный только из-за отсутствующего
+    // прогонщика, не «сломанный пакет»; корпусный прогон информационный и
+    // вправе на нём состояться.
+    let hermetic_runner_skip = options.hermetic && super::runner_only_incomplete(&reference);
+    if reference.outcome != crate::gate::GateOutcome::Pass && !hermetic_runner_skip {
         return Err(HarnessError::Control(format!(
             "кейс {} не зелёный на маршруте Critical — корпусный прогон мерил бы \
              сломанный пакет ({})",

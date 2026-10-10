@@ -26,6 +26,13 @@ fn pytest_available() -> bool {
         .is_ok_and(|status| status.success())
 }
 
+/// Есть ли `mvn` в PATH — для B7-теста отсутствующего прогонщика Maven:
+/// где Maven установлен, сценарий вырождается и тест скипается.
+fn mvn_available() -> bool {
+    std::env::var_os("PATH")
+        .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join("mvn").is_file()))
+}
+
 /// Есть ли `python3` в PATH (A2): без него python-фикстуру ACP не запустить,
 /// тесты скипаются. Тот же PATH-scan, что в интеграционном таргете
 /// `tests/acp_fixture.rs` (дублирование по таргетам — конвенция).
@@ -3662,6 +3669,90 @@ fn redteam_save_refuses_a_broken_case() {
         !case.join(".arch-handoff/redteam.json").exists(),
         "измерение сломанного пакета не сохраняется"
     );
+}
+
+/// Рекурсивная копия дерева для B7-фикстуры (без внешних зависимостей);
+/// `.git` не нужен — `redteam` делает мутантам свой репозиторий.
+fn copy_tree(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).expect("mkdir копии");
+    for entry in std::fs::read_dir(from).expect("read исходника") {
+        let entry = entry.expect("entry");
+        let dst = to.join(entry.file_name());
+        if entry.path().is_dir() {
+            copy_tree(&entry.path(), &dst);
+        } else {
+            std::fs::copy(entry.path(), &dst).expect("копия файла");
+        }
+    }
+}
+
+/// B7: кейс с исполняемыми правилами на ОТСУТСТВУЮЩИЙ прогонщик (`mvn`):
+/// `redteam` без `--hermetic` обязан НАЗВАТЬ недостающий прогонщик и команду
+/// установки (а не глухое «обязательная fitness без входа»); режим
+/// `--hermetic` состоятелен — эталон, красный лишь из-за слепоты окружения,
+/// прощается, а мутаторы без прогонщика выходят из знаменателя как
+/// «пропущен: неизмеримо без прогонщика». На машине с Maven тест вырождается
+/// и скипается.
+#[test]
+fn redteam_names_missing_runner_and_hermetic_proceeds() {
+    if mvn_available() {
+        eprintln!("skipped: mvn present");
+        return;
+    }
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("кейсы/digital-ruble-merchant");
+    let tmp = tempfile::tempdir().expect("tmp");
+    let case = tmp.path().join("case");
+    copy_tree(&src, &case);
+    // Подменяем прогонщик на заведомо отсутствующий: `mvn` нет в PATH.
+    let constraints = case.join("CONSTRAINTS.yaml");
+    let text = std::fs::read_to_string(&constraints).expect("read constraints");
+    std::fs::write(
+        &constraints,
+        text.replace("python3 -m pytest -q -p no:cacheprovider", "mvn -q test"),
+    )
+    .expect("подмена прогонщика");
+
+    // Без --hermetic: эталон красный из-за прогонщика — прогон отказан, но
+    // причина обязана называть прогонщика и команду установки.
+    let out = arch_cmd(tmp.path())
+        .arg("redteam")
+        .arg(case.as_os_str())
+        .output()
+        .expect("прогон arch-be redteam");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(out.status.code(), Some(1), "вывод: {text}");
+    assert!(
+        text.contains("нет прогонщика mvn"),
+        "отказ обязан назвать отсутствующий прогонщик: {text}"
+    );
+    assert!(
+        text.contains("установите Maven"),
+        "отказ обязан дать команду установки: {text}"
+    );
+
+    // С --hermetic: слепота окружения прощается, мутаторы без прогонщика —
+    // «неизмеримо без прогонщика», прогон состоятелен (Итог: PASS).
+    let out = arch_cmd(tmp.path())
+        .arg("redteam")
+        .arg(case.as_os_str())
+        .arg("--hermetic")
+        .output()
+        .expect("прогон arch-be redteam --hermetic");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(out.status.code(), Some(0), "вывод: {text}");
+    assert!(
+        text.contains("неизмеримо без прогонщика"),
+        "мутатор без прогонщика обязан выйти из знаменателя: {text}"
+    );
+    assert!(text.contains("Итог: PASS"), "вывод: {text}");
 }
 
 /// Каталог собранного `arch-be` — хук запускается через `sh` с этим каталогом
