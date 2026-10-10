@@ -3350,3 +3350,149 @@ fn rubric_run_all_accepted_judges_only_missing_and_stale() {
         .expect("конфликт флагов");
     assert!(!conflict.status.success(), "конфликт обязан быть ошибкой");
 }
+
+/// Минимальные аргументы, удовлетворяющие `required` схемы инструмента:
+/// строки — правдоподобные значения (путь — `.`, иначе `x`), массивы — `[]`,
+/// объекты — `{}`, числа — 0, булевы — false. Прочие поля не заполняются —
+/// для контрактной проверки схемы этого достаточно.
+fn minimal_args(schema: &Value) -> Value {
+    let mut out = serde_json::Map::new();
+    let Some(required) = schema.get("required").and_then(Value::as_array) else {
+        return Value::Object(out);
+    };
+    let props = schema.get("properties").and_then(Value::as_object);
+    for field in required.iter().filter_map(Value::as_str) {
+        let ty = props
+            .and_then(|p| p.get(field))
+            .and_then(|p| p.get("type"))
+            .and_then(Value::as_str)
+            .unwrap_or("string");
+        let value = match ty {
+            "array" => Value::Array(vec![]),
+            "object" => Value::Object(serde_json::Map::new()),
+            "integer" | "number" => Value::from(0),
+            "boolean" => Value::from(false),
+            // Строка-путь — `.` (cwd инструмента); прочие — нейтральный `x`.
+            _ if matches!(field, "path" | "dir" | "repo" | "case" | "change_dir") => {
+                Value::from(".")
+            }
+            _ => Value::from("x"),
+        };
+        out.insert(field.to_string(), value);
+    }
+    Value::Object(out)
+}
+
+/// Имена параметров, названные в тексте ошибки отсутствующими. Маркеры:
+/// «нужен параметр» + бэктик, «обязательный аргумент» + бэктик либо кавычка.
+/// Берётся только первый токен после маркера — иначе скобочные пояснения
+/// вида «(историческое имя ‘repo’)» дали бы ложняк.
+fn missing_param_names(message: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    for marker in [
+        "нужен параметр `",
+        "обязательный аргумент `",
+        "обязательный аргумент '",
+    ] {
+        let close = if marker.ends_with('`') { '`' } else { '\'' };
+        let mut rest = message;
+        while let Some(pos) = rest.find(marker) {
+            let after = &rest[pos + marker.len()..];
+            let Some(end) = after.find(close) else { break };
+            names.push(after[..end].to_string());
+            rest = &after[end + 1..];
+        }
+    }
+    names
+}
+
+/// B2 (волна 0.4.0): контракт «схема ↔ реализация» на всём MCP-органе.
+/// Клиент строит минимальные аргументы строго по `inputSchema` (заполняет
+/// `required`), вызывает каждый объявленный инструмент и проверяет: текст
+/// ошибки не может требовать параметр, которого НЕТ в схеме. Прогон в `--rw`,
+/// потому что регрессия B2 жила в `reverse_survey` — инструменте белого
+/// списка записи (в ро-режиме он не отдаётся): spec объявлял
+/// `required: ["path"]`, а `call` читал `repo`, и инструмент отвечал
+/// «нужен параметр `repo`», которого в схеме не было.
+#[test]
+fn advertised_tools_accept_their_own_schema_args() {
+    let home = tempfile::tempdir().expect("tmp");
+    let responses = mcp_serve_with_args(
+        home.path(),
+        &["--rw"],
+        &batch(&[
+            json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+                "protocolVersion":"2025-06-18","capabilities":{},
+                "clientInfo":{"name":"claude-code","version":"1.0"}}})
+            .to_string(),
+            json!({"jsonrpc":"2.0","method":"notifications/initialized"}).to_string(),
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}).to_string(),
+        ]),
+    );
+    let tools = responses[1]["result"]["tools"]
+        .as_array()
+        .expect("tools/list отдаёт массив")
+        .clone();
+    let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+    assert!(
+        names.contains(&"reverse_survey"),
+        "rw-режим обязан отдавать reverse_survey: {names:?}"
+    );
+    assert!(tools.len() > 40, "rw-контур шире ро-контура: {tools:?}");
+
+    // Второй прогон: initialize + вызов каждого инструмента с аргументами по схеме.
+    let mut requests = vec![
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+            "protocolVersion":"2025-06-18","capabilities":{},
+            "clientInfo":{"name":"claude-code","version":"1.0"}}})
+        .to_string(),
+        json!({"jsonrpc":"2.0","method":"notifications/initialized"}).to_string(),
+    ];
+    let mut plan: Vec<(u64, String, Value)> = Vec::new();
+    for (id, t) in (100u64..).zip(tools.iter()) {
+        let name = t["name"]
+            .as_str()
+            .expect("у инструмента есть имя")
+            .to_string();
+        let schema = t.get("inputSchema").cloned().unwrap_or_else(|| json!({}));
+        let args = minimal_args(&schema);
+        requests.push(call(id, &name, &args));
+        plan.push((id, name, schema));
+    }
+    let responses = mcp_serve_with_args(home.path(), &["--rw"], &batch(&requests));
+    let calls = &responses[1..];
+    assert_eq!(
+        calls.len(),
+        plan.len(),
+        "ответов на вызовы меньше, чем вызовов"
+    );
+
+    for (idx, (id, name, schema)) in plan.iter().enumerate() {
+        let response = &calls[idx];
+        assert_eq!(response["id"], *id, "порядок ответов");
+        // JSON-RPC error (например, нет ключа LLM) — не про контракт схемы.
+        if response.get("error").is_some() {
+            continue;
+        }
+        if response["result"]["isError"].as_bool() != Some(true) {
+            continue;
+        }
+        let text = response["result"]["content"]
+            .as_array()
+            .and_then(|c| c.first())
+            .and_then(|c| c["text"].as_str())
+            .unwrap_or("");
+        let props: Vec<String> = schema
+            .get("properties")
+            .and_then(Value::as_object)
+            .map(|o| o.keys().cloned().collect())
+            .unwrap_or_default();
+        for missing in missing_param_names(text) {
+            assert!(
+                props.contains(&missing),
+                "инструмент `{name}` требует `{missing}`, которого нет в его схеме \
+                 (properties: {props:?}); ответ: {text}"
+            );
+        }
+    }
+}

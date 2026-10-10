@@ -207,7 +207,10 @@ fn snapshot(repo: &Path) -> Result<RepoSnapshot> {
     let mut contents = BTreeMap::new();
     let walker = WalkDir::new(repo).follow_links(false).into_iter();
     for entry in walker.filter_entry(|e| {
-        if e.file_type().is_dir() {
+        // Корень обхода (`depth() == 0`) не фильтруем: у `WalkDir::new(".")`
+        // `file_name()` корня — ".", и dot-правило срезало бы весь обход
+        // (регрессия B1: `survey .` давал пустую карту при полной по `$PWD`).
+        if e.depth() > 0 && e.file_type().is_dir() {
             let name = e.file_name().to_string_lossy();
             // Dot-каталоги (.git, .github, .venv…) и служебные — вне обхода;
             // CI ищется точечно по известным путям, а не обходом.
@@ -249,6 +252,15 @@ fn snapshot(repo: &Path) -> Result<RepoSnapshot> {
             // в списке (безопасно: regex-сканеры по нему просто не пройдут).
         }
         files.push(rel);
+    }
+    // Обход не нашёл ни одного файла, хотя каталог непустой: почти наверняка
+    // ошибка корня/фильтра (B1), а не честно пустой репозиторий — молчаливая
+    // «пустая карта» опаснее явной ошибки.
+    if files.is_empty() && std::fs::read_dir(repo).is_ok_and(|mut d| d.next().is_some()) {
+        return Err(HarnessError::Control(format!(
+            "[error] survey_empty_walk — обход `{}` не нашёл ни одного файла при непустом каталоге → проверьте форму пути-корня (`.`/`./`/`..`) и фильтры обхода",
+            repo.display()
+        )));
     }
     files.sort();
     Ok(RepoSnapshot { files, contents })
@@ -1105,9 +1117,15 @@ impl Tool for ReverseSurveyTool {
     }
 
     async fn call(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput> {
-        let Some(repo) = args.get("repo").and_then(Value::as_str) else {
+        // Каноническое имя — `path` (объявлено в spec как required); `repo` —
+        // историческое имя, сохранено для обратной совместимости (B2).
+        let Some(repo) = args
+            .get("path")
+            .or_else(|| args.get("repo"))
+            .and_then(Value::as_str)
+        else {
             return Ok(ToolOutput::err(
-                "reverse_survey: нужен параметр `repo` (каталог репозитория)",
+                "reverse_survey: обязательный аргумент 'path' (string; историческое имя 'repo') отсутствует",
             ));
         };
         let repo = ctx.resolve(repo);
@@ -1436,22 +1454,29 @@ mod tests {
             tmp.path().to_path_buf(),
             std::sync::Arc::new(crate::config::Config::default()),
         );
-        // Относительный путь от cwd.
+        // Канонический аргумент `path` (объявлен в spec как required) обязан
+        // работать так же, как историческое имя `repo` (B2).
         let out = tool
-            .call(json!({"repo": "repo", "out": "rev"}), &ctx)
+            .call(json!({"path": "repo", "out": "rev"}), &ctx)
             .await
             .expect("call");
         assert!(!out.is_error, "{}", out.content);
         assert!(out.content.contains("[confirmed]"), "{}", out.content);
         assert!(out.content.contains("rev/survey.md"), "{}", out.content);
         assert!(repo.join("rev/survey.md").is_file());
-        // Без repo — мягкая ошибка, не паника.
+        // Историческое имя `repo` продолжает работать (обратная совместимость).
+        let out = tool
+            .call(json!({"repo": "repo", "out": "rev2"}), &ctx)
+            .await
+            .expect("call repo");
+        assert!(!out.is_error, "{}", out.content);
+        // Без path/repo — мягкая ошибка, не паника; в тексте — каноническое имя.
         let out = tool.call(json!({}), &ctx).await.expect("call empty");
         assert!(out.is_error);
-        assert!(out.content.contains("repo"), "{}", out.content);
+        assert!(out.content.contains("path"), "{}", out.content);
         // Несуществующий репозиторий — мягкая ошибка.
         let out = tool
-            .call(json!({"repo": "ghost"}), &ctx)
+            .call(json!({"path": "ghost"}), &ctx)
             .await
             .expect("call ghost");
         assert!(out.is_error);
