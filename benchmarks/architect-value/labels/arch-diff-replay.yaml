@@ -1,0 +1,83 @@
+# labels/arch-diff-replay.yaml — разметка значимых диффов B.3 (метрика 13).
+#
+# Источник: `TASK-Spine-0.4.0-architect-value.md` приложение B.3. Значимые —
+# PetClinic `79b527a` (новый сервис + внешний LLM + 3 ребра), Boutique `2932624`
+# (новый сервис + AlloyDB + ребро frontend→assistant). Остальные коммиты окон
+# (60 + 80 в исходной разметке) — апдейты зависимостей/CI/UI, эталон
+# «архитектурных изменений нет»; из них курирован набор окон-шума (6 шт.).
+#
+# Прогонщик `runners/replay.py` для каждой метки гоняет
+#   arch-be arch-diff --repo <clone> --base <sha>~1 --head <sha> --format json
+# и сверяет всплывшие узлы/рёбра с ожиданием:
+#   recall значимых  — доля значимых коммитов, где всплыл хотя бы один
+#                      ожидаемый токен (компонент/внешняя система/ребро);
+#   precision состава — F1 множества всплывших токенов против ожидаемых;
+#   шум              — доля окон-шума с НЕПУСТЫМ диффом (порог ≤ 10 %).
+#
+# Ожидаемые токены нормализуются (срезается `dir:`/`sys:`/`svc:`, берётся
+# последний сегмент пути, lower-case), чтобы не зависеть от формы id в
+# `arch-diff` (0.3.17 печатает `dir:src/shoppingassistantservice`,
+# `sys:tracing-server:9411`). Токен без явной привязки — «апдейт/CI/UI».
+version: "2026.10"
+suite: D
+repo_significance_rule: >-
+  Значимый дифф = добавлен/удалён компонент, межсервисное ребро, хранилище или
+  внешняя система. Бампа зависимости, CI-workflow, UI-правка, тест версии —
+  не значимы (эталон «архитектурных изменений нет»).
+
+defaults:
+  base: "{sha}~1"
+  format: json
+  # Пороги метрики 13 (§9 задачи) — заморожены в PREREGISTRATION.md.
+  thresholds:
+    recall_significant: 0.80
+    composition_f1: 0.80
+    noise_ratio: 0.10
+
+# Значимые коммиты (до: 0/2 recall — 0.3.16/0.3.17 не собирают состав).
+significant:
+  - repo: petclinic
+    sha: 79b527a35d2141f619386bb94a9e18355aab7880
+    title: "Generative AI support for Spring Petclinic Microservices (#281)"
+    expect_components: [genai-service]
+    expect_edges:
+      - [api-gateway, genai-service]
+      - [genai-service, vets-service]
+      - [genai-service, customers-service]
+    expect_external: [openai, azure-openai]
+  - repo: boutique
+    sha: 2932624cdb5f7fd41077efef06e01c109af96a40
+    title: "Add ShoppingAssistant, and AlloyDB support to ProductCatalog (#2466)"
+    expect_components: [shoppingassistantservice]
+    expect_edges:
+      - [frontend, shoppingassistantservice]
+    expect_external: [alloydb]
+
+# Окна-шума (6 шт.) — эталон «архитектурных изменений нет».
+# Кандидаты из окон разметки (60 коммитов PetClinic / 80 Boutique) с фильтром
+# «зависимость/CI/UI». Непустой дифф здесь — ложное срабатывание (шум).
+noise:
+  - repo: petclinic
+    sha: 3bc491b61148740bddf771f1ef12d8fe09bffb1d
+    title: "Bump Grafana to 11.4.0 and Prometheus to v3.1.0 (#555)"
+    kind: dependency
+  - repo: petclinic
+    sha: f03042bc7fb9df9837b9392f19739e6c75c976b4
+    title: "fix(workflows): avoid require('@actions/github') in triage-pr script"
+    kind: ci
+  - repo: petclinic
+    sha: dc9ca15a71189bc4be6c02518d7180232c0555b7
+    title: "Migrate from AngularJS to Vue.js for frontend components (#568)"
+    kind: ui
+  - repo: boutique
+    sha: 0c41e6d3dcd68c07853efda65b6b48a76681f6a0
+    title: "Update python:3.14.7-slim Docker digest to cad9a2c (#3521)"
+    kind: dependency
+  - repo: boutique
+    sha: 232c9b67f711dd7d330a9f3e18689cf7e6618cc1
+    title: "Update golang (#3524)"
+    kind: dependency
+  - repo: boutique
+    sha: 1f89fa37a187da58afb4cc5f0ae8a2d8f772958c
+    title: "Update nodejs (#3525)"
+    kind: dependency

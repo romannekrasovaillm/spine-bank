@@ -1,0 +1,65 @@
+# archunit_c3.yaml — засевы C.3 (6 обходов ArchUnit-гейта) для сьюта StdComply.
+#
+# Источник: `TASK-Spine-0.4.0-architect-value.md` §C.3. Те же архитектурные
+# нарушения, что в C.2, но измеряются ДВУМЯ детекторами:
+#   text_detection     — текстовое правило `dependency_direction` (S6/S7);
+#   archunit_detection — правило `type: archunit` (байткод, ADR-039).
+# Смысл: показать, что текстовая проверка слепа к FQN/wildcard, а ArchUnit — нет.
+#
+# `archunit_detection` на 0.3.17 не измеряется без JDK + jar'ов ArchUnit
+# (`archunit fetch` требует сеть) → прогонщик `runners/seed_buckpal.py` печатает
+# SKIP с причиной, а не «зелень».
+#
+# Отображение в §C.3 (текст ↗, ArchUnit ↗):
+#   A1 import          (✓, ✓)   A2 wildcard   (✗, ✓)   A3 FQN-поле (✗, ✓)
+#   A4 new <FQN>       (✗, ✓)   A5 FxClient.class по FQN (✗, ✓)   A6 комментарий (чисто, чисто)
+version: "2026.10"
+suite: C3
+repo: buckpal
+base_sha: dc819c66640be4f42100a622b9e97b1e82ad75a7
+standard: standard/CONSTRAINTS.java-services.yaml
+insert_position: eof
+requires: [jdk, archunit-jar]
+bypasses:
+  - id: A1
+    title: "import адаптера в домене"
+    target: src/main/java/io/reflectoring/buckpal/application/domain/model/Account.java
+    insert: "import io.reflectoring.buckpal.adapter.out.persistence.AccountJpaEntity;"
+    owner_rule: s6_domain_independent
+    text_detection: caught
+    archunit_detection: caught
+  - id: A2
+    title: "wildcard-import адаптера в домене"
+    target: src/main/java/io/reflectoring/buckpal/application/domain/model/Account.java
+    insert: "import io.reflectoring.buckpal.adapter.out.persistence.*;"
+    owner_rule: s6_domain_independent
+    text_detection: missed
+    archunit_detection: caught
+  - id: A3
+    title: "поле по FQN исходящего адаптера в домене"
+    target: src/main/java/io/reflectoring/buckpal/application/domain/model/Account.java
+    insert: "private io.reflectoring.buckpal.adapter.out.persistence.AccountJpaEntity repository;"
+    owner_rule: s6_domain_independent
+    text_detection: missed
+    archunit_detection: caught
+  - id: A4
+    title: "new <FQN> исходящего адаптера в домене"
+    target: src/main/java/io/reflectoring/buckpal/application/domain/model/Account.java
+    insert: "Object o = new io.reflectoring.buckpal.adapter.out.persistence.AccountJpaEntity();"
+    owner_rule: s6_domain_independent
+    text_detection: missed
+    archunit_detection: caught
+  - id: A5
+    title: "ссылка FxClient.class по FQN в домене"
+    target: src/main/java/io/reflectoring/buckpal/application/domain/model/Account.java
+    insert: "Class<?> c = io.reflectoring.buckpal.adapter.out.persistence.AccountJpaEntity.class;"
+    owner_rule: s6_domain_independent
+    text_detection: missed
+    archunit_detection: caught
+  - id: A6
+    title: "закомментированный import (контроль ложного срабатывания)"
+    target: src/main/java/io/reflectoring/buckpal/application/domain/model/Account.java
+    insert: "// import io.reflectoring.buckpal.adapter.out.persistence.AccountJpaEntity;"
+    owner_rule: s6_domain_independent
+    text_detection: clean
+    archunit_detection: clean

@@ -1,0 +1,140 @@
+# architect-value — run_all
+version: 0.3.17
+date: 2026-10-10
+arch_be: arch-be
+repos_dir: /home/roman/bench-repos
+
+## Предполёт: разбор входов (test_parsers)
+
+## ground_truth
+ok   boutique.yaml exists: got=True want=True
+ok   boutique is dict: got=True want=True
+ok   boutique has components: got=True want=True
+ok   petclinic.yaml exists: got=True want=True
+ok   petclinic is dict: got=True want=True
+ok   petclinic has components: got=True want=True
+ok   petclinic #components: got=8 want=8
+ok   buckpal.yaml exists: got=True want=True
+ok   buckpal is dict: got=True want=True
+ok   buckpal has components: got=True want=True
+ok   library.yaml exists: got=True want=True
+ok   library is dict: got=True want=True
+ok   library has components: got=True want=True
+
+## standard/requirements.yaml
+ok   requirements is dict: got=True want=True
+ok   12 requirements: got=12 want=12
+ok   baseline_expressibility: got=7 want=7
+ok   target_expressibility: got=11 want=11
+
+## standard/CONSTRAINTS.java-services.yaml
+ok   12 rules: got=12 want=12
+ok   7 executable rules: got=7 want=7
+ok   executable ids: got=['JSS-001', 'JSS-003', 'JSS-004', 'JSS-006', 'JSS-007', 'JSS-008', 'JSS-011'] want=['JSS-001', 'JSS-003', 'JSS-004', 'JSS-006', 'JSS-007', 'JSS-008', 'JSS-011']
+
+## seeds/buckpal_c2.yaml
+ok   12 seeds: got=12 want=12
+ok   seed ids: got=['V01', 'V02', 'V03', 'V04', 'V05', 'V06', 'V07', 'V08', 'V09', 'V10', 'V11', 'V12'] want=['V01', 'V02', 'V03', 'V04', 'V05', 'V06', 'V07', 'V08', 'V09', 'V10', 'V11', 'V12']
+ok   V12 clean: got='clean' want='clean'
+ok   base_sha: got='dc819c66640be4f42100a622b9e97b1e82ad75a7' want='dc819c66640be4f42100a622b9e97b1e82ad75a7'
+
+## seeds/archunit_c3.yaml
+ok   6 bypasses: got=6 want=6
+ok   bypass ids: got=['A1', 'A2', 'A3', 'A4', 'A5', 'A6'] want=['A1', 'A2', 'A3', 'A4', 'A5', 'A6']
+
+## labels/arch-diff-replay.yaml
+ok   labels is dict: got=True want=True
+ok   2 significant: got=2 want=2
+ok   6 noise: got=6 want=6
+ok   recall threshold: got=0.8 want=0.8
+
+## parser edge cases (inline/scalar/block)
+ok   int: got=1 want=1
+ok   inline list: got=['x', 'y z', 2] want=['x', 'y z', 2]
+ok   inline map: got={'k': 'v', 'n': None} want={'k': 'v', 'n': None}
+ok   block scalar: got='one two' want='one two'
+ok   dq escape: got='esc\nq' want='esc\nq'
+ok   nested seq/map: got=['p', {'q': 1, 'r': True}] want=['p', {'q': 1, 'r': True}]
+
+## repos
+ok   4 repos in lock: got=4 want=4
+ok   boutique clone resolves: got=True want=True
+
+ИТОГ: ok — все проверки парсера и входов прошли
+
+## StdComply — стандарт Java-сервисы (метрики 7, 9, 10)
+
+## Стандарт Java-сервисы — метрики 7, 9, 10
+[RUN] metric 7: expressible=7/12 (baseline=7, target≥11; ids=JSS-001,JSS-003,JSS-004,JSS-006,JSS-007,JSS-008,JSS-011)
+[RUN] metric 9: false_fail_errors=2 (из них пустой glob: 2; baseline=2, target=0) rules=s6_domain_independent,s7_inbound_no_outbound
+[RUN] metric 10: formats_seen=3/8 (baseline=4/8, target=8/8 + диапазоны/scope); missed=svc.csproj,go.mod,build.gradle,package.json,pyproject.toml
+
+## StdComply — семена buckpal (метрика 8, C.3)
+
+## Засевы buckpal — метрика 8 (C.2) + C.3
+[RUN] metric 8 C.2 [V01]: ✓ факт=caught ожид=caught (baseline 0.3.16=caught) владелец=s6_domain_independent
+[RUN] metric 8 C.2 [V02]: ✗ факт=missed ожид=caught (baseline 0.3.16=missed) владелец=s6_domain_independent
+[RUN] metric 8 C.2 [V03]: ✓ факт=caught ожид=caught (baseline 0.3.16=caught) владелец=s7_inbound_no_outbound
+[RUN] metric 8 C.2 [V04]: ✓ факт=caught ожид=caught (baseline 0.3.16=missed) владелец=s6_domain_independent
+[FIND] metric 8 C.2 [V04]: факт=caught ≠ baseline 0.3.16=missed
+[RUN] metric 8 C.2 [V05]: ✓ факт=caught ожид=caught (baseline 0.3.16=caught) владелец=s6_domain_independent
+[RUN] metric 8 C.2 [V06]: ✓ факт=caught ожид=caught (baseline 0.3.16=caught) владелец=s6_domain_independent
+[RUN] metric 8 C.2 [V07]: ✓ факт=caught ожид=caught (baseline 0.3.16=caught) владелец=s8_no_literal_password
+[RUN] metric 8 C.2 [V08]: ✗ факт=missed ожид=caught (baseline 0.3.16=missed) владелец=s1_no_embedded_db_in_prod
+[RUN] metric 8 C.2 [V09]: ✗ факт=missed ожид=caught (baseline 0.3.16=missed) владелец=s1_no_embedded_db_in_prod
+[RUN] metric 8 C.2 [V10]: ✓ факт=caught ожид=caught (baseline 0.3.16=caught) владелец=s6_domain_independent
+[RUN] metric 8 C.2 [V11]: ✗ факт=missed ожид=caught (baseline 0.3.16=missed) владелец=s7_inbound_no_outbound
+[RUN] metric 8 C.2 [V12]: ✓ факт=clean ожид=clean (baseline 0.3.16=clean) владелец=s6_domain_independent
+[RUN] metric 8: correct=8/12 (baseline 0.3.16: 7/12 slash, 2/12 Java; target 0.4.0 ≥11/12)
+[RUN] C.3 text [A1]: ✓ факт=caught ожид(text)=caught (archunit=caught) — import адаптера в домене
+[RUN] C.3 text [A2]: ✗ факт=caught ожид(text)=missed (archunit=caught) — wildcard-import адаптера в домене
+[RUN] C.3 text [A3]: ✓ факт=missed ожид(text)=missed (archunit=caught) — поле по FQN исходящего адаптера в до
+[RUN] C.3 text [A4]: ✓ факт=missed ожид(text)=missed (archunit=caught) — new <FQN> исходящего адаптера в доме
+[RUN] C.3 text [A5]: ✓ факт=missed ожид(text)=missed (archunit=caught) — ссылка FxClient.class по FQN в домен
+[RUN] C.3 text [A6]: ✓ факт=clean ожид(text)=clean (archunit=clean) — закомментированный import (контроль 
+[RUN] C.3 text_detection: correct=5/6 (текстовое правило s6)
+[SKIP] C.3 archunit_detection: нужен ArchUnit-jar (`archunit fetch`, требует сеть); ARCHUNIT_JAR не задан → байткод-детектор (type: archunit, ADR-039) не измерен
+
+## arch-diff-replay — значимые диффы и окна-шума (метрика 13)
+
+## arch-diff-replay — метрика 13
+[RUN] metric 13 significant [petclinic:79b527a]: hit=нет f1=0.00 surf=['.->tracing-server:9411', 'tracing-server:9411'] exp=['api-gateway->genai-service', 'azure-openai', 'genai-service->customers-service', 'genai-service->vets-service', 'openai'] — Generative AI support for Spring Petclin
+[RUN] metric 13 significant [boutique:2932624]: hit=нет f1=0.00 surf=нет exp=['alloydb', 'frontend->shoppingassistantservice'] — Add ShoppingAssistant, and AlloyDB suppo
+[FIND] metric 13 noise [petclinic:dc9ca15]: непустой дифф (ui)
+[RUN] metric 13: recall_significant=0/2=0.00 (порог≥0.8); composition_F1=0.00 (порог≥0.8); noise=1/6=0.17 (порог≤0.1) [0.3.17 before: 0/2 по составу, 6/6 шум]
+
+## MCP — схема ↔ реализация (метрики 15, 16)
+
+## MCP: схема ↔ реализация — метрики 15, 16
+[RUN] metric 15 [serve]: tools=40 divergences=0
+[RUN] metric 15 [serve --rw]: tools=51 divergences=0
+[RUN] metric 15: divergences=0 (baseline=1 reverse_survey, target=0); servers=serve/serve --rw
+[RUN] metric 16: recovery_tools=нет missing=['recover', 'arch_diff'] (baseline: нет инструментов, target: recover+arch_diff)
+
+## ArchRecover — survey . ≡ survey <abs> (метрика 1)
+
+## Архитектурный обход — метрика 1 (survey . ≡ survey <abs>)
+[RUN] metric 1 [boutique]: rel=46 abs=46 equal=yes
+[RUN] metric 1 [petclinic]: rel=71 abs=71 equal=yes
+[RUN] metric 1 [buckpal]: rel=22 abs=22 equal=yes
+[RUN] metric 1 [library]: rel=31 abs=31 equal=yes
+
+## ArchRecover — восстановление архитектуры (метрики 2–6, 18, 19)
+[SKIP] metric 2 (компоненты F1): волна R (recover) не реализована в 0.3.17
+[SKIP] metric 3 (рёбра recall/precision): волна R (recover) не реализована в 0.3.17
+[SKIP] metric 4 (хранилища recall): волна R (recover) не реализована в 0.3.17
+[SKIP] metric 5 (внешние precision): волна R (recover) не реализована в 0.3.17
+[SKIP] metric 6 (шум карты survey): механизм грунт-труса recover отсутствует в 0.3.17
+[SKIP] metric 18 (детерминизм recover/arch-diff JSON): recover отсутствует; arch-diff даёт JSON (см. metric 13)
+[SKIP] metric 19 (время recover ≤5 тыс. файлов): recover отсутствует в 0.3.17
+
+## Kontur — измеримые кейсы и FP на реальном коде (метрики 11, 12, 20)
+[SKIP] metric 11 (Kontur-bench измеримых кейсов): волна K (redteam) не реализована в 0.3.17
+[SKIP] metric 12 (Kontur на реальном коде: detection/FP): волна K (redteam) не реализована в 0.3.17
+[SKIP] metric 20 (квалификация судьи: различительная сила): рубрики/судья — вне Python-прогонщиков
+
+## Прочее (вне Python-прогонщиков)
+[SKIP] metric 14 (selftest из коробки): измеряется в CI (cargo test), не прогонщиком бенчмарка
+[SKIP] metric 17 (golden judge MAE / доля в диапазоне): требует API-ключ судьи — вне офлайн-прогона
+
+готово: /home/roman/.arch-harness/worktrees/spine-bank-42b7c6db0c05a788/claude-code-20261010134443/benchmarks/architect-value/results/0.3.17-2026-10-10 (run_all.log, summary.md)

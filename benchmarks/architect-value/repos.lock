@@ -1,0 +1,17 @@
+# repos.lock — приложения B (чужие репо), пиннутые SHA.
+# Формат: <url>  <sha>  <local-mirror>
+# local-mirror — путь клонов по умолчанию (~/bench-repos); прогонщики берут
+# корень клонов из --repos-dir / ARCH_VALUE_REPOS, домашний путь не зашит.
+# Клоны в git не входят; на них не влияет заморозка входов P1.
+#
+# Boutique (online-boutique): 12 компонентов, 17 межсервисных рёбер, 1 хранилище.
+#   rёбра — из kubernetes-manifests/*.yaml (env *_ADDR) + kustomize/components/shopping-assistant.
+# PetClinic (microservices): 8 maven-модулей, 6 бизнес-рёбер, 3 СУБД, OpenAI/Azure.
+#   рёбра — api-gateway/application.yml (lb://) + genai-service (VectorStoreController, AIDataProvider).
+# buckpal (гексагон, Gradle): пакетный уровень, эталон — DependencyRuleTests.java (ArchUnit).
+# library (DDD, Maven): контексты lending / catalogue / commons.
+
+https://github.com/GoogleCloudPlatform/microservices-demo  38e7348eb289eb5b87c0c6e8cb19ced0449dc389  ~/bench-repos/microservices-demo
+https://github.com/spring-petclinic/spring-petclinic-microservices  1d76b00d683e86b62867a6bf59530f8ab301244f  ~/bench-repos/spring-petclinic-microservices
+https://github.com/thombergs/buckpal  dc819c66640be4f42100a622b9e97b1e82ad75a7  ~/bench-repos/buckpal
+https://github.com/ddd-by-examples/library  5225ff7a0f0c1e0751b91cdd64f925cd001d7555  ~/bench-repos/library
