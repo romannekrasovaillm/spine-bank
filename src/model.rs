@@ -53,8 +53,8 @@ pub use drift::{DriftOptions, DriftReport, ModelDriftTool, drift_check, drift_ch
 pub use exchange::{ExportFormat, ImportReport, export_model, import_structurizr};
 pub use graph::{find_cycle, graph_mermaid, graph_text};
 pub use parse::{
-    Entity, LinkKind, Model, ModelLoadIssue, load_issues_note, load_model, load_model_tolerant,
-    parse_entity, split_frontmatter,
+    Condition, Entity, LinkKind, Model, ModelLoadIssue, load_issues_note, load_model,
+    load_model_tolerant, parse_entity, split_frontmatter,
 };
 pub use project::{ProjectReport, project_adr, render_adr};
 pub use registry::{RegistryFormat, RegistryImportOptions, RegistryImportReport, import_registry};

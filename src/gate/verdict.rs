@@ -5,11 +5,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::components::{
-    component_arch_drift, component_control_plane, component_decision_quality,
-    component_delta_guard, component_evidence, component_fitness, component_model_drift,
-    component_model_validate, component_nfr, component_openspec_coverage, component_rule_weakened,
-    component_secrets, component_sensors, component_spine_lint, component_trace,
-    evidence_bundle_dirs,
+    component_approval_conditions, component_arch_drift, component_control_plane,
+    component_decision_quality, component_delta_guard, component_evidence, component_fitness,
+    component_model_drift, component_model_validate, component_nfr, component_openspec_coverage,
+    component_rule_weakened, component_secrets, component_sensors, component_spine_lint,
+    component_trace, evidence_bundle_dirs,
 };
 use super::git::{ConstraintsPath, GitProbe, constraints_label};
 use super::route::{
@@ -195,6 +195,10 @@ pub(super) fn run_inner(
         // Н2: целостность модели — часть гейта на ЛЮБОМ маршруте (SKIP без
         // каталога model/); обязательность по маршрутам — в `[gate.required]`.
         component_model_validate(repo, route),
+        // G (ADR-074): условия согласования решений — «да, пока выполнено».
+        // SKIP без model/ или без принятых ADR с условиями; severity находки —
+        // из `[gate.conditions]` (дефолт warn).
+        component_approval_conditions(repo, &constraints.path, options.conditions.severity),
         // C1: дрейф «модель ↔ код» — warn по умолчанию, error в
         // `[gate.required]` маршрута.
         component_model_drift(

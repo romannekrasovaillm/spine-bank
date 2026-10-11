@@ -1,7 +1,7 @@
 //! Составляющие гейта (B1): `fitness`, `delta_guard`, `rule_weakened`,
 //! `spine_lint`, `trace_check`, `sensors`, `nfr`, `evidence_verify`,
 //! `model_validate`, `decision_quality`, `model_drift` (C1), `arch_drift`
-//! (K6).
+//! (K6), `approval_conditions` (G, ADR-074).
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -1481,6 +1481,170 @@ pub(super) fn component_model_validate(repo: &Path, route: Route) -> GateCompone
         GateComponent::pass("model_validate", detail).noting(notes)
     } else {
         GateComponent::fail("model_validate", detail, findings).noting(notes)
+    }
+}
+
+/// Составляющая `approval_conditions` (G, ADR-074): условия согласования
+/// решений.
+///
+/// Решение «под условием» (поле `conditions` сущности `ADR`) — не безусловное
+/// «да», а «да, пока выполнено `text`». Без механики условие живёт в памяти
+/// агента и теряется за одну сессию (пробел GOVERN: эрозия согласований).
+/// Составляющая переносит условия в гейт: у каждого условия с `check` проверка
+/// обязана разрешаться в правило реестра `CONSTRAINTS.yaml`, а сработавшее
+/// правило — нарушением условия. Условие без `check` следит человек (`owner`):
+/// находка-предупреждение и граница вердикта (блок 2 паспорта).
+///
+/// Составляющая читает УЖЕ разобранную модель (`model_validate` в том же
+/// прогоне гарантирует валидность сущностей). Fitness запускается повторно
+/// только при наличии разрешённых проверок и ровно один раз (ADR-074: условий
+/// с механикой обычно единицы; двойной прогон принят осознанно).
+///
+/// Нет каталога `model/` или принятых ADR с условиями — SKIP (fail-soft: нет
+/// входа). Severity находки `approval_condition_violated` — из
+/// `[gate.conditions]` (дефолт `warn`: чужие пайплайны не краснеют).
+pub(super) fn component_approval_conditions(
+    repo: &Path,
+    constraints: &Path,
+    severity: crate::config::ConditionSeverity,
+) -> GateComponent {
+    let model_dir = repo.join("model");
+    if !model_dir.is_dir() {
+        return GateComponent::skip("approval_conditions", "нет каталога model/".to_string());
+    }
+    let model = match crate::model::load_model_tolerant(&model_dir) {
+        Ok(m) => m,
+        Err(e) => {
+            return GateComponent::fail(
+                "approval_conditions",
+                format!("сбой загрузки модели: {e}"),
+                Vec::new(),
+            );
+        }
+    };
+    // Только ПРИНЯТЫЕ ADR: условие незрелого решения никого не связывает.
+    let conditional: Vec<&crate::model::Entity> = model
+        .entities
+        .iter()
+        .filter(|e| {
+            e.kind == crate::model::EntityKind::Adr
+                && !e.conditions.is_empty()
+                && adr_is_accepted(&format!("status: {}", e.status))
+        })
+        .collect();
+    if conditional.is_empty() {
+        return GateComponent::skip(
+            "approval_conditions",
+            "нет принятых ADR с условиями согласования".to_string(),
+        );
+    }
+    // Реестр правил: `check` условия ссылается на правило по id или имени.
+    let cards = match control::rule_cards(constraints) {
+        Ok(c) => c,
+        Err(e) => {
+            return GateComponent::fail(
+                "approval_conditions",
+                format!("сбой чтения реестра ограничений: {e}"),
+                Vec::new(),
+            );
+        }
+    };
+    let severity_label = severity.as_str();
+    let mut findings: Vec<GateFinding> = Vec::new();
+    let mut notes: Vec<String> = Vec::new();
+    // Разрешённые проверки: (сущность, условие, имя правила). Fitness гоняется
+    // ниже и ровно один раз, только если этот список не пуст.
+    let mut resolved: Vec<(&crate::model::Entity, &crate::model::Condition, String)> = Vec::new();
+    for &entity in &conditional {
+        for cond in &entity.conditions {
+            if let Some(check) = cond.check.as_deref() {
+                match cards.iter().find(|c| c.key() == check || c.name == check) {
+                    Some(card) => resolved.push((entity, cond, card.name.clone())),
+                    // Проверка условия не разрешается в правило реестра —
+                    // обещание решения без механики (fail-closed: это и есть
+                    // эрозия, которую фиксирует семейство GOVERN).
+                    None => findings.push(GateFinding::ruled(
+                        severity_label.to_string(),
+                        "approval_condition_violated".to_string(),
+                        format!(
+                            "{}: условие '{}' — проверка `{}` не разрешается в правило \
+                             реестра CONSTRAINTS.yaml; «{}»",
+                            entity.id, cond.id, check, cond.text
+                        ),
+                    )),
+                }
+            } else {
+                // Условие без механики: следит человек. Не молчим (иначе
+                // возврат к «условие в памяти»), но и не блокируем.
+                let owner = cond.owner.as_deref().unwrap_or("не назначен");
+                let due = cond
+                    .due
+                    .as_deref()
+                    .map(|d| format!(", срок {d}"))
+                    .unwrap_or_default();
+                findings.push(GateFinding::ruled(
+                    "warn".to_string(),
+                    "approval_condition_unchecked".to_string(),
+                    format!(
+                        "{}: условие '{}' без механической проверки — владелец {}{}; «{}»",
+                        entity.id, cond.id, owner, due, cond.text
+                    ),
+                ));
+                notes.push(format!(
+                    "{}: условие '{}' следит человек ({}{}) — механически не проверяется",
+                    entity.id, cond.id, owner, due
+                ));
+            }
+        }
+    }
+    // Сработавшее правило — нарушенное условие. Fitness гоняется только при
+    // наличии разрешённых проверок (иначе лишний прогон на репо без условий).
+    if !resolved.is_empty() {
+        match control::check(repo, constraints) {
+            Ok(report) => {
+                for (entity, cond, rule) in &resolved {
+                    if let Some(issue) = report.issues.iter().find(|i| &i.rule == rule) {
+                        findings.push(GateFinding::ruled(
+                            severity_label.to_string(),
+                            "approval_condition_violated".to_string(),
+                            format!(
+                                "{}: условие '{}' нарушено — правило `{}` сработало ({}:{}); «{}»",
+                                entity.id,
+                                cond.id,
+                                rule,
+                                issue.file.display(),
+                                issue.line,
+                                cond.text
+                            ),
+                        ));
+                    }
+                }
+            }
+            Err(e) => {
+                return GateComponent::fail(
+                    "approval_conditions",
+                    format!("сбой прогона fitness для условий: {e}"),
+                    findings,
+                );
+            }
+        }
+    }
+    let errors = findings.iter().filter(|f| f.severity == "error").count();
+    let detail = format!(
+        "принятых ADR с условиями: {}, условий: {}, находок: {} (error: {errors})",
+        conditional.len(),
+        conditional
+            .iter()
+            .map(|e| e.conditions.len())
+            .sum::<usize>(),
+        findings.len(),
+    );
+    if errors > 0 {
+        GateComponent::fail("approval_conditions", detail, findings).noting(notes)
+    } else if findings.is_empty() {
+        GateComponent::pass("approval_conditions", detail).noting(notes)
+    } else {
+        GateComponent::pass_with_findings("approval_conditions", detail, findings).noting(notes)
     }
 }
 

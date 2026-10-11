@@ -364,6 +364,9 @@ pub struct GateOptions {
     /// Составляющая `secrets` (C3): severity и область сканирования
     /// (секция `[gate.secrets]`).
     pub secrets: crate::config::SecretsConfig,
+    /// Составляющая `approval_conditions` (G, ADR-074): severity находки
+    /// `approval_condition_violated` (секция `[gate.conditions]`).
+    pub conditions: crate::config::ConditionsConfig,
     /// Составляющая `openspec_coverage` (F2, ADR-067): область покрытия
     /// требований `OpenSpec` (секция `[gate.openspec_coverage]`).
     pub openspec_coverage: crate::config::OpenspecCoverageConfig,
@@ -418,6 +421,7 @@ impl GateOptions {
             rule_weakened: cfg.gate.rule_weakened.clone(),
             overrides: cfg.gate.overrides.clone(),
             secrets: cfg.gate.secrets,
+            conditions: cfg.gate.conditions,
             openspec_coverage: cfg.gate.openspec_coverage,
             decision_policy: cfg.gate.decision_policy.clone(),
             exec: crate::cmd_trust::ExecPolicy::default(),
