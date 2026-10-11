@@ -18,8 +18,9 @@ use std::time::Instant;
 use super::baseline;
 use super::registry::{evaluate_overrides, load_constraints_resolved};
 use super::types::{
-    FitnessReport, FitnessRule, LintIssue, RequiresSkippedRule, RuleDuration, RuleKind,
-    RulesFingerprint, RunnerSkippedRule, SourceCount, UntrustedSkippedRule, normalize_severity,
+    FitnessReport, FitnessRule, LintIssue, NotApplicableRule, RequiresSkippedRule, RuleDuration,
+    RuleKind, RulesFingerprint, RunnerSkippedRule, SourceCount, UntrustedSkippedRule,
+    normalize_severity,
 };
 use crate::error::{HarnessError, Result};
 
@@ -27,7 +28,7 @@ mod glob;
 mod runner;
 
 pub(crate) use glob::{collect_dirs, collect_files, glob_matches};
-use runner::run_rule;
+use runner::{not_applicable, run_rule};
 
 /// Прогон fitness functions из `CONSTRAINTS.yaml` по репозиторию.
 ///
@@ -167,6 +168,9 @@ pub fn check_with_options(
     let mut runner_skipped: Vec<RunnerSkippedRule> = Vec::new();
     let mut untrusted_skipped: Vec<UntrustedSkippedRule> = Vec::new();
     let mut requires_skipped: Vec<RequiresSkippedRule> = Vec::new();
+    // Волна S (ADR-070): правила со статусом N/A — объявленные условия
+    // `applies_to` не выполнены, прогон пропущен. НЕ находка, гейт не ломает.
+    let mut not_applicable_rules: Vec<NotApplicableRule> = Vec::new();
     // A3: решение об исполнении команд реестра — ОДИН снимок на весь прогон
     // (модель доверия, ADR-053): no-exec (флаг/переменная/дефолт MCP) или
     // allow-файл, не совпадающий с отпечатком набора команд. Отпечаток
@@ -209,6 +213,17 @@ pub fn check_with_options(
     };
     for rule in &rule_refs {
         let started = Instant::now();
+        // Волна S (ADR-070): правило, чьи объявленные условия `applies_to` не
+        // выполнены, получает статус N/A — прогон пропускается, статус идёт в
+        // отчёт покрытия (не PASS и не FAIL), гейт не ломается.
+        if let Some(reason) = not_applicable(repo, rule)? {
+            not_applicable_rules.push(NotApplicableRule {
+                rule: rule.name.clone(),
+                severity: normalize_severity(&rule.severity, &rule.name)?.to_string(),
+                reason,
+            });
+            continue;
+        }
         // ADR-068: ресурс недоступен — правило даёт SKIP с причиной (не PASS и
         // не FAIL): проверка не исполняется, в находки не попадает. Ресурс
         // доступен — обычная семантика (SKIP — не лазейка).
@@ -410,6 +425,16 @@ pub fn check_with_options(
             notes
         );
     }
+    if !not_applicable_rules.is_empty() {
+        // Волна S (ADR-070): N/A — не нарушение и не проверка: правило не
+        // относится к этому репозиторию. В сводке отдельным счётчиком, гейт
+        // не ломает.
+        let _ = write!(
+            summary,
+            "; неприменимо (N/A): {}",
+            not_applicable_rules.len()
+        );
+    }
     if let Some(fp) = &fingerprint {
         // Запись в String не может завершиться ошибкой — игнор безопасен.
         let _ = write!(
@@ -437,6 +462,7 @@ pub fn check_with_options(
         untrusted_skipped,
         requires_skipped,
         fingerprint,
+        not_applicable: not_applicable_rules,
     })
 }
 

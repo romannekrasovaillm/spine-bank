@@ -253,6 +253,11 @@ pub struct FitnessReport {
     /// Отпечаток состава реестра правил (П5). Аддитивное поле SDK-контракта v1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fingerprint: Option<RulesFingerprint>,
+    /// Правила со статусом N/A (волна S, ADR-070): объявленные условия
+    /// `applies_to` не выполнены — правило не прогонялось, гейт не ломает.
+    /// Аддитивное поле SDK-контракта v1.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub not_applicable: Vec<NotApplicableRule>,
 }
 
 /// Тип fitness-правила из `CONSTRAINTS.yaml`.
@@ -330,6 +335,44 @@ impl RuleKind {
             Self::MustContain | Self::MustNotContain | Self::EachFileMustContain
         )
     }
+}
+
+/// Применимость правила к репозиторию (волна S, ADR-070): правило объявляет,
+/// к каким стекам и структурам оно относится.
+///
+/// Неприменимое правило получает статус **N/A** (не FAIL и не PASS): корп-
+/// стандарт, написанный под Java-Maven, не краснит Python-репозиторий ложной
+/// находкой «правилу нечего проверять». Отсутствие условий (или отсутствие
+/// поля `applies_to`) — правило применимо всегда: поведение существующих
+/// правил не меняется.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub(crate) struct AppliesTo {
+    /// Стеки, к которым применимо правило (`java-maven`, `java-gradle`,
+    /// `node`, `python`, `rust`, `dotnet`, `go`). Пусто — любой стек.
+    #[serde(default, deserialize_with = "de_string_or_list")]
+    pub(crate) stack: Vec<String>,
+    /// Glob'ы: правило применимо, только если существует хотя бы один файл
+    /// под одним из них (например, `**/pom.xml`). Пусто — без условия.
+    #[serde(default, deserialize_with = "de_string_or_list")]
+    pub(crate) when_exists: Vec<String>,
+    /// Применимо, только если собственный glob-набор правила (после
+    /// исключений) непуст; пустой набор — N/A, а не находка «правилу нечего
+    /// проверять».
+    #[serde(default)]
+    pub(crate) when_glob_nonempty: bool,
+}
+
+/// Правило, неприменимое к репозиторию (волна S, ADR-070): объявленные
+/// условия [`AppliesTo`] не выполнены — статус N/A (не PASS и не FAIL).
+/// НЕ находка, гейт не ломает; перечисляется в отчёте покрытия стандарта.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotApplicableRule {
+    /// Имя правила.
+    pub rule: String,
+    /// Нормализованный severity правила (`error`/`warn`).
+    pub severity: String,
+    /// Причина неприменимости (какое условие не выполнено).
+    pub reason: String,
 }
 
 /// Одно правило из `CONSTRAINTS.yaml`.
@@ -488,6 +531,11 @@ pub struct FitnessRule {
     /// `command_succeeds`, 300 для `archunit` (ADR-039).
     #[serde(default)]
     pub(crate) timeout_secs: Option<u64>,
+    /// Применимость к репозиторию (волна S, ADR-070): объявленные условия
+    /// (`stack`/`when_exists`/`when_glob_nonempty`). Неприменимое правило даёт
+    /// N/A, а не находку. Отсутствие поля — правило применимо всегда.
+    #[serde(default)]
+    pub(crate) applies_to: Option<AppliesTo>,
 }
 
 impl FitnessRule {
@@ -572,6 +620,17 @@ impl FitnessRule {
         fn flag(value: bool) -> String {
             if value { "true".into() } else { String::new() }
         }
+        fn applies(a: &Option<AppliesTo>) -> String {
+            match a {
+                None => String::new(),
+                Some(a) => format!(
+                    "stack={};when_exists={};when_glob_nonempty={}",
+                    list(&a.stack),
+                    list(&a.when_exists),
+                    flag(a.when_glob_nonempty)
+                ),
+            }
+        }
         let mut out = BTreeMap::new();
         out.insert("id", opt(&self.id));
         out.insert("kind", self.kind.as_str().to_string());
@@ -590,6 +649,7 @@ impl FitnessRule {
         out.insert("reference", opt(&self.reference));
         out.insert("timeout_secs", num(self.timeout_secs));
         out.insert("unverifiable", flag(self.unverifiable));
+        out.insert("applies_to", applies(&self.applies_to));
         out.insert("adr", opt(&self.adr));
         out.insert("owner", opt(&self.owner));
         out.insert("expiry", opt(&self.expiry));

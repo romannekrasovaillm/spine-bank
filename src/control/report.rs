@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use super::exec::check;
 use super::registry::load_constraints_resolved;
 use super::rules::parse_constraints_file;
-use super::types::{FitnessRule, LintIssue};
+use super::types::{FitnessRule, LintIssue, NotApplicableRule};
 use crate::error::{HarnessError, Result};
 
 /// Обязательные заголовки спецификации (сенсор `required_sections`).
@@ -681,6 +681,9 @@ pub struct ControlReport {
     /// Правила ручного контроля (`unverifiable: true` — не исполняются,
     /// осознанный долг с owner).
     pub unverifiable_rules: Vec<String>,
+    /// Правила со статусом N/A (волна S, ADR-070): объявленные условия
+    /// `applies_to` не выполнены — не PASS и не FAIL, гейт не ломают.
+    pub not_applicable_rules: Vec<NotApplicableRule>,
     /// Расхождения пинов версий `extends` (текст находок).
     pub version_mismatches: Vec<String>,
     /// Флотовой срез теневого гейта (D2, ADR-059): сохранённые отчёты
@@ -717,6 +720,14 @@ pub fn control_report(repo: &Path, constraints: &Path, level: &str) -> Result<Co
     let mut inherited: BTreeMap<String, usize> = BTreeMap::new();
     let mut own = 0usize;
     let mut unverifiable_rules = Vec::new();
+    // Волна S (ADR-070): N/A-правила уровня — из отчёта прогона, отфильтрованные
+    // в скоуп. N/A — не исход: в pass/fail/warn не входит.
+    let na_names: BTreeSet<&str> = fitness
+        .not_applicable
+        .iter()
+        .map(|n| n.rule.as_str())
+        .collect();
+    let mut not_applicable_rules: Vec<NotApplicableRule> = Vec::new();
     for rule in &scoped {
         match &rule.source {
             Some(source) => *inherited.entry(source.clone()).or_default() += 1,
@@ -724,6 +735,12 @@ pub fn control_report(repo: &Path, constraints: &Path, level: &str) -> Result<Co
         }
         if rule.unverifiable {
             unverifiable_rules.push(rule.name.clone());
+            continue;
+        }
+        if na_names.contains(rule.name.as_str()) {
+            if let Some(na) = fitness.not_applicable.iter().find(|n| n.rule == rule.name) {
+                not_applicable_rules.push(na.clone());
+            }
             continue;
         }
         let has_error = fitness
@@ -780,6 +797,7 @@ pub fn control_report(repo: &Path, constraints: &Path, level: &str) -> Result<Co
         overrides,
         expired_rules,
         unverifiable_rules,
+        not_applicable_rules,
         version_mismatches,
         // D2 (ADR-059): флотовой срез теневого гейта — сохранённые прогоны
         // `--shadow-constraints` по проектам (сам репозиторий и его
@@ -813,8 +831,11 @@ pub fn render_control_report(report: &ControlReport) -> String {
     }
     let _ = writeln!(
         out,
-        "\nИсходы правил: pass {}, fail {}, warn {}",
-        report.pass, report.fail, report.warn
+        "\nИсходы правил: pass {}, fail {}, warn {}, N/A {}",
+        report.pass,
+        report.fail,
+        report.warn,
+        report.not_applicable_rules.len()
     );
     let _ = writeln!(
         out,
@@ -848,6 +869,16 @@ pub fn render_control_report(report: &ControlReport) -> String {
     }
     for name in &report.unverifiable_rules {
         let _ = writeln!(out, "- {name}");
+    }
+
+    // Волна S (ADR-070): N/A — правило не относится к этому репозиторию
+    // (условия `applies_to` не выполнены). Не находка и не проверка.
+    let _ = writeln!(out, "\n## Неприменимые правила (N/A)");
+    if report.not_applicable_rules.is_empty() {
+        let _ = writeln!(out, "- нет");
+    }
+    for na in &report.not_applicable_rules {
+        let _ = writeln!(out, "- {} ({}): {}", na.rule, na.severity, na.reason);
     }
 
     let _ = writeln!(out, "\n## Расхождения версий extends");
@@ -1457,6 +1488,103 @@ mod tests {
         assert_eq!(corp.fail, 1, "только own_rule в исходах");
         assert_eq!(corp.pass, 0);
     }
+
+    /// Волна S (ADR-070): правило с невыполненными условиями `applies_to`
+    /// получает статус N/A — не PASS и не FAIL. Корп-стандарт под Java-Maven
+    /// не краснит пустой репозиторий ложными находками «правилу нечего
+    /// проверять» (метрика 9 таблицы приёмки).
+    #[test]
+    fn applies_to_unmet_conditions_give_na_not_fail() {
+        let dir = tempfile::tempdir().unwrap();
+        let constraints = write_file(
+            dir.path(),
+            "CONSTRAINTS.yaml",
+            "rules:\n\
+             \x20 - name: java_only\n\
+             \x20   type: dependency_direction\n\
+             \x20   glob: \"**/*.java\"\n\
+             \x20   forbid: [foo.bar]\n\
+             \x20   applies_to:\n\
+             \x20     stack: [java-maven, java-gradle]\n\
+             \x20   severity: error\n\
+             \x20 - name: needs_pom\n\
+             \x20   type: must_contain\n\
+             \x20   glob: \"**/*.java\"\n\
+             \x20   pattern: \"package \"\n\
+             \x20   applies_to:\n\
+             \x20     when_exists: [\"**/pom.xml\"]\n\
+             \x20   severity: error\n\
+             \x20 - name: nonempty_guard\n\
+             \x20   type: dependency_direction\n\
+             \x20   glob: \"**/adapter/in/**/*.java\"\n\
+             \x20   forbid: [x.y]\n\
+             \x20   applies_to:\n\
+             \x20     when_glob_nonempty: true\n\
+             \x20   severity: error\n",
+        );
+        let report = check(dir.path(), &constraints).unwrap();
+        assert!(report.passed, "N/A не должны ломать гейт: {report:?}");
+        assert!(
+            report.issues.iter().all(|i| i.severity != "error"),
+            "нет error-находок: {:?}",
+            report.issues
+        );
+        assert_eq!(
+            report.not_applicable.len(),
+            3,
+            "{:?}",
+            report.not_applicable
+        );
+        assert!(
+            report.not_applicable.iter().all(|n| n.severity == "error"),
+            "{:?}",
+            report.not_applicable
+        );
+
+        let corp = control_report(dir.path(), &constraints, "all").unwrap();
+        assert_eq!(corp.fail, 0, "N/A — не FAIL");
+        assert_eq!(corp.pass, 0, "N/A — не PASS");
+        assert_eq!(corp.not_applicable_rules.len(), 3);
+        assert!(corp.passed);
+        // JSON-контракт: аддитивное поле сериализуется.
+        let json = serde_json::to_value(&corp).unwrap();
+        assert!(json.get("not_applicable_rules").is_some(), "{json}");
+        // Markdown: отдельный раздел с причинами.
+        let md = render_control_report(&corp);
+        assert!(md.contains("## Неприменимые правила (N/A)"), "{md}");
+        assert!(md.contains("java_only"), "{md}");
+        assert!(md.contains("N/A 3"), "{md}");
+    }
+
+    /// Регресс (текущая семантика сохранена): правило БЕЗ `applies_to` с
+    /// пустым glob-набором по-прежнему даёт error-находку «правилу нечего
+    /// проверять» — N/A наступает только по явному условию.
+    #[test]
+    fn empty_glob_without_applies_to_still_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let constraints = write_file(
+            dir.path(),
+            "CONSTRAINTS.yaml",
+            "rules:\n\
+             \x20 - name: plain_empty\n\
+             \x20   type: dependency_direction\n\
+             \x20   glob: \"**/nope/**/*.java\"\n\
+             \x20   forbid: [x.y]\n\
+             \x20   severity: error\n",
+        );
+        let report = check(dir.path(), &constraints).unwrap();
+        assert!(!report.passed);
+        assert!(report.not_applicable.is_empty());
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|i| i.rule == "plain_empty" && i.severity == "error"),
+            "{:?}",
+            report.issues
+        );
+    }
+
     /// Реестр «другой редакции»: два неизвестных типа + одно валидное правило.
     const ALIEN_CONSTRAINTS: &str = "rules:\n\
          \x20 - name: readme\n\

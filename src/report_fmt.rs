@@ -1244,6 +1244,7 @@ mod tests {
                 ),
             }],
             fingerprint: None,
+            not_applicable: Vec::new(),
         };
         let fmt = FmtReport::from_fitness(&report);
         let ran = fmt

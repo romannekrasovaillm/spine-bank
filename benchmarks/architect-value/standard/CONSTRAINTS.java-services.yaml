@@ -86,6 +86,13 @@ rules:
       - "org/springframework"
       - "jakarta/persistence"
       - "javax/persistence"
+    # Гексагональная раскладка пакетов (`application.domain`) — не универсальна.
+    # На репозитории без такого слоя правило неприменимо: пустой набор файлов
+    # должен дать N/A, а не ERROR (метрика 9, §S1). `stack` дополнительно
+    # ограничивает корп-правило Java-сборкой.
+    applies_to:
+      stack: [java-maven, java-gradle]
+      when_glob_nonempty: true
     severity: error
     owner: "@arch-board"
     rationale: "Домен не зависит от адаптеров и фреймворка (AD-LAYER-DOMAIN, hexagonal)."
@@ -98,6 +105,11 @@ rules:
     glob: "**/adapter/in/**/*.java"
     forbid:
       - "io/reflectoring/buckpal/adapter/out"
+    # Слой `adapter.in` специфичен для гексагональной раскладки buckpal; на
+    # сервисе без него глоб пуст → N/A (метрика 9, §S1).
+    applies_to:
+      stack: [java-maven, java-gradle]
+      when_glob_nonempty: true
     severity: error
     owner: "@arch-board"
     rationale: "Входящий адаптер не зависит от исходящего (AD-LAYER-PORTS)."

@@ -110,8 +110,8 @@ pub use tools::{
     AdrNewTool, FitnessCheckTool, RulesReportTool, SignificanceScoreTool, SpineLintTool, tools,
 };
 pub use types::{
-    BEHAVIOUR_RULE_KINDS, FitnessReport, FitnessRule, LintIssue, OverrideEntry, OverrideInfo,
-    RequiresSkippedRule, Route, RuleCard, RuleDuration, RulesFingerprint, RunnerSkippedRule,
-    Significance, SkippedUnknownRule, SourceCount, UntrustedSkippedRule,
+    BEHAVIOUR_RULE_KINDS, FitnessReport, FitnessRule, LintIssue, NotApplicableRule, OverrideEntry,
+    OverrideInfo, RequiresSkippedRule, Route, RuleCard, RuleDuration, RulesFingerprint,
+    RunnerSkippedRule, Significance, SkippedUnknownRule, SourceCount, UntrustedSkippedRule,
 };
 pub(crate) use types::{RuleKind, normalize_severity};

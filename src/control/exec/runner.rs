@@ -819,6 +819,105 @@ fn rule_globs(rule: &FitnessRule) -> Vec<String> {
     }
 }
 
+/// Пробы стека репозитория → имя стека (волна S, ADR-070): эвристика по
+/// именам манифестов. Стек считается найденным, если под его glob'ом есть
+/// хотя бы один файл.
+const STACK_PROBES: &[(&str, &[&str])] = &[
+    ("java-maven", &["**/pom.xml"]),
+    ("java-gradle", &["**/build.gradle", "**/build.gradle.kts"]),
+    ("node", &["**/package.json"]),
+    (
+        "python",
+        &["**/pyproject.toml", "**/requirements.txt", "**/setup.py"],
+    ),
+    ("rust", &["**/Cargo.toml"]),
+    ("dotnet", &["**/*.csproj", "**/*.fsproj"]),
+    ("go", &["**/go.mod"]),
+];
+
+/// Определяет стеки репозитория по манифестам (`java-maven`, `java-gradle`,
+/// `node`, `python`, `rust`, `dotnet`, `go`).
+pub(super) fn detect_stacks(repo: &Path) -> Result<BTreeSet<&'static str>> {
+    let mut stacks = BTreeSet::new();
+    for &(name, globs) in STACK_PROBES {
+        let mut found = false;
+        for &g in globs {
+            if !collect_files(repo, g)?.is_empty() {
+                found = true;
+                break;
+            }
+        }
+        if found {
+            stacks.insert(name);
+        }
+    }
+    Ok(stacks)
+}
+
+/// Применение условий `applies_to` (волна S, ADR-070).
+///
+/// `Ok(None)` — правило применимо (прогонять). `Ok(Some(reason))` — правило
+/// N/A: объявленное условие не выполнено, прогон пропускается, гейт находкой
+/// НЕ ломается. Отсутствие поля `applies_to` — правило применимо всегда
+/// (поведение существующих правил не меняется).
+///
+/// Условие `when_glob_nonempty` — единственный способ превратить «пустой
+/// набор файлов» в N/A: собственное правило репозитория с пустым glob'ом без
+/// этого условия по-прежнему даёт находку «правилу нечего проверять»
+/// (текущая семантика сохранена).
+pub(super) fn not_applicable(repo: &Path, rule: &FitnessRule) -> Result<Option<String>> {
+    let Some(a) = &rule.applies_to else {
+        return Ok(None);
+    };
+    if !a.stack.is_empty() {
+        let stacks = detect_stacks(repo)?;
+        if !a.stack.iter().any(|s| stacks.contains(s.as_str())) {
+            let found = if stacks.is_empty() {
+                "нет".to_string()
+            } else {
+                stacks.iter().copied().collect::<Vec<_>>().join(", ")
+            };
+            return Ok(Some(format!(
+                "стек не найден: нужно [{}], в репозитории: {}",
+                a.stack.join(", "),
+                found
+            )));
+        }
+    }
+    if !a.when_exists.is_empty() {
+        let mut found = false;
+        for g in &a.when_exists {
+            if !collect_files(repo, g)?.is_empty() {
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            return Ok(Some(format!(
+                "нет файлов по when_exists: {}",
+                a.when_exists.join(", ")
+            )));
+        }
+    }
+    if a.when_glob_nonempty {
+        let globs = rule_globs(rule);
+        let mut any = false;
+        for g in &globs {
+            if !collect_files(repo, g)?.is_empty() {
+                any = true;
+                break;
+            }
+        }
+        if !any {
+            return Ok(Some(format!(
+                "набор файлов правила пуст (glob: {})",
+                globs.join(", ")
+            )));
+        }
+    }
+    Ok(None)
+}
+
 /// Запускает `bash -c <command>` в `repo` с ручным таймаутом.
 /// `Ok(None)` в статусе — команда превысила таймаут и была убита.
 /// Механика (процессная группа, читатели с дедлайном) — [`crate::proc`]:
