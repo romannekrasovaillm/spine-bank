@@ -8,6 +8,7 @@ mod archify;
 mod archunit;
 mod automation;
 mod bench;
+mod constraints_harvest;
 mod control;
 mod fleet;
 mod library;
@@ -39,6 +40,7 @@ use archunit::{ArchunitCmd, cmd_archunit};
 use automation::{CronCmd, EvalCmd, cmd_cron, cmd_eval};
 #[cfg(feature = "harness")]
 use bench::{BenchCmd, cmd_bench};
+use constraints_harvest::cmd_constraints_harvest;
 use control::{ControlCmd, cmd_control};
 use fleet::{FleetCmd, cmd_fleet};
 #[cfg(feature = "harness")]
@@ -624,6 +626,21 @@ enum Cmd {
         /// Каталог черновика модели (`status: inferred`, `source: recover@<sha>`).
         #[arg(long = "model-out")]
         model_out: Option<PathBuf>,
+    },
+    /// Детерминированный сборщик фактов-ограничений для секции Context ADR
+    /// (ADR-073, цикл DECIDE): нагрузочные ориентиры, владение, лицензии/EOL,
+    /// зависимости, env-поверхность, скрытые инварианты кода. Только факты
+    /// (без интерпретации), доказательство `файл:строка`. Форматы md | json
+    /// (arch-be/constraints-harvest/v1); два прогона байт-в-байт идентичны.
+    ConstraintsHarvest {
+        /// Корень репозитория.
+        repo: PathBuf,
+        /// Формат: md | json (arch-be/constraints-harvest/v1).
+        #[arg(long, default_value = "md")]
+        format: String,
+        /// Записать отчёт в файл (иначе — stdout).
+        #[arg(long)]
+        out: Option<PathBuf>,
     },
     /// Архитектурный дифф PR (волна K, ADR-063): что изменилось в системе
     /// между ревизиями — связи компонентов, внешние системы, хранилища,
@@ -1698,6 +1715,9 @@ pub(crate) async fn run() -> Result<()> {
             format,
             model_out,
         }) => cmd_recover(&cfg, &repo, rev.as_deref(), &format, model_out.as_deref())?,
+        Some(Cmd::ConstraintsHarvest { repo, format, out }) => {
+            cmd_constraints_harvest(&repo, &format, out.as_deref())?;
+        }
         Some(Cmd::ArchDiff {
             repo,
             base,

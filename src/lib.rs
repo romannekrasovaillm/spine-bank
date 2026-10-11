@@ -39,6 +39,7 @@ pub mod clipboard;
 pub mod cmd_trust;
 pub mod config;
 pub mod connect;
+pub mod constraints_harvest;
 pub mod contract_diff;
 pub mod control;
 pub(crate) mod control_plane;
