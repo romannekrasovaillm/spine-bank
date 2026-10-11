@@ -1,0 +1,12 @@
+# Фикстура выгрузки CMDB для живого прогона сверки (AB-02).
+# PetClinic: 8 сервисов, все заведены корректно (владельцы совпадают с
+# черновиком модели, который пишет `landscape diff --model-out`).
+systems:
+  - {id: CMDB-001, name: admin-server,      owner: "Платформа",  status: active}
+  - {id: CMDB-002, name: api-gateway,       owner: "Интеграции", status: active}
+  - {id: CMDB-003, name: config-server,     owner: "Платформа",  status: active}
+  - {id: CMDB-004, name: customers-service, owner: "CRM",        status: active}
+  - {id: CMDB-005, name: discovery-server,  owner: "Платформа",  status: active}
+  - {id: CMDB-006, name: genai-service,     owner: "AI",         status: active}
+  - {id: CMDB-007, name: vets-service,      owner: "CMS",        status: active}
+  - {id: CMDB-008, name: visits-service,    owner: "Записи",     status: active}

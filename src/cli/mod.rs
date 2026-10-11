@@ -11,6 +11,7 @@ mod bench;
 mod constraints_harvest;
 mod control;
 mod fleet;
+mod landscape;
 mod library;
 mod mcp;
 mod misc;
@@ -45,6 +46,7 @@ use control::{ControlCmd, cmd_control};
 use fleet::{FleetCmd, cmd_fleet};
 #[cfg(feature = "harness")]
 use fleet::{WorktreeCmd, cmd_worktree};
+use landscape::{LandscapeCmd, cmd_landscape};
 #[cfg(feature = "harness")]
 use library::cmd_prompts;
 use library::{MemoryCmd, PluginsCmd, SkillsCmd, cmd_init, cmd_memory, cmd_plugins, cmd_skills};
@@ -650,6 +652,13 @@ enum Cmd {
         /// Каталог черновика модели (`status: inferred`, `source: recover@<sha>`).
         #[arg(long = "model-out")]
         model_out: Option<PathBuf>,
+    },
+    /// Сверка ландшафта с выгрузкой CMDB (волна LANDSCAPE, AB-02, ADR-077):
+    /// три класса расхождений — не заведено в CMDB, запись CMDB без модели/кода,
+    /// конфликт владельца. Форматы md | json (arch-be/landscape-diff/v1).
+    Landscape {
+        #[command(subcommand)]
+        cmd: LandscapeCmd,
     },
     /// Детерминированный сборщик фактов-ограничений для секции Context ADR
     /// (ADR-073, цикл DECIDE): нагрузочные ориентиры, владение, лицензии/EOL,
@@ -1878,6 +1887,7 @@ pub(crate) async fn run() -> Result<()> {
             format,
             model_out,
         }) => cmd_recover(&cfg, &repo, rev.as_deref(), &format, model_out.as_deref())?,
+        Some(Cmd::Landscape { cmd }) => cmd_landscape(&cfg, cmd)?,
         Some(Cmd::ConstraintsHarvest { repo, format, out }) => {
             cmd_constraints_harvest(&repo, &format, out.as_deref())?;
         }

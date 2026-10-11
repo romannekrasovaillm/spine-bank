@@ -7,6 +7,23 @@
 
 ## [Unreleased]
 
+### Добавлено
+
+- **Сверка ландшафта с выгрузкой CMDB (ADR-077, волна LANDSCAPE, AB-02).**
+  Команда `arch-be landscape diff --cmdb <файл> [--root <dir>] [--aliases
+  <файл>] [--repo <dir>] [--rev <rev>] [--format md|json] [--model-out <dir>]`:
+  сверка ландшафта (модель ⊕ граф кода) с внешним инвентарём. Три класса
+  расхождений — `cmdb-missing` [error], `cmdb-orphan` [warn], `owner-conflict`
+  [error]; вердикт по каждой записи CMDB — `подтверждена | ошибочна | не
+  проверяема`; `retired`-записи не дают ложных предупреждений; `--model-out`
+  пишет `SYS-*` со `status: inferred` неразрушающе. Схема
+  `arch-be/landscape-diff/v1`. Формат выгрузки — `docs/landscape.md`.
+
+### Что может покраснеть после обновления
+
+- Новая подкоманда `landscape diff` не меняет вердикты существующего гейта:
+  сверка CMDB — отдельный контур, в `control check` не входит.
+
 ## [0.4.1] — 2026-10-11
 
 Патч-релиз ценности по итогам карты 12 задач ArchBenchmarks v2: закрыты

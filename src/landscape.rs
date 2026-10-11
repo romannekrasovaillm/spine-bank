@@ -50,12 +50,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::error::{HarnessError, Result};
 use crate::llm::ToolSpec;
-use crate::model::{EntityKind, LinkKind};
+use crate::model::{EntityKind, LinkKind, parse_id};
 use crate::tool::{Tool, ToolContext, ToolOutput};
 
 /// Каталоги, которые не считаются проектами при сканировании `ROOT`.
@@ -990,6 +990,695 @@ pub fn render_diff_markdown(diff: &LandscapeDiff, since: &str) -> String {
     out
 }
 
+// ---------------------------------------------------------------------------
+// Сверка ландшафта с CMDB (AB-02, ADR-077)
+// ---------------------------------------------------------------------------
+
+/// Класс расхождения: система есть в модели/коде, но не заведена в CMDB.
+pub const CLASS_CMDB_MISSING: &str = "cmdb-missing";
+/// Класс расхождения: запись CMDB без модели/кода. Для статуса `retired` —
+/// не расхождение.
+pub const CLASS_CMDB_ORPHAN: &str = "cmdb-orphan";
+/// Класс расхождения: владелец в CMDB не совпадает с владельцем модели.
+pub const CLASS_OWNER_CONFLICT: &str = "owner-conflict";
+
+/// Схема JSON-отчёта сверки ландшафта с CMDB.
+pub const CMDB_DIFF_SCHEMA: &str = "arch-be/landscape-diff/v1";
+
+/// Запись системы из выгрузки CMDB. Семантически обязательно `name`; пустое
+/// имя отсекается явной проверкой (`load_cmdb`) с понятным сообщением.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CmdbSystem {
+    /// Внешний идентификатор записи в CMDB (если есть).
+    #[serde(default)]
+    pub id: Option<String>,
+    /// Название системы — ключ сопоставления с ландшафтом.
+    #[serde(default)]
+    pub name: String,
+    /// Владелец (свободная строка CMDB).
+    #[serde(default)]
+    pub owner: Option<String>,
+    /// Статус: `active` | `deprecated` | `retired` (по умолчанию `active`).
+    #[serde(default)]
+    pub status: Option<String>,
+    /// Система-предшественник, которую вытесняет эта запись.
+    #[serde(default)]
+    pub replaces: Option<String>,
+}
+
+impl CmdbSystem {
+    /// Нормализованный статус: lowercase, пустой → `active`.
+    #[must_use]
+    pub fn status_norm(&self) -> String {
+        self.status
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_lowercase)
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "active".to_string())
+    }
+
+    /// Выведена ли система из эксплуатации (`retired`/`decommissioned`/`eol`).
+    #[must_use]
+    pub fn retired(&self) -> bool {
+        matches!(
+            self.status_norm().as_str(),
+            "retired" | "decommissioned" | "eol"
+        )
+    }
+}
+
+/// Файл выгрузки CMDB: обёртка `{systems: [...]}` либо голый список.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum CmdbFile {
+    /// `systems:`-обёртка (основная форма).
+    Wrapped {
+        /// Список систем.
+        systems: Vec<CmdbSystem>,
+    },
+    /// Голый верхнеуровневый список.
+    Bare(Vec<CmdbSystem>),
+}
+
+/// Загружает выгрузку CMDB из YAML (JSON — подмножество YAML).
+///
+/// Форма: `systems: [...]` либо голый список; запись —
+/// `{id?, name, owner?, status?, replaces?}`. Записи сортируются по
+/// каноничному имени, затем по `id`.
+///
+/// # Errors
+/// Файл не читается; выгрузка пуста; синтаксическая ошибка разбора; запись
+/// без непустого `name`.
+pub fn load_cmdb(path: &Path) -> Result<Vec<CmdbSystem>> {
+    let text = std::fs::read_to_string(path).map_err(|e| HarnessError::io(path, e))?;
+    if text.trim().is_empty() {
+        return Err(HarnessError::Model(format!(
+            "{}: выгрузка CMDB пуста",
+            path.display()
+        )));
+    }
+    let file: CmdbFile = serde_yaml_ng::from_str(&text)
+        .map_err(|e| HarnessError::Model(format!("{}: выгрузка CMDB: {e}", path.display())))?;
+    let mut systems = match file {
+        CmdbFile::Wrapped { systems } | CmdbFile::Bare(systems) => systems,
+    };
+    if systems.is_empty() {
+        return Err(HarnessError::Model(format!(
+            "{}: выгрузка CMDB не содержит записей",
+            path.display()
+        )));
+    }
+    if systems.iter().any(|s| s.name.trim().is_empty()) {
+        return Err(HarnessError::Model(format!(
+            "{}: запись CMDB без имени",
+            path.display()
+        )));
+    }
+    systems.sort_by(|a, b| {
+        (canonical_name(&a.name), a.id.as_deref().unwrap_or(""))
+            .cmp(&(canonical_name(&b.name), b.id.as_deref().unwrap_or("")))
+    });
+    Ok(systems)
+}
+
+/// Извлекает владельца из тела сущности: строка `Владелец: ...`; при наличии
+/// кавычек-ёлочек «…» берётся внутренняя часть.
+fn owner_from_body(body: &str) -> Option<String> {
+    for line in body.lines() {
+        let Some(rest) = line.trim().strip_prefix("Владелец:") else {
+            continue;
+        };
+        let rest = rest.trim();
+        if rest.is_empty() {
+            return None;
+        }
+        if let (Some(open), Some(close)) = (rest.find('«'), rest.rfind('»')) {
+            if open < close {
+                let inner = rest[open + '«'.len_utf8()..close].trim();
+                if !inner.is_empty() {
+                    return Some(inner.to_string());
+                }
+            }
+        }
+        return Some(rest.to_string());
+    }
+    None
+}
+
+/// Нормализация имени владельца для сравнения: trim, lowercase, схлопывание
+/// пробелов.
+fn norm_owner(s: &str) -> String {
+    s.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+/// Система дизайна (из модели или из графа кода) для сверки с CMDB.
+#[derive(Debug, Clone)]
+struct DesignSystem {
+    /// Каноничное имя (ключ сопоставления).
+    canonical: String,
+    /// Представительное имя.
+    display: String,
+    /// Владелец (из тела сущности), если известен.
+    owner: Option<String>,
+    /// Доказательство: `проект:ID` или `код:<узел>`.
+    evidence: String,
+}
+
+/// Собирает системы дизайна из моделей набора (`SYS`/`INT`), применяя алиасы.
+fn collect_model_systems(
+    root: &Path,
+    aliases: &BTreeMap<String, String>,
+) -> Result<Vec<DesignSystem>> {
+    let mut dirs: Vec<PathBuf> = vec![root.to_path_buf()];
+    let rd = std::fs::read_dir(root).map_err(|e| HarnessError::io(root, e))?;
+    for entry in rd {
+        let entry = entry.map_err(|e| HarnessError::io(root, e))?;
+        let p = entry.path();
+        if !p.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if SKIP_DIRS.contains(&name.as_str()) {
+            continue;
+        }
+        dirs.push(p);
+    }
+    dirs.sort();
+    dirs.dedup();
+
+    let mut out: Vec<DesignSystem> = Vec::new();
+    for d in &dirs {
+        let Some((project, model)) = load_project(d)? else {
+            continue;
+        };
+        for e in &model.entities {
+            if !matches!(e.kind, EntityKind::Sys | EntityKind::Int) {
+                continue;
+            }
+            let raw = canonical_name(&e.title);
+            let canonical = aliases.get(&raw).cloned().unwrap_or(raw);
+            if canonical.is_empty() {
+                continue;
+            }
+            out.push(DesignSystem {
+                canonical,
+                display: e.title.trim().to_string(),
+                owner: owner_from_body(&e.body),
+                evidence: format!("{project}:{}", e.id),
+            });
+        }
+    }
+    out.sort_by(|a, b| (&a.canonical, &a.evidence).cmp(&(&b.canonical, &b.evidence)));
+    Ok(out)
+}
+
+/// Расхождение сверки с CMDB.
+#[derive(Debug, Clone, Serialize)]
+pub struct CmdbFinding {
+    /// Класс: `cmdb-missing` | `cmdb-orphan` | `owner-conflict`.
+    pub class: String,
+    /// Строгость: `error` | `warn`.
+    pub severity: String,
+    /// Предмет (каноничное имя системы).
+    pub subject: String,
+    /// Описание.
+    pub message: String,
+    /// Доказательство (проект:id, id CMDB, значения владельцев).
+    pub evidence: String,
+}
+
+/// Вердикт по записи выгрузки CMDB.
+#[derive(Debug, Clone, Serialize)]
+pub struct CmdbVerdict {
+    /// id записи CMDB (или каноничное имя, если `id` нет).
+    pub id: String,
+    /// Имя из CMDB.
+    pub name: String,
+    /// `подтверждена` | `ошибочна` | `не проверяема`.
+    pub verdict: String,
+    /// Обоснование.
+    pub reason: String,
+}
+
+/// Отчёт сверки ландшафта с CMDB.
+#[derive(Debug)]
+pub struct CmdbDiffReport {
+    /// Корень сканирования.
+    pub root: PathBuf,
+    /// Путь выгрузки CMDB.
+    pub cmdb: PathBuf,
+    /// Расхождения (сортированы: ошибки, затем предупреждения).
+    pub findings: Vec<CmdbFinding>,
+    /// Вердикты по записям CMDB (в порядке записей в выгрузке).
+    pub verdicts: Vec<CmdbVerdict>,
+    /// Систем дизайна (объединение модель ⊕ код).
+    pub design_systems: usize,
+    /// Систем из графа кода (переданных в `code_systems`).
+    pub code_systems: usize,
+    /// Записей в выгрузке CMDB.
+    pub cmdb_records: usize,
+    /// Каталог черновика модели (при `--model-out`).
+    pub model_dir: Option<PathBuf>,
+    /// Id записанных систем черновика (`SYS-NNN`, `status: inferred`).
+    pub written: Vec<String>,
+    /// Имена систем, уже присутствующих в модели (черновик не пишется).
+    pub skipped: Vec<String>,
+}
+
+impl CmdbDiffReport {
+    /// Число расхождений строгости `error`.
+    #[must_use]
+    pub fn error_count(&self) -> usize {
+        self.findings
+            .iter()
+            .filter(|f| f.severity == "error")
+            .count()
+    }
+
+    /// Число расхождений строгости `warn`.
+    #[must_use]
+    pub fn warn_count(&self) -> usize {
+        self.findings
+            .iter()
+            .filter(|f| f.severity == "warn")
+            .count()
+    }
+
+    /// Пройдена ли сверка (нет ошибок).
+    #[must_use]
+    pub fn passed(&self) -> bool {
+        self.error_count() == 0
+    }
+}
+
+/// Ранг строгости для сортировки (`error` раньше `warn`).
+fn sev_rank(sev: &str) -> u8 {
+    u8::from(sev != "error")
+}
+
+/// Сверяет ландшафт (модель ⊕ граф кода) с выгрузкой CMDB.
+///
+/// Три класса расхождений (ADR-077):
+/// - `cmdb-missing` [error] — система дизайна не заведена в CMDB;
+/// - `cmdb-orphan` [warn] — запись CMDB без модели/кода (`retired` гасит
+///   предупреждение и даёт вердикт «подтверждена»);
+/// - `owner-conflict` [error] — владелец CMDB ≠ владелец модели.
+///
+/// Вердикт записи (AB-02, задача 5): `подтверждена` — сопоставлена с
+/// моделью/кодом с согласованным владельцем; `ошибочна` — запись висит без
+/// модели/кода либо владелец конфликтует; `не проверяема` — ландшафт не
+/// содержит ни одного источника (ни модели, ни графа кода), сверять не с чем.
+///
+/// `code_systems` — каноничные имена компонент графа кода (`recover`).
+/// При `model_out` — неразрушающий черновик `SYS` со `status: inferred`.
+///
+/// # Errors
+/// `root` недоступен; модель или CMDB не читаются; ошибки записи черновика.
+pub fn diff_cmdb(
+    root: &Path,
+    cmdb_path: &Path,
+    aliases: &BTreeMap<String, String>,
+    code_systems: &[String],
+    model_out: Option<&Path>,
+) -> Result<CmdbDiffReport> {
+    if !root.is_dir() {
+        return Err(HarnessError::Model(format!(
+            "сверка CMDB: корень недоступен: {}",
+            root.display()
+        )));
+    }
+    let cmdb = load_cmdb(cmdb_path)?;
+    let model_systems = collect_model_systems(root, aliases)?;
+    // Есть ли вообще источник ландшафта для сверки: запись CMDB, которой нет
+    // ни в модели, ни в графе кода, при отсутствии обоих источников «не
+    // проверяема», а не «ошибочна» (AB-02: ложные orphan — штраф).
+    let has_sources = !model_systems.is_empty() || !code_systems.is_empty();
+
+    // Индекс систем дизайна по каноничному имени: владелец — первый известный
+    // (модель важнее кода).
+    let mut design: BTreeMap<String, DesignSystem> = BTreeMap::new();
+    for s in &model_systems {
+        design
+            .entry(s.canonical.clone())
+            .and_modify(|cur| {
+                if cur.owner.is_none() {
+                    cur.owner.clone_from(&s.owner);
+                }
+            })
+            .or_insert_with(|| s.clone());
+    }
+    for c in code_systems {
+        let raw = canonical_name(c);
+        if raw.is_empty() {
+            continue;
+        }
+        let canonical = aliases.get(&raw).cloned().unwrap_or(raw);
+        if canonical.is_empty() || design.contains_key(&canonical) {
+            continue;
+        }
+        design.insert(
+            canonical.clone(),
+            DesignSystem {
+                canonical,
+                display: c.trim().to_string(),
+                owner: None,
+                evidence: format!("код:{}", c.trim()),
+            },
+        );
+    }
+
+    let mut findings: Vec<CmdbFinding> = Vec::new();
+    let mut verdicts: Vec<CmdbVerdict> = Vec::new();
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+
+    for rec in &cmdb {
+        let canonical = canonical_name(&rec.name);
+        let rec_id = rec
+            .id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map_or_else(|| canonical.clone(), str::to_string);
+
+        let Some(matched) = design.get(&canonical) else {
+            // (б) запись CMDB без модели/кода.
+            if rec.retired() {
+                verdicts.push(CmdbVerdict {
+                    id: rec_id,
+                    name: rec.name.trim().to_string(),
+                    verdict: "подтверждена".to_string(),
+                    reason: format!(
+                        "retired — отсутствие в модели/коде ожидаемо (статус {})",
+                        rec.status_norm()
+                    ),
+                });
+                continue;
+            }
+            if !has_sources {
+                // Источников ландшафта нет вовсе — сверить не с чем.
+                verdicts.push(CmdbVerdict {
+                    id: rec_id,
+                    name: rec.name.trim().to_string(),
+                    verdict: "не проверяема".to_string(),
+                    reason: "нет источников ландшафта (ни модели, ни графа кода)".to_string(),
+                });
+                continue;
+            }
+            findings.push(CmdbFinding {
+                class: CLASS_CMDB_ORPHAN.to_string(),
+                severity: "warn".to_string(),
+                subject: canonical.clone(),
+                message: format!(
+                    "«{}» есть в CMDB, но нет ни в модели, ни в графе кода",
+                    rec.name.trim()
+                ),
+                evidence: format!("CMDB:{rec_id}"),
+            });
+            verdicts.push(CmdbVerdict {
+                id: rec_id,
+                name: rec.name.trim().to_string(),
+                verdict: "ошибочна".to_string(),
+                reason: "системы нет ни в модели, ни в коде (в CMDB висит)".to_string(),
+            });
+            continue;
+        };
+        seen.insert(canonical.clone());
+
+        // (в) конфликт владельца.
+        let cmdb_owner = rec
+            .owner
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        if let (Some(c_owner), Some(m_owner)) = (cmdb_owner, matched.owner.as_deref()) {
+            let (nc, nm) = (norm_owner(c_owner), norm_owner(m_owner));
+            if !nc.is_empty() && !nm.is_empty() && nc != nm {
+                findings.push(CmdbFinding {
+                    class: CLASS_OWNER_CONFLICT.to_string(),
+                    severity: "error".to_string(),
+                    subject: canonical.clone(),
+                    message: format!("владелец в CMDB «{c_owner}» ≠ владелец модели «{m_owner}»"),
+                    evidence: format!("CMDB:{rec_id} ↔ {}", matched.evidence),
+                });
+                verdicts.push(CmdbVerdict {
+                    id: rec_id,
+                    name: rec.name.trim().to_string(),
+                    verdict: "ошибочна".to_string(),
+                    reason: format!("владелец CMDB «{c_owner}» не совпадает с моделью «{m_owner}»"),
+                });
+                continue;
+            }
+        }
+        verdicts.push(CmdbVerdict {
+            id: rec_id,
+            name: rec.name.trim().to_string(),
+            verdict: "подтверждена".to_string(),
+            reason: format!("сопоставлена с {}", matched.evidence),
+        });
+    }
+
+    // (а) системы дизайна, не заведённые в CMDB.
+    let mut missing: Vec<&DesignSystem> = design
+        .values()
+        .filter(|s| !seen.contains(&s.canonical))
+        .collect();
+    missing.sort_by(|a, b| (&a.canonical, &a.evidence).cmp(&(&b.canonical, &b.evidence)));
+    for s in missing {
+        findings.push(CmdbFinding {
+            class: CLASS_CMDB_MISSING.to_string(),
+            severity: "error".to_string(),
+            subject: s.canonical.clone(),
+            message: format!("«{}» из {} не заведена в CMDB", s.display, s.evidence),
+            evidence: s.evidence.clone(),
+        });
+    }
+
+    findings.sort_by(|a, b| {
+        (sev_rank(&a.severity), &a.class, &a.subject).cmp(&(
+            sev_rank(&b.severity),
+            &b.class,
+            &b.subject,
+        ))
+    });
+
+    let (model_dir, written, skipped) = match model_out {
+        Some(dir) => {
+            let (w, s) = draft_cmdb_systems(cmdb_path, &cmdb, dir, aliases)?;
+            (Some(dir.to_path_buf()), w, s)
+        }
+        None => (None, Vec::new(), Vec::new()),
+    };
+
+    Ok(CmdbDiffReport {
+        root: root.to_path_buf(),
+        cmdb: cmdb_path.to_path_buf(),
+        findings,
+        verdicts,
+        design_systems: design.len(),
+        code_systems: code_systems.len(),
+        cmdb_records: cmdb.len(),
+        model_dir,
+        written,
+        skipped,
+    })
+}
+
+/// Frontmatter черновика системы из CMDB (только известные модели поля).
+#[derive(Serialize)]
+struct CmdbDraftFront<'a> {
+    id: &'a str,
+    #[serde(rename = "type")]
+    kind: &'a str,
+    title: &'a str,
+    status: &'a str,
+    source: &'a str,
+}
+
+/// Пишет файл черновика: YAML-frontmatter (`---`) + тело.
+fn write_cmdb_entity(path: &Path, front: &CmdbDraftFront<'_>, body: &str) -> Result<()> {
+    let yaml = serde_yaml_ng::to_string(front)
+        .map_err(|e| HarnessError::Model(format!("черновик CMDB: yaml: {e}")))?;
+    let content = format!("---\n{yaml}---\n\n{body}\n");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| HarnessError::io(parent, e))?;
+    }
+    std::fs::write(path, content).map_err(|e| HarnessError::io(path, e))
+}
+
+/// Неразрушающе дописывает `model/SYS-NNN.md` по записям CMDB, которых ещё
+/// нет в модели (по каноничному имени). Существующие системы не трогаются.
+///
+/// Возвращает (записанные id, пропущенные имена).
+fn draft_cmdb_systems(
+    cmdb_path: &Path,
+    cmdb: &[CmdbSystem],
+    dir: &Path,
+    aliases: &BTreeMap<String, String>,
+) -> Result<(Vec<String>, Vec<String>)> {
+    std::fs::create_dir_all(dir).map_err(|e| HarnessError::io(dir, e))?;
+    let model = crate::model::load_model_tolerant(dir)?;
+
+    let mut existing: BTreeSet<String> = BTreeSet::new();
+    let mut max_sys = 0u64;
+    for e in &model.entities {
+        if matches!(e.kind, EntityKind::Sys | EntityKind::Int) {
+            let raw = canonical_name(&e.title);
+            existing.insert(aliases.get(&raw).cloned().unwrap_or(raw));
+        }
+        if let Some((EntityKind::Sys, n)) = parse_id(&e.id) {
+            max_sys = max_sys.max(n);
+        }
+    }
+
+    let source = format!(
+        "cmdb@{}",
+        cmdb_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("cmdb")
+    );
+    let mut written: Vec<String> = Vec::new();
+    let mut skipped: Vec<String> = Vec::new();
+    for rec in cmdb {
+        let canonical = canonical_name(&rec.name);
+        if canonical.is_empty() {
+            continue;
+        }
+        if existing.contains(&canonical) {
+            skipped.push(rec.name.trim().to_string());
+            continue;
+        }
+        max_sys += 1;
+        let id = format!("SYS-{max_sys:03}");
+        let title = rec.name.trim().to_string();
+        let front = CmdbDraftFront {
+            id: &id,
+            kind: "sys",
+            title: &title,
+            status: "inferred",
+            source: &source,
+        };
+        let mut body = String::from(
+            "Восстановленная система из выгрузки CMDB. Уточните назначение и владельца.",
+        );
+        if let Some(owner) = rec
+            .owner
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            let _ = write!(body, "\nВладелец: «{owner}»");
+        }
+        write_cmdb_entity(&dir.join(format!("{id}.md")), &front, &body)?;
+        existing.insert(canonical);
+        written.push(id);
+    }
+    Ok((written, skipped))
+}
+
+/// Рендер сверки с CMDB в markdown.
+#[must_use]
+pub fn render_cmdb_diff_markdown(report: &CmdbDiffReport) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "# Сверка ландшафта с CMDB\n");
+    let _ = writeln!(out, "Корень: `{}`", report.root.display());
+    let _ = writeln!(out, "Выгрузка CMDB: `{}`", report.cmdb.display());
+    let _ = writeln!(
+        out,
+        "Систем дизайна: {} (из них код: {}); записей CMDB: {}\n",
+        report.design_systems, report.code_systems, report.cmdb_records
+    );
+
+    let _ = writeln!(out, "## Расхождения ({})\n", report.findings.len());
+    if report.findings.is_empty() {
+        let _ = writeln!(out, "- нет\n");
+    } else {
+        for f in &report.findings {
+            let _ = writeln!(
+                out,
+                "- **{}** [{}] `{}` — {} ({})",
+                f.severity, f.class, f.subject, f.message, f.evidence
+            );
+        }
+        out.push('\n');
+    }
+
+    let _ = writeln!(
+        out,
+        "## Вердикты по записям CMDB ({})\n",
+        report.verdicts.len()
+    );
+    for v in &report.verdicts {
+        let _ = writeln!(
+            out,
+            "- `{}` {} — {} ({})",
+            v.id, v.name, v.verdict, v.reason
+        );
+    }
+    out.push('\n');
+
+    if let Some(dir) = &report.model_dir {
+        let _ = writeln!(out, "## Черновик модели\n");
+        let _ = writeln!(out, "Каталог: `{}`", dir.display());
+        let _ = writeln!(out, "Записано ([inferred]): {}", report.written.len());
+        if !report.written.is_empty() {
+            let _ = writeln!(out, "- {}", report.written.join(", "));
+        }
+        if !report.skipped.is_empty() {
+            let _ = writeln!(
+                out,
+                "Пропущено (уже в модели): {}",
+                report.skipped.join(", ")
+            );
+        }
+        out.push('\n');
+    }
+
+    let _ = write!(
+        out,
+        "Итого: ошибок {}, предупреждений {}; вердиктов {}",
+        report.error_count(),
+        report.warn_count(),
+        report.verdicts.len()
+    );
+    out
+}
+
+/// Рендер сверки с CMDB в JSON (схема [`CMDB_DIFF_SCHEMA`]).
+///
+/// # Errors
+/// Ошибка сериализации в JSON.
+pub fn render_cmdb_diff_json(report: &CmdbDiffReport) -> Result<String> {
+    let value = json!({
+        "schema": CMDB_DIFF_SCHEMA,
+        "arch_be": env!("CARGO_PKG_VERSION"),
+        "root": report.root.display().to_string(),
+        "cmdb": report.cmdb.display().to_string(),
+        "passed": report.passed(),
+        "counts": {
+            "errors": report.error_count(),
+            "warnings": report.warn_count(),
+            "design_systems": report.design_systems,
+            "code_systems": report.code_systems,
+            "cmdb_records": report.cmdb_records,
+            "verdicts": report.verdicts.len(),
+        },
+        "findings": report.findings,
+        "verdicts": report.verdicts,
+        "model_out": report.model_dir.as_ref().map(|d| json!({
+            "dir": d.display().to_string(),
+            "written": report.written,
+            "skipped": report.skipped,
+        })),
+    });
+    serde_json::to_string_pretty(&value)
+        .map_err(|e| HarnessError::Model(format!("сверка CMDB: json: {e}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1579,5 +2268,195 @@ mod tests {
         let diff = diff_landscape(&repo, "HEAD", &BTreeMap::new()).unwrap();
         assert_eq!(diff.added, vec!["Процессинг".to_string()], "{diff:?}");
         assert!(diff.removed.is_empty() && diff.changed.is_empty());
+    }
+
+    // --- Сверка с CMDB (AB-02, ADR-077) ---
+
+    #[test]
+    fn cmdb_parser_reads_wrapped_and_bare() {
+        let dir = tempfile::tempdir().unwrap();
+        let wrapped = write_file(
+            dir.path(),
+            "cmdb.yaml",
+            "systems:\n  - {id: S1, name: Процессинг, owner: Team A, status: active}\n  - {name: Шлюз}\n",
+        );
+        let systems = load_cmdb(&wrapped).unwrap();
+        assert_eq!(systems.len(), 2);
+        assert_eq!(systems[0].name, "Процессинг");
+        assert_eq!(systems[0].status_norm(), "active");
+        assert!(!systems[0].retired());
+        assert_eq!(systems[1].status_norm(), "active", "статус по умолчанию");
+
+        // Голый список (и JSON как YAML-надмножество).
+        let bare = write_file(
+            dir.path(),
+            "cmdb.json",
+            "[{\"name\": \"Шлюз\", \"status\": \"retired\"}]",
+        );
+        let systems = load_cmdb(&bare).unwrap();
+        assert_eq!(systems.len(), 1);
+        assert!(systems[0].retired());
+    }
+
+    #[test]
+    fn cmdb_parser_rejects_nameless_and_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let nameless = write_file(dir.path(), "bad.yaml", "systems:\n  - {id: S1}\n");
+        let err = load_cmdb(&nameless).unwrap_err();
+        assert!(err.to_string().contains("без имени"), "{err}");
+        let empty = write_file(dir.path(), "empty.yaml", "systems: []\n");
+        assert!(load_cmdb(&empty).is_err());
+    }
+
+    /// Фикстура «дизайн»: проект p1 с двумя системами и владельцами.
+    fn design_fixture(dir: &Path) -> PathBuf {
+        let root = dir.join("root");
+        write_file(
+            &root,
+            "p1/model/SYS-001.md",
+            "---\nid: SYS-001\ntype: sys\ntitle: Customers Service\nstatus: adopted\n---\nВладелец: «Team A»\n",
+        );
+        write_file(
+            &root,
+            "p1/model/SYS-002.md",
+            "---\nid: SYS-002\ntype: sys\ntitle: Vets Service\nstatus: adopted\n---\nВладелец: «Team B»\n",
+        );
+        root
+    }
+
+    #[test]
+    fn diff_cmdb_clean_when_all_registered() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = design_fixture(dir.path());
+        let cmdb = write_file(
+            dir.path(),
+            "cmdb.yaml",
+            "systems:\n  - {name: Customers Service, owner: Team A}\n  - {name: vets-service, owner: Team B}\n",
+        );
+        let report = diff_cmdb(&root, &cmdb, &BTreeMap::new(), &[], None).unwrap();
+        assert!(report.passed(), "{:?}", report.findings);
+        assert_eq!(report.error_count(), 0);
+        assert_eq!(report.warn_count(), 0);
+        assert_eq!(report.verdicts.len(), 2);
+        assert!(report.verdicts.iter().all(|v| v.verdict == "подтверждена"));
+    }
+
+    #[test]
+    fn diff_cmdb_missing_is_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = design_fixture(dir.path());
+        // В CMDB нет «Vets Service».
+        let cmdb = write_file(
+            dir.path(),
+            "cmdb.yaml",
+            "systems:\n  - {name: Customers Service, owner: Team A}\n",
+        );
+        let report = diff_cmdb(&root, &cmdb, &BTreeMap::new(), &[], None).unwrap();
+        assert!(!report.passed());
+        assert_eq!(report.error_count(), 1, "{:?}", report.findings);
+        let f = &report.findings[0];
+        assert_eq!(f.class, CLASS_CMDB_MISSING);
+        assert_eq!(f.subject, canonical_name("Vets Service"));
+        assert!(f.message.contains("не заведена в CMDB"), "{f:?}");
+    }
+
+    #[test]
+    fn diff_cmdb_orphan_is_warn_and_retired_silenced() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = design_fixture(dir.path());
+        let cmdb = write_file(
+            dir.path(),
+            "cmdb.yaml",
+            "systems:\n  - {name: Customers Service, owner: Team A}\n  - {name: Vets Service, owner: Team B}\n  - {name: Legacy Billing, owner: Team C}\n  - {name: Old CRM, owner: Team D, status: retired}\n",
+        );
+        let report = diff_cmdb(&root, &cmdb, &BTreeMap::new(), &[], None).unwrap();
+        // Orphan «Legacy Billing» — только warn; «Old CRM» (retired) молчит.
+        assert!(
+            report.passed(),
+            "warn не роняет сверку: {:?}",
+            report.findings
+        );
+        assert_eq!(report.error_count(), 0);
+        assert_eq!(report.warn_count(), 1, "{:?}", report.findings);
+        assert_eq!(report.findings[0].class, CLASS_CMDB_ORPHAN);
+        let retired = report
+            .verdicts
+            .iter()
+            .find(|v| v.name == "Old CRM")
+            .expect("вердикт retired");
+        assert_eq!(retired.verdict, "подтверждена", "{retired:?}");
+        assert!(retired.reason.contains("retired"));
+    }
+
+    #[test]
+    fn diff_cmdb_unverifiable_without_landscape_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        // Пустой корень: ни модели, ни графа кода — источник сверки отсутствует.
+        let root = dir.path().join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        let cmdb = write_file(
+            dir.path(),
+            "cmdb.yaml",
+            "systems:\n  - {name: Legacy Billing, owner: Team C}\n",
+        );
+        let report = diff_cmdb(&root, &cmdb, &BTreeMap::new(), &[], None).unwrap();
+        // Ложных orphan нет: сверять не с чем — вердикт «не проверяема».
+        assert!(report.passed(), "{:?}", report.findings);
+        assert_eq!(report.error_count(), 0);
+        assert_eq!(report.warn_count(), 0);
+        assert_eq!(report.verdicts.len(), 1);
+        let v = &report.verdicts[0];
+        assert_eq!(v.verdict, "не проверяема", "{v:?}");
+        assert!(v.reason.contains("нет источников"), "{v:?}");
+    }
+
+    #[test]
+    fn diff_cmdb_owner_conflict_is_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = design_fixture(dir.path());
+        // Владелец «Vets Service» в CMDB не совпадает с моделью (Team B).
+        let cmdb = write_file(
+            dir.path(),
+            "cmdb.yaml",
+            "systems:\n  - {name: Customers Service, owner: Team A}\n  - {name: Vets Service, owner: Team Z}\n",
+        );
+        let report = diff_cmdb(&root, &cmdb, &BTreeMap::new(), &[], None).unwrap();
+        assert!(!report.passed());
+        assert_eq!(report.error_count(), 1, "{:?}", report.findings);
+        let f = &report.findings[0];
+        assert_eq!(f.class, CLASS_OWNER_CONFLICT);
+        assert!(
+            f.message.contains("Team Z") && f.message.contains("Team B"),
+            "{f:?}"
+        );
+    }
+
+    #[test]
+    fn diff_cmdb_model_out_writes_inferred_and_does_not_overwrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        // Пустая модель-каталог + CMDB с двумя системами.
+        let out = dir.path().join("model");
+        let cmdb = write_file(
+            dir.path(),
+            "cmdb.yaml",
+            "systems:\n  - {name: Customers Service, owner: Team A}\n  - {name: Vets Service}\n",
+        );
+        let report = diff_cmdb(&root, &cmdb, &BTreeMap::new(), &[], Some(&out)).unwrap();
+        assert_eq!(report.written.len(), 2, "{:?}", report.written);
+        assert!(out.join("SYS-001.md").exists());
+        let text = std::fs::read_to_string(out.join("SYS-001.md")).unwrap();
+        assert!(text.contains("status: inferred"), "{text}");
+        assert!(text.contains("source: cmdb@cmdb.yaml"), "{text}");
+
+        // Архитектор подтверждает правку — повторный прогон не затирает.
+        let adopted = text.replace("status: inferred", "status: adopted");
+        std::fs::write(out.join("SYS-001.md"), &adopted).unwrap();
+        let report2 = diff_cmdb(&root, &cmdb, &BTreeMap::new(), &[], Some(&out)).unwrap();
+        let after = std::fs::read_to_string(out.join("SYS-001.md")).unwrap();
+        assert!(after.contains("status: adopted"), "правка затёрта: {after}");
+        assert!(report2.skipped.iter().any(|s| s == "Customers Service"));
+        assert!(!report2.written.contains(&"SYS-001".to_string()));
     }
 }
