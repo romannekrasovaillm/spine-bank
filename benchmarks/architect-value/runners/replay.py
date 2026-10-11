@@ -57,16 +57,38 @@ def norm_edge(a, b):
 
 
 def surfaced(doc):
-    """→ (components:set, externals:set, edges:set) из узлов/рёбер диффа."""
+    """→ (components:set, externals:set, edges:set) из узлов/рёбер диффа.
+
+    Токены берутся из `title` узла (короткое имя компонента: `api-gateway`,
+    а не `dir:spring-petclinic-api-gateway`); id — запасной вариант. Рёбра
+    состава — только компонент→компонент: ребро к внешней системе/хранилищу
+    не порождает токен-ребро (внешка уже учтена узлом), иначе состав
+    задваивался бы ложными FP.
+    """
+    titles = {}
+    for key in _NODE_LISTS:
+        for n in doc.get(key) or []:
+            nid = n.get("id", "") if isinstance(n, dict) else str(n)
+            title = (n.get("title") or "") if isinstance(n, dict) else ""
+            titles[nid] = title or nid
     comps, externals, edges = set(), set(), set()
     for key in _NODE_LISTS:
         for n in doc.get(key) or []:
             nid = n.get("id", "") if isinstance(n, dict) else str(n)
-            (externals if nid.startswith("sys:") else comps).add(norm_token(nid))
+            tok = norm_token(titles.get(nid) or nid)
+            (externals if nid.startswith("sys:") else comps).add(tok)
     for key in _EDGE_LISTS:
         for e in doc.get(key) or []:
-            if isinstance(e, dict):
-                edges.add(norm_edge(e.get("from", ""), e.get("to", "")))
+            if not isinstance(e, dict):
+                continue
+            f, t = e.get("from", ""), e.get("to", "")
+            if f.startswith(("sys:", "store:", "topic:", "contract:")) or t.startswith(
+                ("sys:", "store:", "topic:", "contract:")
+            ):
+                continue
+            edges.add(
+                f"{norm_token(titles.get(f) or f)}->{norm_token(titles.get(t) or t)}"
+            )
     return comps, externals, edges
 
 
@@ -78,18 +100,40 @@ def expected(label):
 
 
 def is_nonempty(doc):
-    if any(doc.get(k) for k in _NONEMPTY_FIELDS):
-        return True
-    rt = doc.get("route", {}) or {}
-    return bool(rt.get("triggers")) or (rt.get("score") or 0) > 0
+    """Непустой = изменён СОСТАВ (узлы/рёбра/контракты…), ровно как в
+    замороженном правиле значимости labels: «добавлен/удалён компонент,
+    ребро, хранилище или внешняя система». Триггеры/маршрут сами по себе
+    (new_vendor на бампе зависимости, spurious new_component) — сигнал
+    ревью, но не «архитектурное изменение» по правилу разметки."""
+    return any(doc.get(k) for k in _NONEMPTY_FIELDS)
+
+
+def _tok_match(surf_tok, exp_tok):
+    """Ожидание покрывает всплывший токен: равен или содержится (имена
+    модулей длиннее эталона: spring-petclinic-api-gateway ⊃ api-gateway).
+    Рёбра («a->b») сопоставляются по эндпоинтам отдельно — составные имена
+    не контекстны."""
+    if "->" in exp_tok and "->" in surf_tok:
+        (sa, sb), (ea, eb) = surf_tok.split("->", 1), exp_tok.split("->", 1)
+        return (sa == ea or ea in sa) and (sb == eb or eb in sb)
+    return surf_tok == exp_tok or exp_tok in surf_tok
 
 
 def f1(surf, exp):
-    inter = len(surf & exp)
+    """F1 множеств с матчингом «ожидание ⊆ всплывший» (эндпоинты рёбер
+    сопоставляются по отдельности — составные имена не контекстны)."""
+    matched_exp = set()
+    tp = 0
+    for s in surf:
+        for e in exp:
+            if _tok_match(s, e):
+                matched_exp.add(e)
+                tp += 1
+                break
     if not surf or not exp:
-        return 0.0, inter
-    p, r = inter / len(surf), inter / len(exp)
-    return (2 * p * r / (p + r) if p + r else 0.0), inter
+        return 0.0, len(matched_exp)
+    p, r = tp / len(surf), len(matched_exp) / len(exp)
+    return (2 * p * r / (p + r) if p + r else 0.0), len(matched_exp)
 
 
 def run_diff(clone, sha):
