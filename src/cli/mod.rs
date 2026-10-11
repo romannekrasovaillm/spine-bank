@@ -14,6 +14,7 @@ mod library;
 mod mcp;
 mod misc;
 mod model;
+mod recover;
 mod rubric;
 mod rules;
 mod specs;
@@ -46,8 +47,9 @@ use fleet::{WorktreeCmd, cmd_worktree};
 use library::cmd_prompts;
 use library::{MemoryCmd, PluginsCmd, SkillsCmd, cmd_init, cmd_memory, cmd_plugins, cmd_skills};
 use mcp::{McpCmd, cmd_mcp};
-use misc::{PolicyCmd, cmd_policy, cmd_policy_export, cmd_survey};
+use misc::{PolicyCmd, cmd_policy, cmd_policy_export, cmd_survey, cmd_survey_audit};
 use model::{ModelCmd, NfrCmd, TraceCmd, cmd_model, cmd_nfr, cmd_trace};
+use recover::cmd_recover;
 use rubric::{RubricCmd, cmd_rubric};
 use rules::{RulesCmd, cmd_rules};
 use specs::{
@@ -597,6 +599,31 @@ enum Cmd {
         /// Каталог вывода (по умолчанию <repo>/docs/reverse).
         #[arg(long)]
         out: Option<PathBuf>,
+        /// Аудит `[inferred]`-слоя (R6, ADR-069): проверить, что ни одно
+        /// `[confirmed]` не создано моделью и `status` модели — `inferred`.
+        /// Нарушение → exit 1.
+        #[arg(long)]
+        audit: bool,
+        /// Каталог модели для аудита (по умолчанию <repo>/model).
+        #[arg(long = "model-out")]
+        model_out: Option<PathBuf>,
+    },
+    /// Полный граф «как построено» одной ревизии (R5, ADR-069): узлы и рёбра
+    /// без диффа и merge-base; форматы md | json (arch-be/recover/v1) | mermaid
+    /// | structurizr | c4-plantuml. Опционально — черновик model/ со
+    /// `status: inferred` (повторный прогон не затирает правки архитектора).
+    Recover {
+        /// Корень репозитория.
+        repo: PathBuf,
+        /// Ревизия (ветка/тег/sha; по умолчанию HEAD).
+        #[arg(long)]
+        rev: Option<String>,
+        /// Формат: md | json (arch-be/recover/v1) | mermaid | structurizr | c4-plantuml.
+        #[arg(long, default_value = "md")]
+        format: String,
+        /// Каталог черновика модели (`status: inferred`, `source: recover@<sha>`).
+        #[arg(long = "model-out")]
+        model_out: Option<PathBuf>,
     },
     /// Архитектурный дифф PR (волна K, ADR-063): что изменилось в системе
     /// между ревизиями — связи компонентов, внешние системы, хранилища,
@@ -1653,7 +1680,24 @@ pub(crate) async fn run() -> Result<()> {
         #[cfg(feature = "harness")]
         Some(Cmd::Worktree { cmd }) => cmd_worktree(&cfg, cmd).await?,
         Some(Cmd::Fleet { cmd }) => cmd_fleet(&cfg, cmd).await?,
-        Some(Cmd::Survey { repo, out }) => cmd_survey(&cfg, &repo, out.as_deref())?,
+        Some(Cmd::Survey {
+            repo,
+            out,
+            audit,
+            model_out,
+        }) => {
+            if audit {
+                cmd_survey_audit(&repo, out.as_deref(), model_out.as_deref())?;
+            } else {
+                cmd_survey(&cfg, &repo, out.as_deref())?;
+            }
+        }
+        Some(Cmd::Recover {
+            repo,
+            rev,
+            format,
+            model_out,
+        }) => cmd_recover(&cfg, &repo, rev.as_deref(), &format, model_out.as_deref())?,
         Some(Cmd::ArchDiff {
             repo,
             base,

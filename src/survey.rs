@@ -707,6 +707,34 @@ pub(crate) fn extract_host_port(url: &str) -> Option<String> {
 /// внешней системой» у карты обследования и архитектурного диффа.
 pub(crate) const INTEGRATION_URL_PATTERN: &str = r#"(?i)\b(?:https?|postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis|amqps?|jdbc:[a-z0-9]+)://[^\s"'<>)\]]+"#;
 
+/// Обнаруженная в строке интеграция (ADR-069 п.4 — одна механика на карту и
+/// граф): URL-совпадение [`INTEGRATION_URL_PATTERN`] и разобранный из него
+/// `host:port` ([`extract_host_port`]).
+pub(crate) struct IntegrationHit {
+    /// Сырой URL/строка подключения — для классификации по схеме в графе.
+    pub(crate) url: String,
+    /// `host:port` без userinfo/пути/схемы.
+    pub(crate) host_port: String,
+}
+
+/// Одна механика обнаружения интеграций (ADR-069 п.4). По строке файла находит
+/// все URL/строки подключения ([`INTEGRATION_URL_PATTERN`]) и разбирает из них
+/// `host:port` ([`extract_host_port`]); совпадения без разрешимого host
+/// (петлевые, пустые) отбрасываются. Политику (какие файлы, комментарии,
+/// денилист хостов, класс узла) применяет вызывающий: секция 4 карты рендерит
+/// все находки, граф as-built ([`crate::arch_diff`]) оставляет лишь хранилища.
+pub(crate) fn integration_hits(re: &Regex, line: &str) -> Vec<IntegrationHit> {
+    re.find_iter(line)
+        .filter_map(|m| {
+            let url = m.as_str();
+            extract_host_port(url).map(|host_port| IntegrationHit {
+                url: url.to_string(),
+                host_port,
+            })
+        })
+        .collect()
+}
+
 /// Сканер 4: интеграции — URL/строки подключения из конфигов → host:port.
 /// Значения проходят через редактор секретов (`src/secrets.rs`) — в карту
 /// не должны уехать ни userinfo, ни токены в query. Денилист ([`SurveyDenylist`])
@@ -729,17 +757,15 @@ fn scan_integrations(snap: &RepoSnapshot, deny: &SurveyDenylist) -> Result<Vec<F
             continue;
         }
         for (idx, line) in lines.iter().enumerate() {
-            for m in re.find_iter(line) {
-                if let Some(host) = extract_host_port(m.as_str()) {
-                    if deny.host_ignored(&host) {
-                        continue;
-                    }
-                    let host = redactor.redact(&host);
-                    let refs = by_host.entry(host).or_default();
-                    let reference = file_line(path, idx);
-                    if !refs.contains(&reference) && refs.len() < MAX_REFS_PER_FINDING {
-                        refs.push(reference);
-                    }
+            for hit in integration_hits(&re, line) {
+                if deny.host_ignored(&hit.host_port) {
+                    continue;
+                }
+                let host = redactor.redact(&hit.host_port);
+                let refs = by_host.entry(host).or_default();
+                let reference = file_line(path, idx);
+                if !refs.contains(&reference) && refs.len() < MAX_REFS_PER_FINDING {
+                    refs.push(reference);
                 }
             }
         }
@@ -1261,6 +1287,247 @@ pub fn render_notes_stub(report: &SurveyReport) -> String {
     out
 }
 
+// ── R6 (ADR-069): аудит `[inferred]`-слоя модели ──────────────────────────
+//
+// Плейбук `recover-review` предписывает хосту писать предположения ТОЛЬКО в
+// `survey-notes.md`/`model/*` со `status: inferred`. Механика ниже проверяет,
+// что модель не создала ни одного `[confirmed]` без доказательства: каждая
+// `[confirmed]`-претензия обязана иметь evidence `путь:строка`, разрешимый в
+// существующую строку файла репозитория; сущность модели со `status`,
+// отличным от `inferred`, — нарушение.
+
+/// Нарушение дисциплины меток в слое модели (R6).
+#[derive(Debug, Clone)]
+pub struct AuditFinding {
+    /// Артефакт слоя модели (путь относительно репозитория).
+    pub artifact: String,
+    /// Номер строки в артефакте (1-based; 0 — свойство всего файла).
+    pub line: usize,
+    /// Претензия (`[confirmed]`-текст или значение `status`).
+    pub claim: String,
+    /// Почему это нарушение.
+    pub problem: String,
+}
+
+/// Итог аудита `[inferred]`-слоя: что проверено и что нарушено.
+#[derive(Debug, Clone)]
+pub struct AuditOutcome {
+    /// Проверенный файл заметок (`survey-notes.md`), если существовал.
+    pub notes_path: Option<PathBuf>,
+    /// Число проверенных документов модели в `model/`.
+    pub model_files: usize,
+    /// Сколько `[confirmed]`-претензий встречено в слое модели.
+    pub confirmed_seen: usize,
+    /// Нарушения (пустой список — слой чист).
+    pub findings: Vec<AuditFinding>,
+}
+
+impl AuditOutcome {
+    /// Слой чист: ни одной `[confirmed]` без разрешимого evidence, ни одной
+    /// сущности модели со `status` ≠ `inferred`.
+    #[must_use]
+    pub fn passed(&self) -> bool {
+        self.findings.is_empty()
+    }
+}
+
+/// Извлекает ссылки-доказательства `путь:строка` из строки артефакта.
+/// Ссылка должна нести расширение файла и номер строки (strict-форма R6) —
+/// это отсекает догадки без адреса кода.
+fn evidence_refs(line: &str) -> Vec<String> {
+    let re = Regex::new(r"[A-Za-z0-9_./@+-]+\.[A-Za-z0-9]+:[0-9]+").expect("re evidence");
+    re.find_iter(line).map(|m| m.as_str().to_string()).collect()
+}
+
+/// Проверяет одну ссылку: `путь:строка` должна указывать на существующий
+/// файл, а номер строки — попадать в него. `None` — ссылка разрешима;
+/// `Some(причина)` — не разрешается.
+fn resolve_evidence(repo: &Path, reference: &str) -> Option<String> {
+    let r = reference.trim().trim_matches('`');
+    let (path_str, line_no) = r.rsplit_once(':')?;
+    let line_no: usize = line_no.parse().ok()?;
+    let file = repo.join(path_str);
+    if !file.is_file() {
+        return Some(format!("файл не найден: {path_str}"));
+    }
+    let Ok(text) = std::fs::read_to_string(&file) else {
+        return Some(format!("файл не читается: {path_str}"));
+    };
+    let total = text.lines().count();
+    if line_no == 0 || line_no > total {
+        return Some(format!(
+            "строка {line_no} вне файла {path_str} (строк: {total})"
+        ));
+    }
+    None
+}
+
+/// Усечённый текст претензии (после метки) для отчёта.
+fn claim_text(line: &str) -> String {
+    let text = line
+        .split_once("[confirmed]")
+        .map_or(line, |(_, rest)| rest)
+        .trim();
+    let cut: String = text.chars().take(80).collect();
+    if cut.is_empty() {
+        "(пусто)".to_string()
+    } else {
+        cut
+    }
+}
+
+/// Проверяет построчно артефакт слоя модели на `[confirmed]` с evidence.
+fn audit_text(repo: &Path, artifact: &str, text: &str, out: &mut AuditOutcome) {
+    for (i, line) in text.lines().enumerate() {
+        if !line.contains("[confirmed]") {
+            continue;
+        }
+        out.confirmed_seen += 1;
+        let refs = evidence_refs(line);
+        if refs.is_empty() {
+            out.findings.push(AuditFinding {
+                artifact: artifact.to_string(),
+                line: i + 1,
+                claim: claim_text(line),
+                problem: "у [confirmed] нет evidence `путь:строка`".to_string(),
+            });
+            continue;
+        }
+        let problems: Vec<String> = refs
+            .iter()
+            .filter_map(|r| resolve_evidence(repo, r))
+            .collect();
+        if problems.len() == refs.len() {
+            out.findings.push(AuditFinding {
+                artifact: artifact.to_string(),
+                line: i + 1,
+                claim: claim_text(line),
+                problem: format!("evidence не разрешается: {}", problems.join("; ")),
+            });
+        }
+    }
+}
+
+/// `status` из YAML-frontmatter документа модели (`---` … `---`).
+fn frontmatter_status(text: &str) -> Option<String> {
+    let mut lines = text.lines();
+    if lines.next()?.trim() != "---" {
+        return None;
+    }
+    for line in lines {
+        if line.trim() == "---" {
+            break;
+        }
+        if let Some((key, value)) = line.split_once(':') {
+            if key.trim() == "status" {
+                return Some(
+                    value
+                        .trim()
+                        .trim_matches('"')
+                        .trim_matches('\'')
+                        .to_string(),
+                );
+            }
+        }
+    }
+    None
+}
+
+/// Аудит `[inferred]`-слоя: `survey-notes.md` + `*.md` в `model_dir`.
+///
+/// # Errors
+/// Ошибки чтения артефактов слоя модели.
+pub fn audit_inferred(
+    repo: &Path,
+    notes: Option<&Path>,
+    model_dir: Option<&Path>,
+) -> Result<AuditOutcome> {
+    let mut out = AuditOutcome {
+        notes_path: None,
+        model_files: 0,
+        confirmed_seen: 0,
+        findings: Vec::new(),
+    };
+    let rel = |p: &Path| {
+        p.strip_prefix(repo)
+            .unwrap_or(p)
+            .to_string_lossy()
+            .replace('\\', "/")
+    };
+    if let Some(notes) = notes {
+        if notes.is_file() {
+            out.notes_path = Some(notes.to_path_buf());
+            let text = std::fs::read_to_string(notes).map_err(|e| HarnessError::io(notes, e))?;
+            audit_text(repo, &rel(notes), &text, &mut out);
+        }
+    }
+    if let Some(dir) = model_dir {
+        if dir.is_dir() {
+            for entry in WalkDir::new(dir).follow_links(false) {
+                let entry = entry
+                    .map_err(|e| HarnessError::Control(format!("обход {}: {e}", dir.display())))?;
+                let path = entry.path();
+                if !entry.file_type().is_file()
+                    || path.extension().and_then(|e| e.to_str()) != Some("md")
+                {
+                    continue;
+                }
+                let text = std::fs::read_to_string(path).map_err(|e| HarnessError::io(path, e))?;
+                out.model_files += 1;
+                let rel = rel(path);
+                if let Some(status) =
+                    frontmatter_status(&text).filter(|s| !s.eq_ignore_ascii_case("inferred"))
+                {
+                    out.findings.push(AuditFinding {
+                        artifact: rel.clone(),
+                        line: 0,
+                        claim: format!("status: {status}"),
+                        problem: "модель не создаёт сущности со status ≠ inferred (R6)".to_string(),
+                    });
+                }
+                audit_text(repo, &rel, &text, &mut out);
+            }
+        }
+    }
+    out.findings
+        .sort_by(|a, b| (&a.artifact, a.line, &a.problem).cmp(&(&b.artifact, b.line, &b.problem)));
+    Ok(out)
+}
+
+/// Рендер итога аудита `[inferred]`-слоя (человекочитаемо).
+#[must_use]
+pub fn render_audit(outcome: &AuditOutcome) -> String {
+    let mut out = String::new();
+    let notes = outcome
+        .notes_path
+        .as_ref()
+        .map_or_else(|| "—".to_string(), |p| p.display().to_string());
+    let _ = writeln!(
+        out,
+        "аудит [inferred]-слоя: заметки {notes}, документов модели {}, \
+         [confirmed] {}, нарушений {}",
+        outcome.model_files,
+        outcome.confirmed_seen,
+        outcome.findings.len()
+    );
+    if outcome.passed() {
+        let _ = writeln!(
+            out,
+            "OK: ни одного [confirmed] без разрешимого evidence; status модели — inferred"
+        );
+        return out;
+    }
+    for f in &outcome.findings {
+        let loc = if f.line == 0 {
+            f.artifact.clone()
+        } else {
+            format!("{}:{}", f.artifact, f.line)
+        };
+        let _ = writeln!(out, "  - {loc}: {} — {}", f.problem, f.claim);
+    }
+    out
+}
+
 /// Прогон обследования: пишет `survey.md` (перезапись), создаёт заготовку
 /// `survey-notes.md` при отсутствии (существующий не трогает НИКОГДА).
 ///
@@ -1417,6 +1684,38 @@ mod tests {
             std::fs::create_dir_all(parent).expect("mkdir");
         }
         std::fs::write(path, text).expect("write");
+    }
+
+    /// `git init` + один коммит всех файлов: граф «как построено» читает
+    /// ревизию, а не рабочее дерево (ADR-069 п.4 — регресс на общей фикстуре).
+    fn git_init_commit(repo: &Path) {
+        let steps: [&[&str]; 3] = [
+            &["init", "-q", "-b", "main"],
+            &["add", "-A"],
+            &[
+                "-c",
+                "user.email=t@example.com",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "-m",
+                "base",
+            ],
+        ];
+        for args in steps {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(repo)
+                .args(args)
+                .output()
+                .expect("git");
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
     }
 
     /// Фикстурный мультистек-репозиторий: rust + python + sql + конфиги,
@@ -1646,6 +1945,70 @@ mod tests {
         assert!(!md.contains("localhost"), "{md}");
     }
 
+    /// ADR-069 п.4 (R5): секция 4 карты и узлы-хранилища графа «как
+    /// построено» опираются на общий детектор интеграций
+    /// ([`integration_hits`]) — на общей фикстуре множества host совпадают.
+    /// Регресс-тест ловит расхождение «что считать интеграцией/хранилищем»
+    /// между картой обследования и графом (одна механика, не две).
+    #[test]
+    fn survey_integrations_match_graph_datastore_hosts() {
+        use crate::arch_diff::NodeKind;
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("repo");
+        write_file(
+            &repo.join("services/ledger/Cargo.toml"),
+            "[package]\nname = \"ledger\"\n",
+        );
+        write_file(
+            &repo.join("services/ledger/config/application.yaml"),
+            "dsn: \"postgres://db.internal:5432/ledger\"\n",
+        );
+        write_file(
+            &repo.join("services/reporting/Cargo.toml"),
+            "[package]\nname = \"reporting\"\n",
+        );
+        write_file(
+            &repo.join("services/reporting/config/cache.yaml"),
+            "url: \"redis://cache.internal:6379/0\"\n",
+        );
+        git_init_commit(&repo);
+
+        // Карта: секция 4 «Интеграции» — множество host.
+        let report = scan(&repo).expect("scan");
+        let ints = report
+            .sections
+            .iter()
+            .find(|s| s.title.starts_with("Интеграции"))
+            .expect("секция интеграций");
+        let map_hosts: BTreeSet<String> = ints
+            .findings
+            .iter()
+            .map(|f| {
+                f.text
+                    .trim_start_matches("внешний endpoint `")
+                    .trim_end_matches('`')
+                    .to_string()
+            })
+            .collect();
+
+        // Граф: узлы-хранилища — host из id `store:<scheme>://<host>`.
+        let graph = crate::arch_diff::as_built(&repo, "HEAD").expect("as_built");
+        let graph_hosts: BTreeSet<String> = graph
+            .nodes
+            .iter()
+            .filter(|n| n.kind == NodeKind::Datastore)
+            .filter_map(|n| n.id.split_once("://").map(|(_, h)| h.to_string()))
+            .collect();
+
+        let expected: BTreeSet<String> = ["cache.internal:6379", "db.internal:5432"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        assert_eq!(map_hosts, expected, "карта: хранилища фикстуры");
+        assert_eq!(graph_hosts, expected, "граф: те же хранилища");
+        assert_eq!(map_hosts, graph_hosts, "одна механика, не две");
+    }
+
     #[test]
     fn rerun_overwrites_survey_but_never_touches_notes() {
         let tmp = tempfile::tempdir().expect("tmp");
@@ -1861,5 +2224,89 @@ mod tests {
             .expect("call ghost");
         assert!(out.is_error);
         assert!(out.content.contains("ghost"), "{}", out.content);
+    }
+
+    // ── R6 (ADR-069): аудит [inferred]-слоя ─────────────────────────────────
+
+    #[test]
+    fn audit_flags_confirmed_without_resolvable_evidence() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = make_repo(tmp.path());
+        let notes = repo.join("docs/reverse/survey-notes.md");
+        // Хорошая претензия — evidence существует (billing/worker.py:1).
+        // Плохая — нет evidence; битая — строка вне файла.
+        write_file(
+            &notes,
+            "# Заметки [inferred]\n\
+             - [confirmed] воркер шлёт события (billing/worker.py:1)\n\
+             - [inferred] компонент отвечает за биллинг\n\
+             - [confirmed] платёжный шлюз — вот тут\n\
+             - [confirmed] связь с базой (billing/worker.py:999)\n",
+        );
+        let out = audit_inferred(&repo, Some(&notes), None).expect("audit");
+        assert_eq!(out.confirmed_seen, 3, "три [confirmed]-претензии");
+        assert!(!out.passed());
+        assert_eq!(out.findings.len(), 2, "{:?}", out.findings);
+        // Нет evidence → нарушение (строка 4: строка 1 — заголовок файла).
+        assert!(
+            out.findings
+                .iter()
+                .any(|f| f.line == 4 && f.problem.contains("нет evidence")),
+            "{:?}",
+            out.findings
+        );
+        // Строка вне файла → нарушение.
+        assert!(
+            out.findings
+                .iter()
+                .any(|f| f.line == 5 && f.problem.contains("вне файла")),
+            "{:?}",
+            out.findings
+        );
+        // Разрешимая претензия — не находка.
+        assert!(!out.findings.iter().any(|f| f.line == 1));
+    }
+
+    #[test]
+    fn audit_flags_model_entity_status_not_inferred() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = make_repo(tmp.path());
+        let model = repo.join("model");
+        write_file(
+            &model.join("CMP-001-web.md"),
+            "---\nid: CMP-001\ntype: cmp\ntitle: Web\nstatus: inferred\nsource: recover@abc\n---\n\nТело.\n",
+        );
+        // Модель не смеет поднять черновик до confirmed — это нарушение R6.
+        write_file(
+            &model.join("CMP-002-db.md"),
+            "---\nid: CMP-002\ntype: cmp\ntitle: Db\nstatus: confirmed\n---\n\nТело.\n",
+        );
+        let out = audit_inferred(&repo, None, Some(&model)).expect("audit");
+        assert_eq!(out.model_files, 2);
+        assert!(!out.passed());
+        assert_eq!(out.findings.len(), 1, "{:?}", out.findings);
+        assert!(out.findings[0].artifact.ends_with("CMP-002-db.md"));
+        assert!(out.findings[0].problem.contains("status ≠ inferred"));
+    }
+
+    #[test]
+    fn audit_passes_on_clean_inferred_layer() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = make_repo(tmp.path());
+        let notes = repo.join("docs/reverse/survey-notes.md");
+        write_file(
+            &notes,
+            "- [inferred] догадка без адреса — это допустимо в слое [inferred]\n\
+             - [confirmed] реальный факт (src/main.rs:1)\n",
+        );
+        let model = repo.join("model");
+        write_file(
+            &model.join("SYS-001.md"),
+            "---\nid: SYS-001\ntype: sys\ntitle: Система\nstatus: inferred\n---\n\nТело.\n",
+        );
+        let out = audit_inferred(&repo, Some(&notes), Some(&model)).expect("audit");
+        assert!(out.passed(), "{:?}", out.findings);
+        assert_eq!(out.confirmed_seen, 1);
+        assert!(render_audit(&out).contains("OK"));
     }
 }

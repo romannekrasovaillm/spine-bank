@@ -176,6 +176,7 @@ pub(super) const PLAYBOOK_PROMPTS: &[PlaybookPrompt] = &[
 pub const BRIDGE_READ_ONLY: &[&str] = &[
     "adr_registry",
     "agentsmd_lint",
+    "arch_diff",
     "archify_validate",
     "architect_review",
     "asyncapi_lint",
@@ -192,6 +193,7 @@ pub const BRIDGE_READ_ONLY: &[&str] = &[
     "openapi_lint",
     "openspec_coverage",
     "plugin_list",
+    "recover",
     "rubric_accept",
     "rubric_handover",
     "rubric_list",

@@ -10,6 +10,10 @@ use serde::Serialize;
 /// `gate-verdict/v1`: потребители сверяют поле `schema` перед разбором.
 pub const ARCH_DIFF_SCHEMA: &str = "arch-be/arch-diff/v1";
 
+/// Имя машинного контракта JSON-вывода команды `recover` (R5, ADR-069):
+/// полный граф одной ревизии без диффа. Надмножество полей [`ArchGraph`].
+pub const RECOVER_SCHEMA: &str = "arch-be/recover/v1";
+
 /// Потолок оснований `файл:строка` у одного ребра (дальше — счётчик
 /// сокращения в последнем элементе `… (+N)`).
 pub const MAX_EDGE_EVIDENCE: usize = 10;

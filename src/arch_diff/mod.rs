@@ -34,6 +34,7 @@ mod diff;
 mod modules;
 mod packages;
 mod providers;
+mod recover;
 mod report;
 mod snapshot;
 mod types;
@@ -54,6 +55,10 @@ pub use diff::{
     InvariantHit, ModelProposal, ModelStatus, NfrShift, ProposalKind, RouteInfo, RuleGuard,
     TeethClass, TriggerHit, arch_diff, matched_failures,
 };
+pub use recover::{
+    RecoverOutcome, recover, render_c4_plantuml, render_recover_json, render_recover_md,
+    render_recover_mermaid, render_structurizr, tools,
+};
 pub use report::{render_json, render_md, render_mermaid, render_sarif};
 pub use snapshot::{
     MAX_SNAPSHOT_CONTENT_FILES, ScanLimits, Snapshot, resolve_rev, snapshot_at, snapshot_at_with,
@@ -61,5 +66,5 @@ pub use snapshot::{
 };
 pub use types::{
     ARCH_DIFF_SCHEMA, ArchEdge, ArchGraph, ArchNode, Confidence, EdgeKind, MAX_EDGE_EVIDENCE,
-    NodeKind, Via,
+    NodeKind, RECOVER_SCHEMA, Via,
 };

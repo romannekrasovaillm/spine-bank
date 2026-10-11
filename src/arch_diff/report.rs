@@ -274,13 +274,13 @@ pub fn render_md(diff: &ArchDiff) -> String {
 
 /// Mermaid-id узла: `-`, `:`, `/`, `.` недопустимы/шумны в id flowchart —
 /// замена на `_` (стиль `model::graph_mermaid`).
-fn mermaid_id(id: &str) -> String {
+pub(super) fn mermaid_id(id: &str) -> String {
     id.replace(['-', ':', '/', '.'], "_")
 }
 
 /// Метка узла: `id · title` с усечением и безопасными скобками (стиль
 /// `model::graph_mermaid`).
-fn mermaid_label(node: &ArchNode) -> String {
+pub(super) fn mermaid_label(node: &ArchNode) -> String {
     const MAX_TITLE: usize = 48;
     let mut title: String = node.title.chars().take(MAX_TITLE).collect();
     if node.title.chars().count() > MAX_TITLE {

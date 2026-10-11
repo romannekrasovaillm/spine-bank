@@ -1105,7 +1105,7 @@ mod tests {
         let dir = tmp.path().join("proj");
         let report = connect(&ConnectOptions::new(Host::Qwen, dir.clone())).expect("connect");
 
-        assert_eq!(report.skills.len(), 66, "в отчёте все 66 скиллов");
+        assert_eq!(report.skills.len(), 67, "в отчёте все 67 скиллов");
         let settings: Value =
             serde_json::from_str(&read(&dir.join(".qwen/settings.json"))).expect("json");
         assert_eq!(settings["mcpServers"]["spine"]["command"], "arch-be");

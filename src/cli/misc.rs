@@ -31,6 +31,33 @@ pub(crate) fn cmd_survey(cfg: &Config, repo: &Path, out: Option<&Path>) -> Resul
     Ok(())
 }
 
+/// `arch-be survey <repo> --audit`: механика R6 (ADR-069) — проверяет, что
+/// модель не создала ни одного `[confirmed]` без разрешимого evidence и
+/// писала сущности только со `status: inferred`. Нарушение → exit 1.
+pub(crate) fn cmd_survey_audit(
+    repo: &Path,
+    out: Option<&Path>,
+    model_out: Option<&Path>,
+) -> Result<()> {
+    let out_dir = match out {
+        Some(dir) if dir.is_absolute() => dir.to_path_buf(),
+        Some(dir) => repo.join(dir),
+        None => repo.join("docs/reverse"),
+    };
+    let notes = out_dir.join("survey-notes.md");
+    let model_dir = match model_out {
+        Some(dir) if dir.is_absolute() => dir.to_path_buf(),
+        Some(dir) => repo.join(dir),
+        None => repo.join("model"),
+    };
+    let outcome = arch_harness::survey::audit_inferred(repo, Some(&notes), Some(&model_dir))?;
+    print!("{}", arch_harness::survey::render_audit(&outcome));
+    if !outcome.passed() {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
 /// Подкоманды `arch-be policy`.
 #[derive(Subcommand)]
 pub(crate) enum PolicyCmd {

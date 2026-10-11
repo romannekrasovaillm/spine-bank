@@ -14,7 +14,7 @@ use crate::control::{DiffGlobs, content_looks_like_contract, looks_like_config};
 use crate::error::{HarnessError, Result};
 use crate::imports;
 use crate::model::{EntityKind, Model, load_model_tolerant};
-use crate::survey::{INTEGRATION_URL_PATTERN, extract_host_port, is_manifest_file};
+use crate::survey::{INTEGRATION_URL_PATTERN, IntegrationHit, extract_host_port, is_manifest_file};
 
 /// Потолок байт заголовка контракта для опознания по содержимому — как у
 /// детектора `api_contract_change` (`CONTRACT_PROBE_BYTES` в `diff_triggers`).
@@ -77,6 +77,9 @@ pub(crate) struct RevisionScan {
     pub snapshot: Snapshot,
     /// Граф «как построено».
     pub graph: ArchGraph,
+    /// Компоненты графа с корнями кода (R5: черновик `model/`, детекторы
+    /// секций 1/4/5 карты).
+    pub components: Vec<ComponentCtx>,
     /// Модель ревизии (если в снимке есть `model/*.md`).
     pub model: Option<Model>,
     /// Материализация `model/` и реестра правил ревизии: держит файлы,
@@ -119,10 +122,11 @@ pub(crate) fn scan_revision_with(
 ) -> Result<RevisionScan> {
     let snap = snapshot_at_with(repo, rev, limits)?;
     let (case, model) = materialize_case(&snap)?;
-    let graph = build_graph(&snap, model.as_ref(), globs)?;
+    let (graph, components) = build_graph(&snap, model.as_ref(), globs)?;
     Ok(RevisionScan {
         snapshot: snap,
         graph,
+        components,
         model,
         case,
     })
@@ -140,10 +144,11 @@ pub(crate) fn scan_worktree_with(
 ) -> Result<RevisionScan> {
     let snap = snapshot_worktree_with(repo, limits)?;
     let (case, model) = materialize_case(&snap)?;
-    let graph = build_graph(&snap, model.as_ref(), globs)?;
+    let (graph, components) = build_graph(&snap, model.as_ref(), globs)?;
     Ok(RevisionScan {
         snapshot: snap,
         graph,
+        components,
         model,
         case,
     })
@@ -364,19 +369,17 @@ fn collect_import_edges(snap: &Snapshot, comps: &[ComponentCtx], acc: &mut EdgeA
 /// Классификация URL из конфига: только хранилище (`store:<scheme>://<host>`)
 /// по явной схеме строки подключения. Внешние системы детектируются не по
 /// произвольному `host:port` (шум: B-метрика «внешние precision» падала до
-/// ≤0.21), а по каталогу провайдеров ([`super::providers`]). Петлевые хосты и
-/// денилист (`SurveyDenylist`, B8) пропускаются; userinfo срезается разбором
-/// `survey::extract_host_port`, итоговый id прогоняется через редактор секретов.
+/// ≤0.21), а по каталогу провайдеров ([`super::providers`]). Обнаружение
+/// интеграции и разбор `host:port` (срез userinfo) — общая механика карты и
+/// графа ([`crate::survey::integration_hits`], ADR-069 п.4); денилист B8
+/// (`SurveyDenylist`) применяет вызывающий. Итоговый id прогоняется через
+/// редактор секретов.
 fn classify_url(
-    url: &str,
+    hit: &IntegrationHit,
     redactor: &crate::secrets::Redactor,
-    deny: &crate::survey::SurveyDenylist,
 ) -> Option<(NodeKind, String)> {
-    let host = extract_host_port(url)?;
-    if deny.host_ignored(&host) {
-        return None;
-    }
-    let scheme_raw = url
+    let scheme_raw = hit
+        .url
         .split_once("://")
         .map(|(s, _)| s.to_ascii_lowercase())
         .unwrap_or_default();
@@ -385,7 +388,7 @@ fn classify_url(
     if !DATASTORE_SCHEMES.contains(&scheme) {
         return None;
     }
-    let id = redactor.redact(&format!("store:{scheme}://{host}"));
+    let id = redactor.redact(&format!("store:{scheme}://{}", hit.host_port));
     Some((NodeKind::Datastore, id))
 }
 
@@ -472,9 +475,13 @@ fn collect_connect_edges(
             if is_comment_line(line) {
                 continue;
             }
-            // (1a) Строки подключения со схемой.
-            for m in re_url.find_iter(line) {
-                if let Some((kind, id)) = classify_url(m.as_str(), &redactor, &deny) {
+            // (1a) Строки подключения со схемой (общая механика карты и
+            // графа, ADR-069 п.4).
+            for hit in crate::survey::integration_hits(&re_url, line) {
+                if deny.host_ignored(&hit.host_port) {
+                    continue;
+                }
+                if let Some((kind, id)) = classify_url(&hit, &redactor) {
                     hits.push((kind, id, lnum));
                 }
             }
@@ -621,7 +628,13 @@ fn collect_contracts(
 
 /// Сборка графа из снимка и модели: узлы отсортированы по id, рёбра — по
 /// (from, to, kind), основания — по строке с потолком [`MAX_EDGE_EVIDENCE`].
-fn build_graph(snap: &Snapshot, model: Option<&Model>, globs: &DiffGlobs) -> Result<ArchGraph> {
+/// Возвращает граф и компоненты с корнями кода (R5: `recover` берёт их для
+/// черновика `model/`).
+fn build_graph(
+    snap: &Snapshot,
+    model: Option<&Model>,
+    globs: &DiffGlobs,
+) -> Result<(ArchGraph, Vec<ComponentCtx>)> {
     let topo = super::modules::deploy_topology(snap);
     let comps = collect_components(snap, model, &topo);
     let mut nodes: BTreeMap<String, ArchNode> = BTreeMap::new();
@@ -672,12 +685,15 @@ fn build_graph(snap: &Snapshot, model: Option<&Model>, globs: &DiffGlobs) -> Res
             b.confidence,
         ))
     });
-    Ok(ArchGraph {
-        rev: snap.rev.clone(),
-        nodes: nodes.into_values().collect(),
-        edges,
-        gaps: gaps.into_iter().collect(),
-    })
+    Ok((
+        ArchGraph {
+            rev: snap.rev.clone(),
+            nodes: nodes.into_values().collect(),
+            edges,
+            gaps: gaps.into_iter().collect(),
+        },
+        comps,
+    ))
 }
 
 #[cfg(test)]
