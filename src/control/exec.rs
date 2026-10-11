@@ -661,7 +661,7 @@ mod tests {
         );
     }
 
-    /// data_ownership (S9, ADR-078), режим «database-per-service»: у хранилища
+    /// `data_ownership` (S9, ADR-078), режим «database-per-service»: у хранилища
     /// два компонента-коннектора (копия `store:`-узла из графа) → находка
     /// `data_ownership_violated` с обоими именами.
     #[test]
@@ -701,8 +701,7 @@ mod tests {
         assert!(
             hits.iter()
                 .all(|i| i.message.contains("data_ownership_violated")),
-            "{:?}",
-            hits
+            "{hits:?}"
         );
         assert!(
             hits.iter().any(|i| i.message.contains("CMP-001")),
@@ -714,7 +713,7 @@ mod tests {
         );
     }
 
-    /// data_ownership, база не краснеет: единственный коннектор к хранилищу —
+    /// `data_ownership`, база не краснеет: единственный коннектор к хранилищу —
     /// владение соблюдено, находок нет.
     #[test]
     fn data_ownership_ok_single_connector() {
@@ -742,7 +741,7 @@ mod tests {
         );
     }
 
-    /// data_ownership, режим whitelist (`owners: [CMP-001]`): обращение
+    /// `data_ownership`, режим whitelist (`owners: [CMP-001]`): обращение
     /// чужого компонента (CMP-002) к хранилищу владельца — находка; сам
     /// владелец чист.
     #[test]
