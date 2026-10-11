@@ -10,7 +10,7 @@
 //!   [`run_golden`] — прогон судьи по набору, согласие с эталоном — MAE
 //!   ([`mean_absolute_error`]); регрессионный порог — на стороне CLI (ADR-004).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -1168,6 +1168,637 @@ fn report_markdown(bench: &Benchmark, report: &BenchReport) -> String {
     out
 }
 
+// ── Метрика 13: arch-diff-replay (волна D, ADR-072) ──────────────────────────
+//
+// Replay значимых диффов и окон-шума по замороженной разметке
+// `benchmarks/architect-value/labels/arch-diff-replay.yaml` (приложение B.3
+// задачи). Семантика зеркалит прогонщик
+// `benchmarks/architect-value/runners/replay.py` (заморожен вместе с входами):
+//   recall значимых   — доля значимых коммитов, где «по составу» всплыл хотя
+//                       бы один ожидаемый токен РЁБЕР/ВНЕШНИХ систем;
+//                       компонент-узел сам по себе не «состав»;
+//   precision состава — macro-F1 множества всплывших состав-токенов (рёбра +
+//                       внешние) против ожидаемых того же вида;
+//   шум               — доля окон-шума с НЕПУСТЫМ диффом (порог ≤ 10 %).
+//
+// Нормализация токенов (label): срезается префикс `dir:`/`sys:`/`svc:`/
+// `node:`/`edge:`, берётся последний сегмент пути, lower-case; ребро —
+// нормализованные концы через `->`.
+
+/// Префиксы id узлов, срезаемые при нормализации токена (заморожено).
+const REPLAY_PREFIXES: [&str; 5] = ["dir:", "sys:", "svc:", "node:", "edge:"];
+
+/// Списки узлов диффа (для «всплывших» токенов).
+const REPLAY_NODE_LISTS: [&str; 2] = ["added_nodes", "removed_nodes"];
+
+/// Списки рёбер диффа.
+const REPLAY_EDGE_LISTS: [&str; 2] = ["added_edges", "removed_edges"];
+
+/// Поля диффа, непустота любого из которых = «дифф непустой» (заморожено;
+/// шире [`ArchDiff::is_empty`] — включает предложения/ADR/объявленные рёбра).
+const REPLAY_NONEMPTY_FIELDS: [&str; 10] = [
+    "added_nodes",
+    "removed_nodes",
+    "added_edges",
+    "removed_edges",
+    "contract_changes",
+    "nfr_shifts",
+    "invariants_touched",
+    "proposals",
+    "declared_unused",
+    "adrs_touched",
+];
+
+/// Нормализация токена метки: `dir:src/x` → `x`; `sys:tracing-server:9411` →
+/// `tracing-server:9411` (срез одного префикса, последний сегмент пути, lower).
+#[must_use]
+pub fn replay_norm_token(tok: &str) -> String {
+    let mut t = tok.trim().to_lowercase();
+    for p in REPLAY_PREFIXES {
+        if let Some(rest) = t.strip_prefix(p) {
+            t = rest.to_string();
+            break;
+        }
+    }
+    match t.rsplit_once('/') {
+        Some((_, last)) => last.to_string(),
+        None => t,
+    }
+}
+
+/// Нормализованное ребро: `<from>-><to>`.
+#[must_use]
+pub fn replay_norm_edge(from: &str, to: &str) -> String {
+    format!("{}->{}", replay_norm_token(from), replay_norm_token(to))
+}
+
+/// Разметка метрики 13 (`labels/arch-diff-replay.yaml`).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ReplayLabels {
+    /// Значения по умолчанию (base-шаблон, пороги).
+    #[serde(default)]
+    pub defaults: ReplayDefaults,
+    /// Значимые коммиты.
+    #[serde(default)]
+    pub significant: Vec<ReplaySignificant>,
+    /// Окна-шума.
+    #[serde(default)]
+    pub noise: Vec<ReplayNoise>,
+}
+
+/// Значения по умолчанию разметки.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ReplayDefaults {
+    /// Шаблон базы диффа (`{sha}~1`); `{sha}` подставляется sha коммита.
+    #[serde(default)]
+    pub base: Option<String>,
+    /// Формат диффа (заморожен `json`; поле читается для совместимости).
+    #[serde(default)]
+    pub format: Option<String>,
+    /// Пороги метрики.
+    #[serde(default)]
+    pub thresholds: ReplayThresholds,
+}
+
+/// Пороги метрики 13 (заморожены в PREREGISTRATION.md).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplayThresholds {
+    /// Порог recall значимых (≥).
+    pub recall_significant: f64,
+    /// Порог macro-F1 состава (≥).
+    pub composition_f1: f64,
+    /// Порог доли шума (≤).
+    pub noise_ratio: f64,
+}
+
+impl Default for ReplayThresholds {
+    fn default() -> Self {
+        Self {
+            recall_significant: 0.80,
+            composition_f1: 0.80,
+            noise_ratio: 0.10,
+        }
+    }
+}
+
+/// Значимый коммит разметки.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReplaySignificant {
+    /// Логическое имя репо (`petclinic`/`boutique`/…).
+    pub repo: String,
+    /// Полный sha коммита.
+    pub sha: String,
+    /// Человекочитаемый заголовок.
+    #[serde(default)]
+    pub title: String,
+    /// Ожидаемые компоненты-токены (для справки; в F1 не входят).
+    #[serde(default)]
+    pub expect_components: Vec<String>,
+    /// Ожидаемые внешние системы-токены.
+    #[serde(default)]
+    pub expect_external: Vec<String>,
+    /// Ожидаемые рёбра — пары `[from, to]`.
+    #[serde(default)]
+    pub expect_edges: Vec<Vec<String>>,
+}
+
+/// Окно-шума разметки (эталон «архитектурных изменений нет»).
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReplayNoise {
+    /// Логическое имя репо.
+    pub repo: String,
+    /// Полный sha коммита.
+    pub sha: String,
+    /// Человекочитаемый заголовок.
+    #[serde(default)]
+    pub title: String,
+    /// Вид окна (dependency/ci/ui/…).
+    #[serde(default)]
+    pub kind: String,
+}
+
+/// Результат по одному значимому коммиту.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReplaySigResult {
+    /// Логическое имя репо.
+    pub repo: String,
+    /// sha коммита.
+    pub sha: String,
+    /// Заголовок.
+    pub title: String,
+    /// Всплыл ли ≥1 ожидаемый состав-токен.
+    pub hit: bool,
+    /// F1 состава этого коммита.
+    pub f1: f64,
+    /// Всплывшие состав-токены (рёбра + внешние), отсортированы.
+    pub surf_comp: Vec<String>,
+    /// Ожидаемые состав-токены (рёбра + внешние), отсортированы.
+    pub exp_comp: Vec<String>,
+}
+
+/// Результат по одному окну-шума.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReplayNoiseResult {
+    /// Логическое имя репо.
+    pub repo: String,
+    /// sha коммита.
+    pub sha: String,
+    /// Вид окна.
+    pub kind: String,
+    /// Непустой ли дифф (ложное срабатывание).
+    pub nonempty: bool,
+}
+
+/// Отчёт метрики 13.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReplayReport {
+    /// recall значимых агрегированный.
+    pub recall_significant: f64,
+    /// macro-F1 состава.
+    pub composition_f1: f64,
+    /// Доля непустых окон-шума.
+    pub noise_ratio: f64,
+    /// Сработавших значимых.
+    pub sig_hits: usize,
+    /// Измеренных значимых.
+    pub sig_measured: usize,
+    /// Непустых окон-шума.
+    pub noise_fp: usize,
+    /// Измеренных окон-шума.
+    pub noise_measured: usize,
+    /// Пороги из разметки.
+    pub thresholds: ReplayThresholds,
+    /// По-коммитные результаты значимых.
+    pub significant: Vec<ReplaySigResult>,
+    /// По-коммитные результаты окон-шума.
+    pub noise: Vec<ReplayNoiseResult>,
+    /// Пропущенные метки (нет клона/коммита/ошибка диффа) с причиной.
+    pub skipped: Vec<String>,
+}
+
+impl ReplayReport {
+    /// Сборка отчёта из по-коммитных результатов (чистая агрегация).
+    #[must_use]
+    pub fn from_results(
+        significant: Vec<ReplaySigResult>,
+        noise: Vec<ReplayNoiseResult>,
+        thresholds: ReplayThresholds,
+        skipped: Vec<String>,
+    ) -> Self {
+        let sig_measured = significant.len();
+        let sig_hits = significant.iter().filter(|r| r.hit).count();
+        let f1_sum: f64 = significant.iter().map(|r| r.f1).sum();
+        let noise_measured = noise.len();
+        let noise_fp = noise.iter().filter(|r| r.nonempty).count();
+        #[allow(clippy::cast_precision_loss)]
+        let recall = if sig_measured == 0 {
+            0.0
+        } else {
+            sig_hits as f64 / sig_measured as f64
+        };
+        #[allow(clippy::cast_precision_loss)]
+        let macro_f1 = if sig_measured == 0 {
+            0.0
+        } else {
+            f1_sum / sig_measured as f64
+        };
+        #[allow(clippy::cast_precision_loss)]
+        let noise_ratio = if noise_measured == 0 {
+            0.0
+        } else {
+            noise_fp as f64 / noise_measured as f64
+        };
+        Self {
+            recall_significant: recall,
+            composition_f1: macro_f1,
+            noise_ratio,
+            sig_hits,
+            sig_measured,
+            noise_fp,
+            noise_measured,
+            thresholds,
+            significant,
+            noise,
+            skipped,
+        }
+    }
+
+    /// Прошёл ли прогон пороги метрики 13.
+    #[must_use]
+    pub fn passed(&self) -> bool {
+        self.recall_significant >= self.thresholds.recall_significant
+            && self.composition_f1 >= self.thresholds.composition_f1
+            && self.noise_ratio <= self.thresholds.noise_ratio
+    }
+
+    /// Однострочная сводка метрики 13.
+    #[must_use]
+    pub fn summary(&self) -> String {
+        format!(
+            "recall_significant={}/{}={:.2} (порог≥{:.2}); composition_F1={:.2} \
+             (порог≥{:.2}); noise={}/{}={:.2} (порог≤{:.2}) — {}",
+            self.sig_hits,
+            self.sig_measured,
+            self.recall_significant,
+            self.thresholds.recall_significant,
+            self.composition_f1,
+            self.thresholds.composition_f1,
+            self.noise_fp,
+            self.noise_measured,
+            self.noise_ratio,
+            self.thresholds.noise_ratio,
+            if self.passed() { "PASS" } else { "FAIL" }
+        )
+    }
+
+    /// Многострочный текстовый отчёт (для `--format text`).
+    #[must_use]
+    pub fn to_text(&self) -> String {
+        let mut out = String::new();
+        let _ = writeln!(out, "arch-diff-replay — метрика 13");
+        for r in &self.significant {
+            let _ = writeln!(
+                out,
+                "  significant [{}:{}] hit={} f1={:.2} surf={} exp={} — {}",
+                r.repo,
+                &r.sha[..r.sha.len().min(7)],
+                if r.hit { "да" } else { "нет" },
+                r.f1,
+                join_or(&r.surf_comp, "нет"),
+                join_or(&r.exp_comp, "нет"),
+                r.title
+            );
+        }
+        for r in &self.noise {
+            if r.nonempty {
+                let _ = writeln!(
+                    out,
+                    "  noise [{}:{}] непустой дифф ({})",
+                    r.repo,
+                    &r.sha[..r.sha.len().min(7)],
+                    r.kind
+                );
+            }
+        }
+        for s in &self.skipped {
+            let _ = writeln!(out, "  skip: {s}");
+        }
+        let _ = writeln!(out, "  {}", self.summary());
+        out
+    }
+}
+
+/// Список токенов через запятую либо `dash` при пустоте.
+fn join_or(items: &[String], dash: &str) -> String {
+    if items.is_empty() {
+        dash.to_string()
+    } else {
+        items.join(", ")
+    }
+}
+
+/// Непустой ли массив по ключу (пустой/отсутствующий — нет).
+fn field_nonempty(doc: &serde_json::Value, key: &str) -> bool {
+    doc.get(key)
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|a| !a.is_empty())
+}
+
+/// «Всплывшие» состав-токены диффа: (внешние системы, рёбра).
+#[must_use]
+pub fn replay_surfaced(doc: &serde_json::Value) -> (BTreeSet<String>, BTreeSet<String>) {
+    let mut externals = BTreeSet::new();
+    let mut edges = BTreeSet::new();
+    for key in REPLAY_NODE_LISTS {
+        if let Some(arr) = doc.get(key).and_then(serde_json::Value::as_array) {
+            for n in arr {
+                let nid = n
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                if nid.starts_with("sys:") {
+                    externals.insert(replay_norm_token(nid));
+                }
+            }
+        }
+    }
+    for key in REPLAY_EDGE_LISTS {
+        if let Some(arr) = doc.get(key).and_then(serde_json::Value::as_array) {
+            for e in arr {
+                let from = e
+                    .get("from")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                let to = e
+                    .get("to")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                edges.insert(replay_norm_edge(from, to));
+            }
+        }
+    }
+    (externals, edges)
+}
+
+/// Ожидаемые состав-токены метки: (внешние, рёбра).
+#[must_use]
+pub fn replay_expected(label: &ReplaySignificant) -> (BTreeSet<String>, BTreeSet<String>) {
+    let ext = label
+        .expect_external
+        .iter()
+        .map(|s| replay_norm_token(s))
+        .collect();
+    let edges = label
+        .expect_edges
+        .iter()
+        .filter_map(|pair| match pair.as_slice() {
+            [from, to] => Some(replay_norm_edge(from, to)),
+            _ => None,
+        })
+        .collect();
+    (ext, edges)
+}
+
+/// F1 множеств (surf против exp) и размер пересечения.
+#[must_use]
+pub fn replay_f1(surf: &BTreeSet<String>, exp: &BTreeSet<String>) -> (f64, usize) {
+    let inter = surf.intersection(exp).count();
+    if surf.is_empty() || exp.is_empty() {
+        return (0.0, inter);
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let p = inter as f64 / surf.len() as f64;
+    #[allow(clippy::cast_precision_loss)]
+    let r = inter as f64 / exp.len() as f64;
+    let f = if p + r > 0.0 {
+        2.0 * p * r / (p + r)
+    } else {
+        0.0
+    };
+    (f, inter)
+}
+
+/// «Дифф непустой» (замороженная семантика): любое из полей состава/
+/// контрактов/NFR/предложений/ADR непусто ИЛИ сработали триггеры/счёт маршрута.
+#[must_use]
+pub fn replay_is_nonempty(doc: &serde_json::Value) -> bool {
+    if REPLAY_NONEMPTY_FIELDS
+        .iter()
+        .any(|k| field_nonempty(doc, k))
+    {
+        return true;
+    }
+    let route = doc.get("route");
+    let has_triggers = route
+        .and_then(|r| r.get("triggers"))
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|a| !a.is_empty());
+    let score = route
+        .and_then(|r| r.get("score"))
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    has_triggers || score > 0
+}
+
+/// Сверка одного значимого коммита с эталоном.
+#[must_use]
+pub fn replay_evaluate_significant(
+    label: &ReplaySignificant,
+    doc: &serde_json::Value,
+) -> ReplaySigResult {
+    let (ext, edges) = replay_surfaced(doc);
+    let mut surf_comp: BTreeSet<String> = ext;
+    surf_comp.extend(edges);
+    let (exp_ext, exp_edges) = replay_expected(label);
+    let mut exp_comp: BTreeSet<String> = exp_ext;
+    exp_comp.extend(exp_edges);
+    let (f1, inter) = replay_f1(&surf_comp, &exp_comp);
+    ReplaySigResult {
+        repo: label.repo.clone(),
+        sha: label.sha.clone(),
+        title: label.title.clone(),
+        hit: inter >= 1,
+        f1,
+        surf_comp: surf_comp.into_iter().collect(),
+        exp_comp: exp_comp.into_iter().collect(),
+    }
+}
+
+/// Оценка одного окна-шума.
+#[must_use]
+pub fn replay_evaluate_noise(label: &ReplayNoise, doc: &serde_json::Value) -> ReplayNoiseResult {
+    ReplayNoiseResult {
+        repo: label.repo.clone(),
+        sha: label.sha.clone(),
+        kind: label.kind.clone(),
+        nonempty: replay_is_nonempty(doc),
+    }
+}
+
+/// Каталог клона по логическому имени репо (как `avlib.REPO_CLONES`).
+#[must_use]
+fn replay_clone_name(repo: &str) -> &str {
+    match repo {
+        "boutique" => "microservices-demo",
+        "petclinic" => "spring-petclinic-microservices",
+        "buckpal" => "buckpal",
+        "library" => "library",
+        other => other,
+    }
+}
+
+/// Подставляет `{sha}` в шаблон базы (по умолчанию `{sha}~1`).
+fn replay_base_ref(defaults: &ReplayDefaults, sha: &str) -> String {
+    defaults
+        .base
+        .clone()
+        .unwrap_or_else(|| "{sha}~1".to_string())
+        .replace("{sha}", sha)
+}
+
+/// Прогон метрики 13: дифф каждой метки (`base` → `head=sha`) по клону репо и
+/// сверка с эталоном. `repo_filter` — `None`/`Some("all")` = все репо. `last` —
+/// рассматривать не более N последних меток каждого списка (после фильтра).
+///
+/// Отсутствие клона/коммита и ошибка диффа — честный `skipped`, не паника
+/// (как замороженный `replay.py`).
+///
+/// # Errors
+/// Не читается/не разбирается файл разметки.
+pub fn replay_arch_diff(
+    labels_path: &Path,
+    repos_dir: &Path,
+    repo_filter: Option<&str>,
+    last: Option<usize>,
+    limits: (usize, usize),
+    globs: &crate::control::DiffGlobs,
+) -> Result<ReplayReport> {
+    let text = std::fs::read_to_string(labels_path).map_err(|e| {
+        HarnessError::Config(format!(
+            "метрика 13: не читается разметка {}: {e}",
+            labels_path.display()
+        ))
+    })?;
+    let labels: ReplayLabels = serde_yaml_ng::from_str(&text).map_err(|e| {
+        HarnessError::Config(format!(
+            "метрика 13: не разобрана разметка {}: {e}",
+            labels_path.display()
+        ))
+    })?;
+    let thresholds = labels.defaults.thresholds.clone();
+    let keep = |repo: &str| match repo_filter {
+        None | Some("all") => true,
+        Some(want) => repo == want,
+    };
+    let cap = |n: usize| -> usize { last.map_or(n, |l| l.min(n)) };
+
+    let mut skipped: Vec<String> = Vec::new();
+    let mut significant: Vec<ReplaySigResult> = Vec::new();
+    let mut noise: Vec<ReplayNoiseResult> = Vec::new();
+
+    // Значимые: F1 состава важнее половины — замеряем все.
+    let sig_labels: Vec<&ReplaySignificant> = labels
+        .significant
+        .iter()
+        .filter(|s| keep(&s.repo))
+        .collect();
+    let sig_take = cap(sig_labels.len());
+    for label in sig_labels.into_iter().take(sig_take) {
+        let short = &label.sha[..label.sha.len().min(7)];
+        let tag = format!("[{}:{short}]", label.repo);
+        let Some(clone) = replay_clone(repos_dir, &label.repo) else {
+            skipped.push(format!(
+                "metric 13 significant {tag}: клон {} отсутствует",
+                label.repo
+            ));
+            continue;
+        };
+        match replay_run_diff(
+            &clone,
+            &replay_base_ref(&labels.defaults, &label.sha),
+            &label.sha,
+            limits,
+            globs,
+        ) {
+            Ok(doc) => significant.push(replay_evaluate_significant(label, &doc)),
+            Err(e) => skipped.push(format!("metric 13 significant {tag}: {e}")),
+        }
+    }
+
+    // Окна-шума: доля непустых диффов.
+    let noise_labels: Vec<&ReplayNoise> = labels.noise.iter().filter(|n| keep(&n.repo)).collect();
+    let noise_take = cap(noise_labels.len());
+    for label in noise_labels.into_iter().take(noise_take) {
+        let short = &label.sha[..label.sha.len().min(7)];
+        let tag = format!("[{}:{short}]", label.repo);
+        let Some(clone) = replay_clone(repos_dir, &label.repo) else {
+            skipped.push(format!(
+                "metric 13 noise {tag}: клон {} отсутствует",
+                label.repo
+            ));
+            continue;
+        };
+        match replay_run_diff(
+            &clone,
+            &replay_base_ref(&labels.defaults, &label.sha),
+            &label.sha,
+            limits,
+            globs,
+        ) {
+            Ok(doc) => noise.push(replay_evaluate_noise(label, &doc)),
+            Err(e) => skipped.push(format!("metric 13 noise {tag}: {e}")),
+        }
+    }
+
+    Ok(ReplayReport::from_results(
+        significant,
+        noise,
+        thresholds,
+        skipped,
+    ))
+}
+
+/// Дифф одной метки: `arch_diff` → JSON → разбор в [`serde_json::Value`].
+fn replay_run_diff(
+    clone: &Path,
+    base: &str,
+    head: &str,
+    limits: (usize, usize),
+    globs: &crate::control::DiffGlobs,
+) -> Result<serde_json::Value> {
+    let declared = BTreeMap::new();
+    let diff = crate::arch_diff::arch_diff(
+        clone,
+        &crate::arch_diff::ArchDiffInput {
+            base,
+            head: Some(head),
+            declared,
+            limits,
+            globs,
+        },
+    )
+    .map_err(|e| HarnessError::Config(format!("ошибка диффа: {e}")))?;
+    let json = crate::arch_diff::render_json(&diff)
+        .map_err(|e| HarnessError::Config(format!("ошибка рендера JSON: {e}")))?;
+    serde_json::from_str(&json).map_err(|e| HarnessError::Config(format!("дифф не JSON: {e}")))
+}
+
+/// Каталог клона репо, если он есть (`<repos_dir>/<имя-клона>`).
+fn replay_clone(repos_dir: &Path, repo: &str) -> Option<PathBuf> {
+    let cand = repos_dir.join(replay_clone_name(repo));
+    cand.is_dir().then_some(cand)
+}
+
+/// Корень клонов бенчмарка: `ARCH_VALUE_REPOS` / `~/bench-repos`.
+#[must_use]
+pub fn replay_default_repos_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("ARCH_VALUE_REPOS") {
+        return PathBuf::from(dir);
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home).join("bench-repos")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2007,5 +2638,218 @@ tags:
         assert_eq!(median(&[]), None);
         assert!((median(&[3.0, 1.0, 2.0]).expect("медиана") - 2.0).abs() < 1e-9);
         assert!((median(&[1.0, 2.0]).expect("медиана") - 1.5).abs() < 1e-9);
+    }
+
+    // ── Метрика 13: arch-diff-replay (волна D, ADR-072) ──────────────────────
+
+    #[test]
+    fn replay_norm_token_strips_one_prefix_and_keeps_last_segment() {
+        // Срезается ровно ОДИН префикс, затем берётся последний сегмент пути.
+        assert_eq!(replay_norm_token("dir:src/x"), "x");
+        assert_eq!(replay_norm_token("svc:api-gateway"), "api-gateway");
+        assert_eq!(
+            replay_norm_token("sys:tracing-server:9411"),
+            "tracing-server:9411",
+            "двоеточие в имени системы сохраняется"
+        );
+        assert_eq!(
+            replay_norm_token("dir:spring-petclinic-genai-service"),
+            "spring-petclinic-genai-service"
+        );
+        assert_eq!(replay_norm_token("node:Foo/Bar"), "bar");
+        // Отступ по краям срезается, но пробел ПОСЛЕ префикса сохраняется —
+        // как в замороженном `replay.py` (`strip().lower()`, затем срез префикса).
+        assert_eq!(replay_norm_token("  EDGE:API-Gateway "), "api-gateway");
+        assert_eq!(replay_norm_token("edge: x"), " x");
+        // Без префикса — последний сегмент и lower-case.
+        assert_eq!(replay_norm_token("A/B/C"), "c");
+        assert_eq!(replay_norm_token(""), "");
+    }
+
+    #[test]
+    fn replay_norm_edge_joins_normalized_ends() {
+        assert_eq!(
+            replay_norm_edge("dir:a/api-gateway", "svc:genai-service"),
+            "api-gateway->genai-service"
+        );
+    }
+
+    #[test]
+    fn replay_f1_math() {
+        let b = |xs: &[&str]| xs.iter().map(|s| (*s).to_string()).collect::<BTreeSet<_>>();
+        // Идеальное совпадение.
+        let (f, i) = replay_f1(&b(&["a", "b"]), &b(&["a", "b"]));
+        assert!((f - 1.0).abs() < 1e-9 && i == 2);
+        // Половина всплывших лишние: surf 4, exp 2, inter 2 → p=0.5, r=1 → F1=2/3.
+        let (f, i) = replay_f1(&b(&["a", "b", "x", "y"]), &b(&["a", "b"]));
+        assert!((f - 2.0 / 3.0).abs() < 1e-9 && i == 2);
+        // Пустая сторона → 0.
+        assert_eq!(replay_f1(&b(&[]), &b(&["a"])), (0.0, 0));
+        assert_eq!(replay_f1(&b(&["a"]), &b(&[])), (0.0, 0));
+    }
+
+    #[test]
+    fn replay_is_nonempty_semantics() {
+        // Пустой дифф, нулевой маршрут → непустой = нет.
+        let empty = serde_json::json!({ "route": { "score": 0, "triggers": [] } });
+        assert!(!replay_is_nonempty(&empty));
+        // Непустой список узлов.
+        let with_node = serde_json::json!({ "added_nodes": [{ "id": "svc:x" }] });
+        assert!(replay_is_nonempty(&with_node));
+        // Список, но пустой — всё ещё пусто.
+        let empty_list = serde_json::json!({ "added_edges": [] });
+        assert!(!replay_is_nonempty(&empty_list));
+        // Сработал триггер маршрута.
+        let trig =
+            serde_json::json!({ "route": { "score": 0, "triggers": [{ "id": "new_component" }] } });
+        assert!(replay_is_nonempty(&trig));
+        // Счёт маршрута > 0.
+        let score = serde_json::json!({ "route": { "score": 2, "triggers": [] } });
+        assert!(replay_is_nonempty(&score));
+        // Предложения/ADR также считаются.
+        let adr = serde_json::json!({ "adrs_touched": ["ADR-001"] });
+        assert!(replay_is_nonempty(&adr));
+    }
+
+    #[test]
+    fn replay_surfaced_extracts_externals_and_edges() {
+        let doc = serde_json::json!({
+            "added_nodes": [
+                { "id": "svc:genai-service" },
+                { "id": "sys:openai" },
+                { "id": "sys:azure-openai" }
+            ],
+            "added_edges": [
+                { "from": "svc:api-gateway", "to": "svc:genai-service" }
+            ]
+        });
+        let (ext, edges) = replay_surfaced(&doc);
+        // Только `sys:`-узлы попадают во «внешние»; компоненты — нет.
+        assert_eq!(
+            ext.into_iter().collect::<Vec<_>>(),
+            vec!["azure-openai".to_string(), "openai".to_string()]
+        );
+        assert_eq!(
+            edges.into_iter().collect::<Vec<_>>(),
+            vec!["api-gateway->genai-service".to_string()]
+        );
+    }
+
+    #[test]
+    fn replay_evaluate_significant_petclinic_genai() {
+        // Синтетический дифф, имитирующий 79b527a после нормализации id узлов к
+        // коротким именам (`svc:`): 5 ожидаемых состав-токенов совпали, но 2
+        // ребра лишние → p=5/7, r=1 → F1 = 10/12 ≈ 0.8333 (≥ порога 0.80).
+        let label = ReplaySignificant {
+            repo: "petclinic".into(),
+            sha: "79b527a35d2141f619386bb94a9e18355aab7880".into(),
+            title: "genai".into(),
+            expect_components: vec!["genai-service".into()],
+            expect_external: vec!["openai".into(), "azure-openai".into()],
+            expect_edges: vec![
+                vec!["api-gateway".into(), "genai-service".into()],
+                vec!["genai-service".into(), "vets-service".into()],
+                vec!["genai-service".into(), "customers-service".into()],
+            ],
+        };
+        let doc = serde_json::json!({
+            "added_nodes": [
+                { "id": "svc:genai-service" },
+                { "id": "sys:openai" },
+                { "id": "sys:azure-openai" }
+            ],
+            "added_edges": [
+                { "from": "svc:api-gateway", "to": "svc:genai-service" },
+                { "from": "svc:genai-service", "to": "svc:vets-service" },
+                { "from": "svc:genai-service", "to": "svc:customers-service" },
+                { "from": "svc:api-gateway", "to": "svc:vets-service" },
+                { "from": "svc:api-gateway", "to": "svc:customers-service" }
+            ]
+        });
+        let r = replay_evaluate_significant(&label, &doc);
+        assert!(r.hit, "≥1 ожидаемый токен должен всплыть");
+        assert!((r.f1 - 10.0 / 12.0).abs() < 1e-9, "f1={}", r.f1);
+        assert_eq!(r.surf_comp.len(), 7);
+        assert_eq!(r.exp_comp.len(), 5);
+    }
+
+    #[test]
+    fn replay_report_aggregates_and_gates() {
+        let mk_sig = |hit: bool, f1: f64| ReplaySigResult {
+            repo: "r".into(),
+            sha: "s".into(),
+            title: String::new(),
+            hit,
+            f1,
+            surf_comp: vec![],
+            exp_comp: vec![],
+        };
+        let mk_noise = |nonempty: bool| ReplayNoiseResult {
+            repo: "r".into(),
+            sha: "s".into(),
+            kind: "dependency".into(),
+            nonempty,
+        };
+        // 1/2 recall, macro-F1 = (1.0+0.0)/2 = 0.5, шум 0/2.
+        let report = ReplayReport::from_results(
+            vec![mk_sig(true, 1.0), mk_sig(false, 0.0)],
+            vec![mk_noise(false), mk_noise(false)],
+            ReplayThresholds::default(),
+            vec![],
+        );
+        assert!((report.recall_significant - 0.5).abs() < 1e-9);
+        assert!((report.composition_f1 - 0.5).abs() < 1e-9);
+        assert!((report.noise_ratio - 0.0).abs() < 1e-9);
+        assert!(!report.passed(), "recall 0.5 < 0.80 → FAIL");
+        assert!(report.summary().contains("FAIL"));
+
+        // Проходной набор: recall 2/2, F1 (0.9+0.9)/2, шум 0/10.
+        let noise: Vec<_> = (0..10).map(|_| mk_noise(false)).collect();
+        let pass = ReplayReport::from_results(
+            vec![mk_sig(true, 0.9), mk_sig(true, 0.9)],
+            noise,
+            ReplayThresholds::default(),
+            vec![],
+        );
+        assert!(pass.passed());
+        assert!(pass.summary().contains("PASS"));
+    }
+
+    #[test]
+    fn replay_labels_yaml_parses_seq_of_seqs_and_thresholds() {
+        let yaml = "\
+version: \"2026.10\"
+defaults:
+  base: \"{sha}~1\"
+  format: json
+  thresholds:
+    recall_significant: 0.80
+    composition_f1: 0.80
+    noise_ratio: 0.10
+significant:
+  - repo: petclinic
+    sha: 79b527a35d2141f619386bb94a9e18355aab7880
+    title: genai
+    expect_components: [genai-service]
+    expect_edges:
+      - [api-gateway, genai-service]
+      - [genai-service, vets-service]
+    expect_external: [openai, azure-openai]
+noise:
+  - repo: petclinic
+    sha: abc1234
+    title: bump
+    kind: dependency
+";
+        let labels: ReplayLabels = serde_yaml_ng::from_str(yaml).expect("разметка разобрана");
+        assert_eq!(labels.significant.len(), 1);
+        assert_eq!(labels.noise.len(), 1);
+        assert_eq!(labels.significant[0].expect_edges.len(), 2);
+        assert_eq!(
+            labels.significant[0].expect_edges[0],
+            vec!["api-gateway", "genai-service"]
+        );
+        assert!((labels.defaults.thresholds.composition_f1 - 0.80).abs() < 1e-9);
+        assert_eq!(replay_base_ref(&labels.defaults, "deadbeef"), "deadbeef~1");
     }
 }
