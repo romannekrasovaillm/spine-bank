@@ -54,6 +54,30 @@ pub(crate) enum BenchCmd {
         #[arg(long)]
         humans: PathBuf,
     },
+    /// Replay значимых диффов и окон-шума по замороженной разметке (D1,
+    /// метрика 13, ADR-072): recall значимых / точность состава (macro-F1) /
+    /// доля шума. Дифф каждой метки — на графе R1–R3 (`arch_diff`), `base` из
+    /// разметки (`{sha}~1`). По умолчанию — только замер (exit 0), как
+    /// замороженный прогонщик; `--gate` даёт exit 1 при недостижении порогов.
+    ArchDiffReplay {
+        /// Логическое имя репо (`petclinic`/`boutique`/…); `all` — все репо.
+        repo: String,
+        /// Файл разметки (`benchmarks/architect-value/labels/arch-diff-replay.yaml`).
+        #[arg(long)]
+        labels: PathBuf,
+        /// Рассматривать не более N последних меток каждого списка.
+        #[arg(long)]
+        last: Option<usize>,
+        /// Корень клонов репо (по умолчанию `ARCH_VALUE_REPOS` / `~/bench-repos`).
+        #[arg(long)]
+        repos_dir: Option<PathBuf>,
+        /// Формат отчёта: `text` или `json`.
+        #[arg(long, default_value = "text")]
+        format: String,
+        /// Гейт: exit 1 при недостижении порогов метрики 13.
+        #[arg(long)]
+        gate: bool,
+    },
 }
 
 /// `arch-be bench` (только сборка `harness`).
@@ -170,6 +194,39 @@ pub(crate) async fn cmd_bench(cfg: &Arc<Config>, cmd: BenchCmd) -> Result<()> {
                 eprintln!("пропущен {doc}: нет человеческих анкет");
             }
             print!("{}", report.to_markdown());
+        }
+        BenchCmd::ArchDiffReplay {
+            repo,
+            labels,
+            last,
+            repos_dir,
+            format,
+            gate,
+        } => {
+            let (fast_max, standard_max) = cfg.significance.limits()?;
+            let globs = cfg.significance.diff_globs();
+            let repos_dir = repos_dir.unwrap_or_else(arch_harness::bench::replay_default_repos_dir);
+            let filter = if repo == "all" {
+                None
+            } else {
+                Some(repo.as_str())
+            };
+            let report = arch_harness::bench::replay_arch_diff(
+                &labels,
+                &repos_dir,
+                filter,
+                last,
+                (fast_max, standard_max),
+                &globs,
+            )?;
+            match format.as_str() {
+                "json" => println!("{}", serde_json::to_string_pretty(&report)?),
+                "text" => print!("{}", report.to_text()),
+                other => anyhow::bail!("неизвестный формат '{other}' (ожидается text|json)"),
+            }
+            if gate && !report.passed() {
+                std::process::exit(1);
+            }
         }
     }
     Ok(())
