@@ -103,6 +103,7 @@ pub mod report_fmt;
 pub mod retry;
 pub mod review;
 pub mod review_inbox;
+pub mod review_stream;
 pub mod rubric;
 pub mod rubric_pack;
 pub mod rule_templates;

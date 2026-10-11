@@ -788,6 +788,29 @@ enum ReviewCmd {
         #[arg(long, default_value = "text", value_name = "FORMAT")]
         format: String,
     },
+    /// Пакетный ревью-поток с журналом вердиктов (AB-09): прогоняет
+    /// архитектурный дифф по `--last N` последним коммитам первого родителя,
+    /// пишет вердикты в журнал `.arch-review/stream.jsonl` (upsert по sha —
+    /// повторный прогон перекрывающегося диапазона не плодит дубликаты) и
+    /// сводит поток в одну сводку (маршруты, значимые/шум, кумулятивный счётчик
+    /// inferred-рёбер D3). `--report` — кумулятивные метрики эрозии по журналу
+    /// (доли значимого, динамика маршрутов по окнам, топ-триггеры).
+    Stream {
+        /// Репозиторий (git), чей поток коммитов ревьюится.
+        repo: PathBuf,
+        /// Сколько последних коммитов первого родителя взять.
+        #[arg(long, default_value_t = 30, value_name = "N")]
+        last: usize,
+        /// Размер окна отчёта в коммитах (`--report`).
+        #[arg(long, default_value_t = 10, value_name = "M")]
+        window: usize,
+        /// Только отчёт по журналу (без нового прогона).
+        #[arg(long)]
+        report: bool,
+        /// Формат вывода: text (дефолт) | json.
+        #[arg(long, default_value = "text", value_name = "FORMAT")]
+        format: String,
+    },
 }
 
 pub(crate) async fn run() -> Result<()> {
@@ -1578,18 +1601,68 @@ pub(crate) async fn run() -> Result<()> {
             // K7 (эксперимент): ящик ревью по артефактам CI флота — репозиторий
             // не нужен, флаги прогона (--base/--constraints/--json/--no-exec)
             // к чтению артефактов неприменимы.
-            if let Some(ReviewCmd::Inbox { root, format }) = cmd {
-                let report = arch_harness::review_inbox::scan(&root)?;
-                if format.trim().eq_ignore_ascii_case("json") {
-                    let out = arch_harness::review_inbox::to_json(&report);
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string())
-                    );
-                } else {
-                    print!("{}", arch_harness::review_inbox::render(&report));
+            // AB-09: пакетный ревью-поток с журналом вердиктов — своя подкоманда
+            // со собственным репозиторием (`--last`/`--report`/`--window`).
+            match cmd {
+                Some(ReviewCmd::Stream {
+                    repo,
+                    last,
+                    window,
+                    report: only_report,
+                    format,
+                }) => {
+                    let limits = cfg
+                        .significance
+                        .limits()
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    let json_out = format.trim().eq_ignore_ascii_case("json");
+                    if only_report {
+                        let records = arch_harness::review_stream::load_journal(&repo)?;
+                        let rep = arch_harness::review_stream::report(&records, window);
+                        if json_out {
+                            let out = arch_harness::review_stream::report_json(&rep);
+                            println!(
+                                "{}",
+                                serde_json::to_string_pretty(&out)
+                                    .unwrap_or_else(|_| out.to_string())
+                            );
+                        } else {
+                            print!("{}", arch_harness::review_stream::render_report(&rep));
+                        }
+                        return Ok(());
+                    }
+                    let globs = cfg.significance.diff_globs();
+                    let run = arch_harness::review_stream::run_stream(&repo, last, limits, &globs)?;
+                    let mut journal = arch_harness::review_stream::load_journal(&repo)?;
+                    for v in &run.verdicts {
+                        arch_harness::review_stream::upsert(&mut journal, v.clone());
+                    }
+                    arch_harness::review_stream::save_journal(&repo, &mut journal)?;
+                    if json_out {
+                        let out = arch_harness::review_stream::run_json(&run, window);
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string())
+                        );
+                    } else {
+                        print!("{}", arch_harness::review_stream::render_run(&run, window));
+                    }
+                    return Ok(());
                 }
-                return Ok(());
+                Some(ReviewCmd::Inbox { root, format }) => {
+                    let report = arch_harness::review_inbox::scan(&root)?;
+                    if format.trim().eq_ignore_ascii_case("json") {
+                        let out = arch_harness::review_inbox::to_json(&report);
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string())
+                        );
+                    } else {
+                        print!("{}", arch_harness::review_inbox::render(&report));
+                    }
+                    return Ok(());
+                }
+                None => {}
             }
             let Some(dir) = dir else {
                 anyhow::bail!(
