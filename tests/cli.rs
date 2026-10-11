@@ -5086,6 +5086,76 @@ fn survey_relative_root_forms_match_absolute() {
         .stderr(contains("survey_empty_walk"));
 }
 
+/// R6 (ADR-069): аудит `[inferred]`-слоя. `survey <repo> --audit` пропускает
+/// чистый слой (`[confirmed]` с разрешимым `путь:строка`, модель со
+/// `status: inferred`) и падает с exit 1, если модель создала `[confirmed]`
+/// без evidence или сущность модели со `status ≠ inferred`.
+#[test]
+fn survey_audit_gates_inferred_layer() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let home = tmp.path();
+    let repo = home.join("repo");
+    std::fs::create_dir_all(repo.join("docs/reverse")).expect("mkdir docs/reverse");
+    std::fs::create_dir_all(repo.join("model")).expect("mkdir model");
+    std::fs::write(repo.join("src.rs"), "fn main() {}\n").expect("src.rs");
+
+    // Чисто: `[confirmed]` с разрешимым evidence + модель со status inferred.
+    std::fs::write(
+        repo.join("docs/reverse/survey-notes.md"),
+        "## Заметки модели\n- [inferred] вероятно точка входа — src.rs:1\n- [confirmed] точная точка входа — src.rs:1\n",
+    )
+    .expect("notes ok");
+    std::fs::write(
+        repo.join("model/CMP-001.md"),
+        "---\nid: CMP-001\ntype: cmp\ntitle: Entry\nstatus: inferred\n---\n\nтело\n",
+    )
+    .expect("model ok");
+
+    let out = arch_cmd(home)
+        .args(["survey", repo.to_str().expect("utf8"), "--audit"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout).to_string();
+    assert!(stdout.contains("OK"), "чистый слой: {stdout}");
+
+    // Нарушение 1: `[confirmed]` без evidence — exit 1, отчёт в stdout.
+    std::fs::write(
+        repo.join("docs/reverse/survey-notes.md"),
+        "- [confirmed] точка входа без ссылки\n",
+    )
+    .expect("notes bad");
+    let out = arch_cmd(home)
+        .args(["survey", repo.to_str().expect("utf8"), "--audit"])
+        .assert()
+        .failure();
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout).to_string();
+    assert!(
+        stdout.contains("evidence"),
+        "нет отчёта о нарушении: {stdout}"
+    );
+
+    // Нарушение 2: сущность модели со status ≠ inferred.
+    std::fs::write(
+        repo.join("docs/reverse/survey-notes.md"),
+        "- [inferred] чисто\n",
+    )
+    .expect("notes inferred");
+    std::fs::write(
+        repo.join("model/CMP-001.md"),
+        "---\nid: CMP-001\ntype: cmp\ntitle: Entry\nstatus: confirmed\n---\n\nтело\n",
+    )
+    .expect("model bad");
+    let out = arch_cmd(home)
+        .args(["survey", repo.to_str().expect("utf8"), "--audit"])
+        .assert()
+        .failure();
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout).to_string();
+    assert!(
+        stdout.contains("status") && stdout.contains("inferred"),
+        "нет отчёта о status модели: {stdout}"
+    );
+}
+
 /// B9: пользовательская ошибка CLI не печатает стектрейс, даже когда
 /// `RUST_BACKTRACE=1` (типично для CI, где дефолтный `anyhow`-Debug сыпал
 /// стеком `<unknown>`-кадров). Край печатает `Error: …` + `Caused by`, а

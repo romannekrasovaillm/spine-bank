@@ -306,6 +306,9 @@ pub const PLUGIN_ARCH_CORE_SKILLS_NFR_DESIGN_SKILL_MD: &str =
 /// Встроенный файл плагина `assets/plugins/arch-core/skills/readiness-gate/SKILL.md`.
 pub const PLUGIN_ARCH_CORE_SKILLS_READINESS_GATE_SKILL_MD: &str =
     include_str!("../assets/plugins/arch-core/skills/readiness-gate/SKILL.md");
+/// Встроенный файл плагина `assets/plugins/arch-core/skills/recover-review/SKILL.md`.
+pub const PLUGIN_ARCH_CORE_SKILLS_RECOVER_REVIEW_SKILL_MD: &str =
+    include_str!("../assets/plugins/arch-core/skills/recover-review/SKILL.md");
 /// Встроенный файл плагина `assets/plugins/arch-core/skills/reverse-discovery/SKILL.md`.
 pub const PLUGIN_ARCH_CORE_SKILLS_REVERSE_DISCOVERY_SKILL_MD: &str =
     include_str!("../assets/plugins/arch-core/skills/reverse-discovery/SKILL.md");
@@ -624,6 +627,7 @@ const PLUGIN_FILES: &[(&str, &str)] = &[
     ("plugins/arch-core/skills/handoff-packaging/SKILL.md", PLUGIN_ARCH_CORE_SKILLS_HANDOFF_PACKAGING_SKILL_MD),
     ("plugins/arch-core/skills/nfr-design/SKILL.md", PLUGIN_ARCH_CORE_SKILLS_NFR_DESIGN_SKILL_MD),
     ("plugins/arch-core/skills/readiness-gate/SKILL.md", PLUGIN_ARCH_CORE_SKILLS_READINESS_GATE_SKILL_MD),
+    ("plugins/arch-core/skills/recover-review/SKILL.md", PLUGIN_ARCH_CORE_SKILLS_RECOVER_REVIEW_SKILL_MD),
     ("plugins/arch-core/skills/reverse-discovery/SKILL.md", PLUGIN_ARCH_CORE_SKILLS_REVERSE_DISCOVERY_SKILL_MD),
     ("plugins/arch-core/skills/rubric-judging/SKILL.md", PLUGIN_ARCH_CORE_SKILLS_RUBRIC_JUDGING_SKILL_MD),
     ("plugins/arch-core/skills/significance-routing/SKILL.md", PLUGIN_ARCH_CORE_SKILLS_SIGNIFICANCE_ROUTING_SKILL_MD),

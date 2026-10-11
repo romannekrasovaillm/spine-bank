@@ -11,7 +11,8 @@
 (структурно сломанная схема). На 0.3.17 — 0 расхождений.
 
 Метрика 16 — есть ли у агента инструменты восстановления/диффа (`recover`,
-`arch_diff`). На 0.3.17 их нет (baseline); цель 0.4.0 — есть.
+`arch_diff`). На 0.3.17 их нет (baseline); на 0.4.0 (волна R/R5, ADR-069) —
+есть оба, read-only.
 
 Транспорт — stdio JSON-RPC NDJSON (stdlib: subprocess + json). Прогон без сети;
 `ARCH_NO_EXEC=1` в окружении сервера. Сервер запускается в temp-cwd, чтобы любые
@@ -44,7 +45,8 @@ _FIELD_REQ_RE = re.compile(
     r"[\s:]*[`'\"]?([a-z_][a-z0-9_]*)?",
     re.IGNORECASE,
 )
-# Серверы: read-only (40 инструментов) и rw (мутации/обратный обследователь).
+# Серверы: read-only (42 инструмента, включая recover/arch_diff) и rw
+# (мутации/обратный обследователь).
 SERVERS = [("serve", []), ("serve --rw", ["--rw"])]
 RECOVERY_TOOLS = ["recover", "arch_diff"]
 

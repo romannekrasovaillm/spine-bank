@@ -113,6 +113,7 @@ fn domain_tools(cfg: &Config) -> Vec<Arc<dyn Tool>> {
     out.push(Arc::new(crate::worktree::WorktreeNewTool));
     out.push(Arc::new(crate::fleet::FleetAuditTool));
     out.extend(crate::survey::tools());
+    out.extend(crate::arch_diff::tools());
     #[cfg(feature = "harness")]
     out.extend(crate::distill::tools(cfg));
     out
@@ -133,6 +134,8 @@ mod tests {
             "propose_options",
             "fleet_audit",
             "reverse_survey",
+            "recover",
+            "arch_diff",
             "skill_search",
             "mermaid_render",
             "archify_validate",
