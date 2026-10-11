@@ -1,0 +1,16 @@
+diff --git a/skeleton/payments/total.py b/skeleton/payments/total.py
+new file mode 100644
+--- /dev/null
++++ b/skeleton/payments/total.py
+@@ -0,0 +1,11 @@
++"""Сумма платежей (корпусный дефект, класс S-01 — деньги в float).
++
++Дефект ожидается НЕ поймённым: правила класса S-01 в реестре кейса нет.
++"""
++
++
++def total(amounts):
++    acc = 0.0
++    for a in amounts:
++        acc += float(a)
++    return acc

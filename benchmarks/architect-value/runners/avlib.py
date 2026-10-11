@@ -41,7 +41,12 @@ REPO_CLONES = {
 CLONE_REPOS = {v: k for k, v in REPO_CLONES.items()}
 
 # Путь к бинарю arch-be и корень клонов — из окружения, дефолты без дома.
+# Относительный путь бинаря (напр. `target/debug/arch-be`) резолвится в
+# абсолютный: многие прогонщики запускают arch-be с `cwd=<клон>`/`<кейс>`,
+# где относительный путь не нашёлся бы.
 ARCH_BE = os.environ.get("ARCH_BE", "arch-be")
+if os.sep in ARCH_BE:
+    ARCH_BE = str(Path(ARCH_BE).resolve())
 DEFAULT_REPOS_DIR = os.environ.get("ARCH_VALUE_REPOS", "~/bench-repos")
 DEFAULT_TIMEOUT = int(os.environ.get("ARCH_VALUE_TIMEOUT", "120"))
 

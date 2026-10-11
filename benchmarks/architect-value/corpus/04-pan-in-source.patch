@@ -1,0 +1,11 @@
+diff --git a/skeleton/payments/notify.py b/skeleton/payments/notify.py
+new file mode 100644
+--- /dev/null
++++ b/skeleton/payments/notify.py
+@@ -0,0 +1,6 @@
++"""Уведомление ТСП (корпусный дефект, класс D11 — ПДн в исходнике вне tests/)."""
++PAN_MASK = "PAN-4111111111111111"
++
++
++def mask(pan):
++    return PAN_MASK if pan else None
