@@ -58,6 +58,10 @@ pub struct InboxEntry {
     pub invariants: usize,
     /// Рёбра вне модели (`model_status == not_in_model` среди добавленных).
     pub undeclared_edges: usize,
+    /// Добавленные рёбра с достоверностью `inferred` (D3): слабое основание,
+    /// требующее подтверждения архитектора, — не поднимает маршрут выше
+    /// `standard` (см. [`InboxEntry::effective_rank`]).
+    pub inferred_edges: usize,
     /// Ломающие изменения контрактов (classification breaking|removed).
     pub breaking_contracts: usize,
     /// Затронутые ADR.
@@ -65,9 +69,24 @@ pub struct InboxEntry {
 }
 
 impl InboxEntry {
-    /// Вес записи для сортировки «горячее сверху»: ранг маршрута, число
-    /// задетых инвариантов, объём изменения (добавленные рёбра+узлы) — всё
-    /// по убыванию (Reverse), при равенстве — по пути (детерминизм).
+    /// Эффективный ранг маршрута с учётом достоверности рёбер (D3): при
+    /// наличии `inferred`-рёбер маршрут не поднимается выше `standard`
+    /// (`min` ранга и [`STANDARD_RANK`]) — выведенная связь требует
+    /// подтверждения, а не срочного ревью. Хранимый `route`/`route_rank` —
+    /// сырые, как в артефакте (данные не подменяются).
+    #[must_use]
+    fn effective_rank(&self) -> u8 {
+        if self.inferred_edges > 0 {
+            self.route_rank.min(STANDARD_RANK)
+        } else {
+            self.route_rank
+        }
+    }
+
+    /// Вес записи для сортировки «горячее сверху»: эффективный ранг (с учётом
+    /// inferred-рёбер), число задетых инвариантов, объём изменения
+    /// (добавленные рёбра+узлы) — всё по убыванию (Reverse), при равенстве —
+    /// по пути (детерминизм).
     fn sort_key(
         &self,
     ) -> (
@@ -77,7 +96,7 @@ impl InboxEntry {
         String,
     ) {
         (
-            std::cmp::Reverse(self.route_rank),
+            std::cmp::Reverse(self.effective_rank()),
             std::cmp::Reverse(self.invariants),
             std::cmp::Reverse(self.added_edges + self.added_nodes),
             self.rel.clone(),
@@ -116,6 +135,10 @@ impl InboxReport {
         self.entries.len() + self.empty
     }
 }
+
+/// Ранг маршрута `standard` — потолок эффективного ранга для записей с
+/// `inferred`-рёбрами (D3).
+const STANDARD_RANK: u8 = 2;
 
 /// Ранг маршрута для сортировки (незнакомый маршрут — ниже fast).
 fn route_rank(route: &str) -> u8 {
@@ -166,6 +189,12 @@ fn parse_entry(rel: &str, v: &Value) -> Option<InboxEntry> {
             .filter(|e| e.get("model_status").and_then(Value::as_str) == Some("not_in_model"))
             .count()
     });
+    let inferred = added.map_or(0, |edges| {
+        edges
+            .iter()
+            .filter(|e| e.get("confidence").and_then(Value::as_str) == Some("inferred"))
+            .count()
+    });
     let breaking = v
         .get("contract_changes")
         .and_then(Value::as_array)
@@ -200,6 +229,7 @@ fn parse_entry(rel: &str, v: &Value) -> Option<InboxEntry> {
         removed_nodes: arr_len(v, "removed_nodes"),
         invariants: arr_len(v, "invariants_touched"),
         undeclared_edges: undeclared,
+        inferred_edges: inferred,
         breaking_contracts: breaking,
         adrs: arr_len(v, "adrs_touched"),
     })
@@ -332,6 +362,12 @@ pub fn render(report: &InboxReport) -> String {
         if e.undeclared_edges > 0 {
             flags.push(format!("рёбер вне модели: {}", e.undeclared_edges));
         }
+        if e.inferred_edges > 0 {
+            flags.push(format!(
+                "inferred-рёбра: {} — требуется подтверждение (маршрут не выше standard)",
+                e.inferred_edges
+            ));
+        }
         if e.breaking_contracts > 0 {
             flags.push(format!("ломающих контрактов: {}", e.breaking_contracts));
         }
@@ -375,6 +411,7 @@ pub fn to_json(report: &InboxReport) -> Value {
                 "removed_nodes": e.removed_nodes,
                 "invariants_touched": e.invariants,
                 "undeclared_edges": e.undeclared_edges,
+                "inferred_edges": e.inferred_edges,
                 "breaking_contracts": e.breaking_contracts,
                 "adrs_touched": e.adrs,
             })
@@ -533,6 +570,60 @@ mod tests {
         assert_eq!(e.base, "?");
         assert_eq!(e.added_edges, 1);
         assert_eq!(e.invariants, 0);
+        assert_eq!(e.inferred_edges, 0, "нет confidence — не inferred");
+    }
+
+    /// D3: inferred-ребро не поднимает маршрут выше standard — запись с
+    /// `critical`, но выведенным ребром, уступает честной `critical`; флаг
+    /// требует подтверждения, JSON несёт счётчик (аддитивно). Сырой route
+    /// артефакта не подменяется — понижается лишь эффективный ранг.
+    #[test]
+    fn inferred_edges_cap_route_at_standard() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path();
+        let inferred = serde_json::to_string_pretty(&json!({
+            "schema": ARCH_DIFF_SCHEMA,
+            "base": "aaaa1111bbbb2222cccc3333dddd4444",
+            "head": "eeee5555ffff66667777888899990000",
+            "added_nodes": [],
+            "removed_nodes": [],
+            "added_edges": [{
+                "from": "CMP-001", "to": "CMP-004", "kind": "calls",
+                "evidence": ["skeleton/intake/client.py:3"],
+                "via": "stub", "confidence": "inferred",
+            }],
+            "removed_edges": [],
+            "invariants_touched": [],
+            "adrs_touched": [],
+            "contract_changes": [],
+            "nfr_shifts": [],
+            "route": {"route": "critical", "score": 9, "triggers": [], "evidence": [], "undeclared": []},
+        }))
+        .expect("json");
+        write(root, "a/arch-diff.json", &inferred);
+        // Честная critical (ребро вне модели, без confidence) — не понижается.
+        write(root, "b/arch-diff.json", &artifact("critical", 2, true));
+
+        let report = scan(root).expect("scan");
+        assert_eq!(report.entries.len(), 2, "{:?}", report.entries);
+        // b (эффективный ранг 3) выше a (critical с inferred → ранг 2).
+        assert_eq!(report.entries[0].rel, "b/arch-diff.json");
+        let capped = &report.entries[1];
+        assert_eq!(capped.rel, "a/arch-diff.json");
+        assert_eq!(capped.inferred_edges, 1);
+        assert_eq!(capped.route, "critical", "сырой route не подменяется");
+        assert_eq!(capped.effective_rank(), STANDARD_RANK, "маршрут понижен");
+        assert_eq!(
+            report.entries[0].effective_rank(),
+            3,
+            "запись без inferred не понижается"
+        );
+
+        let text = render(&report);
+        assert!(text.contains("требуется подтверждение"), "{text}");
+        assert!(text.contains("не выше standard"), "{text}");
+        let v = to_json(&report);
+        assert_eq!(v["entries"][1]["inferred_edges"], 1);
     }
 
     /// Корень не каталог — явная ошибка (fail-closed), а не пустой ящик.
