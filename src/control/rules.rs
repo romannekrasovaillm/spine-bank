@@ -9,90 +9,440 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use super::diff_triggers::diff_regex;
-use super::types::{FitnessRule, OverrideEntry, RuleCard, RuleKind, SkippedUnknownRule};
+use super::types::{DenySpec, FitnessRule, OverrideEntry, RuleCard, RuleKind, SkippedUnknownRule};
 use crate::error::{HarnessError, Result};
 
-/// Auto-набор манифестов для `deny_dependency` (поле `manifests` не задано).
-pub(super) const DEFAULT_MANIFEST_GLOBS: [&str; 3] =
-    ["**/Cargo.toml", "**/pom.xml", "**/requirements.txt"];
+/// Auto-набор манифестов для `deny_dependency` (поле `manifests` не задано):
+/// девять форматов тех-радара банка (Maven, Gradle Groovy/KTS, npm,
+/// .NET, Python PEP 621/Poetry, pip, Cargo, Go).
+pub(super) const DEFAULT_MANIFEST_GLOBS: [&str; 9] = [
+    "**/Cargo.toml",
+    "**/pom.xml",
+    "**/build.gradle",
+    "**/build.gradle.kts",
+    "**/package.json",
+    "**/*.csproj",
+    "**/pyproject.toml",
+    "**/requirements.txt",
+    "**/go.mod",
+];
+
+/// Зависимость манифеста (волна S, ADR-070): общая форма для всех форматов
+/// тех-радара. `name` — последний сегмент координаты (артефакт/пакет);
+/// `qualified` — полная координата (`groupId:artifactId`, npm/go-путь) для
+/// сверки с deny-именем целиком; `line` — строка 1-based; `scope` —
+/// нормализованный scope (`compile`/`runtime`/`test`/`peer`/`optional`);
+/// `version` — объявленная версия (для диапазона `below`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ManifestDep {
+    pub(super) name: String,
+    pub(super) qualified: Option<String>,
+    pub(super) line: usize,
+    pub(super) scope: Option<String>,
+    pub(super) version: Option<String>,
+}
+
+/// Строка файла (1-based) по байтовому смещению в содержимом.
+fn line_of(content: &str, offset: usize) -> usize {
+    content[..offset.min(content.len())].matches('\n').count() + 1
+}
+
+/// Номер строки, где встречается ключ `"<key>"` (best-effort, 1 при неудаче) —
+/// для форматов без построчного разбора (JSON/TOML).
+fn find_key_line(content: &str, key: &str) -> usize {
+    let needle = format!("\"{key}\"");
+    content
+        .lines()
+        .position(|l| l.contains(&needle))
+        .map_or(1, |i| i + 1)
+}
+
+/// Спецификатор требования pip/PEP 508 → (имя, версия): `h2==2.0.0` → `(h2,
+/// 2.0.0)`; `requests>=2.0` → `(requests, 2.0)`; `pkgs` (без ограничения) →
+/// `(pkgs, None)`.
+fn parse_req_spec(spec: &str) -> (String, Option<String>) {
+    let trimmed = spec.trim();
+    let cut = trimmed
+        .find(['=', '<', '>', '!', '~', '[', ';', ' '])
+        .unwrap_or(trimmed.len());
+    let name = trimmed[..cut].trim().to_string();
+    let rest = trimmed[cut..].trim_start_matches(['=', '<', '>', '!', '~', ' ']);
+    let vcut = rest.find(['[', ';', ',', ' ']).unwrap_or(rest.len());
+    let version = rest[..vcut].trim();
+    (
+        name,
+        if version.is_empty() {
+            None
+        } else {
+            Some(version.to_string())
+        },
+    )
+}
 
 /// Построчный разбор `Cargo.toml`: имена пакетов из секций `[dependencies]`,
 /// `[dev-dependencies]`, `[build-dependencies]` (и `*.dependencies` —
-/// target-специфичных). Имя — ключ до `=`; значения не разбираются.
-/// Возвращает (пакет, строка 1-based).
-fn parse_cargo_manifest_deps(content: &str) -> Vec<(String, usize)> {
+/// target-специфичных). Имя — ключ до `=`; версия — из значения (простая
+/// строка `"2.0"` или inline-таблица `{ version = "..." }`).
+fn parse_cargo_manifest_deps(content: &str) -> Vec<ManifestDep> {
     let mut out = Vec::new();
-    let mut in_deps = false;
+    let mut scope: Option<&'static str> = None;
     for (idx, raw) in content.lines().enumerate() {
         let line = raw.trim();
         if line.starts_with('[') {
             let section = line.trim_matches(['[', ']']).trim();
-            in_deps = section == "dependencies"
-                || section == "dev-dependencies"
-                || section == "build-dependencies"
-                || section.ends_with(".dependencies");
+            scope = match section {
+                "dependencies" | "build-dependencies" => Some("compile"),
+                "dev-dependencies" => Some("test"),
+                s if s.ends_with(".dependencies") => Some("compile"),
+                _ => None,
+            };
             continue;
         }
-        if !in_deps || line.is_empty() || line.starts_with('#') {
+        let Some(scope) = scope else { continue };
+        if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let key = line.split('=').next().unwrap_or_default().trim();
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
         let name = key
             .split_whitespace()
             .next()
             .unwrap_or_default()
             .trim_matches('"')
             .trim_matches('\'');
-        if !name.is_empty()
-            && name
+        if name.is_empty()
+            || !name
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
         {
-            out.push((name.to_string(), idx + 1));
+            continue;
         }
+        out.push(ManifestDep {
+            name: name.to_string(),
+            qualified: None,
+            line: idx + 1,
+            scope: Some(scope.to_string()),
+            version: cargo_value_version(value.trim()),
+        });
     }
     out
 }
 
-/// Построчный разбор `pom.xml`: все `<artifactId>` (эвристика MVP: собственный
-/// artifactId проекта и parent тоже попадают в список — задокументировано;
-/// ложное срабатывание возможно только при совпадении имени проекта с
-/// deny-пакетом). Возвращает (пакет, строка 1-based).
-fn parse_pom_manifest_deps(content: &str) -> Result<Vec<(String, usize)>> {
-    let re = diff_regex(r"<artifactId>\s*([^<]+?)\s*</artifactId>")?;
+/// Версия из значения Cargo: `"2.0"` → `2.0`; inline-таблица —
+/// `version = "..."`.
+fn cargo_value_version(value: &str) -> Option<String> {
+    if let Some(rest) = value.strip_prefix('"') {
+        return rest.split('"').next().map(str::to_string);
+    }
+    if value.starts_with('{') {
+        let re = diff_regex(r#"version\s*=\s*"([^"]+)""#).ok()?;
+        return re.captures(value).map(|c| c[1].to_string());
+    }
+    None
+}
+
+/// Нормализация Maven `<scope>`: отсутствие/`compile`/`provided`/`system`/
+/// `import` → `compile`; `test` → `test`; `runtime` → `runtime`.
+fn normalize_maven_scope(scope: &str) -> &'static str {
+    match scope.trim().to_ascii_lowercase().as_str() {
+        "test" => "test",
+        "runtime" => "runtime",
+        _ => "compile",
+    }
+}
+
+/// Построчный разбор `pom.xml`: зависимости только из блоков `<dependency>…`.
+/// Собственный `artifactId` проекта и `<parent>` — НЕ зависимости (S2).
+/// `qualified` = `groupId:artifactId`; scope/version — из внутренних тегов.
+fn parse_pom_manifest_deps(content: &str) -> Result<Vec<ManifestDep>> {
+    let block_re = diff_regex(r"(?s)<dependency>(.*?)</dependency>")?;
+    let art_re = diff_regex(r"<artifactId>\s*([^<]+?)\s*</artifactId>")?;
+    let group_re = diff_regex(r"<groupId>\s*([^<]+?)\s*</groupId>")?;
+    let ver_re = diff_regex(r"<version>\s*([^<]+?)\s*</version>")?;
+    let scope_re = diff_regex(r"<scope>\s*([^<]+?)\s*</scope>")?;
+    let mut out = Vec::new();
+    for block in block_re.captures_iter(content) {
+        let body = block.get(1).expect("группа 1 всегда есть");
+        let Some(art) = art_re.captures(body.as_str()) else {
+            continue;
+        };
+        let name = art[1].trim().to_string();
+        let artifact_at = body.start() + art.get(0).expect("совпадение есть").start();
+        let qualified = group_re
+            .captures(body.as_str())
+            .map(|c| format!("{}:{name}", c[1].trim()));
+        let version = ver_re
+            .captures(body.as_str())
+            .map(|c| c[1].trim().to_string());
+        let scope = scope_re
+            .captures(body.as_str())
+            .map(|c| normalize_maven_scope(&c[1]).to_string());
+        out.push(ManifestDep {
+            name,
+            qualified,
+            line: line_of(content, artifact_at),
+            scope,
+            version,
+        });
+    }
+    Ok(out)
+}
+
+/// Scope конфигурации Gradle: `test*` → `test`; `runtime*` → `runtime`;
+/// прочее (`implementation`/`api`/`compileOnly`/…) → `compile`.
+fn gradle_scope(keyword: &str) -> &'static str {
+    let k = keyword.trim().to_ascii_lowercase();
+    if k.starts_with("test") {
+        "test"
+    } else if k.starts_with("runtime") {
+        "runtime"
+    } else {
+        "compile"
+    }
+}
+
+/// Разбор `build.gradle`/`build.gradle.kts`: строковая нотация
+/// (`implementation 'g:a:v'`, в т.ч. `implementation("g:a:v")`) и
+/// map-нотация (`implementation group: 'g', name: 'n', version: 'v'`).
+/// Не-координатные строки (`apply plugin: 'java'`) пропускаются.
+fn parse_gradle_manifest_deps(content: &str) -> Result<Vec<ManifestDep>> {
+    let str_re = diff_regex(r#"(?m)([A-Za-z][A-Za-z0-9]*)\s*\(?\s*['"]([^'"\s]+)['"]"#)?;
+    let group_re = diff_regex(r#"group:\s*['"]([^'"]+)['"]"#)?;
+    let name_re = diff_regex(r#"name:\s*['"]([^'"]+)['"]"#)?;
+    let ver_re = diff_regex(r#"version:\s*['"]([^'"]+)['"]"#)?;
     let mut out = Vec::new();
     for (idx, line) in content.lines().enumerate() {
-        for caps in re.captures_iter(line) {
-            out.push((caps[1].to_string(), idx + 1));
+        let ln = idx + 1;
+        // map-нотация.
+        if let (Some(n), Some(g)) = (name_re.captures(line), group_re.captures(line)) {
+            let name = n[1].to_string();
+            let kw = line.split_whitespace().next().unwrap_or_default();
+            out.push(ManifestDep {
+                qualified: Some(format!("{}:{name}", &g[1])),
+                name,
+                line: ln,
+                scope: Some(gradle_scope(kw).to_string()),
+                version: ver_re.captures(line).map(|c| c[1].to_string()),
+            });
+            continue;
+        }
+        // строковая нотация `g:a[:v]`.
+        for caps in str_re.captures_iter(line) {
+            let mut parts = caps[2].split(':');
+            let (Some(group), Some(artifact)) = (parts.next(), parts.next()) else {
+                continue;
+            };
+            out.push(ManifestDep {
+                name: artifact.to_string(),
+                qualified: Some(format!("{group}:{artifact}")),
+                line: ln,
+                scope: Some(gradle_scope(&caps[1]).to_string()),
+                version: parts.next().map(str::to_string),
+            });
         }
     }
     Ok(out)
 }
 
+/// Разбор `package.json`: секции `dependencies` (runtime),
+/// `devDependencies` (test), `peerDependencies` (peer),
+/// `optionalDependencies` (optional). Версия — значение; строка — поиск ключа.
+fn parse_package_json_manifest_deps(content: &str) -> Vec<ManifestDep> {
+    let Ok(serde_json::Value::Object(root)) = serde_json::from_str(content) else {
+        return Vec::new();
+    };
+    let sections = [
+        ("dependencies", "runtime"),
+        ("devDependencies", "test"),
+        ("peerDependencies", "peer"),
+        ("optionalDependencies", "optional"),
+    ];
+    let mut out = Vec::new();
+    for (section, scope) in sections {
+        let Some(serde_json::Value::Object(deps)) = root.get(section) else {
+            continue;
+        };
+        for (name, value) in deps {
+            out.push(ManifestDep {
+                name: name.clone(),
+                qualified: None,
+                line: find_key_line(content, name),
+                scope: Some(scope.to_string()),
+                version: value.as_str().map(str::to_string),
+            });
+        }
+    }
+    out
+}
+
+/// Разбор `*.csproj` (`PackageReference Include="..." Version="..."`).
+fn parse_csproj_manifest_deps(content: &str) -> Result<Vec<ManifestDep>> {
+    let tag_re = diff_regex(r"<PackageReference\b[^>]*>")?;
+    let inc_re = diff_regex(r#"Include\s*=\s*"([^"]+)""#)?;
+    let ver_re = diff_regex(r#"Version\s*=\s*"([^"]+)""#)?;
+    let mut out = Vec::new();
+    for (idx, line) in content.lines().enumerate() {
+        for tag in tag_re.find_iter(line) {
+            let t = tag.as_str();
+            let Some(name) = inc_re.captures(t) else {
+                continue;
+            };
+            out.push(ManifestDep {
+                name: name[1].to_string(),
+                qualified: None,
+                line: idx + 1,
+                scope: Some("compile".to_string()),
+                version: ver_re.captures(t).map(|c| c[1].to_string()),
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// Добавить требования из TOML-значения: массив строк (PEP 621
+/// `dependencies` / `optional-dependencies`) или таблица `name = version`
+/// (Poetry). `python` в Poetry-таблице — не зависимость.
+fn push_pyproject_reqs(
+    value: Option<&toml::Value>,
+    scope: &str,
+    content: &str,
+    out: &mut Vec<ManifestDep>,
+) {
+    match value {
+        Some(toml::Value::Array(items)) => {
+            for item in items {
+                if let Some(spec) = item.as_str() {
+                    let (name, version) = parse_req_spec(spec);
+                    if name.is_empty() {
+                        continue;
+                    }
+                    out.push(ManifestDep {
+                        line: find_key_line(content, &name),
+                        name,
+                        qualified: None,
+                        scope: Some(scope.to_string()),
+                        version,
+                    });
+                }
+            }
+        }
+        Some(toml::Value::Table(table)) => {
+            for (name, v) in table {
+                if name == "python" {
+                    continue;
+                }
+                out.push(ManifestDep {
+                    name: name.clone(),
+                    qualified: None,
+                    line: find_key_line(content, name),
+                    scope: Some(scope.to_string()),
+                    version: v.as_str().map(str::to_string),
+                });
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Разбор `pyproject.toml`: PEP 621 (`[project] dependencies` и
+/// `optional-dependencies`) и Poetry (`[tool.poetry.dependencies]`,
+/// `[tool.poetry.group.<g>.dependencies]`). Нечитаемый TOML — без находок.
+fn parse_pyproject_manifest_deps(content: &str) -> Vec<ManifestDep> {
+    let Ok(value) = content.parse::<toml::Value>() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    if let Some(project) = value.get("project") {
+        push_pyproject_reqs(project.get("dependencies"), "compile", content, &mut out);
+        if let Some(groups) = project
+            .get("optional-dependencies")
+            .and_then(toml::Value::as_table)
+        {
+            for group in groups.values() {
+                push_pyproject_reqs(Some(group), "optional", content, &mut out);
+            }
+        }
+    }
+    if let Some(poetry) = value.get("tool").and_then(|t| t.get("poetry")) {
+        push_pyproject_reqs(poetry.get("dependencies"), "compile", content, &mut out);
+        if let Some(groups) = poetry.get("group").and_then(toml::Value::as_table) {
+            for group in groups.values() {
+                push_pyproject_reqs(group.get("dependencies"), "compile", content, &mut out);
+            }
+        }
+    }
+    out
+}
+
+/// Разбор `go.mod`: `require <path> <version>` (одиночный) и блок
+/// `require ( … )`. `name` — последний сегмент пути, `qualified` — весь путь.
+fn parse_go_mod_manifest_deps(content: &str) -> Vec<ManifestDep> {
+    let mut out = Vec::new();
+    let mut in_block = false;
+    for (idx, raw) in content.lines().enumerate() {
+        let line = raw.trim();
+        if line.starts_with("require (") {
+            in_block = true;
+            continue;
+        }
+        if in_block && line == ")" {
+            in_block = false;
+            continue;
+        }
+        let entry = if in_block {
+            line
+        } else if let Some(rest) = line.strip_prefix("require ") {
+            rest.trim()
+        } else {
+            continue;
+        };
+        let mut parts = entry.split_whitespace();
+        let Some(path) = parts.next() else {
+            continue;
+        };
+        if path.starts_with("//") || path == "(" || path == ")" {
+            continue;
+        }
+        out.push(ManifestDep {
+            name: path.rsplit('/').next().unwrap_or(path).to_string(),
+            qualified: Some(path.to_string()),
+            line: idx + 1,
+            scope: Some("compile".to_string()),
+            version: parts.next().map(str::to_string),
+        });
+    }
+    out
+}
+
 /// Построчный разбор `requirements.txt`: имя пакета — до спецификатора
 /// версии (`==`/`>=`/`~=`/`[` и т.п.); комментарии `#`, опции (`-r`, `-e`)
-/// и пустые строки пропускаются. Возвращает (пакет, строка 1-based).
-fn parse_requirements_manifest_deps(content: &str) -> Vec<(String, usize)> {
+/// и пустые строки пропускаются.
+fn parse_requirements_manifest_deps(content: &str) -> Vec<ManifestDep> {
     let mut out = Vec::new();
     for (idx, raw) in content.lines().enumerate() {
         let line = raw.split(" #").next().unwrap_or_default().trim();
         if line.is_empty() || line.starts_with('#') || line.starts_with('-') {
             continue;
         }
-        let name = line
-            .split(['=', '<', '>', '!', '~', '[', ';', ' '])
-            .next()
-            .unwrap_or_default()
-            .trim();
-        if !name.is_empty() {
-            out.push((name.to_string(), idx + 1));
+        let (name, version) = parse_req_spec(line);
+        if name.is_empty() {
+            continue;
         }
+        out.push(ManifestDep {
+            name,
+            qualified: None,
+            line: idx + 1,
+            scope: Some("compile".to_string()),
+            version,
+        });
     }
     out
 }
 
-/// Зависимости манифеста по имени файла (для `deny_dependency`).
-pub(super) fn manifest_deps(rel: &str, content: &str) -> Result<Vec<(String, usize)>> {
+/// Зависимости манифеста по имени файла (для `deny_dependency`, волна S):
+/// диспетчер по девяти форматам тех-радара; прочее — формат pip.
+pub(super) fn manifest_deps(rel: &str, content: &str) -> Result<Vec<ManifestDep>> {
     let name = Path::new(rel)
         .file_name()
         .and_then(|n| n.to_str())
@@ -101,10 +451,70 @@ pub(super) fn manifest_deps(rel: &str, content: &str) -> Result<Vec<(String, usi
         Ok(parse_cargo_manifest_deps(content))
     } else if name == "pom.xml" {
         parse_pom_manifest_deps(content)
+    } else if name == "build.gradle" || name == "build.gradle.kts" {
+        parse_gradle_manifest_deps(content)
+    } else if name == "package.json" {
+        Ok(parse_package_json_manifest_deps(content))
+    } else if name == "pyproject.toml" {
+        Ok(parse_pyproject_manifest_deps(content))
+    } else if name == "go.mod" {
+        Ok(parse_go_mod_manifest_deps(content))
+    } else if name.ends_with(".csproj") || name.ends_with(".fsproj") || name.ends_with(".vbproj") {
+        parse_csproj_manifest_deps(content)
     } else {
         // requirements.txt и любые иные *.txt по glob — формат pip.
         Ok(parse_requirements_manifest_deps(content))
     }
+}
+
+/// Версия `candidate` строго ниже порога `threshold` (дот-числовая схема:
+/// `2.15.0 < 2.17.1`, `1.9 < 2`; префиксы `^`/`v`/операторов срезаются).
+/// Непарсимая версия с ЛЮБОЙ стороны — `false` (fail-open: без версии не
+/// красним — иначе ложные находки на `latest`/`*`).
+pub(super) fn version_below(candidate: &str, threshold: &str) -> bool {
+    fn parts(s: &str) -> Option<Vec<u64>> {
+        let start = s.find(|c: char| c.is_ascii_digit())?;
+        let mut out = Vec::new();
+        for piece in s[start..].split(['.', '-', '+', ' ', '_']) {
+            let num: String = piece.chars().take_while(char::is_ascii_digit).collect();
+            if num.is_empty() {
+                break;
+            }
+            out.push(num.parse::<u64>().ok()?);
+        }
+        (!out.is_empty()).then_some(out)
+    }
+    let (Some(mut a), Some(mut b)) = (parts(candidate), parts(threshold)) else {
+        return false;
+    };
+    let len = a.len().max(b.len());
+    a.resize(len, 0);
+    b.resize(len, 0);
+    a < b
+}
+
+/// Совпадение записи `deny` с зависимостью (волна S, ADR-070): имя (или
+/// полная координата) + диапазон версий (`below`) + фильтр scope.
+pub(super) fn deny_spec_matches(spec: &DenySpec, dep: &ManifestDep) -> bool {
+    if dep.name != spec.name() && dep.qualified.as_deref() != Some(spec.name()) {
+        return false;
+    }
+    if let Some(below) = spec.below() {
+        let Some(version) = dep.version.as_deref() else {
+            return false;
+        };
+        if !version_below(version, below) {
+            return false;
+        }
+    }
+    let scopes = spec.scopes();
+    if !scopes.is_empty() {
+        let scope = dep.scope.as_deref().unwrap_or("compile");
+        if !scopes.iter().any(|s| s == scope) {
+            return false;
+        }
+    }
+    true
 }
 
 /// Пакетная копия реестра ограничений (handoff-пакет) — приоритетная в
@@ -573,5 +983,206 @@ mod tests {
         );
         let rules = load_fitness_rules(&c).expect("разбор схемы");
         assert_eq!(rules[0].requires, vec!["oracle-client".to_string()]);
+    }
+
+    // --- S2 (волна S, ADR-070): тех-радар — форматы/диапазоны/scope ---
+
+    /// Восемь форматов манифестов тех-радара (метрика 10): один запрещённый
+    /// пакет `h2` объявлен по-разному — находка обязана появиться в каждом.
+    #[test]
+    fn deny_dependency_detects_all_manifest_formats() {
+        use std::collections::BTreeSet;
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        let files: &[(&str, &str)] = &[
+            (
+                "svc-maven/pom.xml",
+                "<project><dependencies><dependency><groupId>com.h2database</groupId><artifactId>h2</artifactId></dependency></dependencies></project>\n",
+            ),
+            (
+                "svc-gradle/build.gradle",
+                "dependencies {\n  implementation 'com.h2database:h2:2.2.224'\n}\n",
+            ),
+            (
+                "svc-gradle-kts/build.gradle.kts",
+                "dependencies {\n  implementation(\"com.h2database:h2:2.2.224\")\n}\n",
+            ),
+            (
+                "svc-node/package.json",
+                "{\"name\":\"svc\",\"dependencies\":{\"h2\":\"^2.0.0\"}}\n",
+            ),
+            (
+                "svc-dotnet/svc.csproj",
+                "<Project Sdk=\"Microsoft.NET.Sdk\"><ItemGroup><PackageReference Include=\"h2\" Version=\"2.0.0\" /></ItemGroup></Project>\n",
+            ),
+            (
+                "svc-python/pyproject.toml",
+                "[project]\nname = \"svc\"\ndependencies = [\"h2\"]\n",
+            ),
+            ("svc-req/requirements.txt", "h2==2.0.0\n"),
+            (
+                "svc-rust/Cargo.toml",
+                "[package]\nname = \"svc\"\nversion = \"0.1.0\"\n\n[dependencies]\nh2 = \"2.0\"\n",
+            ),
+            (
+                "svc-go/go.mod",
+                "module example.com/svc\n\ngo 1.21\n\nrequire github.com/example/h2 v1.0.0\n",
+            ),
+        ];
+        for (rel, content) in files {
+            write_file(repo, rel, content);
+        }
+        let constraints = write_file(
+            repo,
+            "CONSTRAINTS.yaml",
+            "rules:\n  - name: probe\n    type: deny_dependency\n    deny: [h2]\n    severity: error\n",
+        );
+        let report = check(repo, &constraints).unwrap();
+        let hit: BTreeSet<String> = report
+            .issues
+            .iter()
+            .filter(|i| i.rule == "probe")
+            .map(|i| i.file.display().to_string())
+            .collect();
+        for (rel, _) in files {
+            assert!(
+                hit.contains(*rel),
+                "формат не распознан: {rel}; находки: {hit:?}"
+            );
+        }
+    }
+
+    /// Диапазон версий (S2, `log4j-core < 2.17.1`): находка ниже порога,
+    /// тишина на пороге и выше; версия без диапазона не сравнивается.
+    #[test]
+    fn deny_dependency_version_range() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        write_file(
+            repo,
+            "old/pom.xml",
+            "<project><dependency><groupId>org.apache.logging.log4j</groupId><artifactId>log4j-core</artifactId><version>2.15.0</version></dependency></project>\n",
+        );
+        write_file(
+            repo,
+            "edge/pom.xml",
+            "<project><dependency><groupId>org.apache.logging.log4j</groupId><artifactId>log4j-core</artifactId><version>2.17.1</version></dependency></project>\n",
+        );
+        write_file(
+            repo,
+            "new/pom.xml",
+            "<project><dependency><groupId>org.apache.logging.log4j</groupId><artifactId>log4j-core</artifactId><version>2.20.0</version></dependency></project>\n",
+        );
+        let constraints = write_file(
+            repo,
+            "CONSTRAINTS.yaml",
+            "rules:\n  - name: no_old_log4j\n    type: deny_dependency\n    deny:\n      - name: log4j-core\n        below: \"2.17.1\"\n    severity: error\n",
+        );
+        let report = check(repo, &constraints).unwrap();
+        let hits: Vec<&LintIssue> = report
+            .issues
+            .iter()
+            .filter(|i| i.rule == "no_old_log4j")
+            .collect();
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].file, Path::new("old/pom.xml"));
+        assert!(hits[0].message.contains("2.15.0"), "{}", hits[0].message);
+        assert!(hits[0].message.contains("2.17.1"), "{}", hits[0].message);
+    }
+
+    /// Scope-фильтр (S2): `testImplementation`-зависимость не краснит правило
+    /// с `scopes: [runtime, compile]`, `implementation` — краснит.
+    #[test]
+    fn deny_dependency_scope_filter() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        write_file(
+            repo,
+            "svc-test/build.gradle",
+            "dependencies {\n  testImplementation 'com.h2database:h2:2.2.224'\n}\n",
+        );
+        write_file(
+            repo,
+            "svc-prod/build.gradle",
+            "dependencies {\n  implementation 'com.h2database:h2:2.2.224'\n}\n",
+        );
+        let constraints = write_file(
+            repo,
+            "CONSTRAINTS.yaml",
+            "rules:\n  - name: no_h2_runtime\n    type: deny_dependency\n    deny:\n      - name: h2\n        scopes: [runtime, compile]\n    severity: error\n",
+        );
+        let report = check(repo, &constraints).unwrap();
+        let hits: Vec<&LintIssue> = report
+            .issues
+            .iter()
+            .filter(|i| i.rule == "no_h2_runtime")
+            .collect();
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].file, Path::new("svc-prod/build.gradle"));
+    }
+
+    /// Точный `pom.xml` (S2): собственный `artifactId` проекта и `<parent>` —
+    /// НЕ зависимости; находка только на `<dependency>`-блоке.
+    #[test]
+    fn deny_dependency_pom_ignores_own_artifact_and_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        write_file(
+            repo,
+            "s/pom.xml",
+            "<project>\n  <parent><artifactId>h2-parent</artifactId></parent>\n  <artifactId>h2</artifactId>\n  <dependencies>\n    <dependency><artifactId>ok-lib</artifactId></dependency>\n  </dependencies>\n</project>\n",
+        );
+        let constraints = write_file(
+            repo,
+            "CONSTRAINTS.yaml",
+            "rules:\n  - name: no_h2\n    type: deny_dependency\n    deny: [h2, h2-parent]\n    severity: error\n",
+        );
+        let report = check(repo, &constraints).unwrap();
+        assert!(
+            report.issues.iter().all(|i| i.rule != "no_h2"),
+            "{:?}",
+            report.issues
+        );
+    }
+
+    /// Разбор `deny` (S2): одиночная строка, список строк и список
+    /// развёрнутых записей `{name, below, scopes}`.
+    #[test]
+    fn deny_spec_parses_all_forms() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = write_file(
+            dir.path(),
+            "CONSTRAINTS.yaml",
+            "rules:\n\
+             \x20 - name: one\n    type: deny_dependency\n    deny: h2\n\
+             \x20 - name: list\n    type: deny_dependency\n    deny: [h2, hsqldb]\n\
+             \x20 - name: detailed\n    type: deny_dependency\n    deny:\n      - name: log4j-core\n        below: \"2.17.1\"\n        scopes: [runtime, compile]\n",
+        );
+        let rules = load_fitness_rules(&c).expect("разбор deny");
+        assert_eq!(rules[0].deny.len(), 1);
+        assert_eq!(rules[0].deny[0].name(), "h2");
+        assert!(rules[0].deny[0].below().is_none());
+        assert_eq!(rules[1].deny.len(), 2);
+        assert_eq!(rules[2].deny[0].name(), "log4j-core");
+        assert_eq!(rules[2].deny[0].below(), Some("2.17.1"));
+        assert_eq!(
+            rules[2].deny[0].scopes(),
+            &["runtime".to_string(), "compile".to_string()]
+        );
+    }
+
+    /// Компаратор версий (S2): дот-числовая схема, операторы диапазонов
+    /// срезаются, непарсимое — НЕ ниже (fail-open: без версии не красним).
+    #[test]
+    fn version_below_dotted_numeric() {
+        assert!(version_below("2.15.0", "2.17.1"));
+        assert!(version_below("2.0.0", "2.17.1"));
+        assert!(version_below("1.9", "2"));
+        assert!(version_below("^2.15.0", "2.17.1"));
+        assert!(version_below("v2.15.0", "2.17.1"));
+        assert!(!version_below("2.17.1", "2.17.1"));
+        assert!(!version_below("2.20.0", "2.17.1"));
+        assert!(!version_below("latest", "2.17.1"));
+        assert!(!version_below("2.15.0", "legacy"));
     }
 }

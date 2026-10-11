@@ -18,27 +18,34 @@ version: "2026.10"
 id: JAVA-SERVICES
 rules:
   # S1. Встраиваемые СУБД (h2, hsqldb) не в runtime прода.
-  # Выразимо ЧАСТИЧНО: deny_dependency разбирает `pom.xml` (Maven), но не
-  # build.gradle (Gradle — тех-радар §2.4, metric 10) и не различает scope
-  # (test/runtime попадают наравне с compile). Gradle-выражение — волна S.
+  # Выразимо × deny_dependency (волна S, ADR-070): тех-радар разбирает Maven и
+  # Gradle (Groovy/KTS), а `scopes: [runtime, compile]` отсекает тестовые
+  # зависимости (`testImplementation`, `<scope>test</scope>`).
   - id: JSS-001
     name: s1_no_embedded_db_in_prod
     type: deny_dependency
-    manifests: ["**/pom.xml"]
-    deny: [h2, hsqldb]
+    manifests: ["**/pom.xml", "**/build.gradle", "**/build.gradle.kts"]
+    deny:
+      - { name: "com.h2database:h2", scopes: [runtime, compile] }
+      - { name: hsqldb, scopes: [runtime, compile] }
     severity: warn
     owner: "@arch-board"
     rationale: "Тех-радар Hold: встраиваемые СУБД (h2, hsqldb) недопустимы в runtime прода."
     reference: "TECH-RADAR hold-embedded-db"
 
-  # S2. log4j-core < 2.17.1 запрещён. Диапазоны версий в манифестах имеющимся
-  # набором правил не выражаются (нужен парсинг версий — волна S).
+  # S2. log4j-core < 2.17.1 запрещён. Выразимо × deny_dependency с диапазоном
+  # версии (`below: "2.17.1"`, волна S, ADR-070): сравнение по точечно-числовым
+  # версиям Maven/Gradle; нечисловые специф. (диапазоны `[1.0,2.0)`) — fail-open.
   - id: JSS-002
     name: s2_log4j_min_version
-    unverifiable: true
+    type: deny_dependency
+    manifests: ["**/pom.xml", "**/build.gradle", "**/build.gradle.kts"]
+    deny:
+      - { name: log4j-core, below: "2.17.1" }
     severity: error
     owner: "@dka-security"
-    rationale: "log4j-core < 2.17.1 запрещён; нужен разбор диапазонов версий — не выразимо."
+    rationale: "log4j-core < 2.17.1 запрещён (Log4Shell); ниже порога — error."
+    reference: "TECH-RADAR log4j-2.17.1"
 
   # S3. Каждый бизнес-сервис публикует OpenAPI. Выразимо хрупким glob'ом ×
   # dir_must_have_file (признак сервиса — каталог `src/main/resources`).

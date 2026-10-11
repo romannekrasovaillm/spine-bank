@@ -375,6 +375,72 @@ pub struct NotApplicableRule {
     pub reason: String,
 }
 
+/// Одна запись `deny`-списка тех-радара (`deny_dependency`, волна S, ADR-070).
+///
+/// Простая форма — `h2` (имя пакета); развёрнутая — `{name: log4j-core,
+/// below: "2.17.1", scopes: [runtime, compile]}` (диапазон версий и фильтр
+/// scope). Формат — dual: строка задаёт имя; карта — имя плюс необязательные
+/// диапазон и scope. Отсутствие развёрнутых полей сохраняет семантику
+/// существующих `deny: [pkg, ...]` (сравнение только по имени).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum DenySpec {
+    /// Простое имя пакета (обратная совместимость).
+    Name(String),
+    /// Развёрнутая запись: имя + диапазон версии + scope-фильтр.
+    Detailed {
+        /// Имя пакета (артефакт; для `groupId:artifactId` — проверяется и
+        /// полная координата, и последний сегмент).
+        name: String,
+        /// Запрещать версии строго НИЖЕ порога (`< below`); пусто — любая
+        /// версия. Непарсимая версия НЕ краснит (fail-open).
+        #[serde(default)]
+        below: Option<String>,
+        /// Разрешённый набор scope для краснения (`compile`/`runtime`/`test`/
+        /// `peer`/`optional`); пусто — любой scope.
+        #[serde(default, deserialize_with = "de_string_or_list")]
+        scopes: Vec<String>,
+    },
+}
+
+impl DenySpec {
+    /// Имя пакета записи.
+    pub(crate) fn name(&self) -> &str {
+        match self {
+            DenySpec::Name(name) | DenySpec::Detailed { name, .. } => name,
+        }
+    }
+
+    /// Порог диапазона версий (`below`) — `None`, если не задан.
+    pub(crate) fn below(&self) -> Option<&str> {
+        match self {
+            DenySpec::Name(_) => None,
+            DenySpec::Detailed { below, .. } => below.as_deref(),
+        }
+    }
+
+    /// Набор scope для краснения — пусто, если не задан.
+    pub(crate) fn scopes(&self) -> &[String] {
+        match self {
+            DenySpec::Name(_) => &[],
+            DenySpec::Detailed { scopes, .. } => scopes,
+        }
+    }
+
+    /// Канонический текст записи для анти-ослабления (A1): порядок scope не
+    /// влияет на хэш тела правила.
+    fn canonical(&self) -> String {
+        let mut scopes: Vec<&str> = self.scopes().iter().map(String::as_str).collect();
+        scopes.sort_unstable();
+        format!(
+            "{}|below={}|scopes={}",
+            self.name(),
+            self.below().unwrap_or_default(),
+            scopes.join(",")
+        )
+    }
+}
+
 /// Одно правило из `CONSTRAINTS.yaml`.
 ///
 /// Публичная структура (нужна `ArchUnit`-мосту на CLI-краю, ADR-039); поля
@@ -505,9 +571,11 @@ pub struct FitnessRule {
     /// `**/requirements.txt`.
     #[serde(default, deserialize_with = "de_string_or_list")]
     pub(super) manifests: Vec<String>,
-    /// Запрещённые имена пакетов (для `deny_dependency`; строка или список).
-    #[serde(default, deserialize_with = "de_string_or_list")]
-    pub(super) deny: Vec<String>,
+    /// Запрещённые пакеты (для `deny_dependency`, волна S, ADR-070): строка,
+    /// список имён или список развёрнутых записей [`DenySpec`] с диапазоном
+    /// версий и scope-фильтром.
+    #[serde(default, deserialize_with = "de_deny_list")]
+    pub(super) deny: Vec<DenySpec>,
     /// Ссылка на основание запрета — решение техкомитета/ADR (для
     /// `deny_dependency`; попадает в текст находки).
     #[serde(default)]
@@ -611,6 +679,11 @@ impl FitnessRule {
         fn opt_list(values: &Option<Vec<String>>) -> String {
             values.as_deref().map_or(String::new(), list)
         }
+        fn deny_specs(values: &[DenySpec]) -> String {
+            let mut refs: Vec<String> = values.iter().map(DenySpec::canonical).collect();
+            refs.sort_unstable();
+            refs.join("\u{1f}")
+        }
         fn opt(value: &Option<String>) -> String {
             value.clone().unwrap_or_default()
         }
@@ -644,7 +717,7 @@ impl FitnessRule {
         out.insert("model_dir", opt(&self.model_dir));
         out.insert("classes_dir", opt(&self.classes_dir));
         out.insert("jar_dir", opt(&self.jar_dir));
-        out.insert("deny", list(&self.deny));
+        out.insert("deny", deny_specs(&self.deny));
         out.insert("manifests", list(&self.manifests));
         out.insert("reference", opt(&self.reference));
         out.insert("timeout_secs", num(self.timeout_secs));
@@ -690,6 +763,27 @@ where
     Ok(match StringOrList::deserialize(deserializer)? {
         StringOrList::One(s) => vec![s],
         StringOrList::Many(v) => v,
+    })
+}
+
+/// Десериализация `deny`-списка тех-радара (волна S, ADR-070): принимает и
+/// одиночную запись [`DenySpec`], и их список — форма записи (строка или
+/// карта `{name, below, scopes}`) разбирается самим `DenySpec`.
+fn de_deny_list<'de, D>(deserializer: D) -> std::result::Result<Vec<DenySpec>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum DenyInput {
+        /// Одиночная запись (имя или карта).
+        One(DenySpec),
+        /// Список записей.
+        Many(Vec<DenySpec>),
+    }
+    Ok(match DenyInput::deserialize(deserializer)? {
+        DenyInput::One(spec) => vec![spec],
+        DenyInput::Many(v) => v,
     })
 }
 

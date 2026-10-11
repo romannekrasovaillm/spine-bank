@@ -13,9 +13,12 @@ use regex::Regex;
 
 use super::baseline;
 use super::glob::{collect_dirs, collect_files, glob_matches};
-use crate::control::rules::{DEFAULT_MANIFEST_GLOBS, manifest_deps};
+use crate::control::rules::{
+    DEFAULT_MANIFEST_GLOBS, ManifestDep, deny_spec_matches, manifest_deps,
+};
 use crate::control::types::{
-    FitnessRule, LintIssue, RuleKind, RunnerSkippedRule, UntrustedSkippedRule, normalize_severity,
+    DenySpec, FitnessRule, LintIssue, RuleKind, RunnerSkippedRule, UntrustedSkippedRule,
+    normalize_severity,
 };
 use crate::error::{HarnessError, Result};
 
@@ -32,6 +35,26 @@ fn apply_excludes<T: AsRef<str>>(paths: &mut Vec<T>, excludes: &[String]) {
 
 /// Дефолтный таймаут `command_succeeds`, секунды.
 const COMMAND_TIMEOUT_DEFAULT_SECS: u64 = 60;
+
+/// Текст находки `deny_dependency` (волна S, ADR-070): для простой записи —
+/// «пакет '<имя>' из deny-списка»; для записи с диапазоном версии добавляется
+/// факт нарушения «'<версия>' < '<порог>'».
+fn deny_message(spec: &DenySpec, dep: &ManifestDep, reference: &str) -> String {
+    match spec.below() {
+        Some(below) => format!(
+            "deny_dependency: пакет '{}' {} < {} из deny-списка{}",
+            spec.name(),
+            dep.version.as_deref().unwrap_or("?"),
+            below,
+            reference
+        ),
+        None => format!(
+            "deny_dependency: пакет '{}' из deny-списка{}",
+            spec.name(),
+            reference
+        ),
+    }
+}
 
 /// Выполняет одно fitness-правило, добавляя находки в `issues`.
 ///
@@ -519,13 +542,15 @@ pub(super) fn run_rule(
             for (rel, abs) in &files {
                 let bytes = std::fs::read(abs).map_err(|e| HarnessError::io(abs, e))?;
                 let content = String::from_utf8_lossy(&bytes);
-                for (pkg, line) in manifest_deps(rel, &content)? {
-                    if rule.deny.iter().any(|d| d == &pkg) {
-                        issue(
-                            PathBuf::from(rel),
-                            line,
-                            format!("deny_dependency: пакет '{pkg}' из deny-списка{reference}"),
-                        );
+                for dep in manifest_deps(rel, &content)? {
+                    for spec in &rule.deny {
+                        if deny_spec_matches(spec, &dep) {
+                            issue(
+                                PathBuf::from(rel),
+                                dep.line,
+                                deny_message(spec, &dep, &reference),
+                            );
+                        }
                     }
                 }
             }
