@@ -66,8 +66,9 @@ fn is_yaml(path: &str) -> bool {
 
 /// Нормализованное имя для сопоставления: только ASCII-буквоцифры в нижнем
 /// регистре (`ProductCatalogService` → `productcatalogservice`,
-/// `vets-service` → `vetsservice`).
-fn norm_name(s: &str) -> String {
+/// `vets-service` → `vetsservice`). Общая с `as_built` (REC, ADR-075):
+/// k8s-имя манифеста сводится к заголовку компонента тем же правилом.
+pub(crate) fn norm_name(s: &str) -> String {
     s.chars()
         .filter(char::is_ascii_alphanumeric)
         .map(|c| c.to_ascii_lowercase())
@@ -317,6 +318,7 @@ fn acc_call(
         EdgeKind::Calls,
         Some(via),
         Some(confidence),
+        None,
     ))
     .or_default()
     .insert(evidence);
@@ -682,7 +684,7 @@ mod tests {
         let mut gaps: BTreeSet<String> = BTreeSet::new();
         collect_call_edges(snap, comps, tp, &mut acc, &mut nodes, &mut gaps).unwrap();
         acc.into_iter()
-            .map(|((from, to, _k, via, conf), _)| (from, to, via.unwrap(), conf.unwrap()))
+            .map(|((from, to, _k, via, conf, _c), _)| (from, to, via.unwrap(), conf.unwrap()))
             .collect()
     }
 

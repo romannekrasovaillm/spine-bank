@@ -8,7 +8,8 @@ use regex::Regex;
 
 use super::snapshot::{Snapshot, snapshot_at_with, snapshot_worktree_with};
 use super::types::{
-    ArchEdge, ArchGraph, ArchNode, Confidence, EdgeKind, MAX_EDGE_EVIDENCE, NodeKind, Via,
+    ArchEdge, ArchGraph, ArchNode, Condition, ConditionKind, Confidence, EdgeKind,
+    MAX_EDGE_EVIDENCE, NodeKind, Via,
 };
 use crate::control::{DiffGlobs, content_looks_like_contract, looks_like_config};
 use crate::error::{HarnessError, Result};
@@ -308,19 +309,117 @@ pub(crate) fn owner_of_path(contexts: &[(usize, Vec<String>)], path: &str) -> Op
         .map(|(c, _)| *c)
 }
 
-/// Ключ накопителя рёбер: (from, to, kind, via, confidence). `via`/`confidence`
-/// заполнены только у рёбер `calls` (R2) — ребрам прочих видов они `None`.
-type EdgeKey = (String, String, EdgeKind, Option<Via>, Option<Confidence>);
+/// Ключ накопителя рёбер: (from, to, kind, via, confidence, condition).
+/// `via`/`confidence` заполнены только у рёбер `calls` (R2); `condition` — у
+/// рёбер `connect`, выведённых из условного основания (REC, ADR-075); у прочих
+/// видов поля `None`.
+type EdgeKey = (
+    String,
+    String,
+    EdgeKind,
+    Option<Via>,
+    Option<Confidence>,
+    Option<Condition>,
+);
 
 /// Накопитель рёбер: ключ → основания (множество — дедуп).
 pub(crate) type EdgeAcc = BTreeMap<EdgeKey, BTreeSet<String>>;
 
-/// Добавляет основание к ребру без способа/достоверности (import/connect/
+/// Добавляет основание к ребру без способа/достоверности/условия (import/
 /// contract по построению).
 fn acc_edge(acc: &mut EdgeAcc, from: &str, to: &str, kind: EdgeKind, evidence: String) {
-    acc.entry((from.to_string(), to.to_string(), kind, None, None))
-        .or_default()
-        .insert(evidence);
+    acc_edge_cond(acc, from, to, kind, None, evidence);
+}
+
+/// Добавляет основание к ребру с условием активации (REC, ADR-075): рёбра
+/// `connect` одного направления под разными условиями не сливаются — это и
+/// есть deployment-вид (одно ребро на окружение).
+fn acc_edge_cond(
+    acc: &mut EdgeAcc,
+    from: &str,
+    to: &str,
+    kind: EdgeKind,
+    condition: Option<Condition>,
+    evidence: String,
+) {
+    acc.entry((
+        from.to_string(),
+        to.to_string(),
+        kind,
+        None,
+        None,
+        condition,
+    ))
+    .or_default()
+    .insert(evidence);
+}
+
+/// Токены окружений (нижний регистр) для распознавания overlay-файлов и
+/// каталогов. Узкий allowlist — расширение в пользовательском каталоге
+/// провайдеров невозможно, поэтому список фиксирован.
+const ENV_TOKENS: [&str; 15] = [
+    "prod",
+    "production",
+    "staging",
+    "stage",
+    "dev",
+    "development",
+    "test",
+    "testing",
+    "qa",
+    "uat",
+    "preprod",
+    "sandbox",
+    "local",
+    "canary",
+    "demo",
+];
+
+/// Канонический токен окружения из allowlist (нижний регистр) либо `None`.
+fn env_token(segment: &str) -> Option<&'static str> {
+    let seg = segment.to_ascii_lowercase();
+    ENV_TOKENS.iter().copied().find(|t| *t == seg)
+}
+
+/// Окружение per-environment overlay-файла (REC, ADR-075) по пути:
+/// (`overlays`|`envs`|`environments`)/`<env>`/… (kustomize/helm),
+/// `values-<env>.yaml` / `application-<env>.yml` (helm/spring-профили).
+/// Эвристика по пути: значение per-env, а не свойство кода.
+fn overlay_env(path: &str) -> Option<&'static str> {
+    let lower = path.to_ascii_lowercase();
+    let segs: Vec<&str> = lower.split('/').collect();
+    // Каталог-маркер окружения: overlays/<env>/, envs/<env>/, environments/<env>/.
+    for pair in segs.windows(2) {
+        if matches!(pair[0], "overlays" | "envs" | "environments") {
+            if let Some(env) = env_token(pair[1]) {
+                return Some(env);
+            }
+        }
+    }
+    // Имя файла: values-<env>, application-<env>, values_<env> (суффикс — токен).
+    let name = segs.last().copied().unwrap_or("");
+    let stem = name.rsplit_once('.').map_or(name, |(s, _)| s);
+    for sep in ['-', '_'] {
+        if let Some((_, env)) = stem.rsplit_once(sep) {
+            if let Some(token) = env_token(env) {
+                return Some(token);
+            }
+        }
+    }
+    None
+}
+
+/// Условие активации ребра по основанию: overlay-файл перекрывает построчное
+/// основание (deployment-вид важнее источника строки), иначе — условие самой
+/// строки (config-key/env-flag) либо `None` (безусловное ребро).
+fn hit_condition(overlay: Option<&str>, source: Option<Condition>) -> Option<Condition> {
+    if let Some(env) = overlay {
+        return Some(Condition {
+            kind: ConditionKind::EnvOverlay,
+            text: env.to_string(),
+        });
+    }
+    source
 }
 
 /// Рёбра импортов: файл компонента импортирует модуль другого компонента.
@@ -435,6 +534,155 @@ fn node_title(kind: NodeKind, id: &str) -> String {
     }
 }
 
+/// Владельцы k8s-документов файла: `(строка начала, строка конца, индекс
+/// компонента)`. Учитываются только документы `Deployment`/`StatefulSet`, чей
+/// `metadata.name` (нормализованный, как у `calls::env_calls`) совпадает с
+/// заголовком компонента. Для манифестов вне `code_roots`
+/// (`kustomize/`, `kubernetes-manifests/`) — детерминированный способ связать
+/// условие активации с компонентом, не вводя новых детекторов рёбер `calls`
+/// (их ведёт `calls::env_calls`); применяется только к условиям-провайдерам и
+/// лишь когда путь не дал владельца.
+fn k8s_doc_owners(content: &str, comps: &[ComponentCtx]) -> Vec<(usize, usize, usize)> {
+    let mut by_title: BTreeMap<String, usize> = BTreeMap::new();
+    for (i, c) in comps.iter().enumerate() {
+        by_title
+            .entry(super::calls::norm_name(&c.title))
+            .or_insert(i);
+    }
+    let lines: Vec<&str> = content.lines().collect();
+    let mut out = Vec::new();
+    let mut start = 1usize;
+    let mut doc = String::new();
+    for (idx, line) in lines.iter().enumerate() {
+        let lnum = idx + 1;
+        if line.trim() == "---" {
+            push_doc_owner(&doc, start, lnum.saturating_sub(1), &by_title, &mut out);
+            doc.clear();
+            start = lnum + 1;
+        } else {
+            doc.push_str(line);
+            doc.push('\n');
+        }
+    }
+    push_doc_owner(&doc, start, lines.len().max(1), &by_title, &mut out);
+    // Kustomize-компонент (`kind: Component`) несёт патчи-Deployment'ы внутри
+    // блочных скаляров `patch: |-`; они тоже именуют цель `metadata.name`.
+    out.extend(embedded_patch_owners(&lines, &by_title));
+    out
+}
+
+/// Владельцы из блочных скаляров `patch: |…` (kustomize `Component`):
+/// каждый блок — отдельный k8s-документ; если это `Deployment`/`StatefulSet`
+/// с заголовком компонента — его строки получают владельца.
+fn embedded_patch_owners(
+    lines: &[&str],
+    by_title: &BTreeMap<String, usize>,
+) -> Vec<(usize, usize, usize)> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let Some(key_indent) = patch_block_indent(lines[i]) else {
+            i += 1;
+            continue;
+        };
+        let mut j = i + 1;
+        let mut block = String::new();
+        let mut last = i; // 1-based номер последней значимой строки блока
+        while j < lines.len() {
+            let raw = lines[j];
+            let ind = raw.len() - raw.trim_start().len();
+            if !raw.trim().is_empty() && ind <= key_indent {
+                break;
+            }
+            block.push_str(raw);
+            block.push('\n');
+            last = j + 1;
+            j += 1;
+        }
+        if let Some(idx) = doc_yaml_owner(&dedent(&block), by_title) {
+            // Содержимое блока — строки i+2 ..= last (1-based).
+            out.push((i + 2, last.max(i + 2), idx));
+        }
+        i = j.max(i + 1);
+    }
+    out
+}
+
+/// Отступ ключа `patch:` (с учётом маркера списка `- `), если строка начинает
+/// блочный скаляр (`patch: |…` / `patch: >…`). Иначе `None`.
+fn patch_block_indent(line: &str) -> Option<usize> {
+    let mut col = line.len() - line.trim_start().len();
+    let mut rest = line.trim_start();
+    if let Some(r) = rest.strip_prefix("- ") {
+        col += 2;
+        rest = r;
+    }
+    let value = rest.strip_prefix("patch:")?.trim_start();
+    (value.starts_with('|') || value.starts_with('>')).then_some(col)
+}
+
+/// Снимает общий минимальный отступ (блок-скаляр kustomize внутри документа).
+fn dedent(block: &str) -> String {
+    let min = block
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.len() - l.trim_start().len())
+        .min()
+        .unwrap_or(0);
+    block
+        .lines()
+        .map(|l| l.get(min..).unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Разбирает один YAML-документ: `Deployment`/`StatefulSet` с заголовком
+/// компонента добавляет себя в `out`. Невалидный/чужой документ — молча.
+fn push_doc_owner(
+    doc: &str,
+    start: usize,
+    end: usize,
+    by_title: &BTreeMap<String, usize>,
+    out: &mut Vec<(usize, usize, usize)>,
+) {
+    if doc.trim().is_empty() {
+        return;
+    }
+    if let Some(idx) = doc_yaml_owner(doc, by_title) {
+        out.push((start, end.max(start), idx));
+    }
+}
+
+/// Индекс компонента по заголовку, если YAML-документ — `Deployment`/`StatefulSet`
+/// с совпавшим `metadata.name` (нормализация как в `calls::norm_name`).
+fn doc_yaml_owner(doc: &str, by_title: &BTreeMap<String, usize>) -> Option<usize> {
+    let v = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(doc).ok()?;
+    let map = v.as_mapping()?;
+    if !matches!(
+        map.get("kind").and_then(serde_yaml_ng::Value::as_str),
+        Some("Deployment" | "StatefulSet")
+    ) {
+        return None;
+    }
+    let name = map
+        .get("metadata")
+        .and_then(|m| m.get("name"))
+        .and_then(serde_yaml_ng::Value::as_str)?;
+    by_title.get(&super::calls::norm_name(name)).copied()
+}
+
+/// Владелец, чей k8s-документ покрывает строку `line` (1-based).
+fn owner_at(line: usize, docs: &[(usize, usize, usize)]) -> Option<usize> {
+    docs.iter()
+        .find(|(s, e, _)| line >= *s && line <= *e)
+        .map(|(_, _, i)| *i)
+}
+
+/// Обращение из конфига: вид узла, id, 1-based строка, условие активации,
+/// владелец из k8s-документа (последний — лишь у условий-провайдеров; REC,
+/// ADR-075).
+type ConfigHit = (NodeKind, String, usize, Option<Condition>, Option<usize>);
+
 /// Рёбра обращений: хранилища, внешние системы-провайдеры и топики из
 /// конфигов компонентов. Источники: (1) строки подключения со схемой и
 /// `bootstrap.servers`; (2) каталог провайдеров по ключам конфигурации
@@ -460,12 +708,33 @@ fn collect_connect_edges(
             continue;
         }
         let owner = owner_of_path(&contexts, path);
-        // (kind, id, 1-based строка) — все обращения из файла.
-        let mut hits: Vec<(NodeKind, String, usize)> = Vec::new();
+        // Окружение overlay-файла (per-environment values) — условие всех
+        // рёбер из него (REC, ADR-075, deployment-вид).
+        let overlay = overlay_env(path);
+        // Владельцы k8s-документов — только когда путь не дал владельца
+        // (манифест вне `code_roots`); для условий-провайдеров (REC, ADR-075).
+        let doc_owners = if owner.is_none() {
+            k8s_doc_owners(content, comps)
+        } else {
+            Vec::new()
+        };
+        // (kind, id, 1-based строка, условие активации, владелец из k8s-документа)
+        // — все обращения из файла. Владелец-doc заполняется лишь у условий.
+        let mut hits: Vec<ConfigHit> = Vec::new();
         // (2a) Провайдер по конфигурационному ключу (вложенный YAML → dotted).
         for (dotted, line) in super::providers::flatten_keys(content) {
-            if let Some(def) = providers.by_key(&dotted) {
-                hits.push((NodeKind::ExternalSystem, format!("sys:{}", def.id), line));
+            if let Some((def, key)) = providers.match_key(&dotted) {
+                let source = Some(Condition {
+                    kind: ConditionKind::ConfigKey,
+                    text: key.to_string(),
+                });
+                hits.push((
+                    NodeKind::ExternalSystem,
+                    format!("sys:{}", def.id),
+                    line,
+                    hit_condition(overlay, source),
+                    owner_at(line, &doc_owners),
+                ));
             }
         }
         // (3) Разрешение на схемное-менее разбирательство — образ хранилища.
@@ -482,12 +751,22 @@ fn collect_connect_edges(
                     continue;
                 }
                 if let Some((kind, id)) = classify_url(&hit, &redactor) {
-                    hits.push((kind, id, lnum));
+                    hits.push((kind, id, lnum, hit_condition(overlay, None), None));
                 }
             }
             // (2b) Провайдер по сырой подстроке (env-переменная, SDK-маркер).
-            if let Some(def) = providers.by_needle(line) {
-                hits.push((NodeKind::ExternalSystem, format!("sys:{}", def.id), lnum));
+            if let Some((def, needle)) = providers.match_needle(line) {
+                let source = Some(Condition {
+                    kind: ConditionKind::EnvFlag,
+                    text: needle.to_string(),
+                });
+                hits.push((
+                    NodeKind::ExternalSystem,
+                    format!("sys:{}", def.id),
+                    lnum,
+                    hit_condition(overlay, source),
+                    owner_at(lnum, &doc_owners),
+                ));
             }
             // (1b) `bootstrap.servers: "k1:9092,k2:9092"` — Kafka без схемы
             // (та же альтернатива, что у детектора `new_datastore`): значение
@@ -507,6 +786,8 @@ fn collect_connect_edges(
                             NodeKind::Datastore,
                             redactor.redact(&format!("store:kafka://{host}")),
                             lnum,
+                            hit_condition(overlay, None),
+                            None,
                         ));
                     }
                 }
@@ -528,13 +809,15 @@ fn collect_connect_edges(
                                 NodeKind::Datastore,
                                 redactor.redact(&format!("store:{scheme}://{host}")),
                                 lnum,
+                                hit_condition(overlay, None),
+                                None,
                             ));
                         }
                     }
                 }
             }
         }
-        for (kind, id, line) in hits {
+        for (kind, id, line, condition, doc_owner) in hits {
             nodes.entry(id.clone()).or_insert_with(|| ArchNode {
                 title: node_title(kind, &id),
                 id: id.clone(),
@@ -542,12 +825,14 @@ fn collect_connect_edges(
                 inferred: false,
                 model_id: None,
             });
-            if let Some(source) = owner {
-                acc_edge(
+            // Владелец пути приоритетнее владельца k8s-документа.
+            if let Some(source) = owner.or(doc_owner) {
+                acc_edge_cond(
                     acc,
                     &comps[source].id,
                     &id,
                     EdgeKind::Connect,
+                    condition,
                     format!("{path}:{line}"),
                 );
             }
@@ -660,7 +945,7 @@ fn build_graph(
 
     let mut edges: Vec<ArchEdge> = acc
         .into_iter()
-        .map(|((from, to, kind, via, confidence), evidence)| {
+        .map(|((from, to, kind, via, confidence, condition), evidence)| {
             let total = evidence.len();
             let mut ev: Vec<String> = evidence.into_iter().take(MAX_EDGE_EVIDENCE).collect();
             if total > MAX_EDGE_EVIDENCE {
@@ -673,16 +958,18 @@ fn build_graph(
                 evidence: ev,
                 via,
                 confidence,
+                condition,
             }
         })
         .collect();
     edges.sort_by(|a, b| {
-        (&a.from, &a.to, a.kind, a.via, a.confidence).cmp(&(
+        (&a.from, &a.to, a.kind, a.via, a.confidence, &a.condition).cmp(&(
             &b.from,
             &b.to,
             b.kind,
             b.via,
             b.confidence,
+            &b.condition,
         ))
     });
     Ok((
@@ -1046,6 +1333,143 @@ mod tests {
         assert_eq!(pg.from, "CMP-001");
         assert_eq!(pg.kind, EdgeKind::Connect);
         assert_eq!(pg.evidence, vec!["skeleton/intake/config.yaml:2"]);
+    }
+
+    /// Условия активации рёбер `connect` (REC, ADR-075): конфигурационный ключ
+    /// провайдера (`config-key`, `@ConditionalOnProperty` через осевой ключ),
+    /// env-маркер (`env-flag`) и overlay-файл окружения (`env-overlay`,
+    /// deployment-вид — перекрывает построчный источник). Безусловное ребро
+    /// (строка подключения) условия не несёт.
+    #[test]
+    fn connect_edges_carry_activation_conditions() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("mkdir");
+        fixture_python(&repo);
+        // Spring-конфиг компонента: ключ Azure OpenAI ⇒ config-key; env-маркер
+        // AlloyDB ⇒ env-flag; DSN ⇒ безусловное ребро.
+        write_file(
+            &repo,
+            "skeleton/intake/application.yaml",
+            "dsn: \"postgres://ledger-db:5432/ledger\"\nspring:\n  ai:\n    azure:\n      openai:\n        api-key: ${AZURE_SECRET_VALUE}\ncloud:\n  instance: ${ALLOYDB_CLUSTER_NAME}\n",
+        );
+        // Helm per-environment values: то же направление, что у config-key, но
+        // в overlay-файле — условие становится env-overlay (deployment×env).
+        write_file(
+            &repo,
+            "skeleton/intake/deploy/overlays/prod/values-prod.yaml",
+            "spring:\n  ai:\n    openai:\n      api-key: ${OPENAI_SECRET_VALUE}\n",
+        );
+        git_repo(&repo);
+        let graph = as_built(&repo, "HEAD").expect("граф");
+
+        let to =
+            |id: &str| -> Vec<&ArchEdge> { graph.edges.iter().filter(|e| e.to == id).collect() };
+
+        // config-key: ключ каталога — основание условия.
+        let azure = to("sys:azure-openai");
+        assert_eq!(azure.len(), 1, "{azure:#?}");
+        let cond = azure[0].condition.as_ref().expect("условие config-key");
+        assert_eq!(cond.kind, ConditionKind::ConfigKey);
+        assert_eq!(cond.text, "spring.ai.azure.openai");
+
+        // env-flag: имя переменной-маркера — основание условия.
+        let alloydb = to("sys:alloydb");
+        assert_eq!(alloydb.len(), 1, "{alloydb:#?}");
+        let cond = alloydb[0].condition.as_ref().expect("условие env-flag");
+        assert_eq!(cond.kind, ConditionKind::EnvFlag);
+        assert_eq!(cond.text, "ALLOYDB_CLUSTER_NAME");
+
+        // env-overlay: overlay-файл перекрывает построчное условие; ребро одного
+        // направления с sys:openai — в окружении prod.
+        let openai = to("sys:openai");
+        assert_eq!(openai.len(), 1, "{openai:#?}");
+        let cond = openai[0].condition.as_ref().expect("условие env-overlay");
+        assert_eq!(cond.kind, ConditionKind::EnvOverlay);
+        assert_eq!(cond.text, "prod");
+
+        // Безусловное ребро (строка подключения) условия не несёт.
+        let pg = to("store:postgres://ledger-db:5432");
+        assert_eq!(pg.len(), 1, "{pg:#?}");
+        assert!(pg[0].condition.is_none(), "{:#?}", pg[0].condition);
+    }
+
+    /// Манифест вне `code_roots` (`kustomize/`, `kubernetes-manifests/`):
+    /// условие-провайдер связывается с компонентом по заголовку, совпавшему с
+    /// `metadata.name` k8s-документа (`Deployment`/`StatefulSet`, REC, ADR-075).
+    /// Путь владельца не даёт (корень компонента — `src/…`), поэтому иначе
+    /// ребро-условие потерялось бы (orphan-узел без ребра).
+    #[test]
+    fn k8s_manifest_attributes_provider_condition_to_component() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("mkdir");
+        // Компонент с ASCII-заголовком, совпадающим с `metadata.name`.
+        write_file(
+            &repo,
+            "model/CMP-001-assistant.md",
+            "---\nid: CMP-001\ntype: cmp\ntitle: shoppingassistantservice\nstatus: adopted\ncode_roots: [src/shoppingassistantservice]\n---\n",
+        );
+        write_file(
+            &repo,
+            "src/shoppingassistantservice/lib.rs",
+            "pub fn run() {}\n",
+        );
+        // k8s-манифест вне корня компонента: env-маркер провайдера AlloyDB.
+        write_file(
+            &repo,
+            "kustomize/components/shopping-assistant/shoppingassistantservice.yaml",
+            "kind: Deployment\nmetadata:\n  name: shoppingassistantservice\nspec:\n  template:\n    spec:\n      containers:\n        - name: server\n          env:\n            - name: ALLOYDB_CLUSTER_NAME\n              value: \"\"\n",
+        );
+        git_repo(&repo);
+        let graph = as_built(&repo, "HEAD").expect("граф");
+
+        let edge = graph
+            .edges
+            .iter()
+            .find(|e| e.to == "sys:alloydb" && e.kind == EdgeKind::Connect)
+            .expect("ребро к alloydb");
+        assert_eq!(edge.from, "CMP-001", "{edge:#?}");
+        let cond = edge.condition.as_ref().expect("условие env-flag");
+        assert_eq!(cond.kind, ConditionKind::EnvFlag);
+        assert_eq!(cond.text, "ALLOYDB_CLUSTER_NAME");
+    }
+
+    /// Kustomize-компонент (`kind: Component`) с патчем Deployment внутри
+    /// блочного скаляра `patch: |-`: условие атрибутируется компоненту по
+    /// `metadata.name` вложенного патча (boutique `productcatalog → alloydb`).
+    #[test]
+    fn kustomize_patch_block_attributes_provider_condition() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("mkdir");
+        write_file(
+            &repo,
+            "model/CMP-001-catalog.md",
+            "---\nid: CMP-001\ntype: cmp\ntitle: productcatalogservice\nstatus: adopted\ncode_roots: [src/productcatalogservice]\n---\n",
+        );
+        write_file(
+            &repo,
+            "src/productcatalogservice/lib.rs",
+            "pub fn serve() {}\n",
+        );
+        write_file(
+            &repo,
+            "kustomize/components/alloydb/kustomization.yaml",
+            "apiVersion: kustomize.config.k8s.io/v1alpha1\nkind: Component\npatches:\n- patch: |-\n    apiVersion: apps/v1\n    kind: Deployment\n    metadata:\n      name: productcatalogservice\n    spec:\n      template:\n        spec:\n          containers:\n            - name: server\n              env:\n              - name: ALLOYDB_CLUSTER_NAME\n                value: ALLOYDB_CLUSTER_NAME_VAL\n",
+        );
+        git_repo(&repo);
+        let graph = as_built(&repo, "HEAD").expect("граф");
+
+        let edge = graph
+            .edges
+            .iter()
+            .find(|e| e.to == "sys:alloydb" && e.kind == EdgeKind::Connect)
+            .expect("ребро к alloydb");
+        assert_eq!(edge.from, "CMP-001", "{edge:#?}");
+        let cond = edge.condition.as_ref().expect("условие env-flag");
+        assert_eq!(cond.kind, ConditionKind::EnvFlag);
+        assert_eq!(cond.text, "ALLOYDB_CLUSTER_NAME");
     }
 
     /// Хранилище без схемы: `host:port` принимается только в манифесте с

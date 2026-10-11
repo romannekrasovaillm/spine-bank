@@ -84,45 +84,46 @@ impl Providers {
         }
     }
 
-    /// Провайдер по конфигурационному ключу (dotted, регистр не важен):
-    /// совпадение префикса ключа (`spring.ai.openai` покрывает
-    /// `spring.ai.openai.api-key`), при нескольких — самое длинное.
+    /// Провайдер и совпавший ключ каталога по конфигурационному ключу (dotted,
+    /// регистр не важен): совпадение префикса ключа (`spring.ai.openai`
+    /// покрывает `spring.ai.openai.api-key`), при нескольких — самый длинный.
+    /// Возвращаемый ключ — основание условия активации ребра (REC, ADR-075).
     #[must_use]
-    pub fn by_key(&self, dotted_key: &str) -> Option<&ProviderDef> {
+    pub fn match_key(&self, dotted_key: &str) -> Option<(&ProviderDef, &str)> {
         let key = dotted_key.to_ascii_lowercase();
         self.defs
             .iter()
             .filter_map(|d| {
-                let len = d
+                let matched = d
                     .keys
                     .iter()
                     .filter(|k| key_matches(&key, k))
-                    .map(String::len)
-                    .max()?;
-                Some((len, d))
+                    .max_by_key(|k| k.len())?;
+                Some((matched.len(), d, matched.as_str()))
             })
-            .max_by_key(|(len, _)| *len)
-            .map(|(_, d)| d)
+            .max_by_key(|(len, _, _)| *len)
+            .map(|(_, d, k)| (d, k))
     }
 
-    /// Провайдер по сырой подстроке строки (needle, регистр не важен): при
-    /// нескольких — самый длинный needle (специфичный провайдер важнее общего).
+    /// Провайдер и совпавший needle по сырой подстроке строки (регистр не
+    /// важен): при нескольких — самый длинный needle (специфичный провайдер
+    /// важнее общего). Возвращаемый needle — основание условия активации ребра
+    /// (REC, ADR-075).
     #[must_use]
-    pub fn by_needle(&self, line: &str) -> Option<&ProviderDef> {
+    pub fn match_needle(&self, line: &str) -> Option<(&ProviderDef, &str)> {
         let upper = line.to_ascii_uppercase();
         self.defs
             .iter()
             .filter_map(|d| {
-                let len = d
+                let matched = d
                     .needles
                     .iter()
                     .filter(|n| upper.contains(&n.to_ascii_uppercase()))
-                    .map(String::len)
-                    .max()?;
-                Some((len, d))
+                    .max_by_key(|n| n.len())?;
+                Some((matched.len(), d, matched.as_str()))
             })
-            .max_by_key(|(len, _)| *len)
-            .map(|(_, d)| d)
+            .max_by_key(|(len, _, _)| *len)
+            .map(|(_, d, n)| (d, n))
     }
 
     /// Провайдеры каталога (диагностика и тесты).
@@ -236,43 +237,55 @@ mod tests {
     fn dotted_key_prefix_matches_longest_provider() {
         let p = Providers::builtin();
         assert_eq!(
-            p.by_key("spring.ai.openai.api-key").map(|d| d.id.as_str()),
+            p.match_key("spring.ai.openai.api-key")
+                .map(|(d, _)| d.id.as_str()),
             Some("openai")
         );
         assert_eq!(
-            p.by_key("spring.ai.azure.openai.api-key")
-                .map(|d| d.id.as_str()),
+            p.match_key("spring.ai.azure.openai.api-key")
+                .map(|(d, _)| d.id.as_str()),
             Some("azure-openai")
         );
         assert_eq!(
-            p.by_key("spring.ai.gemini.project-id")
-                .map(|d| d.id.as_str()),
+            p.match_key("spring.ai.gemini.project-id")
+                .map(|(d, _)| d.id.as_str()),
             Some("vertex-ai")
         );
-        assert!(p.by_key("server.port").is_none());
+        assert!(p.match_key("server.port").is_none());
         // Граница по точке: `spring.ai.openai2` — не openai.
-        assert!(p.by_key("spring.ai.openai2.key").is_none());
+        assert!(p.match_key("spring.ai.openai2.key").is_none());
+        // Совпавший ключ каталога — основание условия активации (ADR-075).
+        assert_eq!(
+            p.match_key("spring.ai.openai.api-key").map(|(_, k)| k),
+            Some("spring.ai.openai")
+        );
     }
 
     #[test]
     fn needle_matches_env_markers() {
         let p = Providers::builtin();
         assert_eq!(
-            p.by_needle("  api-key: ${OPENAI_API_KEY:demo}")
-                .map(|d| d.id.as_str()),
+            p.match_needle("  api-key: ${OPENAI_API_KEY:demo}")
+                .map(|(d, _)| d.id.as_str()),
             Some("openai")
         );
         assert_eq!(
-            p.by_needle("value: \"ALLOYDB_CLUSTER_NAME\"")
-                .map(|d| d.id.as_str()),
+            p.match_needle("value: \"ALLOYDB_CLUSTER_NAME\"")
+                .map(|(d, _)| d.id.as_str()),
             Some("alloydb")
         );
         assert_eq!(
-            p.by_needle("GOOGLE_API_KEY: ${GOOGLE_API_KEY}")
-                .map(|d| d.id.as_str()),
+            p.match_needle("GOOGLE_API_KEY: ${GOOGLE_API_KEY}")
+                .map(|(d, _)| d.id.as_str()),
             Some("vertex-ai")
         );
-        assert!(p.by_needle("ordinary: value").is_none());
+        assert!(p.match_needle("ordinary: value").is_none());
+        // Совпавший needle каталога — основание условия активации (ADR-075).
+        assert_eq!(
+            p.match_needle("value: \"ALLOYDB_CLUSTER_NAME\"")
+                .map(|(_, n)| n),
+            Some("ALLOYDB_CLUSTER_NAME")
+        );
     }
 
     #[test]
@@ -309,7 +322,7 @@ mod tests {
             "замена по id"
         );
         assert!(
-            p.by_needle("BANK_GATEWAY_URL").is_some(),
+            p.match_needle("BANK_GATEWAY_URL").is_some(),
             "пользовательский провайдер виден"
         );
     }

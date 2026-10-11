@@ -315,8 +315,33 @@ fn draft_model(
     Ok((written, skipped))
 }
 
-/// Машинный контракт `arch-be/recover/v1` (ADR-069): `schema` + версия бинаря
-/// + сериализованный граф ревизии. Детерминизм — сортировками движка.
+/// Подсказки уровня графа (REC, ADR-075): компонент без входящих и исходящих
+/// рёбер — кандидат в мёртвый код или недоинструментированный (аннотация
+/// вывода, НЕ находка: fitness не падает). Детерминированный порядок — по id
+/// (граф уже отсортирован). Контракт `recover/v1` аддитивен: массив `hints`.
+#[must_use]
+pub fn dead_hints(graph: &ArchGraph) -> Vec<String> {
+    let mut connected: BTreeSet<&str> = BTreeSet::new();
+    for e in &graph.edges {
+        connected.insert(e.from.as_str());
+        connected.insert(e.to.as_str());
+    }
+    graph
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Component && !connected.contains(n.id.as_str()))
+        .map(|n| {
+            format!(
+                "{} ({}) — нет связей: кандидат в dead code или недоинструментирован",
+                n.id, n.title
+            )
+        })
+        .collect()
+}
+
+/// Машинный контракт `arch-be/recover/v1` (ADR-069): `schema`, версия бинаря,
+/// сериализованный граф ревизии и `hints` (аддитивно, ADR-075). Детерминизм —
+/// сортировками движка.
 ///
 /// # Errors
 /// Сериализация графа (практически недостижимо — структуры плоские).
@@ -332,6 +357,11 @@ pub fn render_recover_json(graph: &ArchGraph) -> Result<String> {
     );
     if let serde_json::Value::Object(m) = serde_json::to_value(graph)? {
         map.extend(m);
+    }
+    // Пусто — поля нет (контракт v1 не меняется байт-в-байт на чистых графах).
+    let hints = dead_hints(graph);
+    if !hints.is_empty() {
+        map.insert("hints".to_string(), serde_json::to_value(hints)?);
     }
     Ok(serde_json::to_string_pretty(&serde_json::Value::Object(
         map,
@@ -385,6 +415,9 @@ pub fn render_recover_md(graph: &ArchGraph) -> String {
             let via = e
                 .via
                 .map_or_else(String::new, |v| format!(" · {}", v.label()));
+            let cond = e.condition.as_ref().map_or_else(String::new, |c| {
+                format!(" · условие: {} ({})", c.text, c.kind.label())
+            });
             let ev = match e.evidence.first() {
                 Some(first) => {
                     let extra = e.evidence.len().saturating_sub(1);
@@ -398,7 +431,7 @@ pub fn render_recover_md(graph: &ArchGraph) -> String {
             };
             let _ = writeln!(
                 out,
-                "- `{}` --{}{via}--> `{}`{ev}",
+                "- `{}` --{}{via}{cond}--> `{}`{ev}",
                 e.from,
                 e.kind.label(),
                 e.to
@@ -411,6 +444,15 @@ pub fn render_recover_md(graph: &ArchGraph) -> String {
         let _ = writeln!(out, "## Пробелы ([gap], {})", graph.gaps.len());
         for g in &graph.gaps {
             let _ = writeln!(out, "- {g}");
+        }
+        let _ = writeln!(out);
+    }
+
+    let hints = dead_hints(graph);
+    if !hints.is_empty() {
+        let _ = writeln!(out, "## Подсказки ({})", hints.len());
+        for h in &hints {
+            let _ = writeln!(out, "- {h}");
         }
         let _ = writeln!(out);
     }
@@ -750,7 +792,7 @@ impl Tool for ArchDiffTool {
 mod tests {
     use super::super::snapshot::tests::{git_repo, write_file};
     use super::*;
-    use crate::arch_diff::EdgeKind;
+    use crate::arch_diff::{ArchEdge, EdgeKind};
 
     /// Фикстура: компонент-каталог с манифестом + контракт + хранилище из
     /// конфига (строка подключения детектируется только в конфиг-файле).
@@ -861,5 +903,80 @@ mod tests {
         );
         let after = std::fs::read_to_string(&edited).expect("read after");
         assert!(after.contains("status: adopted"), "правка затёрта: {after}");
+    }
+
+    /// Подсказки dead-code (REC, ADR-075): компонент без входящих и исходящих
+    /// рёбер помечается; связанный компонент и не-компоненты (хранилище) — нет.
+    /// Аннотация печатается в md и аддитивно кладётся в JSON-поле `hints`
+    /// (пусто — поля нет вовсе, контракт `v1` не меняется на чистых графах).
+    #[test]
+    fn dead_hints_flag_isolated_components_only() {
+        let node = |id: &str, kind: NodeKind, title: &str| ArchNode {
+            id: id.to_string(),
+            kind,
+            title: title.to_string(),
+            inferred: true,
+            model_id: None,
+        };
+        let connect = ArchEdge {
+            from: "CMP-001".to_string(),
+            to: "store:postgres://db".to_string(),
+            kind: EdgeKind::Connect,
+            evidence: vec!["config/application.yaml:2".to_string()],
+            via: None,
+            confidence: None,
+            condition: None,
+        };
+        let graph = ArchGraph {
+            rev: "deadbeef".to_string(),
+            nodes: vec![
+                node("CMP-001", NodeKind::Component, "ledger"),
+                node("CMP-002", NodeKind::Component, "orphan"),
+                node("CMP-003", NodeKind::Component, "phantom"),
+                node("store:postgres://db", NodeKind::Datastore, "db"),
+            ],
+            edges: vec![connect.clone()],
+            gaps: Vec::new(),
+        };
+
+        let hints = dead_hints(&graph);
+        assert_eq!(hints.len(), 2, "ровно два висячих компонента: {hints:?}");
+        assert!(
+            hints
+                .iter()
+                .any(|h| h.contains("CMP-002") && h.contains("нет связей")),
+            "{hints:?}"
+        );
+        assert!(hints.iter().any(|h| h.contains("CMP-003")), "{hints:?}");
+        assert!(
+            !hints.iter().any(|h| h.contains("CMP-001")),
+            "связанный компонент не висячий: {hints:?}"
+        );
+        // Порядок детерминирован графом (по id): CMP-002 затем CMP-003.
+        assert!(hints[0].contains("CMP-002") && hints[1].contains("CMP-003"));
+
+        let json: serde_json::Value =
+            serde_json::from_str(&render_recover_json(&graph).expect("json")).expect("parse");
+        assert_eq!(
+            json["hints"].as_array().map_or(0, Vec::len),
+            2,
+            "JSON-поле hints: {json}"
+        );
+        let md = render_recover_md(&graph);
+        assert!(md.contains("## Подсказки (2)"), "md без раздела: {md}");
+
+        // Чистый граф: все компоненты связаны — поля `hints` нет (аддитивность).
+        let clean = ArchGraph {
+            nodes: vec![graph.nodes[0].clone(), graph.nodes[3].clone()],
+            edges: vec![connect],
+            ..graph
+        };
+        assert_eq!(dead_hints(&clean), Vec::<String>::new());
+        let clean_json: serde_json::Value =
+            serde_json::from_str(&render_recover_json(&clean).expect("json")).expect("parse");
+        assert!(
+            clean_json.get("hints").is_none(),
+            "чистый граф не должен нести hints: {clean_json}"
+        );
     }
 }
