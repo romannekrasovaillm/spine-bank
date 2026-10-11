@@ -296,6 +296,7 @@ mod tests {
             evidence: evidence.iter().map(|s| (*s).to_string()).collect(),
             via: None,
             confidence: None,
+            condition: None,
         }
     }
 

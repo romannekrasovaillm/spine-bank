@@ -136,6 +136,46 @@ pub enum Confidence {
     Inferred,
 }
 
+/// Вид условия активации ребра (REC, ADR-075): из чего «прочитана» условность
+/// связи. Ключ конфигурации провайдера, переменная окружения-флаг либо
+/// значение per-environment overlay-файла.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConditionKind {
+    /// Ключ конфигурации провайдера (`spring.ai.openai.api-key`): ребро живо,
+    /// пока ключ присутствует.
+    ConfigKey,
+    /// Переменная окружения-флаг/адрес (`ALLOYDB_CLUSTER_NAME`): ребро
+    /// активно, пока переменная задана в манифесте/окружении.
+    EnvFlag,
+    /// Значение per-environment overlay-файла (helm values-<env>.yaml): ребро
+    /// включено только в окружении, где параметр определён.
+    EnvOverlay,
+}
+
+impl ConditionKind {
+    /// Метка вида условия для текста/JSON.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ConfigKey => "config-key",
+            Self::EnvFlag => "env-flag",
+            Self::EnvOverlay => "env-overlay",
+        }
+    }
+}
+
+/// Условие активации ребра (REC, ADR-075): ребро существует в графе, но живо
+/// только при выполнении условия в конкретном окружении — deployment-вид.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub struct Condition {
+    /// Вид условия.
+    pub kind: ConditionKind,
+    /// Текст условия: dotted-ключ конфигурации, имя переменной окружения или
+    /// `ключ=значение` overlay-файла (детерминирован по входу).
+    pub text: String,
+}
+
 /// Ребро графа as-built с основаниями `файл:строка` (отсортированы, без
 /// дублей, ограничены [`MAX_EDGE_EVIDENCE`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -154,6 +194,10 @@ pub struct ArchEdge {
     /// Достоверность вывода (только у `calls`, R2).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confidence: Option<Confidence>,
+    /// Условие активации ребра (REC, ADR-075): deployment-вид. Отсутствует —
+    /// ребро безусловно (поле не сериализуется, контракт `v1` аддитивен).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub condition: Option<Condition>,
 }
 
 /// Граф «как построено» по снимку одной ревизии.
