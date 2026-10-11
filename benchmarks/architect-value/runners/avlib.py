@@ -41,7 +41,12 @@ REPO_CLONES = {
 CLONE_REPOS = {v: k for k, v in REPO_CLONES.items()}
 
 # Путь к бинарю arch-be и корень клонов — из окружения, дефолты без дома.
+# Относительный путь бинаря (напр. `target/debug/arch-be`) резолвится в
+# абсолютный: многие прогонщики запускают arch-be с `cwd=<клон>`/`<кейс>`,
+# где относительный путь не нашёлся бы.
 ARCH_BE = os.environ.get("ARCH_BE", "arch-be")
+if os.sep in ARCH_BE:
+    ARCH_BE = str(Path(ARCH_BE).resolve())
 DEFAULT_REPOS_DIR = os.environ.get("ARCH_VALUE_REPOS", "~/bench-repos")
 DEFAULT_TIMEOUT = int(os.environ.get("ARCH_VALUE_TIMEOUT", "120"))
 
@@ -321,6 +326,62 @@ def repo_clone_dir(repo, repos_root=None):
     return clone_path(REPO_CLONES.get(repo, repo), repos_root)
 
 
+# ── граф as-built (recover) ──────────────────────────────────────────────────
+def recover_graph(clone, sha):
+    """Полный граф одной ревизии: `recover <clone> --rev <sha> --format json`.
+
+    Возвращает (dict-граф, None) либо (None, причина) для SKIP. `recover` даёт
+    весь граф снимка напрямую (не дифф), поэтому dangling-коммиты metric-3 здесь
+    не нужны."""
+    if not sha:
+        return None, "в эталоне не указан sha"
+    env_ok = subprocess.run(
+        ["git", "-C", str(clone), "cat-file", "-e", f"{sha}^{{commit}}"],
+        capture_output=True, text=True,
+    )
+    if env_ok.returncode != 0:
+        return None, f"SHA {sha[:9]} недоступен в клоне (нужен git fetch)"
+    r = run_archbe(
+        ["recover", str(clone), "--rev", sha, "--format", "json"], cwd=clone,
+    )
+    if not r.ok:
+        return None, f"recover → код {r.code}: {(r.err or '').strip()[:160]}"
+    try:
+        return json.loads(r.out), None
+    except ValueError as exc:
+        return None, f"recover JSON не распознан: {exc}"
+
+
+def _strip_port(host):
+    """`host:port` → `host` (для сверки с эталоном, где порт не указан)."""
+    return host.rsplit(":", 1)[0] if ":" in host else host
+
+
+def datastore_names(graph):
+    """Имена хранилищ графа: `store:<scheme>://<host>` → `<host>` (без порта)."""
+    out = set()
+    for n in graph.get("nodes") or []:
+        if n.get("kind") != "datastore":
+            continue
+        nid = n.get("id") or ""
+        rest = nid[len("store:"):] if nid.startswith("store:") else nid
+        host = rest.split("://", 1)[1] if "://" in rest else rest
+        out.add(_strip_port(host))
+    return out
+
+
+def external_names(graph):
+    """Имена внешних систем графа: `sys:<host>` → `<host>` (без порта)."""
+    out = set()
+    for n in graph.get("nodes") or []:
+        if n.get("kind") != "external_system":
+            continue
+        nid = n.get("id") or ""
+        host = nid[len("sys:"):] if nid.startswith("sys:") else nid
+        out.add(_strip_port(host))
+    return out
+
+
 # ── отчётность ───────────────────────────────────────────────────────────────
 def emit_section(title):
     print(f"\n## {title}")
@@ -332,6 +393,10 @@ def emit_run(metric, detail):
 
 def emit_skip(metric, reason):
     print(f"[SKIP] {metric}: {reason}")
+
+
+def emit_find(metric, detail):
+    print(f"[FIND] {metric}: {detail}")
 
 
 def eprint(*a):

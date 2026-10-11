@@ -1,0 +1,12 @@
+diff --git a/tests/notify_test.py b/tests/notify_test.py
+new file mode 100644
+--- /dev/null
++++ b/tests/notify_test.py
+@@ -0,0 +1,7 @@
++"""Тест уведомления ТСП после приёма (корпусный дефект, класс S-04 — ПДн)."""
++# Дефект: карточные данные попадают в тестовый сценарий.
++CARD = "PAN-4111111111111111"
++
++
++def test_notify_after_accept():
++    assert CARD.startswith("PAN-")

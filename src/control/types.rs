@@ -313,6 +313,13 @@ pub(crate) enum RuleKind {
     /// (`scheme://host`) в файлах по `glob` сверяются с реестром интеграций
     /// (`allow` — список хостов). Хост вне реестра — находка (S10).
     OutboundAllowlist,
+    /// Владение хранилищем (волна S, S9, ADR-078): `store:`-узлы графа
+    /// as-built (ADR-069) читают/пишут только компоненты-владельцы. Режим
+    /// whitelist (`owners: [CMP-…]`) — обращение чужого компонента к
+    /// хранилищу владельца есть находка; режим без `owners` —
+    /// «database-per-service»: у хранилища не более одного компонента-
+    /// коннектора (второе ребро `connect` — находка).
+    DataOwnership,
 }
 
 impl RuleKind {
@@ -334,6 +341,7 @@ impl RuleKind {
             Self::DenyDependency => "deny_dependency",
             Self::Conditional => "conditional",
             Self::OutboundAllowlist => "outbound_allowlist",
+            Self::DataOwnership => "data_ownership",
         }
     }
 
@@ -643,6 +651,12 @@ pub struct FitnessRule {
     /// Обязательство условного правила (для `conditional`, волна S, ADR-070).
     #[serde(rename = "then", default)]
     pub(super) then_cond: Option<ConditionalClause>,
+    /// Компоненты-владельцы хранилищ (для `data_ownership`, волна S, S9,
+    /// ADR-078): id (`CMP-…`) или имена компонентов, которым разрешено
+    /// обращение к `store:`-узлам графа as-built. Пусто — режим
+    /// «database-per-service» (у хранилища не более одного коннектора).
+    #[serde(default, deserialize_with = "de_string_or_list")]
+    pub(super) owners: Vec<String>,
 }
 
 impl FitnessRule {
@@ -759,6 +773,7 @@ impl FitnessRule {
         out.insert("command", opt(&self.command));
         out.insert("forbid", opt_list(&self.forbid));
         out.insert("allow", opt_list(&self.allow));
+        out.insert("owners", list(&self.owners));
         out.insert("model_dir", opt(&self.model_dir));
         out.insert("classes_dir", opt(&self.classes_dir));
         out.insert("jar_dir", opt(&self.jar_dir));
