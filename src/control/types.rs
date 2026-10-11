@@ -303,6 +303,16 @@ pub(crate) enum RuleKind {
     /// пакет из `deny` — находка со ссылкой `reference` на решение
     /// техкомитета.
     DenyDependency,
+    /// Условное правило (волна S, ADR-070): `if: {glob, pattern}` —
+    /// триггер; если в пределах модуля (каталог с манифестом сборки) нашёлся
+    /// хотя бы один файл по `if.glob` с `if.pattern`, то в том же модуле
+    /// обязан найтись файл по `then.glob` с `then.pattern`. Выражает S5
+    /// «исходящие вызовы → circuit breaker».
+    Conditional,
+    /// Разрешённые исходящие хосты (волна S, ADR-070): URL-литералы
+    /// (`scheme://host`) в файлах по `glob` сверяются с реестром интеграций
+    /// (`allow` — список хостов). Хост вне реестра — находка (S10).
+    OutboundAllowlist,
 }
 
 impl RuleKind {
@@ -322,6 +332,8 @@ impl RuleKind {
             Self::ContextBoundary => "context_boundary",
             Self::ArchUnit => "archunit",
             Self::DenyDependency => "deny_dependency",
+            Self::Conditional => "conditional",
+            Self::OutboundAllowlist => "outbound_allowlist",
         }
     }
 
@@ -439,6 +451,20 @@ impl DenySpec {
             scopes.join(",")
         )
     }
+}
+
+/// Условие/обязательство правила `conditional` (волна S, ADR-070): набор
+/// файлов (`glob`) и regex (`pattern`). Используется и для триггера `if`
+/// (модуль активируется, если в нём есть файл по glob с pattern), и для
+/// обязательства `then` (в активированном модуле обязан найтись такой файл).
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct ConditionalClause {
+    /// Glob'ы модуля-локального поиска (строка или список); пусто — `**/*`.
+    #[serde(default, deserialize_with = "de_string_or_list")]
+    pub(super) glob: Vec<String>,
+    /// Regex, наличие которого в файле по `glob` активирует/удовлетворяет
+    /// условие.
+    pub(super) pattern: String,
 }
 
 /// Одно правило из `CONSTRAINTS.yaml`.
@@ -604,6 +630,19 @@ pub struct FitnessRule {
     /// N/A, а не находку. Отсутствие поля — правило применимо всегда.
     #[serde(default)]
     pub(crate) applies_to: Option<AppliesTo>,
+    /// Многострочный режим content-правила (волна S, ADR-070): `must_not_contain`
+    /// ищет совпадение по содержимому файла целиком (regex может захватывать
+    /// переносы строк), а не построчно. Выражает S12 «нет field injection»
+    /// (аннотация над полем — многострочный шаблон). Дефолт `false` —
+    /// построчная семантика существующих правил не меняется.
+    #[serde(default)]
+    pub(super) multiline: bool,
+    /// Триггер условного правила (для `conditional`, волна S, ADR-070).
+    #[serde(rename = "if", default)]
+    pub(super) if_cond: Option<ConditionalClause>,
+    /// Обязательство условного правила (для `conditional`, волна S, ADR-070).
+    #[serde(rename = "then", default)]
+    pub(super) then_cond: Option<ConditionalClause>,
 }
 
 impl FitnessRule {
@@ -704,6 +743,12 @@ impl FitnessRule {
                 ),
             }
         }
+        fn clause(c: &Option<ConditionalClause>) -> String {
+            match c {
+                None => String::new(),
+                Some(c) => format!("glob={};pattern={}", list(&c.glob), c.pattern),
+            }
+        }
         let mut out = BTreeMap::new();
         out.insert("id", opt(&self.id));
         out.insert("kind", self.kind.as_str().to_string());
@@ -723,6 +768,9 @@ impl FitnessRule {
         out.insert("timeout_secs", num(self.timeout_secs));
         out.insert("unverifiable", flag(self.unverifiable));
         out.insert("applies_to", applies(&self.applies_to));
+        out.insert("multiline", flag(self.multiline));
+        out.insert("if", clause(&self.if_cond));
+        out.insert("then", clause(&self.then_cond));
         out.insert("adr", opt(&self.adr));
         out.insert("owner", opt(&self.owner));
         out.insert("expiry", opt(&self.expiry));

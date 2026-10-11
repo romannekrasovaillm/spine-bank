@@ -2,18 +2,21 @@
 #
 # 12 требований S1–S12, зафиксированных в `TASK-Spine-0.4.0-architect-value.md`
 # §C.1. Задача P1 — механизовать их ровно настолько, насколько это позволяют
-# типы правил 0.3.17, и ЗАФИКСИРОВАТЬ долю выразимых (метрика 7 таблицы §9).
+# типы правил, и ЗАФИКСИРОВАТЬ долю выразимых (метрика 7 таблицы §9).
 #
-# Ожидание на 0.3.17 — 7 из 12 (исполняемая проверка есть у S1, S3, S4, S6, S7,
-# S8, S11). Остальные (S2, S5, S9, S10, S12) помечены `unverifiable: true`:
-# движок их не исполняет, они видны в отчёте как осознанно неполные. Цель 0.4.0
-# (волна S) — ≥ 11/12; карта апгрейда — в `requirements.yaml`.
+# Исходный замер на 0.3.17 — 7 из 12 (исполняемая проверка у S1, S3, S4, S6, S7,
+# S8, S11). Волна S (0.4.0, ADR-070) добавила механику S2 (`deny_dependency`
+# со scopes/диапазоном версий), S5 (`conditional`), S10 (`outbound_allowlist`),
+# S12 (`must_not_contain` + `multiline`) — итог 11/12. Осталось S9
+# (`data_ownership`, требует графа R3) — осознанный `unverifiable: true` с
+# владельцем `@dka-data`.
 #
 # Схема — src/control/types.rs (FitnessRule). Типы: must_contain,
 # must_not_contain, each_file_must_contain, file_exists, dir_must_have_file,
 # max_age, command_succeeds, dependency_direction, context_boundary, archunit,
-# deny_dependency. Шаблонные карточки (owner/rationale/reference/expiry) движок
-# переносит в находки и читает обход `change_impact`.
+# deny_dependency, conditional, outbound_allowlist. Шаблонные карточки
+# (owner/rationale/reference/expiry) движок переносит в находки и читает обход
+# `change_impact`.
 version: "2026.10"
 id: JAVA-SERVICES
 rules:
@@ -71,14 +74,23 @@ rules:
     owner: "@sre"
     rationale: "Каждый сервис отдаёт health/metrics через actuator."
 
-  # S5. Исходящие вызовы — только через circuit breaker. Условное правило
-  # (зависит от того, есть ли у вызова сетевой характер) — не выразимо.
+  # S5. Исходящие вызовы — только через circuit breaker. Выразимо × conditional
+  # (волна S, ADR-070): триггер `if` — сетевой вызов клиента в модуле сборки,
+  # обязательство `then` — circuit breaker в том же модуле. Модуль без breaker
+  # при наличии исходящего клиента — находка.
   - id: JSS-005
     name: s5_outbound_circuit_breaker
-    unverifiable: true
+    type: conditional
+    if:
+      glob: ["**/*.java"]
+      pattern: "(?:RestTemplate|WebClient|FeignClient|HttpClient|OkHttpClient)"
+    then:
+      glob: ["**/*.java"]
+      pattern: "(?:@CircuitBreaker|@HystrixCommand|@Bulkhead|resilience4j)"
     severity: warn
     owner: "@arch-board"
-    rationale: "Исходящие вызовы идут только через circuit breaker — условное правило."
+    rationale: "Исходящие вызовы идут только через circuit breaker (AD-RESILIENCE)."
+    reference: "AD-RESILIENCE"
 
   # S6. Домен не зависит от адаптеров и фреймворка. Выразимо ×
   # dependency_direction (B4 нормализует и слэш-, и точечную нотацию для *.java);
@@ -142,14 +154,21 @@ rules:
     owner: "@dka-data"
     rationale: "Database-per-service — нужна карта БД↔сервис, текстовая проверка слепа."
 
-  # S10. Исходящие хосты — только из реестра интеграций. Нужен реестр INT-* и
-  # сопоставление с конфигами — не выразимо набором правил 0.3.17.
+  # S10. Исходящие хосты — только из реестра интеграций. Выразимо ×
+  # outbound_allowlist (волна S, ADR-070): URL-литералы из кода и конфигов
+  # сверяются с домен-реестром `allow` (INT-реестр, вынесенный в правило).
   - id: JSS-010
     name: s10_hosts_from_registry
-    unverifiable: true
+    type: outbound_allowlist
+    glob: ["**/*.java", "**/*.yml", "**/*.yaml", "**/*.properties"]
+    allow:
+      - api.bank.example
+      - sso.bank.example
+      - registry.bank.example
     severity: warn
     owner: "@arch-board"
-    rationale: "Исходящие хосты — только из реестра интеграций (INT-*); нужна модель."
+    rationale: "Исходящие хосты — только из реестра интеграций (INT-*)."
+    reference: "AD-INT-REGISTRY"
 
   # S11. Java 17+. Выразимо хрупким regex по манифесту сборки (pom/gradle);
   # произвольные формы версии не покрываются.
@@ -162,11 +181,17 @@ rules:
     owner: "@arch-board"
     rationale: "Сборка на Java 17+."
 
-  # S12. Нет field injection (@Autowired на поле). Проверка требует
-  # многострочного шаблона «аннотация над полем» — построчный движок её не берёт.
+  # S12. Нет field injection (@Autowired на поле). Выразимо × must_not_contain
+  # + `multiline: true` (волна S, ADR-070): regex применяется к содержимому
+  # целиком и ловит аннотацию на отдельной строке над полем; параметр
+  # конструктора не ловится (нет `private`/`protected`).
   - id: JSS-012
     name: s12_no_field_injection
-    unverifiable: true
+    type: must_not_contain
+    glob: ["**/*.java"]
+    multiline: true
+    pattern: "@(?:Autowired|Inject|Resource)\\s+(?:private|protected)\\s+[\\w.<>\\[\\],]+\\s+\\w+\\s*;"
     severity: warn
     owner: "@arch-board"
-    rationale: "Нет field injection (@Autowired на поле) — многострочный шаблон."
+    rationale: "Нет field injection: @Autowired/@Inject/@Resource только через конструктор."
+    reference: "AD-DI-CONSTRUCTOR"

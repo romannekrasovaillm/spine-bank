@@ -2317,6 +2317,135 @@ mod tests {
         );
         assert!(report.passed, "пропуск — не провал: {}", report.summary);
     }
+
+    /// S12 (волна S, ADR-070): `must_not_contain` + `multiline: true` ловит
+    /// аннотацию на отдельной строке над полем; параметр конструктора не ловится.
+    #[test]
+    fn fitness_multiline_must_not_contain() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        write_file(
+            &repo,
+            "src/Foo.java",
+            "import org.springframework.beans.factory.annotation.Autowired;\nclass Foo {\n    @Autowired\n    private BarService bar;\n\n    Foo(@Autowired BazService baz) {}\n}\n",
+        );
+        let constraints = write_file(
+            dir.path(),
+            "CONSTRAINTS.yaml",
+            r"rules:
+  - name: no_field_injection
+    type: must_not_contain
+    glob: '**/*.java'
+    multiline: true
+    pattern: '@(?:Autowired|Inject|Resource)\s+(?:private|protected)\s+[\w.<>\[\],]+\s+\w+\s*;'
+    severity: warn
+",
+        );
+        let report = check(&repo, &constraints).unwrap();
+        let issues: Vec<_> = report
+            .issues
+            .iter()
+            .filter(|i| i.rule == "no_field_injection")
+            .collect();
+        assert_eq!(
+            issues.len(),
+            1,
+            "одна находка field injection: {}",
+            report.summary
+        );
+        assert_eq!(issues[0].line, 3, "@Autowired на строке 3");
+        assert_eq!(issues[0].severity, "warn");
+    }
+
+    /// S5 (волна S, ADR-070): `conditional` сверяет триггер `if` и обязательство
+    /// `then` в пределах модуля сборки — модуль без circuit breaker краснеет.
+    #[test]
+    fn fitness_conditional_module_scoped() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        write_file(&repo, "app-a/pom.xml", "<project/>\n");
+        write_file(
+            &repo,
+            "app-a/src/AOut.java",
+            "class AOut { void f(){ new RestTemplate(); } @CircuitBreaker void g(){} }\n",
+        );
+        write_file(&repo, "app-b/pom.xml", "<project/>\n");
+        write_file(
+            &repo,
+            "app-b/src/BOut.java",
+            "class BOut { void f(){ new RestTemplate(); } }\n",
+        );
+        let constraints = write_file(
+            dir.path(),
+            "CONSTRAINTS.yaml",
+            r"rules:
+  - name: outbound_circuit_breaker
+    type: conditional
+    if:
+      glob: '**/*.java'
+      pattern: 'RestTemplate'
+    then:
+      glob: '**/*.java'
+      pattern: '@CircuitBreaker'
+    severity: warn
+",
+        );
+        let report = check(&repo, &constraints).unwrap();
+        let issues: Vec<_> = report
+            .issues
+            .iter()
+            .filter(|i| i.rule == "outbound_circuit_breaker")
+            .collect();
+        assert_eq!(
+            issues.len(),
+            1,
+            "один модуль без breaker: {}",
+            report.summary
+        );
+        assert!(
+            issues[0].file.to_string_lossy().contains("app-b"),
+            "нарушивший модуль app-b: {:?}",
+            issues[0].file
+        );
+    }
+
+    /// S10 (волна S, ADR-070): `outbound_allowlist` сверяет исходящие хосты с
+    /// реестром интеграций; хост вне реестра — находка, разрешённый не краснеет.
+    #[test]
+    fn fitness_outbound_allowlist() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        write_file(
+            &repo,
+            "config/app.yml",
+            "services:\n  - url: https://api.bank.example/v1\n  - url: https://evil.example/v1\n",
+        );
+        let constraints = write_file(
+            dir.path(),
+            "CONSTRAINTS.yaml",
+            r"rules:
+  - name: hosts_from_registry
+    type: outbound_allowlist
+    glob: '**/*.yml'
+    allow: [api.bank.example]
+    severity: warn
+",
+        );
+        let report = check(&repo, &constraints).unwrap();
+        let issues: Vec<_> = report
+            .issues
+            .iter()
+            .filter(|i| i.rule == "hosts_from_registry")
+            .collect();
+        assert_eq!(
+            issues.len(),
+            1,
+            "один неразрешённый хост: {}",
+            report.summary
+        );
+        assert!(issues[0].message.contains("evil.example"));
+        assert_eq!(issues[0].line, 3, "url с evil.example на строке 3");
+    }
 }
 
 #[cfg(test)]

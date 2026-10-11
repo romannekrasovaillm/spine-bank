@@ -43,7 +43,7 @@ pub(super) struct ManifestDep {
 }
 
 /// Строка файла (1-based) по байтовому смещению в содержимом.
-fn line_of(content: &str, offset: usize) -> usize {
+pub(super) fn line_of(content: &str, offset: usize) -> usize {
     content[..offset.min(content.len())].matches('\n').count() + 1
 }
 
