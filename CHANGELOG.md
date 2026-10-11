@@ -7,6 +7,51 @@
 
 ## [Unreleased]
 
+## [0.4.1] — 2026-10-11
+
+Патч-релиз ценности по итогам карты 12 задач ArchBenchmarks v2: закрыты
+топ-2 пробела — условные согласования (GOVERN) и условия активации рёбер
+(RECOVER) + D3 (confidence в ящике ревью).
+
+### Добавлено
+
+- **Условные согласования (ADR-074, волна G).** Блок `conditions:` в
+  front-matter ADR модели: каждое условие — {id, text, check?}. Гейт
+  получает составляющую `approval_conditions`: условие с `check`
+  исполняется как проба (механика зондов ADR-068); условие без `check` —
+  warn «условие без механической проверки, владелец» в паспорте вердикта.
+  Нарушенное условие — `[error] approval_condition_violated`; по умолчанию
+  warn, error при `[gate] strict_conditions = true` (схема ужесточения
+  ADR). Условия видны в `architect_review` и `change_impact`.
+- **Условия активации рёбер (ADR-075, волна REC).** Ребро recover/arch-diff
+  несёт опциональное `condition` {kind: config_key|env_flag|env_overlay,
+  text}: `spring.ai.openai`-ключи, `@ConditionalOnProperty`, env-флаги
+  (`ALLOYDB_CLUSTER_NAME`), helm-оверлеи. Одинаковое направление в разных
+  окружениях — разные рёбра с разными условиями (deployment-вид). Живой
+  прогон: PetClinic 5 условных рёбер (genai→openai/azure), Boutique 5
+  (productcatalog/shoppingassistant→alloydb). Подсказка о висячих
+  компонентах (нет входящих и исходящих, кроме корней) — `hints` в JSON
+  recover и строка в md, не находка.
+
+### Изменено
+
+- **D3: ящик ревью сортирует по confidence рёбер; inferred-ребро в диффе
+  не поднимает маршрут выше Standard** (строка в вердикте «есть
+  inferred-рёбра, требуется подтверждение») — ADR-075.
+
+### Что может покраснеть после обновления
+
+- **D3 — ужесточение маршрута:** дифф, ранее поднимавшийся до Critical
+  только на inferred-рёбрах, теперь останавливается на Standard до
+  подтверждения. Пайплайны, ждущие Critical-обязательности по таким
+  диффам, увидят смену маршрута (это задумано: inferred ≠ доказано).
+- **`approval_condition_violated` (warn по умолчанию):** новые строки в
+  вердиктах для ADR с условиями; при `strict_conditions = true` — error и
+  красный гейт (включайте осознанно).
+- **recover/arch-diff JSON: новые поля `condition`/`hints`** — аддитивно,
+  старые парсеры не ломаются; строгие схемы с additionalProperties=false
+  заметят.
+
 ## [0.4.0] — 2026-10-11
 
 «Ценность для архитектора, доказанная на чужом коде» (задание
