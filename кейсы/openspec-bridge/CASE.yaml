@@ -1,0 +1,3 @@
+# Объявление кейса (K1, 0.4.0). Кейс-мостик OpenSpec — не пакет Critical
+# (нет docs/adr), меряется на Fast.
+route: fast

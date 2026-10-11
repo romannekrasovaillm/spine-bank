@@ -347,8 +347,18 @@ enum Cmd {
     /// без сети, детерминированно; exit 1, если доля ниже `--min-detection`.
     Redteam {
         /// Кейс (каталог с model/, CONSTRAINTS.yaml, docs/adr, бандлом…);
-        /// не нужен при подкоманде `semantic-score`.
+        /// не нужен при подкоманде `semantic-score` и режиме `--all`.
         case: Option<PathBuf>,
+        /// K1 (контур-бенч 0.4.0): измерить ВСЕ кейсы набора в каталоге и
+        /// напечатать сводку «измерен / не измерен: причина». Маршрут каждого
+        /// кейса — из его `CASE.yaml` (`route:`), отсутствие файла — Critical.
+        /// Прогон информационный: exit 0, порог не применяется.
+        #[arg(long, value_name = "DIR", conflicts_with = "case")]
+        all: Option<PathBuf>,
+        /// K1: переопределить маршрут прогона (fast|standard|critical) —
+        /// сильнее `route:` из `CASE.yaml` кейса.
+        #[arg(long, value_name = "ROUTE")]
+        route: Option<String>,
         /// Подкоманда: смысловая строка по сохранённым клонам (ADR-051).
         #[command(subcommand)]
         cmd: Option<RedteamCmd>,
@@ -390,6 +400,20 @@ enum Cmd {
         /// провалы: эталон с FAIL-составляющей режимом не прощается.
         #[arg(long)]
         hermetic: bool,
+        /// K2 (контур-бенч 0.4.0): redteam для пары «репозиторий + стандарт» —
+        /// засев нарушений `CONSTRAINTS.yaml` в РЕАЛЬНЫЙ репозиторий кода и
+        /// карта обнаружения по слоям (текстовые правила / `ArchUnit` / радар).
+        /// Репозиторий read-only (работа идёт в копии). Несовместим с `case`,
+        /// `--all` и `--corpus`. Прогон информационный: exit 0.
+        #[arg(long, value_name = "REPO", conflicts_with_all = ["case", "all", "corpus"])]
+        repo: Option<PathBuf>,
+        /// K2: стандарт (`CONSTRAINTS.yaml`), которым меряется репозиторий.
+        #[arg(long, value_name = "CONSTRAINTS.yaml", requires = "repo")]
+        standard: Option<PathBuf>,
+        /// K2: группы мутаторов через запятую (java-hex,secrets,radar,config);
+        /// по умолчанию — все.
+        #[arg(long, value_name = "GROUPS", requires = "repo")]
+        mutators: Option<String>,
     },
     /// Составное архитектурное ревью репозитория одним ответом (бэклог
     /// волны 3, п.13): маршрут значимости из git-диффа + весь контур
@@ -1374,6 +1398,8 @@ pub(crate) async fn run() -> Result<()> {
         }
         Some(Cmd::Redteam {
             case,
+            all,
+            route,
             cmd,
             format,
             min_detection,
@@ -1382,7 +1408,69 @@ pub(crate) async fn run() -> Result<()> {
             keep_semantic,
             corpus,
             hermetic,
+            repo,
+            standard,
+            mutators,
         }) => {
+            // K2 (контур-бенч): `--repo <repo> --standard <CONSTRAINTS.yaml>` —
+            // засев нарушений стандарта в реальный репозиторий и карта
+            // обнаружения по слоям. Прогон информационный: exit 0.
+            if let Some(repo) = repo.as_deref() {
+                let Some(standard) = standard.as_deref() else {
+                    anyhow::bail!(
+                        "для K2-прогона укажите стандарт: `--repo <repo> --standard \
+                         <CONSTRAINTS.yaml>`"
+                    );
+                };
+                let groups: Vec<String> = mutators
+                    .as_deref()
+                    .map(|s| {
+                        s.split(',')
+                            .map(str::trim)
+                            .filter(|x| !x.is_empty())
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let report = arch_harness::redteam::run_stdcomply(repo, standard, &groups)?;
+                match format.trim().to_ascii_lowercase().as_str() {
+                    "json" => {
+                        let out = report.to_json();
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string())
+                        );
+                    }
+                    _ => print!("{}", report.render()),
+                }
+                // Информационный прогон: доля обнаружения — измерение, не приёмка.
+                return Ok(());
+            }
+            // K1: `--route` переопределяет маршрут из `CASE.yaml` кейса.
+            let route_override = match route.as_deref() {
+                None => None,
+                Some(r) => Some(
+                    r.trim()
+                        .to_ascii_lowercase()
+                        .parse::<arch_harness::control::Route>()
+                        .map_err(|e: String| anyhow::anyhow!(e))?,
+                ),
+            };
+            // K1: `--all <DIR>` — сводка измеримости всего набора кейсов.
+            if let Some(root) = all.as_deref() {
+                let summary = arch_harness::redteam::measure_all(root, route_override)?;
+                if format.trim().eq_ignore_ascii_case("json") {
+                    let out = summary.to_json();
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string())
+                    );
+                } else {
+                    print!("{}", summary.render());
+                }
+                // Информационный прогон: измеримость — измерение, не приёмка.
+                return Ok(());
+            }
             // Подкоманда `semantic-score` читает уже сохранённые клоны: сам
             // прогон кейса не нужен и кейс не обязателен.
             if let Some(RedteamCmd::SemanticScore { dir, format }) = cmd {
@@ -1437,6 +1525,7 @@ pub(crate) async fn run() -> Result<()> {
                         decision_quality: !no_decision_quality,
                         keep_semantic: keep_semantic.clone(),
                         hermetic,
+                        route: route_override,
                     },
                 )?
             } else {
@@ -1450,6 +1539,7 @@ pub(crate) async fn run() -> Result<()> {
                         decision_quality: !no_decision_quality,
                         keep_semantic: keep_semantic.clone(),
                         hermetic,
+                        route: route_override,
                     },
                 )?;
                 if save {

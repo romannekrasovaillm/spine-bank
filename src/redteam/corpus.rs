@@ -32,7 +32,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use super::{Detection, Expectation, Fixture, Layer, RedteamOptions, RedteamReport};
-use crate::control::Route;
 use crate::error::{HarnessError, Result};
 use crate::gate::GateStatus;
 
@@ -269,6 +268,9 @@ pub fn run_corpus(
     corpus_dir: &Path,
     options: &RedteamOptions,
 ) -> Result<RedteamReport> {
+    // K1: маршрут прогона — из `CASE.yaml` кейса (или флага `--route`); без
+    // файла — Critical, как было до 0.4.0.
+    let route = super::resolve_route(case, options.route)?;
     let load = load_corpus(corpus_dir)?;
     if load.patches.is_empty() && load.rejected.is_empty() {
         return Err(HarnessError::Control(format!(
@@ -282,20 +284,20 @@ pub fn run_corpus(
     super::prepare(&reference_root).map_err(HarnessError::Control)?;
     // Второй коммит обязателен (база прогона — HEAD~1), как в стандартном
     // прогоне.
-    let _ = crate::evidence::pack(&reference_root, Route::Critical);
+    let _ = crate::evidence::pack(&reference_root, route);
     if let Err(e) = super::git(&reference_root, &["add", "-A"])
         .and_then(|()| super::git(&reference_root, &["commit", "-q", "-m", "reference"]))
     {
         return Err(HarnessError::Control(format!("эталон: коммит: {e}")));
     }
-    let reference = super::gate_report(&reference_root, options.decision_quality)?;
+    let reference = super::gate_report(&reference_root, options.decision_quality, route)?;
     // B7: `--hermetic` — эталон, красный только из-за отсутствующего
     // прогонщика, не «сломанный пакет»; корпусный прогон информационный и
     // вправе на нём состояться.
     let hermetic_runner_skip = options.hermetic && super::runner_only_incomplete(&reference);
     if reference.outcome != crate::gate::GateOutcome::Pass && !hermetic_runner_skip {
         return Err(HarnessError::Control(format!(
-            "кейс {} не зелёный на маршруте Critical — корпусный прогон мерил бы \
+            "кейс {} не зелёный на маршруте {route} — корпусный прогон мерил бы \
              сломанный пакет ({})",
             case.display(),
             super::not_green_reasons(&reference)
@@ -342,7 +344,7 @@ pub fn run_corpus(
         applied += 1;
         // Бандл переупаковывается ПОСЛЕ правки — как в стандартном прогоне:
         // иначе дефект ловился бы evidence_verify, а не проверяемым контуром.
-        let _ = crate::evidence::pack(&root, Route::Critical);
+        let _ = crate::evidence::pack(&root, route);
         if let Err(e) = super::git(&root, &["add", "-A"]).and_then(|()| {
             super::git(
                 &root,
@@ -351,7 +353,7 @@ pub fn run_corpus(
         }) {
             return Err(HarnessError::Control(format!("{}: коммит: {e}", patch.id)));
         }
-        let report = super::gate_report(&root, options.decision_quality)?;
+        let report = super::gate_report(&root, options.decision_quality, route)?;
         let failed: Vec<String> = report
             .components
             .iter()
