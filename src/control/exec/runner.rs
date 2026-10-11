@@ -4,7 +4,7 @@
 //! [`crate::rule_templates`]), `max_age`, `dependency_direction` (ADR-029),
 //! `context_boundary` (ADR-030) и подготовка content-правил.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 use std::time::{Duration, SystemTime};
@@ -13,6 +13,7 @@ use regex::Regex;
 
 use super::baseline;
 use super::glob::{collect_dirs, collect_files, glob_matches};
+use crate::arch_diff::{EdgeKind, NodeKind, ScanLimits};
 use crate::control::rules::{
     DEFAULT_MANIFEST_GLOBS, ManifestDep, deny_spec_matches, line_of, manifest_deps,
 };
@@ -657,6 +658,83 @@ pub(super) fn run_rule(
                             "outbound_allowlist: исходящий хост '{host}' вне реестра интеграций (allow: {list})"
                         ),
                     );
+                }
+            }
+        }
+        RuleKind::DataOwnership => {
+            // Хранилища из графа as-built рабочего дерева (ADR-069, K6):
+            // `store:`-узлы и рёбра `connect` от компонентов-коннекторов.
+            // Сканируется рабочее дерево (без git — тест на обычном каталоге).
+            let scan = crate::arch_diff::scan_worktree_with(
+                repo,
+                &crate::control::DiffGlobs::default(),
+                &ScanLimits::default(),
+            )?;
+            let is_store = |id: &str| {
+                scan.graph
+                    .node(id)
+                    .is_some_and(|n| n.kind == NodeKind::Datastore)
+            };
+            // Хранилище → (компонент-коннектор → основание `файл:строка`).
+            let mut conn: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+            for edge in &scan.graph.edges {
+                if edge.kind != EdgeKind::Connect || !is_store(&edge.to) {
+                    continue;
+                }
+                conn.entry(edge.to.clone())
+                    .or_default()
+                    .entry(edge.from.clone())
+                    .or_insert_with(|| edge.evidence.first().cloned().unwrap_or_default());
+            }
+            // Компонент владеет хранилищем, если объявлен в `owners` по id или
+            // по id модели (`dir:`-компоненты сопоставляются через `model_id`).
+            let owns = |component: &str| -> bool {
+                if rule.owners.iter().any(|o| o == component) {
+                    return true;
+                }
+                scan.graph
+                    .node(component)
+                    .and_then(|n| n.model_id.as_deref())
+                    .is_some_and(|mid| rule.owners.iter().any(|o| o == mid))
+            };
+            let split = |ev: &str| -> (String, usize) {
+                match ev.rsplit_once(':') {
+                    Some((file, line)) => (file.to_string(), line.parse().unwrap_or(0)),
+                    None => (ev.to_string(), 0),
+                }
+            };
+            for (store, connectors) in &conn {
+                if rule.owners.is_empty() {
+                    // database-per-service: одно хранилище — один владелец.
+                    if connectors.len() < 2 {
+                        continue;
+                    }
+                    let list = connectors.keys().cloned().collect::<Vec<_>>().join(", ");
+                    for ev in connectors.values() {
+                        let (file, line) = split(ev);
+                        issue(
+                            PathBuf::from(file),
+                            line,
+                            format!(
+                                "data_ownership_violated: хранилище '{store}' доступно более чем одному компоненту ({list}); database-per-service нарушен"
+                            ),
+                        );
+                    }
+                } else {
+                    for (component, ev) in connectors {
+                        if owns(component) {
+                            continue;
+                        }
+                        let (file, line) = split(ev);
+                        issue(
+                            PathBuf::from(file),
+                            line,
+                            format!(
+                                "data_ownership_violated: компонент '{component}' обращается к хранилищу '{store}', но не объявлен владельцем (owners: {})",
+                                rule.owners.join(", ")
+                            ),
+                        );
+                    }
                 }
             }
         }

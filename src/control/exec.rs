@@ -645,6 +645,145 @@ mod tests {
             && i.rule != "cmd_true"));
     }
 
+    /// Модель из двух CMP (приём `skeleton/intake`, ядро `skeleton/ledger`)
+    /// для тестов `data_ownership` (S9): граф as-built выводит `store:`-узлы
+    /// из конфигов внутри `code_roots` компонентов (ADR-069).
+    fn write_two_cmp(repo: &Path) {
+        write_file(
+            repo,
+            "model/CMP-001-intake.md",
+            "---\nid: CMP-001\ntype: cmp\ntitle: Приём\nstatus: adopted\ncode_roots: [skeleton/intake]\n---\nПриём.\n",
+        );
+        write_file(
+            repo,
+            "model/CMP-002-ledger.md",
+            "---\nid: CMP-002\ntype: cmp\ntitle: Ядро\nstatus: adopted\ncode_roots: [skeleton/ledger]\n---\nЯдро.\n",
+        );
+    }
+
+    /// data_ownership (S9, ADR-078), режим «database-per-service»: у хранилища
+    /// два компонента-коннектора (копия `store:`-узла из графа) → находка
+    /// `data_ownership_violated` с обоими именами.
+    #[test]
+    fn data_ownership_flags_second_connector() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        write_two_cmp(&repo);
+        write_file(
+            &repo,
+            "skeleton/intake/config.yaml",
+            "cache: \"redis://redis-cart:6379\"\n",
+        );
+        write_file(
+            &repo,
+            "skeleton/ledger/config.yaml",
+            "cache: \"redis://redis-cart:6379\"\n",
+        );
+        let constraints = write_file(
+            dir.path(),
+            "CONSTRAINTS.yaml",
+            "rules:\n\
+             \x20 - name: db_per_service\n\
+             \x20   type: data_ownership\n\
+             \x20   severity: warn\n",
+        );
+        let report = check(&repo, &constraints).unwrap();
+        let hits: Vec<&crate::control::LintIssue> = report
+            .issues
+            .iter()
+            .filter(|i| i.rule == "db_per_service")
+            .collect();
+        assert!(
+            !hits.is_empty(),
+            "ожидалась находка data_ownership_violated: {:?}",
+            report.issues
+        );
+        assert!(
+            hits.iter()
+                .all(|i| i.message.contains("data_ownership_violated")),
+            "{:?}",
+            hits
+        );
+        assert!(
+            hits.iter().any(|i| i.message.contains("CMP-001")),
+            "{hits:?}"
+        );
+        assert!(
+            hits.iter().any(|i| i.message.contains("CMP-002")),
+            "{hits:?}"
+        );
+    }
+
+    /// data_ownership, база не краснеет: единственный коннектор к хранилищу —
+    /// владение соблюдено, находок нет.
+    #[test]
+    fn data_ownership_ok_single_connector() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        write_two_cmp(&repo);
+        write_file(
+            &repo,
+            "skeleton/intake/config.yaml",
+            "cache: \"redis://redis-cart:6379\"\n",
+        );
+        let constraints = write_file(
+            dir.path(),
+            "CONSTRAINTS.yaml",
+            "rules:\n\
+             \x20 - name: db_per_service\n\
+             \x20   type: data_ownership\n\
+             \x20   severity: warn\n",
+        );
+        let report = check(&repo, &constraints).unwrap();
+        assert!(
+            report.issues.iter().all(|i| i.rule != "db_per_service"),
+            "{:?}",
+            report.issues
+        );
+    }
+
+    /// data_ownership, режим whitelist (`owners: [CMP-001]`): обращение
+    /// чужого компонента (CMP-002) к хранилищу владельца — находка; сам
+    /// владелец чист.
+    #[test]
+    fn data_ownership_whitelist_flags_non_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        write_two_cmp(&repo);
+        write_file(
+            &repo,
+            "skeleton/intake/config.yaml",
+            "cache: \"redis://redis-cart:6379\"\n",
+        );
+        write_file(
+            &repo,
+            "skeleton/ledger/config.yaml",
+            "cache: \"redis://redis-cart:6379\"\n",
+        );
+        let constraints = write_file(
+            dir.path(),
+            "CONSTRAINTS.yaml",
+            "rules:\n\
+             \x20 - name: cache_owner\n\
+             \x20   type: data_ownership\n\
+             \x20   owners: [CMP-001]\n\
+             \x20   severity: warn\n",
+        );
+        let report = check(&repo, &constraints).unwrap();
+        let hits: Vec<&crate::control::LintIssue> = report
+            .issues
+            .iter()
+            .filter(|i| i.rule == "cache_owner")
+            .collect();
+        assert_eq!(hits.len(), 1, "{:?}", report.issues);
+        assert!(
+            hits[0].message.contains("data_ownership_violated"),
+            "{hits:?}"
+        );
+        assert!(hits[0].message.contains("компонент 'CMP-002'"), "{hits:?}");
+        assert!(!hits[0].message.contains("компонент 'CMP-001'"), "{hits:?}");
+    }
+
     #[test]
     fn fitness_report_json_matches_sdk_contract_v1() {
         // SDK-контракт v1 (sdk/CONTRACT.md §2): однострочный JSON FitnessReport

@@ -145,14 +145,17 @@ rules:
     owner: "@dka-security"
     rationale: "Пароли не хранятся литералом в конфиге — только из секрет-хранилища."
 
-  # S9. database-per-service. Требует карты БД↔сервис — текстовая проверка
-  # не отличает общую схему от раздельных баз. Не выразимо без модели.
+  # S9. database-per-service. Выразимо × data_ownership (волна S, S9,
+  # ADR-078): хранилища из графа as-built (ADR-069, `store:`-узлы и рёбра
+  # `connect`) читают/пишут только компоненты-владельцы. Без `owners` —
+  # режим database-per-service: у хранилища не более одного коннектора.
   - id: JSS-009
     name: s9_database_per_service
-    unverifiable: true
+    type: data_ownership
     severity: warn
     owner: "@dka-data"
-    rationale: "Database-per-service — нужна карта БД↔сервис, текстовая проверка слепа."
+    rationale: "Database-per-service — хранилище читает/пишет только компонент-владелец."
+    reference: "ADR-069"
 
   # S10. Исходящие хосты — только из реестра интеграций. Выразимо ×
   # outbound_allowlist (волна S, ADR-070): URL-литералы из кода и конфигов
