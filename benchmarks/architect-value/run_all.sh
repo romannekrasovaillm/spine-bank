@@ -38,6 +38,10 @@ mkdir -p "$DEST"
 LOG="$DEST/run_all.log"
 PY="${PYTHON:-python3}"
 
+# AD-7 (личные пути не живут в репозитории): лог санитизируется —
+# домашний путь исполнителя заменяется плейсхолдером /home/user.
+sanitize() { sed -e "s|$HOME|/home/user|g" -e 's|/home/[a-z][a-z0-9_-]*|/home/user|g'; }
+
 {
   echo "# architect-value — run_all"
   echo "version: $VER"
@@ -45,22 +49,22 @@ PY="${PYTHON:-python3}"
   echo "arch_be: $ARCH_BE"
   echo "repos_dir: $REPOS"
   echo
-} | tee "$LOG"
+} | sanitize | tee "$LOG"
 
 run() {  # run <заголовок> <runner.py> [аргументы...]
   local title="$1"; shift
-  echo "## $title" | tee -a "$LOG"
-  "$PY" "$RUNNERS/$1" --repos-dir "$REPOS" 2>&1 | tee -a "$LOG"
-  echo | tee -a "$LOG"
+  echo "## $title" | sanitize | tee -a "$LOG"
+  "$PY" "$RUNNERS/$1" --repos-dir "$REPOS" 2>&1 | sanitize | tee -a "$LOG"
+  echo | sanitize | tee -a "$LOG"
 }
 
 skip() {  # skip <метрики> <причина>
-  echo "[SKIP] $1: $2" | tee -a "$LOG"
+  echo "[SKIP] $1: $2" | sanitize | tee -a "$LOG"
 }
 
-echo "## Предполёт: разбор входов (test_parsers)" | tee -a "$LOG"
-"$PY" "$RUNNERS/test_parsers.py" 2>&1 | tee -a "$LOG"
-echo | tee -a "$LOG"
+echo "## Предполёт: разбор входов (test_parsers)" | sanitize | tee -a "$LOG"
+"$PY" "$RUNNERS/test_parsers.py" 2>&1 | sanitize | tee -a "$LOG"
+echo | sanitize | tee -a "$LOG"
 
 # ── StdComply: стандарт + семена ────────────────────────────────────────────
 run "StdComply — стандарт Java-сервисы (метрики 7, 9, 10)" control_standard.py
@@ -79,24 +83,24 @@ run "ArchRecover — рёбра as-built recall/precision (метрика 3)" ed
 run "ArchRecover — детерминизм и время recover (метрики 18, 19)" recover_determinism.py
 {
   echo "## ArchRecover — восстановление архитектуры (метрики 4–6)"
-} | tee -a "$LOG"
+} | sanitize | tee -a "$LOG"
 skip "metric 4 (хранилища recall)" "нет раннера хранилищ на эталоне (recover реализован)"
 skip "metric 5 (внешние precision)" "нет раннера внешних систем на эталоне (recover реализован)"
 skip "metric 6 (шум карты survey)" "грунт-трус шума survey отсутствует"
-echo | tee -a "$LOG"
+echo | sanitize | tee -a "$LOG"
 
 # ── Kontur ──────────────────────────────────────────────────────────────────
-echo "## Kontur — измеримые кейсы и FP на реальном коде (метрики 11, 12, 20)" | tee -a "$LOG"
+echo "## Kontur — измеримые кейсы и FP на реальном коде (метрики 11, 12, 20)" | sanitize | tee -a "$LOG"
 run "Kontur — измеримость кейсов и FP на реальном коде (метрики 11, 12)" kontur_bench.py
 
 skip "metric 20 (квалификация судьи: различительная сила)" "рубрики/судья — вне Python-прогонщиков"
-echo | tee -a "$LOG"
+echo | sanitize | tee -a "$LOG"
 
 # ── selftest / golden judge ─────────────────────────────────────────────────
-echo "## Прочее (вне Python-прогонщиков)" | tee -a "$LOG"
+echo "## Прочее (вне Python-прогонщиков)" | sanitize | tee -a "$LOG"
 skip "metric 14 (selftest из коробки)" "измеряется в CI (cargo test), не прогонщиком бенчмарка"
 skip "metric 17 (golden judge MAE / доля в диапазоне)" "требует API-ключ судьи — вне офлайн-прогона"
-echo | tee -a "$LOG"
+echo | sanitize | tee -a "$LOG"
 
 # ── Сводка ──────────────────────────────────────────────────────────────────
 {
@@ -120,5 +124,5 @@ echo | tee -a "$LOG"
   echo "| FIND   | $(grep -cE '^\[FIND\]' "$LOG") |"
 } > "$DEST/summary.md"
 
-echo "готово: $DEST (run_all.log, summary.md)" | tee -a "$LOG"
+echo "готово: $DEST (run_all.log, summary.md)" | sanitize | tee -a "$LOG"
 exit 0

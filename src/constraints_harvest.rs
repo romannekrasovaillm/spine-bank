@@ -157,10 +157,11 @@ fn walk(repo: &Path) -> Result<Tree> {
         };
         let rel = rel.to_string_lossy().replace('\\', "/");
         files.push(rel.clone());
-        if entry.metadata().map_or(0, |m| m.len()) <= MAX_FILE_BYTES
-            && let Ok(text) = std::fs::read_to_string(entry.path())
-        {
-            contents.insert(rel, text);
+        if entry.metadata().map_or(0, |m| m.len()) <= MAX_FILE_BYTES {
+            // MSRV 1.85: let-цепочки нестабильны — вложенная проверка.
+            if let Ok(text) = std::fs::read_to_string(entry.path()) {
+                contents.insert(rel, text);
+            }
         }
     }
     files.sort();
@@ -654,34 +655,38 @@ fn collect_licenses(tree: &Tree) -> Vec<Fact> {
     let mut facts = Vec::new();
     for rel in &tree.files {
         let name = file_name(rel);
-        if is_license_file(name)
-            && let Some(body) = content(tree, rel)
-            && let Some(spdx) = detect_license(body)
-        {
-            facts.push(Fact::new(format!("лицензия: {spdx}"), rel.clone()));
+        // MSRV 1.85: let-цепочки нестабильны — вложенные проверки.
+        if is_license_file(name) {
+            if let Some(body) = content(tree, rel) {
+                if let Some(spdx) = detect_license(body) {
+                    facts.push(Fact::new(format!("лицензия: {spdx}"), rel.clone()));
+                }
+            }
         }
         if is_manifest_file(name) {
-            if let Some(body) = content(tree, rel)
-                && let Some(fact) = platform_version_fact(rel, body)
-            {
-                facts.push(fact);
+            if let Some(body) = content(tree, rel) {
+                if let Some(fact) = platform_version_fact(rel, body) {
+                    facts.push(fact);
+                }
             }
             // Лицензия из манифестов пакетных менеджеров.
-            if name == "package.json"
-                && let Some(body) = content(tree, rel)
-                && let Some(lic) = json_string_value(body, "license")
-            {
-                facts.push(Fact::new(format!("лицензия: {lic}"), rel.clone()));
+            if name == "package.json" {
+                if let Some(body) = content(tree, rel) {
+                    if let Some(lic) = json_string_value(body, "license") {
+                        facts.push(Fact::new(format!("лицензия: {lic}"), rel.clone()));
+                    }
+                }
             }
-            if (name == "pyproject.toml" || name == "deny.toml")
-                && let Some(body) = content(tree, rel)
-                && let Some(idx) = body.lines().position(|l| l.trim().starts_with("license"))
-            {
-                let line = body.lines().nth(idx).unwrap_or("").trim();
-                facts.push(Fact::new(
-                    format!("политика лицензий: {}", truncate(line, 100)),
-                    file_line(rel, idx),
-                ));
+            if name == "pyproject.toml" || name == "deny.toml" {
+                if let Some(body) = content(tree, rel) {
+                    if let Some(idx) = body.lines().position(|l| l.trim().starts_with("license")) {
+                        let line = body.lines().nth(idx).unwrap_or("").trim();
+                        facts.push(Fact::new(
+                            format!("политика лицензий: {}", truncate(line, 100)),
+                            file_line(rel, idx),
+                        ));
+                    }
+                }
             }
         }
     }
@@ -701,15 +706,16 @@ fn collect_lockfiles(tree: &Tree) -> Vec<Fact> {
                 }
                 cur = Some((None, None));
             } else if let Some((name, version)) = cur.as_mut() {
-                if name.is_none()
-                    && let Some(n) = quoted_after(line, "name")
-                {
-                    *name = Some(n);
+                // MSRV 1.85: let-цепочки нестабильны — вложенные проверки.
+                if name.is_none() {
+                    if let Some(n) = quoted_after(line, "name") {
+                        *name = Some(n);
+                    }
                 }
-                if version.is_none()
-                    && let Some(v) = quoted_after(line, "version")
-                {
-                    *version = Some(v);
+                if version.is_none() {
+                    if let Some(v) = quoted_after(line, "version") {
+                        *version = Some(v);
+                    }
                 }
             }
         }
@@ -748,18 +754,19 @@ fn collect_lockfiles(tree: &Tree) -> Vec<Fact> {
     }
     // requirements.txt: пинованные версии.
     for rel in &tree.files {
-        if file_name(rel) == "requirements.txt"
-            && let Some(body) = content(tree, rel)
-        {
-            for (idx, line) in body.lines().enumerate() {
-                let trimmed = line.trim();
-                if trimmed.is_empty() || trimmed.starts_with('#') {
-                    continue;
+        // MSRV 1.85: let-цепочки нестабильны — вложенная проверка.
+        if file_name(rel) == "requirements.txt" {
+            if let Some(body) = content(tree, rel) {
+                for (idx, line) in body.lines().enumerate() {
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() || trimmed.starts_with('#') {
+                        continue;
+                    }
+                    facts.push(Fact::new(
+                        format!("зависимость: {}", truncate(trimmed, 80)),
+                        file_line(rel, idx),
+                    ));
                 }
-                facts.push(Fact::new(
-                    format!("зависимость: {}", truncate(trimmed, 80)),
-                    file_line(rel, idx),
-                ));
             }
         }
     }
@@ -841,13 +848,14 @@ fn collect_invariants(tree: &Tree) -> Vec<Fact> {
                 ));
                 continue;
             }
-            if let Some(text) = comment_text(line)
-                && INVARIANT_MARKERS.iter().any(|m| text.contains(m))
-            {
-                facts.push(Fact::new(
-                    format!("маркер: {}", truncate(&text, 100)),
-                    file_line(rel, idx),
-                ));
+            // MSRV 1.85: let-цепочки нестабильны — вложенная проверка.
+            if let Some(text) = comment_text(line) {
+                if INVARIANT_MARKERS.iter().any(|m| text.contains(m)) {
+                    facts.push(Fact::new(
+                        format!("маркер: {}", truncate(&text, 100)),
+                        file_line(rel, idx),
+                    ));
+                }
             }
         }
     }

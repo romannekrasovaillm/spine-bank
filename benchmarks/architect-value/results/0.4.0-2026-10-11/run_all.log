@@ -1,8 +1,8 @@
 # architect-value — run_all
 version: 0.4.0
 date: 2026-10-11
-arch_be: /home/roman/spine-bank/target/debug/arch-be
-repos_dir: /home/roman/bench-repos
+arch_be: /home/user/spine-bank/target/debug/arch-be
+repos_dir: /home/user/bench-repos
 
 ## Предполёт: разбор входов (test_parsers)
 
@@ -171,4 +171,4 @@ ok   boutique clone resolves: got=True want=True
 [SKIP] metric 14 (selftest из коробки): измеряется в CI (cargo test), не прогонщиком бенчмарка
 [SKIP] metric 17 (golden judge MAE / доля в диапазоне): требует API-ключ судьи — вне офлайн-прогона
 
-готово: /home/roman/spine-bank/benchmarks/architect-value/results/0.4.0-2026-10-11 (run_all.log, summary.md)
+готово: /home/user/spine-bank/benchmarks/architect-value/results/0.4.0-2026-10-11 (run_all.log, summary.md)
