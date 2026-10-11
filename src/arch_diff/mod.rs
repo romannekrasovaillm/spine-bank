@@ -27,6 +27,7 @@
 
 mod accept;
 mod as_built;
+mod calls;
 mod decisions;
 mod diff;
 mod modules;

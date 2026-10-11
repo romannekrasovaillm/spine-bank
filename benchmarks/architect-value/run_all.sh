@@ -5,7 +5,7 @@
 #   StdComply        — 7, 9, 10 (control check стандарта/манифесты) + 8 (семена C.2/C.3)
 #   arch-diff-replay — 13 (replay.py)
 #   MCP              — 15, 16 (mcp_schema_probe.py)
-#   ArchRecover      — 1 (survey_compare.py); 2–6, 18, 19 — SKIP (волна R не в 0.3.17)
+#   ArchRecover      — 1 (survey_compare.py), 3 (edges_recover.py, волна R/R2); 2, 4–6, 18, 19 — SKIP
 #   Kontur           — 11, 12, 20 — SKIP (волна K не в 0.3.17)
 #   selftest/judge   — 14, 17 — SKIP (вне Python-прогонщиков)
 #
@@ -71,13 +71,13 @@ run "arch-diff-replay — значимые диффы и окна-шума (ме
 # ── MCP ─────────────────────────────────────────────────────────────────────
 run "MCP — схема ↔ реализация (метрики 15, 16)" mcp_schema_probe.py
 
-# ── ArchRecover: survey-детерминизм + SKIP волны R ──────────────────────────
+# ── ArchRecover: survey-детерминизм + рёбра + SKIP остальных метрик R ───────
 run "ArchRecover — survey . ≡ survey <abs> (метрика 1)" survey_compare.py
+run "ArchRecover — рёбра as-built recall/precision (метрика 3)" edges_recover.py
 {
-  echo "## ArchRecover — восстановление архитектуры (метрики 2–6, 18, 19)"
+  echo "## ArchRecover — восстановление архитектуры (метрики 2, 4–6, 18, 19)"
 } | tee -a "$LOG"
 skip "metric 2 (компоненты F1)"   "волна R (recover) не реализована в 0.3.17"
-skip "metric 3 (рёбра recall/precision)" "волна R (recover) не реализована в 0.3.17"
 skip "metric 4 (хранилища recall)" "волна R (recover) не реализована в 0.3.17"
 skip "metric 5 (внешние precision)" "волна R (recover) не реализована в 0.3.17"
 skip "metric 6 (шум карты survey)" "механизм грунт-труса recover отсутствует в 0.3.17"

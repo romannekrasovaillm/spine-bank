@@ -161,6 +161,10 @@ pub struct ArchGraph {
     pub nodes: Vec<ArchNode>,
     /// Рёбра (отсортированы по from/to/kind).
     pub edges: Vec<ArchEdge>,
+    /// `[gap]`-строки R2: имена из конфигурации/кода без компонента в
+    /// репозитории (пусто — поле не сериализуется, контракт `v1` не меняется).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub gaps: Vec<String>,
 }
 
 impl ArchGraph {

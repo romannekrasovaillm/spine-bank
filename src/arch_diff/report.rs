@@ -132,6 +132,15 @@ pub fn render_md(diff: &ArchDiff) -> String {
             format!(" — {triggers}")
         }
     );
+    if !diff.gaps.is_empty() {
+        let _ = writeln!(
+            out,
+            "\nНеразрешённые вызовы (нет компонента с таким именем)"
+        );
+        for g in &diff.gaps {
+            let _ = writeln!(out, "  ! {g}");
+        }
+    }
     if diff.is_empty() {
         let _ = writeln!(out, "\nАрхитектурных изменений нет.");
         return out;

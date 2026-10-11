@@ -421,7 +421,7 @@ pub(crate) fn dir_present(snap: &Snapshot, dir: &str) -> bool {
 }
 
 /// Режет текст на YAML-документы по строкам-разделителям `---`.
-fn split_docs(text: &str) -> Vec<&str> {
+pub(crate) fn split_docs(text: &str) -> Vec<&str> {
     let mut out = Vec::new();
     let mut start = 0usize;
     let mut idx = 0usize;
