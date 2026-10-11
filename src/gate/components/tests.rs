@@ -512,6 +512,7 @@ fn runner_skip_detail_only_for_error_severity() {
         untrusted_skipped: Vec::new(),
         requires_skipped: Vec::new(),
         fingerprint: None,
+        not_applicable: Vec::new(),
     };
     let detail = skip_detail(&report(vec![
         skip("r_err", "error"),
@@ -553,6 +554,7 @@ fn untrusted_skip_detail_blocks_at_any_severity() {
         untrusted_skipped,
         requires_skipped: Vec::new(),
         fingerprint: None,
+        not_applicable: Vec::new(),
     };
     let skip = |rule: &str, severity: &str| control::UntrustedSkippedRule {
         rule: rule.to_string(),
@@ -667,6 +669,7 @@ fn requires_skip_detail_lists_rules_and_stand_line() {
         untrusted_skipped: Vec::new(),
         requires_skipped,
         fingerprint: None,
+        not_applicable: Vec::new(),
     };
     let skip = |rule: &str, severity: &str| control::RequiresSkippedRule {
         rule: rule.to_string(),

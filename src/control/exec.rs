@@ -18,8 +18,9 @@ use std::time::Instant;
 use super::baseline;
 use super::registry::{evaluate_overrides, load_constraints_resolved};
 use super::types::{
-    FitnessReport, FitnessRule, LintIssue, RequiresSkippedRule, RuleDuration, RuleKind,
-    RulesFingerprint, RunnerSkippedRule, SourceCount, UntrustedSkippedRule, normalize_severity,
+    FitnessReport, FitnessRule, LintIssue, NotApplicableRule, RequiresSkippedRule, RuleDuration,
+    RuleKind, RulesFingerprint, RunnerSkippedRule, SourceCount, UntrustedSkippedRule,
+    normalize_severity,
 };
 use crate::error::{HarnessError, Result};
 
@@ -27,7 +28,8 @@ mod glob;
 mod runner;
 
 pub(crate) use glob::{collect_dirs, collect_files, glob_matches};
-use runner::run_rule;
+pub(crate) use runner::collect_content_files;
+use runner::{not_applicable, run_rule};
 
 /// Прогон fitness functions из `CONSTRAINTS.yaml` по репозиторию.
 ///
@@ -167,6 +169,9 @@ pub fn check_with_options(
     let mut runner_skipped: Vec<RunnerSkippedRule> = Vec::new();
     let mut untrusted_skipped: Vec<UntrustedSkippedRule> = Vec::new();
     let mut requires_skipped: Vec<RequiresSkippedRule> = Vec::new();
+    // Волна S (ADR-070): правила со статусом N/A — объявленные условия
+    // `applies_to` не выполнены, прогон пропущен. НЕ находка, гейт не ломает.
+    let mut not_applicable_rules: Vec<NotApplicableRule> = Vec::new();
     // A3: решение об исполнении команд реестра — ОДИН снимок на весь прогон
     // (модель доверия, ADR-053): no-exec (флаг/переменная/дефолт MCP) или
     // allow-файл, не совпадающий с отпечатком набора команд. Отпечаток
@@ -209,6 +214,17 @@ pub fn check_with_options(
     };
     for rule in &rule_refs {
         let started = Instant::now();
+        // Волна S (ADR-070): правило, чьи объявленные условия `applies_to` не
+        // выполнены, получает статус N/A — прогон пропускается, статус идёт в
+        // отчёт покрытия (не PASS и не FAIL), гейт не ломается.
+        if let Some(reason) = not_applicable(repo, rule)? {
+            not_applicable_rules.push(NotApplicableRule {
+                rule: rule.name.clone(),
+                severity: normalize_severity(&rule.severity, &rule.name)?.to_string(),
+                reason,
+            });
+            continue;
+        }
         // ADR-068: ресурс недоступен — правило даёт SKIP с причиной (не PASS и
         // не FAIL): проверка не исполняется, в находки не попадает. Ресурс
         // доступен — обычная семантика (SKIP — не лазейка).
@@ -410,6 +426,16 @@ pub fn check_with_options(
             notes
         );
     }
+    if !not_applicable_rules.is_empty() {
+        // Волна S (ADR-070): N/A — не нарушение и не проверка: правило не
+        // относится к этому репозиторию. В сводке отдельным счётчиком, гейт
+        // не ломает.
+        let _ = write!(
+            summary,
+            "; неприменимо (N/A): {}",
+            not_applicable_rules.len()
+        );
+    }
     if let Some(fp) = &fingerprint {
         // Запись в String не может завершиться ошибкой — игнор безопасен.
         let _ = write!(
@@ -437,6 +463,7 @@ pub fn check_with_options(
         untrusted_skipped,
         requires_skipped,
         fingerprint,
+        not_applicable: not_applicable_rules,
     })
 }
 
@@ -2290,6 +2317,135 @@ mod tests {
             "команда изменённого реестра не запускалась"
         );
         assert!(report.passed, "пропуск — не провал: {}", report.summary);
+    }
+
+    /// S12 (волна S, ADR-070): `must_not_contain` + `multiline: true` ловит
+    /// аннотацию на отдельной строке над полем; параметр конструктора не ловится.
+    #[test]
+    fn fitness_multiline_must_not_contain() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        write_file(
+            &repo,
+            "src/Foo.java",
+            "import org.springframework.beans.factory.annotation.Autowired;\nclass Foo {\n    @Autowired\n    private BarService bar;\n\n    Foo(@Autowired BazService baz) {}\n}\n",
+        );
+        let constraints = write_file(
+            dir.path(),
+            "CONSTRAINTS.yaml",
+            r"rules:
+  - name: no_field_injection
+    type: must_not_contain
+    glob: '**/*.java'
+    multiline: true
+    pattern: '@(?:Autowired|Inject|Resource)\s+(?:private|protected)\s+[\w.<>\[\],]+\s+\w+\s*;'
+    severity: warn
+",
+        );
+        let report = check(&repo, &constraints).unwrap();
+        let issues: Vec<_> = report
+            .issues
+            .iter()
+            .filter(|i| i.rule == "no_field_injection")
+            .collect();
+        assert_eq!(
+            issues.len(),
+            1,
+            "одна находка field injection: {}",
+            report.summary
+        );
+        assert_eq!(issues[0].line, 3, "@Autowired на строке 3");
+        assert_eq!(issues[0].severity, "warn");
+    }
+
+    /// S5 (волна S, ADR-070): `conditional` сверяет триггер `if` и обязательство
+    /// `then` в пределах модуля сборки — модуль без circuit breaker краснеет.
+    #[test]
+    fn fitness_conditional_module_scoped() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        write_file(&repo, "app-a/pom.xml", "<project/>\n");
+        write_file(
+            &repo,
+            "app-a/src/AOut.java",
+            "class AOut { void f(){ new RestTemplate(); } @CircuitBreaker void g(){} }\n",
+        );
+        write_file(&repo, "app-b/pom.xml", "<project/>\n");
+        write_file(
+            &repo,
+            "app-b/src/BOut.java",
+            "class BOut { void f(){ new RestTemplate(); } }\n",
+        );
+        let constraints = write_file(
+            dir.path(),
+            "CONSTRAINTS.yaml",
+            r"rules:
+  - name: outbound_circuit_breaker
+    type: conditional
+    if:
+      glob: '**/*.java'
+      pattern: 'RestTemplate'
+    then:
+      glob: '**/*.java'
+      pattern: '@CircuitBreaker'
+    severity: warn
+",
+        );
+        let report = check(&repo, &constraints).unwrap();
+        let issues: Vec<_> = report
+            .issues
+            .iter()
+            .filter(|i| i.rule == "outbound_circuit_breaker")
+            .collect();
+        assert_eq!(
+            issues.len(),
+            1,
+            "один модуль без breaker: {}",
+            report.summary
+        );
+        assert!(
+            issues[0].file.to_string_lossy().contains("app-b"),
+            "нарушивший модуль app-b: {:?}",
+            issues[0].file
+        );
+    }
+
+    /// S10 (волна S, ADR-070): `outbound_allowlist` сверяет исходящие хосты с
+    /// реестром интеграций; хост вне реестра — находка, разрешённый не краснеет.
+    #[test]
+    fn fitness_outbound_allowlist() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        write_file(
+            &repo,
+            "config/app.yml",
+            "services:\n  - url: https://api.bank.example/v1\n  - url: https://evil.example/v1\n",
+        );
+        let constraints = write_file(
+            dir.path(),
+            "CONSTRAINTS.yaml",
+            r"rules:
+  - name: hosts_from_registry
+    type: outbound_allowlist
+    glob: '**/*.yml'
+    allow: [api.bank.example]
+    severity: warn
+",
+        );
+        let report = check(&repo, &constraints).unwrap();
+        let issues: Vec<_> = report
+            .issues
+            .iter()
+            .filter(|i| i.rule == "hosts_from_registry")
+            .collect();
+        assert_eq!(
+            issues.len(),
+            1,
+            "один неразрешённый хост: {}",
+            report.summary
+        );
+        assert!(issues[0].message.contains("evil.example"));
+        assert_eq!(issues[0].line, 3, "url с evil.example на строке 3");
     }
 }
 

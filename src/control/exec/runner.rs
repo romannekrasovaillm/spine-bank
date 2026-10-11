@@ -13,9 +13,12 @@ use regex::Regex;
 
 use super::baseline;
 use super::glob::{collect_dirs, collect_files, glob_matches};
-use crate::control::rules::{DEFAULT_MANIFEST_GLOBS, manifest_deps};
+use crate::control::rules::{
+    DEFAULT_MANIFEST_GLOBS, ManifestDep, deny_spec_matches, line_of, manifest_deps,
+};
 use crate::control::types::{
-    FitnessRule, LintIssue, RuleKind, RunnerSkippedRule, UntrustedSkippedRule, normalize_severity,
+    DenySpec, FitnessRule, LintIssue, RuleKind, RunnerSkippedRule, UntrustedSkippedRule,
+    normalize_severity,
 };
 use crate::error::{HarnessError, Result};
 
@@ -32,6 +35,26 @@ fn apply_excludes<T: AsRef<str>>(paths: &mut Vec<T>, excludes: &[String]) {
 
 /// Дефолтный таймаут `command_succeeds`, секунды.
 const COMMAND_TIMEOUT_DEFAULT_SECS: u64 = 60;
+
+/// Текст находки `deny_dependency` (волна S, ADR-070): для простой записи —
+/// «пакет '<имя>' из deny-списка»; для записи с диапазоном версии добавляется
+/// факт нарушения «'<версия>' < '<порог>'».
+fn deny_message(spec: &DenySpec, dep: &ManifestDep, reference: &str) -> String {
+    match spec.below() {
+        Some(below) => format!(
+            "deny_dependency: пакет '{}' {} < {} из deny-списка{}",
+            spec.name(),
+            dep.version.as_deref().unwrap_or("?"),
+            below,
+            reference
+        ),
+        None => format!(
+            "deny_dependency: пакет '{}' из deny-списка{}",
+            spec.name(),
+            reference
+        ),
+    }
+}
 
 /// Выполняет одно fitness-правило, добавляя находки в `issues`.
 ///
@@ -154,6 +177,27 @@ pub(super) fn run_rule(
             for (rel, abs) in &files {
                 let bytes = std::fs::read(abs).map_err(|e| HarnessError::io(abs, e))?;
                 let content = String::from_utf8_lossy(&bytes);
+                if rule.multiline {
+                    // Многострочный режим (S12): regex применяется к содержимому
+                    // целиком и может захватывать переносы строк. Строка находки —
+                    // начало совпадения, сниппет — сам фрагмент в одну строку.
+                    for m in re.find_iter(&content) {
+                        let snippet: String = m
+                            .as_str()
+                            .split_whitespace()
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                            .chars()
+                            .take(120)
+                            .collect();
+                        issue(
+                            PathBuf::from(rel),
+                            line_of(&content, m.start()),
+                            format!("must_not_contain: запрещённый паттерн '{pattern}': {snippet}"),
+                        );
+                    }
+                    continue;
+                }
                 for (idx, line) in content.lines().enumerate() {
                     if re.is_match(line) {
                         let snippet: String = line.trim().chars().take(120).collect();
@@ -519,14 +563,100 @@ pub(super) fn run_rule(
             for (rel, abs) in &files {
                 let bytes = std::fs::read(abs).map_err(|e| HarnessError::io(abs, e))?;
                 let content = String::from_utf8_lossy(&bytes);
-                for (pkg, line) in manifest_deps(rel, &content)? {
-                    if rule.deny.iter().any(|d| d == &pkg) {
-                        issue(
-                            PathBuf::from(rel),
-                            line,
-                            format!("deny_dependency: пакет '{pkg}' из deny-списка{reference}"),
-                        );
+                for dep in manifest_deps(rel, &content)? {
+                    for spec in &rule.deny {
+                        if deny_spec_matches(spec, &dep) {
+                            issue(
+                                PathBuf::from(rel),
+                                dep.line,
+                                deny_message(spec, &dep, &reference),
+                            );
+                        }
                     }
+                }
+            }
+        }
+        RuleKind::Conditional => {
+            let if_cond = rule.if_cond.as_ref().ok_or_else(|| {
+                HarnessError::Control(format!(
+                    "правило '{}': для conditional нужно поле 'if'",
+                    rule.name
+                ))
+            })?;
+            let then_cond = rule.then_cond.as_ref().ok_or_else(|| {
+                HarnessError::Control(format!(
+                    "правило '{}': для conditional нужно поле 'then'",
+                    rule.name
+                ))
+            })?;
+            let re_if = compile_regex(&rule.name, &if_cond.pattern)?;
+            let re_then = compile_regex(&rule.name, &then_cond.pattern)?;
+            // Модуль — ближайший каталог-предок с манифестом сборки. Триггер
+            // `if` и обязательство `then` проверяются в пределах одного модуля.
+            let mut triggered: BTreeSet<String> = BTreeSet::new();
+            for (rel, abs) in collect_content_files(repo, &if_cond.glob, &rule.exclude_glob)? {
+                let bytes = std::fs::read(&abs).map_err(|e| HarnessError::io(&abs, e))?;
+                if re_if.is_match(&String::from_utf8_lossy(&bytes)) {
+                    triggered.insert(module_root(repo, &rel));
+                }
+            }
+            if triggered.is_empty() {
+                return Ok(());
+            }
+            let mut satisfied: BTreeSet<String> = BTreeSet::new();
+            for (rel, abs) in collect_content_files(repo, &then_cond.glob, &rule.exclude_glob)? {
+                let bytes = std::fs::read(&abs).map_err(|e| HarnessError::io(&abs, e))?;
+                if re_then.is_match(&String::from_utf8_lossy(&bytes)) {
+                    satisfied.insert(module_root(repo, &rel));
+                }
+            }
+            for module in &triggered {
+                if !satisfied.contains(module) {
+                    issue(
+                        PathBuf::from(module),
+                        0,
+                        format!(
+                            "conditional: триггер '{}' сработал в модуле '{module}', но обязательство '{}' не выполнено",
+                            if_cond.pattern, then_cond.pattern
+                        ),
+                    );
+                }
+            }
+        }
+        RuleKind::OutboundAllowlist => {
+            let globs = rule_globs(rule);
+            let mut files = Vec::new();
+            for glob in &globs {
+                files.extend(collect_files(repo, glob)?);
+            }
+            files.sort_by(|a, b| a.0.cmp(&b.0));
+            files.dedup_by(|a, b| a.0 == b.0);
+            if !rule.exclude_glob.is_empty() {
+                files.retain(|(rel, _)| !rule.exclude_glob.iter().any(|ex| glob_matches(ex, rel)));
+            }
+            let allow = rule.allow.as_deref().unwrap_or(&[]);
+            let re_host = compile_regex(&rule.name, OUTBOUND_URL_RE)?;
+            for (rel, abs) in &files {
+                let bytes = std::fs::read(abs).map_err(|e| HarnessError::io(abs, e))?;
+                let content = String::from_utf8_lossy(&bytes);
+                for cap in re_host.captures_iter(&content) {
+                    let Some(m) = cap.get(1) else { continue };
+                    let host = m.as_str();
+                    if host_allowed(host, allow) {
+                        continue;
+                    }
+                    let list = if allow.is_empty() {
+                        "реестр пуст".to_string()
+                    } else {
+                        allow.join(", ")
+                    };
+                    issue(
+                        PathBuf::from(rel),
+                        line_of(&content, cap.get(0).map_or(0, |c| c.start())),
+                        format!(
+                            "outbound_allowlist: исходящий хост '{host}' вне реестра интеграций (allow: {list})"
+                        ),
+                    );
                 }
             }
         }
@@ -817,6 +947,200 @@ fn rule_globs(rule: &FitnessRule) -> Vec<String> {
     } else {
         rule.glob.clone()
     }
+}
+
+/// Компилирует regex правила с понятной ошибкой (волна S, ADR-070): общий
+/// помощник новых типов правил (`conditional`, `outbound_allowlist`).
+fn compile_regex(rule_name: &str, pattern: &str) -> Result<Regex> {
+    Regex::new(pattern).map_err(|e| {
+        HarnessError::Control(format!(
+            "правило '{rule_name}': невалидный regex '{pattern}': {e}"
+        ))
+    })
+}
+
+/// Набор файлов по glob'ам с исключениями (волна S, ADR-070): общий сбор для
+/// новых типов правил. Пустой набор glob'ов — `**/*`. `pub(crate)`: реюз
+/// отчётом покрытия стандарта (проверка вакуумности glob'а).
+pub(crate) fn collect_content_files(
+    repo: &Path,
+    globs: &[String],
+    excludes: &[String],
+) -> Result<Vec<(String, PathBuf)>> {
+    let globs = if globs.is_empty() {
+        vec!["**/*".to_string()]
+    } else {
+        globs.to_vec()
+    };
+    let mut files = Vec::new();
+    for glob in &globs {
+        files.extend(collect_files(repo, glob)?);
+    }
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    files.dedup_by(|a, b| a.0 == b.0);
+    if !excludes.is_empty() {
+        files.retain(|(rel, _)| !excludes.iter().any(|ex| glob_matches(ex, rel)));
+    }
+    Ok(files)
+}
+
+/// Имена манифестов сборки, определяющих корень модуля (волна S, ADR-070):
+/// по ним [`module_root`] находит ближайший каталог-модуль файла.
+const BUILD_MANIFESTS: &[&str] = &[
+    "pom.xml",
+    "build.gradle",
+    "build.gradle.kts",
+    "package.json",
+    "Cargo.toml",
+    "pyproject.toml",
+    "go.mod",
+];
+
+/// Каталог-модуль файла (волна S, ADR-070): ближайший каталог-предок (включая
+/// собственный каталог файла), содержащий манифест сборки; если такого нет —
+/// корень репозитория (`.`). Единица проверки условного правила `conditional`:
+/// триггер `if` и обязательство `then` сверяются в пределах одного модуля.
+fn module_root(repo: &Path, rel: &str) -> String {
+    let mut dir = Path::new(rel).parent();
+    while let Some(d) = dir {
+        if has_build_manifest(&repo.join(d)) {
+            return if d.as_os_str().is_empty() {
+                ".".to_string()
+            } else {
+                d.to_string_lossy().into_owned()
+            };
+        }
+        dir = d.parent();
+    }
+    ".".to_string()
+}
+
+/// Есть ли в каталоге манифест сборки (имя из [`BUILD_MANIFESTS`] или
+/// `*.csproj`/`*.fsproj`).
+fn has_build_manifest(dir_abs: &Path) -> bool {
+    if BUILD_MANIFESTS.iter().any(|m| dir_abs.join(m).exists()) {
+        return true;
+    }
+    std::fs::read_dir(dir_abs).is_ok_and(|rd| {
+        rd.filter_map(std::result::Result::ok).any(|e| {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            name.ends_with(".csproj") || name.ends_with(".fsproj")
+        })
+    })
+}
+
+/// Regex исходящего хоста URL-литерала (волна S, ADR-070): `scheme://host`
+/// для схем `http`/`https`/`ws`/`wss`/`ftp`. Регистронезависимо.
+const OUTBOUND_URL_RE: &str = r"(?i)\b(?:https?|wss?|ftp)://([A-Za-z0-9.-]+)";
+
+/// Разрешён ли хост реестром интеграций (волна S, ADR-070): запись `*`
+/// разрешает всё, иначе — точное совпадение или суффикс поддомена
+/// (`host.ends_with(".entry")`).
+fn host_allowed(host: &str, allow: &[String]) -> bool {
+    allow.iter().any(|entry| {
+        let entry = entry.trim();
+        entry == "*" || host == entry || host.ends_with(&format!(".{entry}"))
+    })
+}
+
+/// Пробы стека репозитория → имя стека (волна S, ADR-070): эвристика по
+/// именам манифестов. Стек считается найденным, если под его glob'ом есть
+/// хотя бы один файл.
+const STACK_PROBES: &[(&str, &[&str])] = &[
+    ("java-maven", &["**/pom.xml"]),
+    ("java-gradle", &["**/build.gradle", "**/build.gradle.kts"]),
+    ("node", &["**/package.json"]),
+    (
+        "python",
+        &["**/pyproject.toml", "**/requirements.txt", "**/setup.py"],
+    ),
+    ("rust", &["**/Cargo.toml"]),
+    ("dotnet", &["**/*.csproj", "**/*.fsproj"]),
+    ("go", &["**/go.mod"]),
+];
+
+/// Определяет стеки репозитория по манифестам (`java-maven`, `java-gradle`,
+/// `node`, `python`, `rust`, `dotnet`, `go`).
+pub(super) fn detect_stacks(repo: &Path) -> Result<BTreeSet<&'static str>> {
+    let mut stacks = BTreeSet::new();
+    for &(name, globs) in STACK_PROBES {
+        let mut found = false;
+        for &g in globs {
+            if !collect_files(repo, g)?.is_empty() {
+                found = true;
+                break;
+            }
+        }
+        if found {
+            stacks.insert(name);
+        }
+    }
+    Ok(stacks)
+}
+
+/// Применение условий `applies_to` (волна S, ADR-070).
+///
+/// `Ok(None)` — правило применимо (прогонять). `Ok(Some(reason))` — правило
+/// N/A: объявленное условие не выполнено, прогон пропускается, гейт находкой
+/// НЕ ломается. Отсутствие поля `applies_to` — правило применимо всегда
+/// (поведение существующих правил не меняется).
+///
+/// Условие `when_glob_nonempty` — единственный способ превратить «пустой
+/// набор файлов» в N/A: собственное правило репозитория с пустым glob'ом без
+/// этого условия по-прежнему даёт находку «правилу нечего проверять»
+/// (текущая семантика сохранена).
+pub(super) fn not_applicable(repo: &Path, rule: &FitnessRule) -> Result<Option<String>> {
+    let Some(a) = &rule.applies_to else {
+        return Ok(None);
+    };
+    if !a.stack.is_empty() {
+        let stacks = detect_stacks(repo)?;
+        if !a.stack.iter().any(|s| stacks.contains(s.as_str())) {
+            let found = if stacks.is_empty() {
+                "нет".to_string()
+            } else {
+                stacks.iter().copied().collect::<Vec<_>>().join(", ")
+            };
+            return Ok(Some(format!(
+                "стек не найден: нужно [{}], в репозитории: {}",
+                a.stack.join(", "),
+                found
+            )));
+        }
+    }
+    if !a.when_exists.is_empty() {
+        let mut found = false;
+        for g in &a.when_exists {
+            if !collect_files(repo, g)?.is_empty() {
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            return Ok(Some(format!(
+                "нет файлов по when_exists: {}",
+                a.when_exists.join(", ")
+            )));
+        }
+    }
+    if a.when_glob_nonempty {
+        let globs = rule_globs(rule);
+        let mut any = false;
+        for g in &globs {
+            if !collect_files(repo, g)?.is_empty() {
+                any = true;
+                break;
+            }
+        }
+        if !any {
+            return Ok(Some(format!(
+                "набор файлов правила пуст (glob: {})",
+                globs.join(", ")
+            )));
+        }
+    }
+    Ok(None)
 }
 
 /// Запускает `bash -c <command>` в `repo` с ручным таймаутом.

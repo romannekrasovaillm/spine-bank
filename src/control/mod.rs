@@ -88,8 +88,10 @@ pub use registry::{
     rule_anchor_opts, rule_weakened, rule_weakened_scoped, rule_weakened_with,
 };
 pub use report::{
-    ControlReport, OverrideReportEntry, REQUIRED_SECTIONS, SensorResult, control_report,
-    lint_spine, render_control_report, rules_report, sensors_check, spine_ad_ids,
+    ControlReport, FleetEntry, FleetReport, FleetViolation, OverrideReportEntry, REQUIRED_SECTIONS,
+    RequirementCoverage, SensorResult, control_report, control_report_opts, fleet_report,
+    lint_spine, render_control_report, render_fleet_report, rules_report, sensors_check,
+    spine_ad_ids,
 };
 pub use rules::{
     ConstraintsPathResolution, HANDOFF_CONSTRAINTS_PATH, ROOT_CONSTRAINTS_PATH,
@@ -110,8 +112,8 @@ pub use tools::{
     AdrNewTool, FitnessCheckTool, RulesReportTool, SignificanceScoreTool, SpineLintTool, tools,
 };
 pub use types::{
-    BEHAVIOUR_RULE_KINDS, FitnessReport, FitnessRule, LintIssue, OverrideEntry, OverrideInfo,
-    RequiresSkippedRule, Route, RuleCard, RuleDuration, RulesFingerprint, RunnerSkippedRule,
-    Significance, SkippedUnknownRule, SourceCount, UntrustedSkippedRule,
+    BEHAVIOUR_RULE_KINDS, FitnessReport, FitnessRule, LintIssue, NotApplicableRule, OverrideEntry,
+    OverrideInfo, RequiresSkippedRule, Route, RuleCard, RuleDuration, RulesFingerprint,
+    RunnerSkippedRule, Significance, SkippedUnknownRule, SourceCount, UntrustedSkippedRule,
 };
 pub(crate) use types::{RuleKind, normalize_severity};

@@ -253,6 +253,11 @@ pub struct FitnessReport {
     /// Отпечаток состава реестра правил (П5). Аддитивное поле SDK-контракта v1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fingerprint: Option<RulesFingerprint>,
+    /// Правила со статусом N/A (волна S, ADR-070): объявленные условия
+    /// `applies_to` не выполнены — правило не прогонялось, гейт не ломает.
+    /// Аддитивное поле SDK-контракта v1.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub not_applicable: Vec<NotApplicableRule>,
 }
 
 /// Тип fitness-правила из `CONSTRAINTS.yaml`.
@@ -298,6 +303,16 @@ pub(crate) enum RuleKind {
     /// пакет из `deny` — находка со ссылкой `reference` на решение
     /// техкомитета.
     DenyDependency,
+    /// Условное правило (волна S, ADR-070): `if: {glob, pattern}` —
+    /// триггер; если в пределах модуля (каталог с манифестом сборки) нашёлся
+    /// хотя бы один файл по `if.glob` с `if.pattern`, то в том же модуле
+    /// обязан найтись файл по `then.glob` с `then.pattern`. Выражает S5
+    /// «исходящие вызовы → circuit breaker».
+    Conditional,
+    /// Разрешённые исходящие хосты (волна S, ADR-070): URL-литералы
+    /// (`scheme://host`) в файлах по `glob` сверяются с реестром интеграций
+    /// (`allow` — список хостов). Хост вне реестра — находка (S10).
+    OutboundAllowlist,
 }
 
 impl RuleKind {
@@ -317,6 +332,8 @@ impl RuleKind {
             Self::ContextBoundary => "context_boundary",
             Self::ArchUnit => "archunit",
             Self::DenyDependency => "deny_dependency",
+            Self::Conditional => "conditional",
+            Self::OutboundAllowlist => "outbound_allowlist",
         }
     }
 
@@ -330,6 +347,124 @@ impl RuleKind {
             Self::MustContain | Self::MustNotContain | Self::EachFileMustContain
         )
     }
+}
+
+/// Применимость правила к репозиторию (волна S, ADR-070): правило объявляет,
+/// к каким стекам и структурам оно относится.
+///
+/// Неприменимое правило получает статус **N/A** (не FAIL и не PASS): корп-
+/// стандарт, написанный под Java-Maven, не краснит Python-репозиторий ложной
+/// находкой «правилу нечего проверять». Отсутствие условий (или отсутствие
+/// поля `applies_to`) — правило применимо всегда: поведение существующих
+/// правил не меняется.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub(crate) struct AppliesTo {
+    /// Стеки, к которым применимо правило (`java-maven`, `java-gradle`,
+    /// `node`, `python`, `rust`, `dotnet`, `go`). Пусто — любой стек.
+    #[serde(default, deserialize_with = "de_string_or_list")]
+    pub(crate) stack: Vec<String>,
+    /// Glob'ы: правило применимо, только если существует хотя бы один файл
+    /// под одним из них (например, `**/pom.xml`). Пусто — без условия.
+    #[serde(default, deserialize_with = "de_string_or_list")]
+    pub(crate) when_exists: Vec<String>,
+    /// Применимо, только если собственный glob-набор правила (после
+    /// исключений) непуст; пустой набор — N/A, а не находка «правилу нечего
+    /// проверять».
+    #[serde(default)]
+    pub(crate) when_glob_nonempty: bool,
+}
+
+/// Правило, неприменимое к репозиторию (волна S, ADR-070): объявленные
+/// условия [`AppliesTo`] не выполнены — статус N/A (не PASS и не FAIL).
+/// НЕ находка, гейт не ломает; перечисляется в отчёте покрытия стандарта.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotApplicableRule {
+    /// Имя правила.
+    pub rule: String,
+    /// Нормализованный severity правила (`error`/`warn`).
+    pub severity: String,
+    /// Причина неприменимости (какое условие не выполнено).
+    pub reason: String,
+}
+
+/// Одна запись `deny`-списка тех-радара (`deny_dependency`, волна S, ADR-070).
+///
+/// Простая форма — `h2` (имя пакета); развёрнутая — `{name: log4j-core,
+/// below: "2.17.1", scopes: [runtime, compile]}` (диапазон версий и фильтр
+/// scope). Формат — dual: строка задаёт имя; карта — имя плюс необязательные
+/// диапазон и scope. Отсутствие развёрнутых полей сохраняет семантику
+/// существующих `deny: [pkg, ...]` (сравнение только по имени).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum DenySpec {
+    /// Простое имя пакета (обратная совместимость).
+    Name(String),
+    /// Развёрнутая запись: имя + диапазон версии + scope-фильтр.
+    Detailed {
+        /// Имя пакета (артефакт; для `groupId:artifactId` — проверяется и
+        /// полная координата, и последний сегмент).
+        name: String,
+        /// Запрещать версии строго НИЖЕ порога (`< below`); пусто — любая
+        /// версия. Непарсимая версия НЕ краснит (fail-open).
+        #[serde(default)]
+        below: Option<String>,
+        /// Разрешённый набор scope для краснения (`compile`/`runtime`/`test`/
+        /// `peer`/`optional`); пусто — любой scope.
+        #[serde(default, deserialize_with = "de_string_or_list")]
+        scopes: Vec<String>,
+    },
+}
+
+impl DenySpec {
+    /// Имя пакета записи.
+    pub(crate) fn name(&self) -> &str {
+        match self {
+            DenySpec::Name(name) | DenySpec::Detailed { name, .. } => name,
+        }
+    }
+
+    /// Порог диапазона версий (`below`) — `None`, если не задан.
+    pub(crate) fn below(&self) -> Option<&str> {
+        match self {
+            DenySpec::Name(_) => None,
+            DenySpec::Detailed { below, .. } => below.as_deref(),
+        }
+    }
+
+    /// Набор scope для краснения — пусто, если не задан.
+    pub(crate) fn scopes(&self) -> &[String] {
+        match self {
+            DenySpec::Name(_) => &[],
+            DenySpec::Detailed { scopes, .. } => scopes,
+        }
+    }
+
+    /// Канонический текст записи для анти-ослабления (A1): порядок scope не
+    /// влияет на хэш тела правила.
+    fn canonical(&self) -> String {
+        let mut scopes: Vec<&str> = self.scopes().iter().map(String::as_str).collect();
+        scopes.sort_unstable();
+        format!(
+            "{}|below={}|scopes={}",
+            self.name(),
+            self.below().unwrap_or_default(),
+            scopes.join(",")
+        )
+    }
+}
+
+/// Условие/обязательство правила `conditional` (волна S, ADR-070): набор
+/// файлов (`glob`) и regex (`pattern`). Используется и для триггера `if`
+/// (модуль активируется, если в нём есть файл по glob с pattern), и для
+/// обязательства `then` (в активированном модуле обязан найтись такой файл).
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct ConditionalClause {
+    /// Glob'ы модуля-локального поиска (строка или список); пусто — `**/*`.
+    #[serde(default, deserialize_with = "de_string_or_list")]
+    pub(super) glob: Vec<String>,
+    /// Regex, наличие которого в файле по `glob` активирует/удовлетворяет
+    /// условие.
+    pub(super) pattern: String,
 }
 
 /// Одно правило из `CONSTRAINTS.yaml`.
@@ -462,9 +597,11 @@ pub struct FitnessRule {
     /// `**/requirements.txt`.
     #[serde(default, deserialize_with = "de_string_or_list")]
     pub(super) manifests: Vec<String>,
-    /// Запрещённые имена пакетов (для `deny_dependency`; строка или список).
-    #[serde(default, deserialize_with = "de_string_or_list")]
-    pub(super) deny: Vec<String>,
+    /// Запрещённые пакеты (для `deny_dependency`, волна S, ADR-070): строка,
+    /// список имён или список развёрнутых записей [`DenySpec`] с диапазоном
+    /// версий и scope-фильтром.
+    #[serde(default, deserialize_with = "de_deny_list")]
+    pub(super) deny: Vec<DenySpec>,
     /// Ссылка на основание запрета — решение техкомитета/ADR (для
     /// `deny_dependency`; попадает в текст находки).
     #[serde(default)]
@@ -488,6 +625,24 @@ pub struct FitnessRule {
     /// `command_succeeds`, 300 для `archunit` (ADR-039).
     #[serde(default)]
     pub(crate) timeout_secs: Option<u64>,
+    /// Применимость к репозиторию (волна S, ADR-070): объявленные условия
+    /// (`stack`/`when_exists`/`when_glob_nonempty`). Неприменимое правило даёт
+    /// N/A, а не находку. Отсутствие поля — правило применимо всегда.
+    #[serde(default)]
+    pub(crate) applies_to: Option<AppliesTo>,
+    /// Многострочный режим content-правила (волна S, ADR-070): `must_not_contain`
+    /// ищет совпадение по содержимому файла целиком (regex может захватывать
+    /// переносы строк), а не построчно. Выражает S12 «нет field injection»
+    /// (аннотация над полем — многострочный шаблон). Дефолт `false` —
+    /// построчная семантика существующих правил не меняется.
+    #[serde(default)]
+    pub(super) multiline: bool,
+    /// Триггер условного правила (для `conditional`, волна S, ADR-070).
+    #[serde(rename = "if", default)]
+    pub(super) if_cond: Option<ConditionalClause>,
+    /// Обязательство условного правила (для `conditional`, волна S, ADR-070).
+    #[serde(rename = "then", default)]
+    pub(super) then_cond: Option<ConditionalClause>,
 }
 
 impl FitnessRule {
@@ -563,6 +718,11 @@ impl FitnessRule {
         fn opt_list(values: &Option<Vec<String>>) -> String {
             values.as_deref().map_or(String::new(), list)
         }
+        fn deny_specs(values: &[DenySpec]) -> String {
+            let mut refs: Vec<String> = values.iter().map(DenySpec::canonical).collect();
+            refs.sort_unstable();
+            refs.join("\u{1f}")
+        }
         fn opt(value: &Option<String>) -> String {
             value.clone().unwrap_or_default()
         }
@@ -571,6 +731,23 @@ impl FitnessRule {
         }
         fn flag(value: bool) -> String {
             if value { "true".into() } else { String::new() }
+        }
+        fn applies(a: &Option<AppliesTo>) -> String {
+            match a {
+                None => String::new(),
+                Some(a) => format!(
+                    "stack={};when_exists={};when_glob_nonempty={}",
+                    list(&a.stack),
+                    list(&a.when_exists),
+                    flag(a.when_glob_nonempty)
+                ),
+            }
+        }
+        fn clause(c: &Option<ConditionalClause>) -> String {
+            match c {
+                None => String::new(),
+                Some(c) => format!("glob={};pattern={}", list(&c.glob), c.pattern),
+            }
         }
         let mut out = BTreeMap::new();
         out.insert("id", opt(&self.id));
@@ -585,11 +762,15 @@ impl FitnessRule {
         out.insert("model_dir", opt(&self.model_dir));
         out.insert("classes_dir", opt(&self.classes_dir));
         out.insert("jar_dir", opt(&self.jar_dir));
-        out.insert("deny", list(&self.deny));
+        out.insert("deny", deny_specs(&self.deny));
         out.insert("manifests", list(&self.manifests));
         out.insert("reference", opt(&self.reference));
         out.insert("timeout_secs", num(self.timeout_secs));
         out.insert("unverifiable", flag(self.unverifiable));
+        out.insert("applies_to", applies(&self.applies_to));
+        out.insert("multiline", flag(self.multiline));
+        out.insert("if", clause(&self.if_cond));
+        out.insert("then", clause(&self.then_cond));
         out.insert("adr", opt(&self.adr));
         out.insert("owner", opt(&self.owner));
         out.insert("expiry", opt(&self.expiry));
@@ -630,6 +811,27 @@ where
     Ok(match StringOrList::deserialize(deserializer)? {
         StringOrList::One(s) => vec![s],
         StringOrList::Many(v) => v,
+    })
+}
+
+/// Десериализация `deny`-списка тех-радара (волна S, ADR-070): принимает и
+/// одиночную запись [`DenySpec`], и их список — форма записи (строка или
+/// карта `{name, below, scopes}`) разбирается самим `DenySpec`.
+fn de_deny_list<'de, D>(deserializer: D) -> std::result::Result<Vec<DenySpec>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum DenyInput {
+        /// Одиночная запись (имя или карта).
+        One(DenySpec),
+        /// Список записей.
+        Many(Vec<DenySpec>),
+    }
+    Ok(match DenyInput::deserialize(deserializer)? {
+        DenyInput::One(spec) => vec![spec],
+        DenyInput::Many(v) => v,
     })
 }
 
