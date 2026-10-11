@@ -23,6 +23,7 @@
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::control::Route;
 use crate::error::{HarnessError, Result};
@@ -31,9 +32,11 @@ use crate::gate::{self, GateOptions, GateOutcome, GateReport, GateRequirements, 
 pub mod case;
 pub mod corpus;
 pub(crate) mod mutators;
+pub mod stdcomply;
 pub(crate) use mutators::MUTATORS;
 
 pub use case::{CASE_MANIFEST, CaseManifest};
+pub use stdcomply::{Detector, SeedOutcome, StdDetection, StdReport, run_stdcomply};
 
 /// Что ожидается от мутатора.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -959,6 +962,11 @@ pub fn render_markdown(report: &RedteamReport) -> String {
     out
 }
 
+/// Монотонный счётчик песочниц процесса: два потока тестов в одну наносекунду
+/// не должны получить один каталог (иначе `Drop` одного снесёт песочницу
+/// другого).
+static FIXTURE_SEQ: AtomicU64 = AtomicU64::new(0);
+
 /// Песочница мутационного прогона: временный каталог, удаляется на `Drop`.
 struct Fixture {
     root: PathBuf,
@@ -976,8 +984,11 @@ impl Fixture {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos());
-        let root =
-            std::env::temp_dir().join(format!("arch-be-redteam-{}-{nanos}", std::process::id()));
+        let seq = FIXTURE_SEQ.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "arch-be-redteam-{}-{nanos}-{seq}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&root).map_err(|e| HarnessError::io(&root, e))?;
         Ok(Self {
             root,

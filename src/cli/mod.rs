@@ -396,6 +396,20 @@ enum Cmd {
         /// провалы: эталон с FAIL-составляющей режимом не прощается.
         #[arg(long)]
         hermetic: bool,
+        /// K2 (контур-бенч 0.4.0): redteam для пары «репозиторий + стандарт» —
+        /// засев нарушений `CONSTRAINTS.yaml` в РЕАЛЬНЫЙ репозиторий кода и
+        /// карта обнаружения по слоям (текстовые правила / `ArchUnit` / радар).
+        /// Репозиторий read-only (работа идёт в копии). Несовместим с `case`,
+        /// `--all` и `--corpus`. Прогон информационный: exit 0.
+        #[arg(long, value_name = "REPO", conflicts_with_all = ["case", "all", "corpus"])]
+        repo: Option<PathBuf>,
+        /// K2: стандарт (`CONSTRAINTS.yaml`), которым меряется репозиторий.
+        #[arg(long, value_name = "CONSTRAINTS.yaml", requires = "repo")]
+        standard: Option<PathBuf>,
+        /// K2: группы мутаторов через запятую (java-hex,secrets,radar,config);
+        /// по умолчанию — все.
+        #[arg(long, value_name = "GROUPS", requires = "repo")]
+        mutators: Option<String>,
     },
     /// Составное архитектурное ревью репозитория одним ответом (бэклог
     /// волны 3, п.13): маршрут значимости из git-диффа + весь контур
@@ -1350,7 +1364,44 @@ pub(crate) async fn run() -> Result<()> {
             keep_semantic,
             corpus,
             hermetic,
+            repo,
+            standard,
+            mutators,
         }) => {
+            // K2 (контур-бенч): `--repo <repo> --standard <CONSTRAINTS.yaml>` —
+            // засев нарушений стандарта в реальный репозиторий и карта
+            // обнаружения по слоям. Прогон информационный: exit 0.
+            if let Some(repo) = repo.as_deref() {
+                let Some(standard) = standard.as_deref() else {
+                    anyhow::bail!(
+                        "для K2-прогона укажите стандарт: `--repo <repo> --standard \
+                         <CONSTRAINTS.yaml>`"
+                    );
+                };
+                let groups: Vec<String> = mutators
+                    .as_deref()
+                    .map(|s| {
+                        s.split(',')
+                            .map(str::trim)
+                            .filter(|x| !x.is_empty())
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let report = arch_harness::redteam::run_stdcomply(repo, standard, &groups)?;
+                match format.trim().to_ascii_lowercase().as_str() {
+                    "json" => {
+                        let out = report.to_json();
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string())
+                        );
+                    }
+                    _ => print!("{}", report.render()),
+                }
+                // Информационный прогон: доля обнаружения — измерение, не приёмка.
+                return Ok(());
+            }
             // K1: `--route` переопределяет маршрут из `CASE.yaml` кейса.
             let route_override = match route.as_deref() {
                 None => None,
