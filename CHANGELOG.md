@@ -7,6 +7,100 @@
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-10-11
+
+«Ценность для архитектора, доказанная на чужом коде» (задание
+`TASK-Spine-0.4.0-architect-value.md`): три функции, ради которых
+архитектор берёт Spine — восстановление архитектуры, проверка стандартов,
+контур — работают на чужом коде и доказаны бенчмарками с пререгистрацией
+(`benchmarks/architect-value/`: PREREGISTRATION, замороженные эталоны,
+живые прогоны в `results/`). Таблица приёмки §9 — `results/0.4.0-*/summary.md`.
+
+### Добавлено
+
+- **Волна R — `arch-be recover` (ADR-069).** Полный граф ревизии без диффа
+  и merge-base: `--format md|json|mermaid|structurizr|c4-plantuml`,
+  `--model-out model/` (черновик SYS/CMP/INT со `status: inferred`,
+  `source: recover@<sha>`; правки архитектора со статусом ≠ inferred не
+  затираются). Схема `arch-be/recover/v1`, детерминизм байт-в-байт,
+  0.2–1.0 с на репозиторий ≤5 тыс. файлов (метрики 18/19). MCP:
+  `recover`, `arch_diff` (read-only). Компоненты: многомодульные сборки
+  (Maven/Gradle/sln/workspaces/go.work, модуль ⨝ деплойная единица,
+  R1) и пакетный уровень монолитов (R4: buckpal — зоны гексагона).
+  Рёбра `calls` по runtime-конфигурации и коду с `via` (env/route/stub/
+  topic), `evidence[]`, `confidence` (R2); хранилища без схемы по образу
+  манифеста, jdbc/mongodb-строки, AlloyDB/Cloud SQL коннекторы (R3);
+  внешние системы по каталогу провайдеров `assets/recover/providers.yaml`
+  (openai/azure/gemini/vertex…). Неразрешённые имена — `[gap]`.
+  survey строит секции карты из того же графа (одна механика). Скилл
+  `recover-review` (R6): LLM хоста пишет только в `[inferred]`-слой;
+  валидатор `survey --audit` отклоняет `[confirmed]` без разрешимого
+  `файл:строка`.
+- **Волна S — стандарты (ADR-070).** `applies_to` (`stack`,
+  `when_exists`, `when_glob_nonempty`): неприменимое корп-правило —
+  статус N/A отдельной строкой в `control report --level corp --coverage`;
+  пустой glob собственного правила остаётся находкой. Типы правил
+  `conditional` (`if: {glob, pattern}` → `then:` в пределах модуля),
+  `outbound_allowlist` (исходящие против реестра интеграций),
+  `multiline: true` у `must_not_contain`. Радар: Gradle Groovy/KTS,
+  `package.json`, `*.csproj`, `pyproject.toml`, `go.mod` в auto;
+  `deny: [{name, below, scopes}]` — диапазоны версий и скоупы
+  test/runtime; собственный `artifactId`/`<parent>` pom — не зависимости.
+  `arch-be control fleet-report <root>` — сводка ДКА по набору репо.
+  `rules teeth` для `dependency_direction`/`deny_dependency` (синтез
+  нарушения в копии; вакуумное правило ловится за прогон).
+- **Волна K — контур на реальном коде (ADR-071).** `arch-be redteam
+  --repo <репо> --standard <CONSTRAINTS.yaml> [--mutators …]` — засев
+  нарушений стандарта в реальный код (wildcard, FQN, static import,
+  Gradle, scope) с картой обнаружения по слоям: текст / ArchUnit /
+  радар. `CASE.yaml` у кейса объявляет маршрут; `redteam --all` печатает
+  сводку «измерен / не измерен: причина».
+- **Волна D — диффу верят (ADR-072).** `arch-be bench arch-diff-replay
+  <repo> --last N --labels …` и раннер метрики 13: recall значимых /
+  composition-F1 / шум на размеченной истории.
+- **`arch-be constraints-harvest` (ADR-073).** Детерминированный
+  сборщик фактов-ограничений для контекста ADR (задача DECIDE):
+  нагрузочные планы, CODEOWNERS, лицензии/версии платформ, lock-топ
+  зависимостей, env-поверхность (секреты маскируются), TODO/@Deprecated/
+  feature-флаги. Схема `arch-be/constraints-harvest/v1`, детерминизм
+  байт-в-байт.
+- **Бенчмарк `benchmarks/architect-value/` (P1):** пререгистрация с
+  заморозкой хэшей (PREREGISTRATION.md, prereg_hashes.txt), эталоны
+  четырёх публичных репо на закреплённых SHA (repos.lock), стандарт
+  12 требований, засевы C.2/C.3, разметка диффа, раннеры stdlib-Python,
+  `run_all.sh` — сьюты ArchRecover/StdComply/Kontur (+ replay), честные
+  SKIP вместо ложных зелёных; результаты — в git.
+
+### Изменено
+
+- `arch-diff`: рёбра несут `via`/`confidence`; состав на значимых
+  коммитах — эталонный (`79b527a`: +genai-service, +openai,
+  +azure-openai, +3 ребра; `2932624`: +shoppingassistantservice,
+  +alloydb, +frontend→assistant); метрика 13: recall 1.00, F1 0.90,
+  шум 0/6 (до: 0/2 по составу, 6/6 шум).
+- survey: секции 1/4/5 из графа recover; версии платформ — только из
+  манифестов; денилист lock-файлов/лицензий (волна B, 0.3.17).
+
+### Что может покраснеть после обновления
+
+- **`dependency_direction` в точечной нотации начинает ловить** (B4,
+  0.3.17) и **wildcard-импорты видны** (B5) — правила, «зеленевшие при
+  любом коде», найдут реальные нарушения.
+- **Радар видит Gradle/npm/csproj/pyproject** — пайплайны с
+  зависимостями в этих форматах получат находки, которых раньше не было
+  (h2 в `runtimeOnly`, версии ниже диапазона).
+- **`survey .` работает** (B1) — на репозиториях с dot-мусором находок
+  станет больше; пустой обход — `[error] survey_empty_walk` вместо
+  тихого `[gap]`.
+- **N/A-строки и `rule_vacuous_prefix` (warn)** меняют текст отчётов —
+  парсеры вывода заметят; гейт N/A и warn не краснят.
+- **`recover`/`arch_diff` из MCP** — агенты начнут получать графы;
+  рёбра `inferred` требуют подтверждения (ADR-069: inferred не
+  поднимает маршрут выше Standard без подтверждения — реализация
+  сортировки inbox по confidence — D3, следующая итерация).
+- **`redteam --hermetic`** меняет знаменатель на машинах без раннеров —
+  сравнивайте прогоны в одном режиме.
+
 ## [0.3.17] — 2026-10-10
 
 Патч-релиз «волны B» (задание 0.4.0): девять дефектов, найденных живыми

@@ -7,7 +7,7 @@
 #   MCP              — 15, 16 (mcp_schema_probe.py)
 #   ArchRecover      — 1 (survey_compare.py), 2 (components_recover.py),
 #                      3 (edges_recover.py), 18/19 (recover_determinism.py, волна R/R5); 4–6 — SKIP
-#   Kontur           — 11, 12, 20 — SKIP (волна K не в 0.3.17)
+#   Kontur           — 11, 12 (kontur_bench.py); 20 — SKIP (судья)
 #   selftest/judge   — 14, 17 — SKIP (вне Python-прогонщиков)
 #
 # Вход: --repos-dir <путь> (иначе $ARCH_VALUE_REPOS, иначе ~/bench-repos);
@@ -87,8 +87,8 @@ echo | tee -a "$LOG"
 
 # ── Kontur ──────────────────────────────────────────────────────────────────
 echo "## Kontur — измеримые кейсы и FP на реальном коде (метрики 11, 12, 20)" | tee -a "$LOG"
-skip "metric 11 (Kontur-bench измеримых кейсов)" "волна K (redteam) не реализована в 0.3.17"
-skip "metric 12 (Kontur на реальном коде: detection/FP)" "волна K (redteam) не реализована в 0.3.17"
+run "Kontur — измеримость кейсов и FP на реальном коде (метрики 11, 12)" kontur_bench.py
+
 skip "metric 20 (квалификация судьи: различительная сила)" "рубрики/судья — вне Python-прогонщиков"
 echo | tee -a "$LOG"
 

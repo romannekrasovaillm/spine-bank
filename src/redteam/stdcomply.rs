@@ -620,9 +620,11 @@ fn catalog(t: &Targets, groups: &[String]) -> Vec<ResolvedSeed> {
     // --- radar: запрещённые пакеты в манифестах ---
     if want("radar") {
         let pom_rel = t.pom.clone().unwrap_or_else(|| "pom.xml".to_string());
-        let pom_text = |artifact: &str, scope: &str| {
+        // Реальные координатыgroupId:artifactId — стандарт (ADR-070) точен
+        // до g:a; сид с «com.example:h2» изображал бы чужую зависимость.
+        let pom_text = |group: &str, artifact: &str, scope: &str| {
             format!(
-                "\n<dependency><groupId>com.example</groupId><artifactId>{artifact}</artifactId>\
+                "\n<dependency><groupId>{group}</groupId><artifactId>{artifact}</artifactId>\
                  <scope>{scope}</scope></dependency>\n"
             )
         };
@@ -635,7 +637,7 @@ fn catalog(t: &Targets, groups: &[String]) -> Vec<ResolvedSeed> {
             "s1_no_embedded_db_in_prod",
             &pom_rel,
             false,
-            pom_text("h2", "runtime"),
+            pom_text("com.h2database", "h2", "runtime"),
         );
         push(
             "RD02",
@@ -646,21 +648,22 @@ fn catalog(t: &Targets, groups: &[String]) -> Vec<ResolvedSeed> {
             "s1_no_embedded_db_in_prod",
             &pom_rel,
             false,
-            pom_text("hsqldb", "runtime"),
+            pom_text("org.hsqldb", "hsqldb", "runtime"),
         );
-        // RD05: h2 в test-scope — радар §2.4 слеп к scope (проба ложного срабатывания).
+        // RD05: h2 в test-scope — скоуп-фильтр радара (S2, ADR-070) не
+        // считает test-зависимости в runtime-запрете: корректно чисто.
         push(
             "RD05",
-            "h2 в pom (test-scope) — радар слеп к scope",
+            "h2 в pom (test-scope) — скоуп отфильтрован",
             "radar",
             Detector::Radar,
             SeedExpect::Clean,
             "s1_no_embedded_db_in_prod",
             &pom_rel,
             false,
-            pom_text("h2", "test"),
+            pom_text("com.h2database", "h2", "test"),
         );
-        // RD03/RD04: Gradle — радар не разбирает build.gradle (§2.4, обход).
+        // RD03/RD04: Gradle разбирается (S2): implementation-runtime ловится.
         let gradle_rel = t
             .gradle
             .clone()
@@ -978,14 +981,15 @@ mod tests {
         assert_eq!(find(&report, "CF02").outcome, SeedOutcome::Clean);
         // Закомментированный импорт — чисто.
         assert_eq!(find(&report, "CF01").outcome, SeedOutcome::Clean);
-        // Радар: h2/hsqldb в pom ловятся; Gradle — обход; test-scope — ложное.
+        // Радар: h2/hsqldb в pom ловятся (реальные g:a, ADR-070); Gradle —
+        // ловится (S2); test-scope — корректно чист (скоуп-фильтр).
         assert_eq!(find(&report, "RD01").outcome, SeedOutcome::Caught);
         assert_eq!(find(&report, "RD02").outcome, SeedOutcome::Caught);
-        assert_eq!(find(&report, "RD03").outcome, SeedOutcome::Missed);
-        assert_eq!(find(&report, "RD05").outcome, SeedOutcome::FalsePositive);
-        // Доля обнаружения и доля ложных срабатываний считаются.
+        assert_eq!(find(&report, "RD03").outcome, SeedOutcome::Caught);
+        assert_eq!(find(&report, "RD05").outcome, SeedOutcome::Clean);
+        // Доля обнаружения считается; ложных срабатываний в этом прогоне нет —
+        // скоуп-фильтр S2 закрыл единственный источник (test-scope).
         assert!(report.detection_ratio() > 0.0);
-        assert!(report.false_positive_ratio() > 0.0);
     }
 
     #[test]
