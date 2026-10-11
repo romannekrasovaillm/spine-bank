@@ -5,7 +5,8 @@
 #   StdComply        — 7, 9, 10 (control check стандарта/манифесты) + 8 (семена C.2/C.3)
 #   arch-diff-replay — 13 (replay.py)
 #   MCP              — 15, 16 (mcp_schema_probe.py)
-#   ArchRecover      — 1 (survey_compare.py), 3 (edges_recover.py, волна R/R2); 2, 4–6, 18, 19 — SKIP
+#   ArchRecover      — 1 (survey_compare.py), 2 (components_recover.py),
+#                      3 (edges_recover.py), 18/19 (recover_determinism.py, волна R/R5); 4–6 — SKIP
 #   Kontur           — 11, 12, 20 — SKIP (волна K не в 0.3.17)
 #   selftest/judge   — 14, 17 — SKIP (вне Python-прогонщиков)
 #
@@ -71,18 +72,17 @@ run "arch-diff-replay — значимые диффы и окна-шума (ме
 # ── MCP ─────────────────────────────────────────────────────────────────────
 run "MCP — схема ↔ реализация (метрики 15, 16)" mcp_schema_probe.py
 
-# ── ArchRecover: survey-детерминизм + рёбра + SKIP остальных метрик R ───────
+# ── ArchRecover: survey-детерминизм + рёбра + компоненты + recover ──────────
 run "ArchRecover — survey . ≡ survey <abs> (метрика 1)" survey_compare.py
+run "ArchRecover — компоненты F1 на пиннутом SHA (метрика 2)" components_recover.py
 run "ArchRecover — рёбра as-built recall/precision (метрика 3)" edges_recover.py
+run "ArchRecover — детерминизм и время recover (метрики 18, 19)" recover_determinism.py
 {
-  echo "## ArchRecover — восстановление архитектуры (метрики 2, 4–6, 18, 19)"
+  echo "## ArchRecover — восстановление архитектуры (метрики 4–6)"
 } | tee -a "$LOG"
-skip "metric 2 (компоненты F1)"   "волна R (recover) не реализована в 0.3.17"
-skip "metric 4 (хранилища recall)" "волна R (recover) не реализована в 0.3.17"
-skip "metric 5 (внешние precision)" "волна R (recover) не реализована в 0.3.17"
-skip "metric 6 (шум карты survey)" "механизм грунт-труса recover отсутствует в 0.3.17"
-skip "metric 18 (детерминизм recover/arch-diff JSON)" "recover отсутствует; arch-diff даёт JSON (см. metric 13)"
-skip "metric 19 (время recover ≤5 тыс. файлов)" "recover отсутствует в 0.3.17"
+skip "metric 4 (хранилища recall)" "нет раннера хранилищ на эталоне (recover реализован)"
+skip "metric 5 (внешние precision)" "нет раннера внешних систем на эталоне (recover реализован)"
+skip "metric 6 (шум карты survey)" "грунт-трус шума survey отсутствует"
 echo | tee -a "$LOG"
 
 # ── Kontur ──────────────────────────────────────────────────────────────────
