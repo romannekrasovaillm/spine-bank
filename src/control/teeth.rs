@@ -25,9 +25,19 @@
 //!   подставляется нарушающая реализация из библиотеки: правило обязано
 //!   покраснеть.
 //!
-//! Остальные типы (`dependency_direction`, `context_boundary`, `archunit`,
-//! `max_age`, `deny_dependency`) мутатором не поддержаны — честный
-//! [`TeethStatus::Unknown`], а не молчаливое «с зубьями».
+//! - `dependency_direction`: в чистый файл набора вставляется импорт модуля,
+//!   совпадающего с запрещённым префиксом (`forbid`) либо не входящего в
+//!   белый список (`allow`); строка синтезируется под язык файла и
+//!   **проверяется** извлекателем импортов (`crate::imports`) до записи,
+//!   поэтому малформед-строка не даёт ложного подтверждения. Находка обязана
+//!   появиться. Пустой набор — [`TeethStatus::GlobEmpty`].
+//! - `deny_dependency`: в манифест набора (`manifests`, иначе автодевять
+//!   форматов тех-радара) вставляется запрещённый пакет (`deny`; при
+//!   диапазоне `below` — версия строго ниже порога) — правило обязано
+//!   покраснеть; вставка тоже проверяется разбором манифеста до записи.
+//!
+//! Остальные типы (`context_boundary`, `archunit`, `max_age`) мутатором не
+//! поддержаны — честный [`TeethStatus::Unknown`], а не молчаливое «с зубьями».
 //!
 //! Результат сохраняется машиночитаемо в `.arch-handoff/teeth.json`
 //! (`--save`; схема `arch-be/rules-teeth/v1`): его читают метрика доверия
@@ -43,8 +53,10 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use super::exec::{check, collect_dirs, collect_files, glob_matches};
+use super::rules::{DEFAULT_MANIFEST_GLOBS, deny_spec_matches, manifest_deps, version_below};
 use super::types::{FitnessRule, RuleKind};
 use crate::error::{HarnessError, Result};
+use crate::imports::{extract_imports, module_prefix_match};
 
 /// Путь сохранённого измерения зубьев внутри кейса.
 pub const TEETH_RESULT_REL: &str = ".arch-handoff/teeth.json";
@@ -470,6 +482,10 @@ fn measure_rule(
         RuleKind::FileExists => measure_delete_file(&copy, &single_path, rule, base),
         RuleKind::DirMustHaveFile => measure_delete_dir_file(&copy, &single_path, rule, base),
         RuleKind::CommandSucceeds => measure_command(&copy, &single_path, rule, base),
+        RuleKind::DependencyDirection => {
+            measure_dependency_direction(&copy, &single_path, rule, base)
+        }
+        RuleKind::DenyDependency => measure_deny_dependency(&copy, &single_path, rule, base),
         other => unknown(format!(
             "тип '{}' мутатором не поддержан — зубья не измерены",
             other.as_str()
@@ -543,16 +559,36 @@ fn verdict(base: RuleTeeth, before: &RuleRun, after: &RuleRun, applied: &str) ->
     }
 }
 
+/// Glob-набор правила для сбора файлов: `deny_dependency` целится в манифесты
+/// (`manifests`, иначе автодевять форматов тех-радара), остальные — в `glob`.
+fn rule_globs(rule: &FitnessRule) -> Vec<String> {
+    match rule.kind {
+        RuleKind::DenyDependency => {
+            if rule.manifests.is_empty() {
+                DEFAULT_MANIFEST_GLOBS
+                    .iter()
+                    .map(|s| (*s).to_string())
+                    .collect()
+            } else {
+                rule.manifests.clone()
+            }
+        }
+        _ => {
+            if rule.glob.is_empty() {
+                vec!["**/*".to_string()]
+            } else {
+                rule.glob.clone()
+            }
+        }
+    }
+}
+
 /// Файлы набора правила (glob'ы минус `exclude_glob`) на копии.
 fn rule_files(
     copy: &Path,
     rule: &FitnessRule,
 ) -> std::result::Result<Vec<(String, PathBuf)>, String> {
-    let globs: Vec<String> = if rule.glob.is_empty() {
-        vec!["**/*".to_string()]
-    } else {
-        rule.glob.clone()
-    };
+    let globs = rule_globs(rule);
     let mut files = Vec::new();
     for glob in &globs {
         files.extend(collect_files(copy, glob).map_err(|e| e.to_string())?);
@@ -672,6 +708,422 @@ fn measure_injection(
         &after,
         &format!("вставка строки под pattern в {rel}"),
     )
+}
+
+/// `dependency_direction`: в чистый файл набора вставляется импорт, совпадающий
+/// с запрещённым префиксом (`forbid`) либо не входящий в белый список (`allow`).
+/// Синтезированная строка **проверяется** извлекателем импортов до записи —
+/// malformed-вставка не даёт ложного подтверждения.
+fn measure_dependency_direction(
+    copy: &Path,
+    single_path: &Path,
+    rule: &FitnessRule,
+    base: RuleTeeth,
+) -> RuleTeeth {
+    let unknown = |detail: String| RuleTeeth {
+        status: TeethStatus::Unknown,
+        detail,
+        ..base.clone()
+    };
+    let allow_mode = match (&rule.forbid, &rule.allow) {
+        (Some(_), None) => false,
+        (None, Some(_)) => true,
+        _ => {
+            return unknown(
+                "dependency_direction: нужно ровно одно из forbid/allow — измерение пропущено"
+                    .to_string(),
+            );
+        }
+    };
+    let (forbid_raw, allow_raw): (&[String], &[String]) = if allow_mode {
+        (&[], rule.allow.as_deref().unwrap_or(&[]))
+    } else {
+        (rule.forbid.as_deref().unwrap_or(&[]), &[])
+    };
+    let globs = rule_globs(rule);
+    let dotted = deps_dotted_notation(&globs);
+    let norm = |raw: &str| -> String {
+        let raw = raw.trim();
+        if dotted {
+            raw.replace('.', "/")
+        } else {
+            raw.to_string()
+        }
+    };
+    let forbid_norms: Vec<String> = forbid_raw.iter().map(|s| norm(s)).collect();
+    let allow_norms: Vec<String> = allow_raw.iter().map(|s| norm(s)).collect();
+    if !allow_mode && forbid_norms.is_empty() {
+        return unknown(
+            "dependency_direction: пустой forbid-список — правило вакуумно".to_string(),
+        );
+    }
+    let files = match rule_files(copy, rule) {
+        Ok(files) => files,
+        Err(e) => return unknown(e),
+    };
+    if files.is_empty() {
+        return RuleTeeth {
+            status: TeethStatus::GlobEmpty,
+            detail: format!(
+                "dependency_direction: по glob '{}' не найдено ни одного файла — правилу нечего проверять (`rule_glob_empty`)",
+                globs.join(", ")
+            ),
+            ..base
+        };
+    }
+    let before = match run_single(copy, single_path, rule) {
+        Ok(run) => run,
+        Err(e) => return unknown(e),
+    };
+    for (rel, abs) in &files {
+        let ext = Path::new(rel)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or_default();
+        let Ok(content) = std::fs::read_to_string(abs) else {
+            continue;
+        };
+        // Цель — чистый файл: без собственных нарушений (иначе счёт не вырастет).
+        if content_violates(rel, &content, &forbid_norms, &allow_norms, allow_mode) {
+            continue;
+        }
+        let candidates: Vec<String> = if allow_mode {
+            vec![
+                "teeth_zz_foreign".to_string(),
+                "teeth_zz_foreign/sub".to_string(),
+                "zz_teeth/foreign".to_string(),
+            ]
+        } else {
+            forbid_norms
+                .iter()
+                .map(|n| format!("{n}/teeth_zz"))
+                .collect()
+        };
+        for cand in &candidates {
+            let Some(line) = import_line_for(ext, cand) else {
+                continue;
+            };
+            // Проверка до записи: извлекатель обязан увидеть ровно этот модуль.
+            let Some(module) = line_module(ext, &line) else {
+                continue;
+            };
+            if !violates_module(&module, &forbid_norms, &allow_norms, allow_mode) {
+                continue;
+            }
+            let mutated = format!("{content}\n{line}\n");
+            if std::fs::write(abs, mutated).is_err() {
+                continue;
+            }
+            let after = match run_single(copy, single_path, rule) {
+                Ok(run) => run,
+                Err(e) => return unknown(e),
+            };
+            return verdict(
+                base,
+                &before,
+                &after,
+                &format!("вставка импорта '{cand}' в {rel}"),
+            );
+        }
+    }
+    unknown(
+        "dependency_direction: не удалось синтезировать проверяемый импорт ни в одном файле набора"
+            .to_string(),
+    )
+}
+
+/// `deny_dependency`: в манифест набора (`manifests`, иначе автодевять форматов
+/// тех-радара) вставляется запрещённый пакет; при диапазоне `below` — версия
+/// строго ниже порога. Вставка **проверяется** разбором манифеста до записи.
+fn measure_deny_dependency(
+    copy: &Path,
+    single_path: &Path,
+    rule: &FitnessRule,
+    base: RuleTeeth,
+) -> RuleTeeth {
+    let unknown = |detail: String| RuleTeeth {
+        status: TeethStatus::Unknown,
+        detail,
+        ..base.clone()
+    };
+    let Some(spec) = rule.deny.first() else {
+        return unknown(
+            "deny_dependency: пустой список deny — правилу нечего запрещать".to_string(),
+        );
+    };
+    let globs = rule_globs(rule);
+    let files = match rule_files(copy, rule) {
+        Ok(files) => files,
+        Err(e) => return unknown(e),
+    };
+    if files.is_empty() {
+        return RuleTeeth {
+            status: TeethStatus::GlobEmpty,
+            detail: format!(
+                "deny_dependency: по glob '{}' нет ни одного манифеста — правилу нечего проверять (`rule_glob_empty`)",
+                globs.join(", ")
+            ),
+            ..base
+        };
+    }
+    // Версия синтезируемой зависимости: строго ниже порога `below`, иначе любая.
+    let version: String = match spec.below() {
+        Some(below) => {
+            let Some(v) = ["0.0.0", "0.0.1", "0.1.0", "1.0.0"]
+                .iter()
+                .find(|v| version_below(v, below))
+            else {
+                return unknown(format!(
+                    "deny_dependency: не удалось подобрать версию ниже порога '{below}'"
+                ));
+            };
+            (*v).to_string()
+        }
+        None => "1.0.0".to_string(),
+    };
+    let scope = pick_scope(spec.scopes());
+    let before = match run_single(copy, single_path, rule) {
+        Ok(run) => run,
+        Err(e) => return unknown(e),
+    };
+    for (rel, abs) in &files {
+        let Ok(content) = std::fs::read_to_string(abs) else {
+            continue;
+        };
+        // Цель — манифест, где запрещённого пакета ещё нет.
+        if manifest_violates(rel, &content, rule) {
+            continue;
+        }
+        let Some(mutated) = insert_dep(&content, rel, spec.name(), &version, scope) else {
+            continue;
+        };
+        // Проверка до записи: разбор обязан увидеть запрещённый пакет.
+        if !manifest_violates(rel, &mutated, rule) {
+            continue;
+        }
+        if std::fs::write(abs, mutated).is_err() {
+            continue;
+        }
+        let after = match run_single(copy, single_path, rule) {
+            Ok(run) => run,
+            Err(e) => return unknown(e),
+        };
+        return verdict(
+            base,
+            &before,
+            &after,
+            &format!("вставка запрещённого пакета '{}' в {rel}", spec.name()),
+        );
+    }
+    unknown(
+        "deny_dependency: не удалось вставить проверяемую запрещённую зависимость ни в один манифест набора"
+            .to_string(),
+    )
+}
+
+/// Импортные языки пишут префиксы через точку (`com.legacy`) — при dot-нотации
+/// (`java`/`kt`/`py`) нормализуем префикс в координаты `/` (как `DepsPrefix`
+/// прогонщика `dependency_direction`).
+fn deps_dotted_notation(globs: &[String]) -> bool {
+    globs.iter().any(|g| {
+        matches!(
+            Path::new(g).extension().and_then(|e| e.to_str()),
+            Some("java" | "kt" | "py")
+        )
+    })
+}
+
+/// Модуль нарушает правило: в режиме allow — не входит в белый список;
+/// в режиме forbid — совпадает с запрещённым префиксом. Относительные пути
+/// (`.`-начало) пропускаются, как в прогонщике.
+fn violates_module(
+    module: &str,
+    forbid_norms: &[String],
+    allow_norms: &[String],
+    allow_mode: bool,
+) -> bool {
+    if module.starts_with('.') {
+        return false;
+    }
+    if allow_mode {
+        !allow_norms.iter().any(|n| module_prefix_match(module, n))
+    } else {
+        forbid_norms.iter().any(|n| module_prefix_match(module, n))
+    }
+}
+
+/// Есть ли в содержимом файла хоть один нарушающий импорт.
+fn content_violates(
+    rel: &str,
+    content: &str,
+    forbid_norms: &[String],
+    allow_norms: &[String],
+    allow_mode: bool,
+) -> bool {
+    let Ok(edges) = extract_imports(rel, content) else {
+        return false;
+    };
+    edges
+        .iter()
+        .any(|e| violates_module(&e.module, forbid_norms, allow_norms, allow_mode))
+}
+
+/// Строка импорта модуля `norm` (координаты `/`) под язык файла.
+fn import_line_for(ext: &str, norm: &str) -> Option<String> {
+    match ext {
+        "rs" => Some(format!("use crate::{};", norm.replace('/', "::"))),
+        "py" => Some(format!("import {}", norm.replace('/', "."))),
+        "java" | "kt" => Some(format!("import {};", norm.replace('/', "."))),
+        "go" => Some(format!("import \"{norm}\"")),
+        "ts" | "tsx" | "js" | "jsx" | "mjs" => Some(format!("import '{norm}';")),
+        _ => None,
+    }
+}
+
+/// Модуль (координаты `/`), извлекаемый из строки импорта, — проверка до записи.
+fn line_module(ext: &str, line: &str) -> Option<String> {
+    let rel = format!("teeth_import.{ext}");
+    extract_imports(&rel, line)
+        .ok()?
+        .into_iter()
+        .map(|e| e.module)
+        .find(|m| !m.starts_with('.'))
+}
+
+/// Есть ли в манифесте хоть одна зависимость, попадающая под `deny`.
+fn manifest_violates(rel: &str, content: &str, rule: &FitnessRule) -> bool {
+    let Ok(deps) = manifest_deps(rel, content) else {
+        return false;
+    };
+    deps.iter()
+        .any(|dep| rule.deny.iter().any(|spec| deny_spec_matches(spec, dep)))
+}
+
+/// Scope для синтезируемой зависимости: `compile`, если допустим, иначе первый
+/// объявленный.
+fn pick_scope(scopes: &[String]) -> &str {
+    if scopes.is_empty() || scopes.iter().any(|s| s == "compile") {
+        return "compile";
+    }
+    &scopes[0]
+}
+
+/// Вставка зависимости `name` версии `version` в манифест (best-effort:
+/// malformed-результат отсекается `manifest_violates` до записи).
+fn insert_dep(content: &str, rel: &str, name: &str, version: &str, scope: &str) -> Option<String> {
+    let file = Path::new(rel)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default();
+    if file == "Cargo.toml" {
+        return insert_cargo_dep(content, name, version);
+    }
+    if file == "pom.xml" {
+        return insert_pom_dep(content, name, version, scope);
+    }
+    if file == "build.gradle" || file == "build.gradle.kts" {
+        return Some(insert_gradle_dep(content, name, version, scope));
+    }
+    if file == "package.json" {
+        return insert_npm_dep(content, name, version, scope);
+    }
+    if file == "pyproject.toml" {
+        return insert_pyproject_dep(content, name, version, scope);
+    }
+    if file == "go.mod" {
+        return Some(format!("{content}\nrequire {name} v{version}\n"));
+    }
+    if file.ends_with(".csproj") || file.ends_with(".fsproj") || file.ends_with(".vbproj") {
+        return Some(format!(
+            "{content}\n<ItemGroup><PackageReference Include=\"{name}\" Version=\"{version}\" /></ItemGroup>\n"
+        ));
+    }
+    // requirements.txt и прочие *.txt — формат pip.
+    Some(format!("{content}\n{name}=={version}\n"))
+}
+
+/// Вставка в `[dependencies]`-секцию Cargo.toml (или новая секция).
+fn insert_cargo_dep(content: &str, name: &str, version: &str) -> Option<String> {
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+    {
+        return None;
+    }
+    let line = format!("{name} = \"{version}\"");
+    let mut lines: Vec<String> = content.lines().map(str::to_string).collect();
+    if let Some(idx) = lines.iter().position(|l| {
+        let t = l.trim();
+        t == "[dependencies]" || t == "[dev-dependencies]" || t == "[build-dependencies]"
+    }) {
+        lines.insert(idx + 1, line);
+    } else {
+        lines.push("[dependencies]".to_string());
+        lines.push(line);
+    }
+    Some(format!("{}\n", lines.join("\n")))
+}
+
+/// Вставка `<dependency>` в `<dependencies>`-секцию pom.xml.
+fn insert_pom_dep(content: &str, name: &str, version: &str, scope: &str) -> Option<String> {
+    let scope_tag = if scope == "compile" {
+        String::new()
+    } else {
+        format!("<scope>{scope}</scope>")
+    };
+    let dep = format!(
+        "<dependency><groupId>teeth.zz</groupId><artifactId>{name}</artifactId><version>{version}</version>{scope_tag}</dependency>"
+    );
+    if let Some(pos) = content.find("</dependencies>") {
+        return Some(format!("{}{dep}{}", &content[..pos], &content[pos..]));
+    }
+    content.rfind("</project>").map(|pos| {
+        format!(
+            "{}<dependencies>{dep}</dependencies>{}",
+            &content[..pos],
+            &content[pos..]
+        )
+    })
+}
+
+/// Вставка координаты в build.gradle[.kts] подходящей конфигурацией.
+fn insert_gradle_dep(content: &str, name: &str, version: &str, scope: &str) -> String {
+    let cfg = match scope {
+        "test" => "testImplementation",
+        "runtime" => "runtimeOnly",
+        _ => "implementation",
+    };
+    format!("{content}\n{cfg} 'teeth.zz:{name}:{version}'\n")
+}
+
+/// Вставка зависимости в раздел package.json по scope.
+fn insert_npm_dep(content: &str, name: &str, version: &str, scope: &str) -> Option<String> {
+    let section = match scope {
+        "test" => "devDependencies",
+        "peer" => "peerDependencies",
+        "optional" => "optionalDependencies",
+        _ => "dependencies",
+    };
+    let mut value: serde_json::Value = serde_json::from_str(content).ok()?;
+    let obj = value.as_object_mut()?;
+    let deps = obj
+        .entry(section)
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    deps.as_object_mut()?.insert(
+        name.to_string(),
+        serde_json::Value::String(version.to_string()),
+    );
+    serde_json::to_string_pretty(&value).ok()
+}
+
+/// Вставка зависимости в pyproject.toml (PEP 621 `[project]`, compile-scope).
+fn insert_pyproject_dep(content: &str, name: &str, version: &str, scope: &str) -> Option<String> {
+    if scope != "compile" || content.contains("[project]") {
+        return None;
+    }
+    Some(format!(
+        "{content}\n[project]\ndependencies = [\"{name}=={version}\"]\n"
+    ))
 }
 
 /// `must_contain` / `each_file_must_contain`: совпадения удаляются из всех
@@ -1933,6 +2385,116 @@ mod tests {
             text.contains("Проверяют поведение (зубья подтверждены): 1 из 3"),
             "{text}"
         );
+    }
+
+    // --- зубья структурных правил (S5: dependency_direction/deny_dependency) ---
+
+    /// `dependency_direction` (forbid): вставка импорта запрещённого префикса в
+    /// чистый файл набора обязана покраснить правило — зубья подтверждены.
+    #[test]
+    fn dependency_direction_forbid_is_confirmed_by_import() {
+        let case = case_with(
+            "rules:\n  - id: C-101\n    name: no_legacy\n    type: dependency_direction\n    \
+             glob: '**/*.java'\n    forbid: ['com.legacy']\n    severity: error\n",
+        );
+        write_file(
+            case.path(),
+            "src/Main.java",
+            "package app;\nimport app.util.Helper;\n",
+        );
+        let report = measure(case.path(), None).expect("измерение");
+        let e = entry(&report, "no_legacy");
+        assert_eq!(e.status, TeethStatus::Confirmed, "{e:?}");
+        assert!(e.detail.contains("вставка импорта"), "{e:?}");
+        // Исходный кейс не тронут: read-only.
+        let content = std::fs::read_to_string(case.path().join("src/Main.java")).expect("read");
+        assert!(
+            !content.contains("com.legacy"),
+            "кейс не мутирован: {content}"
+        );
+    }
+
+    /// `dependency_direction` (allow): импорт вне белого списка в чистый файл
+    /// обязан дать находку.
+    #[test]
+    fn dependency_direction_allow_is_confirmed_by_foreign_import() {
+        let case = case_with(
+            "rules:\n  - id: C-102\n    name: allow_ports\n    type: dependency_direction\n    \
+             glob: '**/*.py'\n    allow: ['app.ports']\n    severity: error\n",
+        );
+        write_file(case.path(), "src/main.py", "import app.ports.repo\n");
+        let report = measure(case.path(), None).expect("измерение");
+        let e = entry(&report, "allow_ports");
+        assert_eq!(e.status, TeethStatus::Confirmed, "{e:?}");
+        assert!(e.detail.contains("вставка импорта"), "{e:?}");
+    }
+
+    /// `dependency_direction` по пустому glob — находка `rule_glob_empty`
+    /// (как у контентных правил), а не молчаливое «с зубьями».
+    #[test]
+    fn dependency_direction_empty_glob_is_a_finding() {
+        let case = case_with(
+            "rules:\n  - id: C-103\n    name: no_legacy\n    type: dependency_direction\n    \
+             glob: '**/*.java'\n    forbid: ['com.legacy']\n    severity: error\n",
+        );
+        // Ни одного .java-файла в кейсе нет.
+        let report = measure(case.path(), None).expect("измерение");
+        let e = entry(&report, "no_legacy");
+        assert_eq!(e.status, TeethStatus::GlobEmpty, "{e:?}");
+        assert!(e.detail.contains("rule_glob_empty"), "{e:?}");
+        assert!(!report.passed());
+    }
+
+    /// `deny_dependency`: вставка запрещённого пакета в манифест набора обязана
+    /// покраснить правило.
+    #[test]
+    fn deny_dependency_is_confirmed_by_package_insertion() {
+        let case = case_with(
+            "rules:\n  - id: C-104\n    name: no_bad_pkg\n    type: deny_dependency\n    \
+             deny: ['bad-pkg']\n    severity: error\n",
+        );
+        write_file(case.path(), "requirements.txt", "flask==2.0.0\n");
+        let report = measure(case.path(), None).expect("измерение");
+        let e = entry(&report, "no_bad_pkg");
+        assert_eq!(e.status, TeethStatus::Confirmed, "{e:?}");
+        assert!(e.detail.contains("вставка запрещённого пакета"), "{e:?}");
+        // Исходный кейс не тронут: read-only.
+        let content = std::fs::read_to_string(case.path().join("requirements.txt")).expect("read");
+        assert!(!content.contains("bad-pkg"), "кейс не мутирован: {content}");
+    }
+
+    /// `deny_dependency` с диапазоном `below`: версия строго ниже порога.
+    #[test]
+    fn deny_dependency_below_range_is_confirmed() {
+        let case = case_with(
+            "rules:\n  - id: C-105\n    name: log4j_floor\n    type: deny_dependency\n    \
+             deny:\n      - name: log4j-core\n        below: '2.17.1'\n    severity: error\n",
+        );
+        write_file(
+            case.path(),
+            "pom.xml",
+            "<project>\n  <dependencies>\n  </dependencies>\n</project>\n",
+        );
+        let report = measure(case.path(), None).expect("измерение");
+        assert_eq!(entry(&report, "log4j_floor").status, TeethStatus::Confirmed);
+    }
+
+    /// Малформед-структурные правила (оба `forbid`/`allow`; пустой `deny`) —
+    /// честный `unknown`, а не «с зубьями» и не беззубое.
+    #[test]
+    fn malformed_structural_rules_are_unknown() {
+        let case = case_with(
+            "rules:\n  - id: C-106\n    name: ambiguous\n    type: dependency_direction\n    \
+             glob: '**/*.java'\n    forbid: ['com.legacy']\n    allow: ['app.ports']\n    \
+             severity: error\n  - id: C-107\n    name: empty_deny\n    \
+             type: deny_dependency\n    severity: error\n",
+        );
+        write_file(case.path(), "src/Main.java", "package app;\n");
+        let report = measure(case.path(), None).expect("измерение");
+        assert_eq!(entry(&report, "ambiguous").status, TeethStatus::Unknown);
+        assert_eq!(entry(&report, "empty_deny").status, TeethStatus::Unknown);
+        // Неизмеренное — не находка качества реестра: прогон не красный.
+        assert!(report.passed(), "{:?}", report.entries);
     }
 
     // --- генератор образцов regex ---------------------------------------------
