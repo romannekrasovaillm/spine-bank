@@ -6,7 +6,8 @@
 #   arch-diff-replay — 13 (replay.py)
 #   MCP              — 15, 16 (mcp_schema_probe.py)
 #   ArchRecover      — 1 (survey_compare.py), 2 (components_recover.py),
-#                      3 (edges_recover.py), 18/19 (recover_determinism.py, волна R/R5); 4–6 — SKIP
+#                      3 (edges_recover.py), 18/19 (recover_determinism.py, волна R/R5),
+#                      4 (stores_recover.py), 5 (externals_recover.py), 6 (survey_noise.py)
 #   Kontur           — 11, 12 (kontur_bench.py); 20 — SKIP (судья)
 #   selftest/judge   — 14, 17 — SKIP (вне Python-прогонщиков)
 #
@@ -81,13 +82,9 @@ run "ArchRecover — survey . ≡ survey <abs> (метрика 1)" survey_compar
 run "ArchRecover — компоненты F1 на пиннутом SHA (метрика 2)" components_recover.py
 run "ArchRecover — рёбра as-built recall/precision (метрика 3)" edges_recover.py
 run "ArchRecover — детерминизм и время recover (метрики 18, 19)" recover_determinism.py
-{
-  echo "## ArchRecover — восстановление архитектуры (метрики 4–6)"
-} | sanitize | tee -a "$LOG"
-skip "metric 4 (хранилища recall)" "нет раннера хранилищ на эталоне (recover реализован)"
-skip "metric 5 (внешние precision)" "нет раннера внешних систем на эталоне (recover реализован)"
-skip "metric 6 (шум карты survey)" "грунт-трус шума survey отсутствует"
-echo | sanitize | tee -a "$LOG"
+run "ArchRecover — хранилища as-built (метрика 4: recall)" stores_recover.py
+run "ArchRecover — внешние системы as-built (метрика 5: precision)" externals_recover.py
+run "ArchRecover — шум карты обследования (метрика 6)" survey_noise.py
 
 # ── Kontur ──────────────────────────────────────────────────────────────────
 echo "## Kontur — измеримые кейсы и FP на реальном коде (метрики 11, 12, 20)" | sanitize | tee -a "$LOG"

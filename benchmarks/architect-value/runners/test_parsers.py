@@ -56,11 +56,13 @@ def main():
     rules = std.get("rules") if isinstance(std, dict) else None
     check("12 rules", len(rules) if isinstance(rules, list) else None, 12)
     if isinstance(rules, list):
+        # После волн S1/S2/S3/S9 все 12 требований стали исполнимыми: в P1
+        # было 7 (5 требований помечены `unverifiable: true`). Метрика 7 §9
+        # растёт 7 → 11 (S1–S3) → 12 (S9, `data_ownership`).
         executable = [r for r in rules if not r.get("unverifiable")]
-        check("7 executable rules", len(executable), 7)
+        check("12 executable rules", len(executable), 12)
         ids = [r.get("id") for r in executable]
-        check("executable ids", ids, ["JSS-001", "JSS-003", "JSS-004", "JSS-006",
-                                      "JSS-007", "JSS-008", "JSS-011"])
+        check("executable ids", ids, [f"JSS-{i:03d}" for i in range(1, 13)])
 
     section("seeds/buckpal_c2.yaml")
     c2 = avlib.load_yaml(avlib.SEEDS / "buckpal_c2.yaml")
