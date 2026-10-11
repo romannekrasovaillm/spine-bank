@@ -220,6 +220,9 @@ pub const CONSTRAINTS_EXAMPLE: &str = include_str!("../examples/CONSTRAINTS.exam
 pub const CRON_TASK_KB_DIGEST: &str = include_str!("../examples/cron/kb_digest.md");
 /// Md-инструкция cron-задачи «дрейф-чек спек».
 pub const CRON_TASK_SPEC_DRIFT: &str = include_str!("../examples/cron/spec_drift.md");
+/// Каталог известных провайдеров внешних систем (R3 волны R):
+/// расширяемый YAML, читает `arch_diff::providers`.
+pub const RECOVER_PROVIDERS: &str = include_str!("../assets/recover/providers.yaml");
 
 // ── Eval-сьют конфигурации харнесса (continuous evals, docs/evals.md) ──
 
@@ -964,6 +967,7 @@ const DEFAULT_FILES: &[(&str, &str)] = &[
         RUBRIC_AGENTS_MD_QUALITY_YAML,
     ),
     ("cron/agents_md_drift.md", CRON_TASK_AGENTS_MD_DRIFT_MD),
+    ("assets/recover/providers.yaml", RECOVER_PROVIDERS),
 ];
 
 /// Программный доступ к встроенным файлам плагинов (`assets/plugins/**`):
