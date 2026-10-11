@@ -1,0 +1,46 @@
+# Каталог известных провайдеров внешних систем (R3 волны R).
+#
+# `keys` — префиксы конфигурационных ключей (dotted, нижний регистр): ключ
+# `spring.ai.openai.api-key` в конфиге опознаёт провайдера `openai`. Вложенный
+# YAML разворачивается в dotted-путь (см. `arch_diff::providers::flatten_keys`).
+# `needles` — сырые подстроки содержимого конфигов (имена переменных окружения
+# и SDK-маркеры), регистронезависимо.
+#
+# Расширение без правки кода: положить свой файл в `$ARCH_HOME/assets/recover/
+# providers.yaml` — провайдер с тем же `id` ЗАМЕНЯЕТ встроенный, новый
+# ДОБАВЛЯЕТСЯ. Банковские провайдеры — в слое `banking/`, не здесь.
+version: 1
+providers:
+  - id: openai
+    keys:
+      - spring.ai.openai
+    needles:
+      - OPENAI_API_KEY
+      - OPENAI_BASE_URL
+  - id: azure-openai
+    keys:
+      - spring.ai.azure.openai
+    needles:
+      - AZURE_OPENAI_KEY
+      - AZURE_OPENAI_ENDPOINT
+      - AZURE_OPENAI_API_KEY
+  - id: vertex-ai
+    keys:
+      - spring.ai.vertex.ai
+      - spring.ai.gemini
+    needles:
+      - GOOGLE_API_KEY
+      - GEMINI_API_KEY
+      - VERTEX_AI
+      - GOOGLE_APPLICATION_CREDENTIALS
+  - id: alloydb
+    needles:
+      - ALLOYDB_CLUSTER_NAME
+      - ALLOYDB_INSTANCE_NAME
+      - ALLOYDB_CONNECTION_NAME
+  - id: stripe
+    keys:
+      - stripe
+    needles:
+      - STRIPE_API_KEY
+      - STRIPE_SECRET_KEY

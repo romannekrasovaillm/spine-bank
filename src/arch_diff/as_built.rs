@@ -34,6 +34,10 @@ pub(crate) const DATASTORE_SCHEMES: [&str; 8] = [
     "kafka",
 ];
 
+/// Regex `host:port` без схемы в манифесте (R3): имя хоста начинается с буквы,
+/// порт — 2–5 цифр сразу после `:` (`port: 8080` с пробелом не подходит).
+const MANIFEST_HOST_PORT_PATTERN: &str = r"(?i)\b([a-z][a-z0-9._-]*):([0-9]{2,5})\b";
+
 /// Компонент графа в построении: узел + корни кода.
 pub(crate) struct ComponentCtx {
     /// Стабильный id узла (id модели либо `dir:<каталог>`).
@@ -238,6 +242,25 @@ fn collect_components(
         }
     }
     candidate_dirs.retain(|dir| !layout.is_aggregator(dir) && !layout.is_test(dir));
+    // R4: одномодульный репозиторий (единственный модуль сборки = корень, модели
+    // нет) — компонент «по факту» разбирается на кластеры пакетов, иначе он
+    // выродился бы в корень репозитория. Пусто — кластеризовать нечего.
+    if layout.modules.is_empty() && comps.is_empty() && candidate_dirs.iter().all(String::is_empty)
+    {
+        let clusters = super::packages::clusters(snap);
+        if clusters.len() >= 2 {
+            return clusters
+                .into_iter()
+                .map(|c| ComponentCtx {
+                    id: c.id,
+                    title: c.title,
+                    inferred: true,
+                    model_id: None,
+                    roots: c.roots,
+                })
+                .collect();
+        }
+    }
     for dir in candidate_dirs {
         let covered = comps.iter().any(|c| {
             c.roots
@@ -338,29 +361,83 @@ fn collect_import_edges(snap: &Snapshot, comps: &[ComponentCtx], acc: &mut EdgeA
     Ok(())
 }
 
-/// Классификация URL из конфига: хранилище (`store:<scheme>://<host>`) или
-/// внешняя система (`sys:<host:port>`); петлевые хосты пропускаются (как в
-/// `survey`). userinfo срезается разбором `survey::extract_host_port`;
-/// итоговый id дополнительно прогоняется через редактор секретов.
-fn classify_url(url: &str, redactor: &crate::secrets::Redactor) -> Option<(NodeKind, String)> {
+/// Классификация URL из конфига: только хранилище (`store:<scheme>://<host>`)
+/// по явной схеме строки подключения. Внешние системы детектируются не по
+/// произвольному `host:port` (шум: B-метрика «внешние precision» падала до
+/// ≤0.21), а по каталогу провайдеров ([`super::providers`]). Петлевые хосты и
+/// денилист (`SurveyDenylist`, B8) пропускаются; userinfo срезается разбором
+/// `survey::extract_host_port`, итоговый id прогоняется через редактор секретов.
+fn classify_url(
+    url: &str,
+    redactor: &crate::secrets::Redactor,
+    deny: &crate::survey::SurveyDenylist,
+) -> Option<(NodeKind, String)> {
     let host = extract_host_port(url)?;
+    if deny.host_ignored(&host) {
+        return None;
+    }
     let scheme_raw = url
         .split_once("://")
         .map(|(s, _)| s.to_ascii_lowercase())
         .unwrap_or_default();
     // jdbc:postgresql://… — хранилище по подсхеме.
     let scheme = scheme_raw.strip_prefix("jdbc:").unwrap_or(&scheme_raw);
-    let (kind, id) = if DATASTORE_SCHEMES.contains(&scheme) {
-        (NodeKind::Datastore, format!("store:{scheme}://{host}"))
-    } else {
-        (NodeKind::ExternalSystem, format!("sys:{host}"))
-    };
-    Some((kind, redactor.redact(&id)))
+    if !DATASTORE_SCHEMES.contains(&scheme) {
+        return None;
+    }
+    let id = redactor.redact(&format!("store:{scheme}://{host}"));
+    Some((NodeKind::Datastore, id))
 }
 
-/// Рёбра обращений: строки подключения в конфигах компонентов → внешние
-/// системы (`sys:`) и хранилища (`store:`); узлы создаются и тогда, когда
-/// конфиг не принадлежит ни одному компоненту (ребра тогда нет).
+/// Схема хранилища по образу в том же манифесте: `image: redis:alpine` →
+/// `redis`. Сравнивается последний компонент имени образа без тега/реестра.
+/// Служит разрешением на разбор строк `host:port` без схемы в этом манифесте.
+fn storage_image_scheme(content: &str) -> Option<&'static str> {
+    for line in content.lines() {
+        let Some((_, rest)) = line.split_once("image:") else {
+            continue;
+        };
+        let token = rest
+            .trim()
+            .trim_matches(['"', '\''])
+            .split_whitespace()
+            .next()
+            .unwrap_or("");
+        let name = token.rsplit('/').next().unwrap_or(token);
+        let name = name.split(':').next().unwrap_or(name);
+        if let Some(scheme) = DATASTORE_SCHEMES
+            .iter()
+            .copied()
+            .find(|s| s.eq_ignore_ascii_case(name))
+        {
+            return Some(scheme);
+        }
+    }
+    None
+}
+
+/// Строка-комментарий (`#`, `//`) — интеграции в ней не ищем.
+fn is_comment_line(line: &str) -> bool {
+    let t = line.trim_start();
+    t.starts_with('#') || t.starts_with("//")
+}
+
+/// Заголовок узла обращения: внешняя система — id провайдера без префикса
+/// `sys:` (эталон сверяется по имени провайдера, а не по `sys:<id>`), узлы
+/// хранилищ — стабильный id как есть.
+fn node_title(kind: NodeKind, id: &str) -> String {
+    match kind {
+        NodeKind::ExternalSystem => id.strip_prefix("sys:").unwrap_or(id).to_string(),
+        _ => id.to_string(),
+    }
+}
+
+/// Рёбра обращений: хранилища, внешние системы-провайдеры и топики из
+/// конфигов компонентов. Источники: (1) строки подключения со схемой и
+/// `bootstrap.servers`; (2) каталог провайдеров по ключам конфигурации
+/// (вложенный YAML → dotted) и по env-маркерам; (3) строки `host:port` без
+/// схемы в манифестах с образом хранилища. Денилист B8 отсекает lock-файлы и
+/// метаданные; узлы создаются и без владельца (тогда ребра нет).
 fn collect_connect_edges(
     snap: &Snapshot,
     comps: &[ComponentCtx],
@@ -370,21 +447,43 @@ fn collect_connect_edges(
     let contexts = contexts_of(comps);
     let re_url = Regex::new(INTEGRATION_URL_PATTERN)
         .map_err(|e| HarnessError::Control(format!("внутренний regex интеграций: {e}")))?;
+    let re_hostport = Regex::new(MANIFEST_HOST_PORT_PATTERN)
+        .map_err(|e| HarnessError::Control(format!("внутренний regex host:port: {e}")))?;
     let redactor = crate::secrets::Redactor::with_builtin_rules();
+    let providers = super::providers::Providers::load();
+    let deny = crate::survey::SurveyDenylist::builtin();
     for (path, content) in &snap.contents {
-        if !looks_like_config(path) {
+        if !looks_like_config(path) || deny.path_ignored(path) {
             continue;
         }
         let owner = owner_of_path(&contexts, path);
+        // (kind, id, 1-based строка) — все обращения из файла.
+        let mut hits: Vec<(NodeKind, String, usize)> = Vec::new();
+        // (2a) Провайдер по конфигурационному ключу (вложенный YAML → dotted).
+        for (dotted, line) in super::providers::flatten_keys(content) {
+            if let Some(def) = providers.by_key(&dotted) {
+                hits.push((NodeKind::ExternalSystem, format!("sys:{}", def.id), line));
+            }
+        }
+        // (3) Разрешение на схемное-менее разбирательство — образ хранилища.
+        let schemeless_scheme = storage_image_scheme(content);
         for (idx, line) in content.lines().enumerate() {
-            let mut hits: Vec<(NodeKind, String)> = Vec::new();
+            let lnum = idx + 1;
+            if is_comment_line(line) {
+                continue;
+            }
+            // (1a) Строки подключения со схемой.
             for m in re_url.find_iter(line) {
-                if let Some(hit) = classify_url(m.as_str(), &redactor) {
-                    hits.push(hit);
+                if let Some((kind, id)) = classify_url(m.as_str(), &redactor, &deny) {
+                    hits.push((kind, id, lnum));
                 }
             }
-            // `bootstrap.servers: "k1:9092,k2:9092"` — Kafka без схемы (та же
-            // альтернатива, что у детектора `new_datastore`): значение
+            // (2b) Провайдер по сырой подстроке (env-переменная, SDK-маркер).
+            if let Some(def) = providers.by_needle(line) {
+                hits.push((NodeKind::ExternalSystem, format!("sys:{}", def.id), lnum));
+            }
+            // (1b) `bootstrap.servers: "k1:9092,k2:9092"` — Kafka без схемы
+            // (та же альтернатива, что у детектора `new_datastore`): значение
             // целиком (кавычки срезаются), каждый брокер — свой узел.
             if let Some((_, rest)) = line.split_once("bootstrap.servers") {
                 let rest = rest.trim_start_matches([' ', ':', '=']);
@@ -394,30 +493,56 @@ fn collect_connect_edges(
                         continue;
                     }
                     if let Some(host) = extract_host_port(token) {
+                        if deny.host_ignored(&host) {
+                            continue;
+                        }
                         hits.push((
                             NodeKind::Datastore,
                             redactor.redact(&format!("store:kafka://{host}")),
+                            lnum,
                         ));
                     }
                 }
             }
-            for (kind, id) in hits {
-                nodes.entry(id.clone()).or_insert_with(|| ArchNode {
-                    title: id.clone(),
-                    id: id.clone(),
-                    kind,
-                    inferred: false,
-                    model_id: None,
-                });
-                if let Some(source) = owner {
-                    acc_edge(
-                        acc,
-                        &comps[source].id,
-                        &id,
-                        EdgeKind::Connect,
-                        format!("{path}:{}", idx + 1),
-                    );
+            // (3) `host:port` без схемы в манифесте с образом хранилища;
+            // строку самого образа (`image:`) не разбираем — иначе тег
+            // (`postgres:15`) дал бы ложное хранилище.
+            if let Some(scheme) = schemeless_scheme {
+                if !line.contains("image:") {
+                    for m in re_hostport.find_iter(line) {
+                        if line[..m.start()].ends_with("//") {
+                            continue;
+                        }
+                        if let Some(host) = extract_host_port(m.as_str()) {
+                            if deny.host_ignored(&host) {
+                                continue;
+                            }
+                            hits.push((
+                                NodeKind::Datastore,
+                                redactor.redact(&format!("store:{scheme}://{host}")),
+                                lnum,
+                            ));
+                        }
+                    }
                 }
+            }
+        }
+        for (kind, id, line) in hits {
+            nodes.entry(id.clone()).or_insert_with(|| ArchNode {
+                title: node_title(kind, &id),
+                id: id.clone(),
+                kind,
+                inferred: false,
+                model_id: None,
+            });
+            if let Some(source) = owner {
+                acc_edge(
+                    acc,
+                    &comps[source].id,
+                    &id,
+                    EdgeKind::Connect,
+                    format!("{path}:{line}"),
+                );
             }
         }
     }
@@ -875,18 +1000,28 @@ mod tests {
         write_file(
             &repo,
             "skeleton/intake/config.yaml",
-            "upstream: \"https://api.bank.ru:8443/v1\"\ndsn: \"postgres://user:secret@ledger-db:5432/ledger\"\nlocal: \"http://127.0.0.1:9000/x\"\nqueue: \"amqp://mq.internal:5672\"\nbootstrap.servers: \"kafka-1:9092,kafka-2:9092\"\n",
+            "upstream: \"https://api.bank.ru:8443/v1\"\ndsn: \"postgres://user:secret@ledger-db:5432/ledger\"\nlocal: \"http://127.0.0.1:9000/x\"\nqueue: \"amqp://mq.internal:5672\"\nbootstrap.servers: \"kafka-1:9092,kafka-2:9092\"\nspring:\n  ai:\n    openai:\n      api-key: ${OPENAI_API_KEY}\n",
         );
         git_repo(&repo);
         let graph = as_built(&repo, "HEAD").expect("граф");
         let ids: Vec<&str> = graph.nodes.iter().map(|n| n.id.as_str()).collect();
-        assert!(ids.contains(&"sys:api.bank.ru:8443"), "{ids:?}");
-        assert!(ids.contains(&"sys:mq.internal:5672"), "{ids:?}");
+        // Произвольный `host:port` больше не даёт внешней системы (R3, шум).
+        assert!(!ids.contains(&"sys:api.bank.ru:8443"), "{ids:?}");
+        assert!(!ids.contains(&"sys:mq.internal:5672"), "{ids:?}");
         assert!(ids.contains(&"store:postgres://ledger-db:5432"), "{ids:?}");
         assert!(ids.contains(&"store:kafka://kafka-1:9092"), "{ids:?}");
         assert!(ids.contains(&"store:kafka://kafka-2:9092"), "{ids:?}");
         assert!(!ids.iter().any(|i| i.contains("127.0.0.1")), "{ids:?}");
         assert!(!ids.iter().any(|i| i.contains("secret")), "{ids:?}");
+        // Провайдер из каталога (ключ `spring.ai.openai.*` + needle).
+        assert!(ids.contains(&"sys:openai"), "{ids:?}");
+        let openai = graph
+            .nodes
+            .iter()
+            .find(|n| n.id == "sys:openai")
+            .expect("узел провайдера");
+        assert_eq!(openai.title, "openai");
+        assert_eq!(openai.kind, NodeKind::ExternalSystem);
         let pg = graph
             .edges
             .iter()
@@ -895,6 +1030,32 @@ mod tests {
         assert_eq!(pg.from, "CMP-001");
         assert_eq!(pg.kind, EdgeKind::Connect);
         assert_eq!(pg.evidence, vec!["skeleton/intake/config.yaml:2"]);
+    }
+
+    /// Хранилище без схемы: `host:port` принимается только в манифесте с
+    /// образом хранилища (`REDIS_ADDR=redis-cart:6379` + `image: redis`).
+    #[test]
+    fn schemeless_storage_requires_image_in_manifest() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("mkdir");
+        fixture_python(&repo);
+        write_file(
+            &repo,
+            "skeleton/intake/deploy.yaml",
+            "kind: Deployment\nimage: redis:alpine\nenv:\n  - name: REDIS_ADDR\n    value: \"redis-cart:6379\"\n",
+        );
+        // Тот же `host:port`, но без образа хранилища рядом — не хранилище.
+        write_file(
+            &repo,
+            "skeleton/intake/plain.yaml",
+            "endpoint: \"cache:6379\"\n",
+        );
+        git_repo(&repo);
+        let graph = as_built(&repo, "HEAD").expect("граф");
+        let ids: Vec<&str> = graph.nodes.iter().map(|n| n.id.as_str()).collect();
+        assert!(ids.contains(&"store:redis://redis-cart:6379"), "{ids:?}");
+        assert!(!ids.iter().any(|i| i.contains("cache:6379")), "{ids:?}");
     }
 
     /// Контракты: по содержимому (openapi-ключ), по имени и по `.proto`;

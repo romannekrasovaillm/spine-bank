@@ -163,7 +163,7 @@ const BUILTIN_DENY_PATHS: [&str; 14] = [
 /// `[survey]`. Списки дополняются, а не заменяются — встроенная защита от
 /// шума с lock-файлов и лицензий действует всегда.
 #[derive(Debug, Clone, Default)]
-struct SurveyDenylist {
+pub(crate) struct SurveyDenylist {
     /// Хосты (нижний регистр) без порта.
     hosts: Vec<String>,
     /// Имена файлов или glob-суффиксы (`*.lock`), нижний регистр.
@@ -172,7 +172,8 @@ struct SurveyDenylist {
 
 impl SurveyDenylist {
     /// Встроенный денилист без пользовательских дополнений.
-    fn builtin() -> Self {
+    #[must_use]
+    pub(crate) fn builtin() -> Self {
         Self {
             hosts: BUILTIN_DENY_HOSTS
                 .iter()
@@ -186,6 +187,7 @@ impl SurveyDenylist {
     }
 
     /// Встроенный денилист, дополненный секцией `[survey]` конфига.
+    #[must_use]
     fn from_config(cfg: &crate::config::SurveyConfig) -> Self {
         let mut d = Self::builtin();
         d.hosts
@@ -196,7 +198,8 @@ impl SurveyDenylist {
     }
 
     /// Хост (`host:port` или `host`) под запретом: равенство или dot-суффикс.
-    fn host_ignored(&self, host_port: &str) -> bool {
+    #[must_use]
+    pub(crate) fn host_ignored(&self, host_port: &str) -> bool {
         let host = host_port
             .split(':')
             .next()
@@ -209,7 +212,8 @@ impl SurveyDenylist {
     }
 
     /// Имя файла пути под запретом: `*.suffix` — по суффиксу, иначе по равенству.
-    fn path_ignored(&self, path: &str) -> bool {
+    #[must_use]
+    pub(crate) fn path_ignored(&self, path: &str) -> bool {
         let name = path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase();
         self.paths.iter().any(|deny| match deny.strip_prefix('*') {
             Some(suffix) => name.ends_with(suffix),
