@@ -343,8 +343,18 @@ enum Cmd {
     /// без сети, детерминированно; exit 1, если доля ниже `--min-detection`.
     Redteam {
         /// Кейс (каталог с model/, CONSTRAINTS.yaml, docs/adr, бандлом…);
-        /// не нужен при подкоманде `semantic-score`.
+        /// не нужен при подкоманде `semantic-score` и режиме `--all`.
         case: Option<PathBuf>,
+        /// K1 (контур-бенч 0.4.0): измерить ВСЕ кейсы набора в каталоге и
+        /// напечатать сводку «измерен / не измерен: причина». Маршрут каждого
+        /// кейса — из его `CASE.yaml` (`route:`), отсутствие файла — Critical.
+        /// Прогон информационный: exit 0, порог не применяется.
+        #[arg(long, value_name = "DIR", conflicts_with = "case")]
+        all: Option<PathBuf>,
+        /// K1: переопределить маршрут прогона (fast|standard|critical) —
+        /// сильнее `route:` из `CASE.yaml` кейса.
+        #[arg(long, value_name = "ROUTE")]
+        route: Option<String>,
         /// Подкоманда: смысловая строка по сохранённым клонам (ADR-051).
         #[command(subcommand)]
         cmd: Option<RedteamCmd>,
@@ -1330,6 +1340,8 @@ pub(crate) async fn run() -> Result<()> {
         }
         Some(Cmd::Redteam {
             case,
+            all,
+            route,
             cmd,
             format,
             min_detection,
@@ -1339,6 +1351,31 @@ pub(crate) async fn run() -> Result<()> {
             corpus,
             hermetic,
         }) => {
+            // K1: `--route` переопределяет маршрут из `CASE.yaml` кейса.
+            let route_override = match route.as_deref() {
+                None => None,
+                Some(r) => Some(
+                    r.trim()
+                        .to_ascii_lowercase()
+                        .parse::<arch_harness::control::Route>()
+                        .map_err(|e: String| anyhow::anyhow!(e))?,
+                ),
+            };
+            // K1: `--all <DIR>` — сводка измеримости всего набора кейсов.
+            if let Some(root) = all.as_deref() {
+                let summary = arch_harness::redteam::measure_all(root, route_override)?;
+                if format.trim().eq_ignore_ascii_case("json") {
+                    let out = summary.to_json();
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string())
+                    );
+                } else {
+                    print!("{}", summary.render());
+                }
+                // Информационный прогон: измеримость — измерение, не приёмка.
+                return Ok(());
+            }
             // Подкоманда `semantic-score` читает уже сохранённые клоны: сам
             // прогон кейса не нужен и кейс не обязателен.
             if let Some(RedteamCmd::SemanticScore { dir, format }) = cmd {
@@ -1393,6 +1430,7 @@ pub(crate) async fn run() -> Result<()> {
                         decision_quality: !no_decision_quality,
                         keep_semantic: keep_semantic.clone(),
                         hermetic,
+                        route: route_override,
                     },
                 )?
             } else {
@@ -1406,6 +1444,7 @@ pub(crate) async fn run() -> Result<()> {
                         decision_quality: !no_decision_quality,
                         keep_semantic: keep_semantic.clone(),
                         hermetic,
+                        route: route_override,
                     },
                 )?;
                 if save {

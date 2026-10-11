@@ -1,0 +1,3 @@
+# Объявление кейса (K1, 0.4.0). Зелёный на Fast; на Standard — evidence_verify
+# красный, поэтому маршрут — fast.
+route: fast

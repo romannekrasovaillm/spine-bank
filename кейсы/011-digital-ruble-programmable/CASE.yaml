@@ -1,0 +1,3 @@
+# Объявление кейса (K1, 0.4.0). Кейс зелёный на Fast (fitness + spine_lint);
+# на Standard эталон краснеет по evidence_verify, поэтому маршрут — fast.
+route: fast

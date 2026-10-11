@@ -28,9 +28,12 @@ use crate::control::Route;
 use crate::error::{HarnessError, Result};
 use crate::gate::{self, GateOptions, GateOutcome, GateReport, GateRequirements, GateStatus};
 
+pub mod case;
 pub mod corpus;
 pub(crate) mod mutators;
 pub(crate) use mutators::MUTATORS;
+
+pub use case::{CASE_MANIFEST, CaseManifest};
 
 /// Что ожидается от мутатора.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1162,20 +1165,257 @@ fn prepare(root: &Path) -> std::result::Result<(), String> {
 }
 
 /// Отчёт гейта по мутанту (для контроля D14 нужен вердикт и аттестация).
-fn gate_report(root: &Path, decision_quality: bool) -> Result<GateReport> {
+fn gate_report(root: &Path, decision_quality: bool, route: Route) -> Result<GateReport> {
     let mut requirements = GateRequirements::default();
     if decision_quality {
+        // `decision_quality` — требование маршрута Critical. На пониженном
+        // маршруте `for_route` его не включает, и кейс меряется без досье
+        // (по построению не Critical-пакет). Маршрут прогона всё равно
+        // передаётся в гейт — он задаёт остальной набор компонентов.
         requirements.critical.push("decision_quality".to_string());
     }
     gate::run_opts(
         root,
-        Some(Route::Critical),
+        Some(route),
         Some("HEAD~1"),
         None,
         (1, 4),
         &requirements,
         &GateOptions::default(),
     )
+}
+
+/// Маршрут прогона: явное перекрытие [`RedteamOptions::route`] либо объявленный
+/// в `CASE.yaml` кейса (нет файла — Critical). Ошибка разбора `CASE.yaml`
+/// пробрасывается — молчаливый откат к Critical исказил бы измерение.
+fn resolve_route(case: &Path, override_route: Option<Route>) -> Result<Route> {
+    match override_route {
+        Some(r) => Ok(r),
+        None => Ok(CaseManifest::load(case)?.route),
+    }
+}
+
+/// Суть отказа «эталон не зелёный»: список составляющих в скобках сообщения
+/// [`run_with_options`]. Полная фраза («мутационный прогон мерил бы сломанный
+/// пакет…») в сводке `--all` избыточна — причина и есть скобки. Сообщение без
+/// скобок (иная ошибка) возвращается как есть.
+fn concise_reason(msg: &str) -> String {
+    if let (Some(open), Some(close)) = (msg.find('('), msg.rfind(')')) {
+        if open < close {
+            return msg[open + 1..close].to_string();
+        }
+    }
+    msg.to_string()
+}
+
+/// Результат измерения одного кейса набора (K1) на объявленном маршруте.
+pub enum CaseOutcome {
+    /// Кейс измерен: доля обнаружения `caught/total`.
+    Measured {
+        /// Поймано дефектов (числитель доли).
+        caught: usize,
+        /// Дефектов в знаменателе доли.
+        total: usize,
+    },
+    /// Кейс не измерен с причиной (объявлен неизмеримым или красный на маршруте).
+    NotMeasured {
+        /// Почему кейс вне контура или не измерился.
+        reason: String,
+    },
+}
+
+impl CaseOutcome {
+    /// Измерен ли кейс.
+    #[must_use]
+    pub fn measured(&self) -> bool {
+        matches!(self, Self::Measured { .. })
+    }
+
+    /// Доля обнаружения; `None` — кейс не измерялся. Пустой знаменатель —
+    /// «измерено на пустом», а не «100 % неверия» (как в [`RedteamReport`]).
+    #[must_use]
+    pub fn ratio(&self) -> Option<f64> {
+        match self {
+            Self::Measured { caught, total } if *total > 0 => Some(*caught as f64 / *total as f64),
+            Self::Measured { .. } => Some(1.0),
+            Self::NotMeasured { .. } => None,
+        }
+    }
+}
+
+/// Измерение одного кейса набора (K1): имя, маршрут, вес и итог.
+pub struct CaseMeasure {
+    /// Имя каталога кейса (относительно набора).
+    pub name: String,
+    /// Маршрут, на котором кейс меряется (из `CASE.yaml` или перекрытия).
+    pub route: Route,
+    /// Вес кейса в агрегатах (метрика 12).
+    pub weight: f64,
+    /// Итог измерения.
+    pub outcome: CaseOutcome,
+}
+
+/// Сводка измерения набора кейсов (K1, `arch-be redteam --all`).
+pub struct MeasureSummary {
+    /// Каталог набора (как задан).
+    pub root: PathBuf,
+    /// Измерения по кейсам (лексикографически по имени каталога).
+    pub cases: Vec<CaseMeasure>,
+}
+
+impl MeasureSummary {
+    /// Число измеренных кейсов.
+    #[must_use]
+    pub fn measured_count(&self) -> usize {
+        self.cases.iter().filter(|c| c.outcome.measured()).count()
+    }
+
+    /// Всего кейсов в наборе.
+    #[must_use]
+    pub fn total_count(&self) -> usize {
+        self.cases.len()
+    }
+
+    /// Текстовая сводка «измерен / не измерен: причина».
+    #[must_use]
+    pub fn render(&self) -> String {
+        let mut out = String::new();
+        // Запись в String не может завершиться ошибкой — игноры безопасны.
+        let _ = writeln!(
+            out,
+            "redteam --all {}: измерено {}/{} кейсов",
+            self.root.display(),
+            self.measured_count(),
+            self.total_count()
+        );
+        for c in &self.cases {
+            match &c.outcome {
+                CaseOutcome::Measured { caught, total } => {
+                    let ratio = c.outcome.ratio().unwrap_or(1.0);
+                    let _ = writeln!(
+                        out,
+                        "  измерен    {:<34} маршрут {:<8} {caught}/{total} = {:.0}%",
+                        c.name,
+                        c.route.to_string(),
+                        ratio * 100.0
+                    );
+                }
+                CaseOutcome::NotMeasured { reason } => {
+                    let _ = writeln!(
+                        out,
+                        "  не измерен {:<34} маршрут {:<8} причина: {reason}",
+                        c.name,
+                        c.route.to_string()
+                    );
+                }
+            }
+        }
+        out
+    }
+
+    /// JSON-сводка (схема `arch-be/redteam-all/v1`).
+    #[must_use]
+    pub fn to_json(&self) -> serde_json::Value {
+        let cases: Vec<serde_json::Value> = self
+            .cases
+            .iter()
+            .map(|c| {
+                let (measured, ratio, caught, total, reason) = match &c.outcome {
+                    CaseOutcome::Measured { caught, total } => {
+                        (true, c.outcome.ratio(), Some(*caught), Some(*total), None)
+                    }
+                    CaseOutcome::NotMeasured { reason } => {
+                        (false, None, None, None, Some(reason.clone()))
+                    }
+                };
+                serde_json::json!({
+                    "name": c.name,
+                    "route": c.route.to_string(),
+                    "weight": c.weight,
+                    "measured": measured,
+                    "caught": caught,
+                    "total": total,
+                    "detection_ratio": ratio,
+                    "reason": reason,
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "schema": "arch-be/redteam-all/v1",
+            "root": self.root.display().to_string(),
+            "measured": self.measured_count(),
+            "total": self.total_count(),
+            "cases": cases,
+        })
+    }
+}
+
+/// Меряет все кейсы набора на их объявленных маршрутах (K1, `redteam --all`).
+///
+/// Кейс, объявленный `measurable: false` в `CASE.yaml`, не прогоняется: сводка
+/// честно печатает причину. Остальные прогоняются обычным мутационным прогоном
+/// на своём маршруте; красный на маршруте кейс — строка «не измерен: причина»,
+/// а не ошибка всего набора.
+///
+/// # Errors
+/// Каталог набора недоступен или `CASE.yaml` кейса не разбирается
+/// (fail-closed: опечатка в маршруте не должна тихо трактоваться как Critical).
+pub fn measure_all(root: &Path, route_override: Option<Route>) -> Result<MeasureSummary> {
+    let entries = std::fs::read_dir(root).map_err(|e| HarnessError::io(root, e))?;
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| HarnessError::io(root, e))?;
+        let path = entry.path();
+        if path.is_dir() {
+            dirs.push(path);
+        }
+    }
+    dirs.sort();
+    let mut cases: Vec<CaseMeasure> = Vec::new();
+    for dir in dirs {
+        let name = dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("?")
+            .to_string();
+        let manifest = CaseManifest::load(&dir)?;
+        let route = route_override.unwrap_or(manifest.route);
+        let outcome = if manifest.measurable {
+            let options = RedteamOptions {
+                route: Some(route),
+                ..RedteamOptions::default()
+            };
+            match run_with_options(&dir, &options) {
+                Ok(report) => CaseOutcome::Measured {
+                    caught: report.scored_caught(),
+                    total: report.scored_total(),
+                },
+                // Красный эталон: причина — список составляющих в скобках
+                // сообщения отказа, а не полная фраза «мерили бы сломанный
+                // пакет» (сводка обязана читаться).
+                Err(e) => CaseOutcome::NotMeasured {
+                    reason: concise_reason(&e.to_string()),
+                },
+            }
+        } else {
+            CaseOutcome::NotMeasured {
+                reason: manifest
+                    .reason
+                    .clone()
+                    .unwrap_or_else(|| "объявлен неизмеримым".to_string()),
+            }
+        };
+        cases.push(CaseMeasure {
+            name,
+            route,
+            weight: manifest.weight,
+            outcome,
+        });
+    }
+    Ok(MeasureSummary {
+        root: root.to_path_buf(),
+        cases,
+    })
 }
 
 /// Мутационный прогон по кейсу.
@@ -1199,6 +1439,11 @@ pub struct RedteamOptions {
     /// мутаторы, которым нужен этот прогонщик, выходят из знаменателя как
     /// «пропущен: неизмеримо без прогонщика» — по образцу «нет входа».
     pub hermetic: bool,
+    /// Маршрут контроля (K1, 0.4.0): `Some(r)` — явное перекрытие, `None` —
+    /// маршрут из `CASE.yaml` кейса (нет файла — Critical, как было до 0.4.0).
+    /// Кейс, по построению не являющийся Critical-пакетом, объявляет свой
+    /// маршрут и меряется на нём.
+    pub route: Option<Route>,
 }
 
 impl Default for RedteamOptions {
@@ -1209,6 +1454,7 @@ impl Default for RedteamOptions {
             decision_quality: true,
             keep_semantic: None,
             hermetic: false,
+            route: None,
         }
     }
 }
@@ -1330,6 +1576,7 @@ pub(crate) fn hermetic_skip(
 pub fn run_with_options(case: &Path, options: &RedteamOptions) -> Result<RedteamReport> {
     let min_detection = options.min_detection;
     let decision_quality = options.decision_quality;
+    let route = resolve_route(case, options.route)?;
     let fixture = Fixture::new(case)?;
     // Эталон: кейс без правок. Нужен и как проверка «кейс вообще зелёный»
     // (иначе доля обнаружения мерила бы сломанный кейс), и как база для
@@ -1338,20 +1585,20 @@ pub fn run_with_options(case: &Path, options: &RedteamOptions) -> Result<Redteam
     prepare(&reference_root).map_err(HarnessError::Control)?;
     // Второй коммит обязателен: база прогона — `HEAD~1`, а на репозитории с
     // одним коммитом git отказывает, и delta_guard краснеет не по делу.
-    let _ = crate::evidence::pack(&reference_root, Route::Critical);
+    let _ = crate::evidence::pack(&reference_root, route);
     if let Err(e) = git(&reference_root, &["add", "-A"])
         .and_then(|()| git(&reference_root, &["commit", "-q", "-m", "reference"]))
     {
         return Err(HarnessError::Control(format!("эталон: коммит: {e}")));
     }
-    let reference = gate_report(&reference_root, decision_quality)?;
+    let reference = gate_report(&reference_root, decision_quality, route)?;
     // B7: в `--hermetic` эталон, красный ИСКЛЮЧИТЕЛЬНО из-за отсутствующего
     // прогонщика, — не «сломанный пакет», а слепое окружение. Мерить его
     // можно; мутаторы без прогонщика выйдут из знаменателя ниже.
     let hermetic_runner_skip = options.hermetic && runner_only_incomplete(&reference);
     if reference.outcome != GateOutcome::Pass && !hermetic_runner_skip {
         return Err(HarnessError::Control(format!(
-            "кейс {} не зелёный на маршруте Critical — мутационный прогон мерил бы \
+            "кейс {} не зелёный на маршруте {route} — мутационный прогон мерил бы \
              сломанный пакет ({}); красноглазый эталон не даёт отличить \
              «дефект пойман» от «пакет уже сломан»",
             case.display(),
@@ -1394,7 +1641,7 @@ pub fn run_with_options(case: &Path, options: &RedteamOptions) -> Result<Redteam
                 return Err(HarnessError::Control(format!("{}: {e}", m.id)));
             }
         }
-        let _ = crate::evidence::pack(&root, Route::Critical);
+        let _ = crate::evidence::pack(&root, route);
         if let Err(e) = git(&root, &["add", "-A"])
             .and_then(|()| git(&root, &["commit", "-q", "-m", &format!("mutant {}", m.id)]))
         {
@@ -1406,7 +1653,7 @@ pub fn run_with_options(case: &Path, options: &RedteamOptions) -> Result<Redteam
             let dest = keep_semantic_clone(&root, dest_root, m, subject)?;
             kept.push(dest);
         }
-        let report = gate_report(&root, decision_quality)?;
+        let report = gate_report(&root, decision_quality, route)?;
         let failed: Vec<String> = report
             .components
             .iter()
@@ -2190,5 +2437,122 @@ mod tests {
             None,
             "пропуск не по прогонщику"
         );
+    }
+
+    /// K1: сводка `--all` печатает СУТЬ отказа «эталон не зелёный» — список в
+    /// скобках сообщения, а не полную фразу «мерили бы сломанный пакет».
+    /// Сообщение без скобок (иная ошибка) отдаётся как есть.
+    #[test]
+    fn concise_reason_takes_the_reason_from_parentheses() {
+        let msg = "кейс x не зелёный на маршруте Fast — мутационный прогон мерил бы \
+                   сломанный пакет (провалена decision_quality); красноглазый эталон";
+        assert_eq!(concise_reason(msg), "провалена decision_quality");
+        assert_eq!(
+            concise_reason("иная ошибка без скобок"),
+            "иная ошибка без скобок"
+        );
+    }
+
+    /// K1: доля обнаружения. Пустой знаменатель — «измерено на пустом» (1.0, не
+    /// деление на ноль); неизмеренный кейс доли не имеет.
+    #[test]
+    fn case_outcome_ratio_semantics() {
+        let full = CaseOutcome::Measured {
+            caught: 7,
+            total: 12,
+        };
+        assert_eq!(full.ratio(), Some(7.0 / 12.0));
+        assert!(full.measured());
+        let empty = CaseOutcome::Measured {
+            caught: 0,
+            total: 0,
+        };
+        assert_eq!(empty.ratio(), Some(1.0));
+        let none = CaseOutcome::NotMeasured {
+            reason: "нет".to_string(),
+        };
+        assert_eq!(none.ratio(), None);
+        assert!(!none.measured());
+    }
+
+    /// K1: `measure_all` честно объявляет неизмеримый кейс с причиной из
+    /// `CASE.yaml` и НЕ прогоняет его (прогон потребовал бы git-пакета).
+    #[test]
+    fn measure_all_reports_declared_not_measurable_cases() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let cases = tmp.path().join("кейсы");
+        let named = cases.join("not-measurable");
+        std::fs::create_dir_all(&named).expect("mkdir");
+        std::fs::write(
+            named.join("CASE.yaml"),
+            "measurable: false\nreason: \"внешний инструмент — не пакет Spine\"\n",
+        )
+        .expect("write");
+        let summary = measure_all(&cases, None).expect("measure");
+        assert_eq!(summary.total_count(), 1);
+        assert_eq!(summary.measured_count(), 0);
+        let rendered = summary.render();
+        assert!(rendered.contains("измерено 0/1 кейсов"), "{rendered}");
+        assert!(
+            rendered.contains("внешний инструмент — не пакет Spine"),
+            "{rendered}"
+        );
+    }
+
+    /// K1: `measurable: false` БЕЗ причины — ошибка разбора (fail-closed):
+    /// `measure_all` не должен тихо объявить кейс неизмеримым без объяснения.
+    #[test]
+    fn measure_all_fails_closed_on_reasonless_not_measurable() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let cases = tmp.path().join("кейсы");
+        let bare = cases.join("bare");
+        std::fs::create_dir_all(&bare).expect("mkdir");
+        std::fs::write(bare.join("CASE.yaml"), "measurable: false\n").expect("write");
+        assert!(measure_all(&cases, None).is_err(), "причина обязана быть");
+    }
+
+    /// K1: `render`/`to_json` сводки — измеренный кейс печатает долю, неизмеренный
+    /// причину; JSON несёт схему `arch-be/redteam-all/v1` и счётчики.
+    #[test]
+    fn measure_summary_renders_measured_and_json() {
+        let summary = MeasureSummary {
+            root: std::path::PathBuf::from("кейсы"),
+            cases: vec![
+                CaseMeasure {
+                    name: "зелёный".to_string(),
+                    route: Route::Fast,
+                    weight: 1.0,
+                    outcome: CaseOutcome::Measured {
+                        caught: 7,
+                        total: 12,
+                    },
+                },
+                CaseMeasure {
+                    name: "красный".to_string(),
+                    route: Route::Critical,
+                    weight: 2.0,
+                    outcome: CaseOutcome::NotMeasured {
+                        reason: "провалена fitness".to_string(),
+                    },
+                },
+            ],
+        };
+        assert_eq!(summary.measured_count(), 1);
+        assert_eq!(summary.total_count(), 2);
+        let text = summary.render();
+        assert!(text.contains("измерено 1/2 кейсов"), "{text}");
+        assert!(text.contains("измерен    зелёный"), "{text}");
+        assert!(text.contains("7/12 = 58%"), "{text}");
+        assert!(text.contains("не измерен красный"), "{text}");
+        assert!(text.contains("провалена fitness"), "{text}");
+        let json = summary.to_json();
+        assert_eq!(json["schema"], "arch-be/redteam-all/v1");
+        assert_eq!(json["measured"], 1);
+        assert_eq!(json["total"], 2);
+        assert_eq!(json["cases"][0]["detection_ratio"], 7.0 / 12.0);
+        assert_eq!(json["cases"][0]["route"], "Fast");
+        assert_eq!(json["cases"][1]["measured"], false);
+        assert_eq!(json["cases"][1]["reason"], "провалена fitness");
+        assert_eq!(json["cases"][1]["route"], "Critical");
     }
 }
