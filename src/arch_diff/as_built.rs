@@ -23,7 +23,7 @@ const CONTRACT_PROBE_BYTES: usize = 4096;
 /// Схемы строк подключения, относимые к хранилищам (а не к внешним
 /// системам): подмножество паттерна детектора `new_datastore`
 /// (`DATASTORE_PATTERN` в `control::diff_triggers`) с явной схемой.
-const DATASTORE_SCHEMES: [&str; 8] = [
+pub(crate) const DATASTORE_SCHEMES: [&str; 8] = [
     "postgres",
     "postgresql",
     "mysql",
@@ -35,17 +35,17 @@ const DATASTORE_SCHEMES: [&str; 8] = [
 ];
 
 /// Компонент графа в построении: узел + корни кода.
-struct ComponentCtx {
+pub(crate) struct ComponentCtx {
     /// Стабильный id узла (id модели либо `dir:<каталог>`).
-    id: String,
+    pub(crate) id: String,
     /// Заголовок из модели (для выведенных — сам каталог).
-    title: String,
+    pub(crate) title: String,
     /// Выведен по манифесту сборки (без модели/`code_roots`).
-    inferred: bool,
+    pub(crate) inferred: bool,
     /// Id сущности модели (у выведенных — None).
-    model_id: Option<String>,
+    pub(crate) model_id: Option<String>,
     /// Нормализованные корни кода (пустая строка — корень репозитория).
-    roots: Vec<String>,
+    pub(crate) roots: Vec<String>,
 }
 
 /// Граф «как построено» по ревизии `rev` репозитория `repo` с дефолтными
@@ -191,9 +191,12 @@ fn materialize_case(snap: &Snapshot) -> Result<(Option<tempfile::TempDir>, Optio
 /// Заголовок выведенного компонента — имя юнита развёртывания (сопряжение
 /// модуля сборки и deploy-юнита, [`super::modules::component_name`]), иначе
 /// имя каталога.
-fn collect_components(snap: &Snapshot, model: Option<&Model>) -> Vec<ComponentCtx> {
+fn collect_components(
+    snap: &Snapshot,
+    model: Option<&Model>,
+    topo: &super::modules::DeployTopology,
+) -> Vec<ComponentCtx> {
     let layout = super::modules::build_layout(snap);
-    let topo = super::modules::deploy_topology(snap);
     let mut comps: Vec<ComponentCtx> = Vec::new();
     if let Some(model) = model {
         for e in &model.entities {
@@ -244,7 +247,7 @@ fn collect_components(snap: &Snapshot, model: Option<&Model>) -> Vec<ComponentCt
         if !covered {
             comps.push(ComponentCtx {
                 id: format!("dir:{}", if dir.is_empty() { "." } else { &dir }),
-                title: super::modules::component_name(&dir, &topo),
+                title: super::modules::component_name(&dir, topo),
                 inferred: true,
                 model_id: None,
                 roots: vec![dir],
@@ -256,7 +259,7 @@ fn collect_components(snap: &Snapshot, model: Option<&Model>) -> Vec<ComponentCt
 }
 
 /// Контексты в форме `imports`: (индекс компонента, корни).
-fn contexts_of(comps: &[ComponentCtx]) -> Vec<(usize, Vec<String>)> {
+pub(crate) fn contexts_of(comps: &[ComponentCtx]) -> Vec<(usize, Vec<String>)> {
     comps
         .iter()
         .enumerate()
@@ -267,7 +270,7 @@ fn contexts_of(comps: &[ComponentCtx]) -> Vec<(usize, Vec<String>)> {
 /// Владелец пути среди компонентов: точный префикс корня; пустой корень
 /// (манифест в корне репозитория) — запасной владелец «всего дерева»,
 /// чтобы корневой код однокомпонентного репозитория не терялся.
-fn owner_of_path(contexts: &[(usize, Vec<String>)], path: &str) -> Option<usize> {
+pub(crate) fn owner_of_path(contexts: &[(usize, Vec<String>)], path: &str) -> Option<usize> {
     if let Some(hit) = imports::owner_by_path(contexts, path) {
         return Some(*hit);
     }
@@ -282,7 +285,7 @@ fn owner_of_path(contexts: &[(usize, Vec<String>)], path: &str) -> Option<usize>
 type EdgeKey = (String, String, EdgeKind, Option<Via>, Option<Confidence>);
 
 /// Накопитель рёбер: ключ → основания (множество — дедуп).
-type EdgeAcc = BTreeMap<EdgeKey, BTreeSet<String>>;
+pub(crate) type EdgeAcc = BTreeMap<EdgeKey, BTreeSet<String>>;
 
 /// Добавляет основание к ребру без способа/достоверности (import/connect/
 /// contract по построению).
@@ -494,7 +497,8 @@ fn collect_contracts(
 /// Сборка графа из снимка и модели: узлы отсортированы по id, рёбра — по
 /// (from, to, kind), основания — по строке с потолком [`MAX_EDGE_EVIDENCE`].
 fn build_graph(snap: &Snapshot, model: Option<&Model>, globs: &DiffGlobs) -> Result<ArchGraph> {
-    let comps = collect_components(snap, model);
+    let topo = super::modules::deploy_topology(snap);
+    let comps = collect_components(snap, model, &topo);
     let mut nodes: BTreeMap<String, ArchNode> = BTreeMap::new();
     for c in &comps {
         nodes.insert(
@@ -512,6 +516,9 @@ fn build_graph(snap: &Snapshot, model: Option<&Model>, globs: &DiffGlobs) -> Res
     collect_import_edges(snap, &comps, &mut acc)?;
     collect_connect_edges(snap, &comps, &mut acc, &mut nodes)?;
     collect_contracts(snap, &comps, globs, &mut acc, &mut nodes);
+    // R2: межсервисные рёбра `calls` по runtime-конфигурации и коду.
+    let mut gaps: BTreeSet<String> = BTreeSet::new();
+    super::calls::collect_call_edges(snap, &comps, &topo, &mut acc, &mut nodes, &mut gaps)?;
 
     let mut edges: Vec<ArchEdge> = acc
         .into_iter()
@@ -544,6 +551,7 @@ fn build_graph(snap: &Snapshot, model: Option<&Model>, globs: &DiffGlobs) -> Res
         rev: snap.rev.clone(),
         nodes: nodes.into_values().collect(),
         edges,
+        gaps: gaps.into_iter().collect(),
     })
 }
 

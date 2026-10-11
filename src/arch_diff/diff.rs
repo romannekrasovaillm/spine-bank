@@ -234,6 +234,10 @@ pub struct ArchDiff {
     /// Предложения правки модели (пронумерованные; уже без решённых журналом
     /// `.arch-handoff/arch-diff-decisions.json` — K5, ADR-064).
     pub proposals: Vec<ModelProposal>,
+    /// `[gap]`-строки R2 на голове: имена из конфигурации/кода без компонента
+    /// в репозитории (пусто — поле не сериализуется).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub gaps: Vec<String>,
 }
 
 impl ArchDiff {
@@ -1036,6 +1040,7 @@ pub fn arch_diff(repo: &Path, input: &ArchDiffInput) -> Result<ArchDiff> {
         nfr_shifts: nfr,
         route,
         proposals,
+        gaps: head.graph.gaps.clone(),
     })
 }
 
