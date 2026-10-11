@@ -29,6 +29,7 @@ use serde_json::{Value, json};
 
 use crate::arch_diff::ARCH_DIFF_SCHEMA;
 use crate::error::{HarnessError, Result};
+use crate::review_stream::{AwaitingEntry, DEFAULT_AWAITING_DAYS, awaiting_under, now_epoch};
 
 /// Схема машинного отчёта ящика (`--format json`).
 pub const REVIEW_INBOX_SCHEMA: &str = "arch-be/review-inbox/v1";
@@ -126,6 +127,12 @@ pub struct InboxReport {
     pub skipped: Vec<SkippedFile>,
     /// Диффов отфильтровано как пустые (читаются, но ревью не требуют).
     pub empty: usize,
+    /// Записи журналов потока (`review stream`, `.arch-review/stream.jsonl`)
+    /// старше порога без подтверждения: значимые или с inferred-рёбрами (D3 —
+    /// «ждёт подтверждения»). Источник — журналы вердиктов под ROOT, которые
+    /// обход ящика намеренно не читает (dot-каталог `.arch-review`); здесь для
+    /// них отдельный проход (ADR-076).
+    pub awaiting: Vec<AwaitingEntry>,
 }
 
 impl InboxReport {
@@ -285,6 +292,7 @@ pub fn scan(root: &Path) -> Result<InboxReport> {
         entries: Vec::new(),
         skipped: Vec::new(),
         empty: 0,
+        awaiting: Vec::new(),
     };
     for path in &candidates {
         let rel = path
@@ -323,6 +331,10 @@ pub fn scan(root: &Path) -> Result<InboxReport> {
     // Горячее сверху: маршрут, инварианты, объём; при равенстве — по пути
     // (ключ кэшируется: он не меняется при сортировке).
     report.entries.sort_by_cached_key(InboxEntry::sort_key);
+    // Журналы потока (`review stream`) ящик намеренно не читает как артефакты
+    // (`.arch-review` — dot-каталог); для «ждёт подтверждения» (ADR-076) —
+    // отдельный проход по флоту.
+    report.awaiting = awaiting_under(root, DEFAULT_AWAITING_DAYS, now_epoch())?;
     Ok(report)
 }
 
@@ -390,6 +402,30 @@ pub fn render(report: &InboxReport) -> String {
             let _ = writeln!(out, "  [warn] {} — {}", s.rel, s.reason);
         }
     }
+    if !report.awaiting.is_empty() {
+        let _ = writeln!(
+            out,
+            "\nЖдут подтверждения (журналы потока, старше {DEFAULT_AWAITING_DAYS} дн.): {}",
+            report.awaiting.len()
+        );
+        for a in &report.awaiting {
+            let mut flags: Vec<String> = vec![format!("{} дн.", a.age_days)];
+            if a.inferred_edges > 0 {
+                flags.push(format!(
+                    "inferred-рёбра: {} — требуется подтверждение",
+                    a.inferred_edges
+                ));
+            }
+            let _ = writeln!(
+                out,
+                "  {:<8} {} · {}\n           {}",
+                a.route,
+                short_rev(&a.sha),
+                flags.join(" · "),
+                a.journal
+            );
+        }
+    }
     out
 }
 
@@ -422,11 +458,28 @@ pub fn to_json(report: &InboxReport) -> Value {
         .iter()
         .map(|s| json!({"file": s.rel, "reason": s.reason}))
         .collect();
+    let awaiting: Vec<Value> = report
+        .awaiting
+        .iter()
+        .map(|a| {
+            json!({
+                "repo": a.repo,
+                "sha": a.sha,
+                "date": a.date,
+                "route": a.route,
+                "inferred_edges": a.inferred_edges,
+                "age_days": a.age_days,
+                "journal": a.journal,
+            })
+        })
+        .collect();
     json!({
         "schema": REVIEW_INBOX_SCHEMA,
         "root": report.root.display().to_string(),
         "non_empty": report.entries.len(),
         "empty_filtered": report.empty,
+        "awaiting_days": DEFAULT_AWAITING_DAYS,
+        "awaiting": awaiting,
         "skipped": skipped,
         "entries": entries,
     })
@@ -683,5 +736,35 @@ mod tests {
         assert_eq!(entry["invariants_touched"], 1);
         assert_eq!(entry["undeclared_edges"], 1);
         assert_eq!(entry["file"], "repo-a/arch-diff.json");
+    }
+
+    /// Журнал потока в dot-каталоге не читается как артефакт диффа, но его
+    /// значимые записи старше порога попадают в раздел «ждёт подтверждения»
+    /// (ADR-076).
+    #[test]
+    fn inbox_reports_awaiting_stream_journal_records() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path();
+        write(
+            root,
+            "repo-a/.arch-review/stream.jsonl",
+            "{\"sha\":\"deadbeef\",\"date\":\"2020-01-01T00:00:00+00:00\",\
+             \"route\":\"critical\",\"score\":5,\"graph_delta\":true,\
+             \"inferred_edges\":1}\n",
+        );
+        let report = scan(root).expect("scan");
+        // Журнал — не артефакт arch-diff: в entries не попадает.
+        assert_eq!(report.entries.len(), 0);
+        assert_eq!(report.awaiting.len(), 1);
+        let a = &report.awaiting[0];
+        assert_eq!(a.sha, "deadbeef");
+        assert_eq!(a.route, "critical");
+        assert_eq!(a.inferred_edges, 1);
+        assert!(a.age_days >= DEFAULT_AWAITING_DAYS as i64);
+        assert_eq!(a.repo, "repo-a");
+        let v = to_json(&report);
+        assert_eq!(v["awaiting"][0]["sha"], "deadbeef");
+        assert_eq!(v["awaiting_days"], DEFAULT_AWAITING_DAYS);
+        assert!(render(&report).contains("Ждут подтверждения"));
     }
 }
