@@ -1,7 +1,7 @@
 # architect-value — run_all
 version: 0.4.1
 date: 2026-10-11
-arch_be: /home/user/.arch-harness/worktrees/spine-bank-42b7c6db0c05a788/claude-code-20261011191439/target/debug/arch-be
+arch_be: /home/user/spine-bank/target/debug/arch-be
 repos_dir: /home/user/bench-repos
 
 ## Предполёт: разбор входов (test_parsers)
@@ -137,13 +137,13 @@ ok   boutique clone resolves: got=True want=True
 
 ## ArchRecover — метрики 18, 19 (детерминизм и время recover)
 [RUN] metric 18 [boutique]: rev 38e7348eb байт-в-байт=да sha256=feb50846e325 schema=ok
-[RUN] metric 19 [boutique]: rev 38e7348eb время 1.16s ≤ 10s OK
+[RUN] metric 19 [boutique]: rev 38e7348eb время 1.08s ≤ 10s OK
 [RUN] metric 18 [petclinic]: rev 1d76b00d6 байт-в-байт=да sha256=6d5228c010fe schema=ok
-[RUN] metric 19 [petclinic]: rev 1d76b00d6 время 0.70s ≤ 10s OK
+[RUN] metric 19 [petclinic]: rev 1d76b00d6 время 0.66s ≤ 10s OK
 [RUN] metric 18 [buckpal]: rev dc819c666 байт-в-байт=да sha256=a1b34cd53b40 schema=ok
-[RUN] metric 19 [buckpal]: rev dc819c666 время 0.26s ≤ 10s OK
+[RUN] metric 19 [buckpal]: rev dc819c666 время 0.23s ≤ 10s OK
 [RUN] metric 18 [library]: rev 5225ff7a0 байт-в-байт=да sha256=5fbd263d84bb schema=ok
-[RUN] metric 19 [library]: rev 5225ff7a0 время 0.64s ≤ 10s OK
+[RUN] metric 19 [library]: rev 5225ff7a0 время 0.59s ≤ 10s OK
 
 ## ArchRecover — хранилища as-built (метрика 4: recall)
 
@@ -189,7 +189,9 @@ ok   boutique clone resolves: got=True want=True
     не измерен parallel-epics: провалена evidence_verify, обязательная fitness без входа (SKIP): реестр правил не найден: ни CONSTR
     не измерен payment-processing-platform: провалена fitness, провалена evidence_verify, провалена decision_quality, обязательная sensors без в
     не измерен salary-payments: провалена decision_quality
-[RUN] metric 12: K2 на реальном коде (buckpal + стандарт): detection=1.00 (порог ≥0.8), FP=0.00 (порог ≤0.03) [archunit 0/0, radar 2/2, text 7/7] OK
+[RUN] metric 12 (K2, buckpal+стандарт): detection=1.00 (9/9) [archunit 0/0, radar 2/2, text 7/7] FP=0.00
+[RUN] metric 12 (K3, корпус дефектов): detection=0.80 (4/5); применено 5, не применилось 0, отклонено 0
+[RUN] metric 12 (K2+K3): detection=0.93 (13/14) (порог ≥0.8), FP=0.00 (порог ≤0.03) OK
 
 [SKIP] metric 20 (квалификация судьи: различительная сила): рубрики/судья — вне Python-прогонщиков
 
@@ -197,4 +199,4 @@ ok   boutique clone resolves: got=True want=True
 [SKIP] metric 14 (selftest из коробки): измеряется в CI (cargo test), не прогонщиком бенчмарка
 [SKIP] metric 17 (golden judge MAE / доля в диапазоне): требует API-ключ судьи — вне офлайн-прогона
 
-готово: /home/user/.arch-harness/worktrees/spine-bank-42b7c6db0c05a788/claude-code-20261011191439/benchmarks/architect-value/results/0.4.1-2026-10-11 (run_all.log, summary.md)
+готово: /home/user/spine-bank/benchmarks/architect-value/results/0.4.1-2026-10-11 (run_all.log, summary.md)

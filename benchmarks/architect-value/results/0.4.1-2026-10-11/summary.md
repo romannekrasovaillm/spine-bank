@@ -50,13 +50,13 @@
 [RUN] metric 3 [boutique]: recall 17/17 (1.00)  precision 17/17 (1.00)  OK (порог: 17 рёбер, prec ≥0.90)
 [RUN] metric 3 [petclinic]: recall 6/6 (1.00)  precision 6/6 (1.00)  OK (порог: 6 рёбер, prec ≥0.90)
 [RUN] metric 18 [boutique]: rev 38e7348eb байт-в-байт=да sha256=feb50846e325 schema=ok
-[RUN] metric 19 [boutique]: rev 38e7348eb время 1.16s ≤ 10s OK
+[RUN] metric 19 [boutique]: rev 38e7348eb время 1.08s ≤ 10s OK
 [RUN] metric 18 [petclinic]: rev 1d76b00d6 байт-в-байт=да sha256=6d5228c010fe schema=ok
-[RUN] metric 19 [petclinic]: rev 1d76b00d6 время 0.70s ≤ 10s OK
+[RUN] metric 19 [petclinic]: rev 1d76b00d6 время 0.66s ≤ 10s OK
 [RUN] metric 18 [buckpal]: rev dc819c666 байт-в-байт=да sha256=a1b34cd53b40 schema=ok
-[RUN] metric 19 [buckpal]: rev dc819c666 время 0.26s ≤ 10s OK
+[RUN] metric 19 [buckpal]: rev dc819c666 время 0.23s ≤ 10s OK
 [RUN] metric 18 [library]: rev 5225ff7a0 байт-в-байт=да sha256=5fbd263d84bb schema=ok
-[RUN] metric 19 [library]: rev 5225ff7a0 время 0.64s ≤ 10s OK
+[RUN] metric 19 [library]: rev 5225ff7a0 время 0.59s ≤ 10s OK
 [RUN] metric 4 [boutique]: recall 1/1 (1.00)  OK (порог ≥0.80)
 [RUN] metric 4 [boutique] лишних хранилищ (FP, precision-сторона): 11: adservice, cartservice, checkoutservice, currencyservice, emailservice, frontend …
 [RUN] metric 4 [petclinic]: recall 0/3 (0.00)  BELOW (порог ≥0.80)
@@ -77,7 +77,9 @@
 [RUN] metric 6 [boutique] шумовая строка: - [confirmed] горячий файл `src/paymentservice/package-lock.json` — 44 изменений за последние ≤500 коммитов (src/paymentservice/package-lock.json:1)
 [RUN] metric 6 [boutique] шумовая строка: - [confirmed] горячий файл `src/currencyservice/package-lock.json` — 43 изменений за последние ≤500 коммитов (src/currencyservice/package-lock.json:1)
 [RUN] metric 11: измеримых кейсов 6/14 (порог ≥6) OK; причины по остальным — в выводе redteam --all
-[RUN] metric 12: K2 на реальном коде (buckpal + стандарт): detection=1.00 (порог ≥0.8), FP=0.00 (порог ≤0.03) [archunit 0/0, radar 2/2, text 7/7] OK
+[RUN] metric 12 (K2, buckpal+стандарт): detection=1.00 (9/9) [archunit 0/0, radar 2/2, text 7/7] FP=0.00
+[RUN] metric 12 (K3, корпус дефектов): detection=0.80 (4/5); применено 5, не применилось 0, отклонено 0
+[RUN] metric 12 (K2+K3): detection=0.93 (13/14) (порог ≥0.8), FP=0.00 (порог ≤0.03) OK
 [SKIP] metric 20 (квалификация судьи: различительная сила): рубрики/судья — вне Python-прогонщиков
 [SKIP] metric 14 (selftest из коробки): измеряется в CI (cargo test), не прогонщиком бенчмарка
 [SKIP] metric 17 (golden judge MAE / доля в диапазоне): требует API-ключ судьи — вне офлайн-прогона
@@ -87,6 +89,6 @@
 
 | маркер | число |
 |--------|-------|
-| RUN    | 67 |
+| RUN    | 69 |
 | SKIP   | 4 |
 | FIND   | 4 |
