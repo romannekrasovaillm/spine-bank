@@ -130,6 +130,20 @@ pub(crate) enum ControlCmd {
         /// Машиночитаемый вывод: JSON-отчёт `ControlReport` (SDK-контракт v1).
         #[arg(long)]
         json: bool,
+        /// Покрытие стандарта (волна S, ADR-070): по каждому правилу скоупа —
+        /// mechanized | unverifiable | vacuous | na.
+        #[arg(long)]
+        coverage: bool,
+    },
+    /// Флотовой отчёт контроля (волна S, ADR-070): обход репозиториев под
+    /// root по `CONSTRAINTS.yaml`, агрегат «N repos PASS / M override /
+    /// K expired / L N/A» + топ нарушенных требований. Только файлы.
+    FleetReport {
+        /// Корень обхода (каталог с репозиториями).
+        root: PathBuf,
+        /// Машиночитаемый вывод: JSON-отчёт `FleetReport`.
+        #[arg(long)]
+        json: bool,
     },
     /// Новый ADR.
     Adr {
@@ -544,9 +558,10 @@ pub(crate) fn cmd_control(cfg: &arch_harness::config::Config, cmd: ControlCmd) -
             constraints,
             level,
             json,
+            coverage,
         } => {
             let c = resolve_constraints_cli(&repo, constraints);
-            let report = arch_harness::control::control_report(&repo, &c, &level)?;
+            let report = arch_harness::control::control_report_opts(&repo, &c, &level, coverage)?;
             if json {
                 // SDK-контракт v1: машиночитаемый отчёт; report — отчётность,
                 // exit code гейт не дублирует.
@@ -556,6 +571,17 @@ pub(crate) fn cmd_control(cfg: &arch_harness::config::Config, cmd: ControlCmd) -
                 );
             } else {
                 print!("{}", arch_harness::control::render_control_report(&report));
+            }
+        }
+        ControlCmd::FleetReport { root, json } => {
+            let report = arch_harness::control::fleet_report(&root)?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&report).expect("FleetReport сериализуется")
+                );
+            } else {
+                print!("{}", arch_harness::control::render_fleet_report(&report));
             }
         }
         ControlCmd::Adr { title, dir } => {

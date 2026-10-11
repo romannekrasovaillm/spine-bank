@@ -11,7 +11,7 @@ use std::process::{Command, Stdio};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
-use super::exec::check;
+use super::exec::{check, collect_content_files};
 use super::registry::load_constraints_resolved;
 use super::rules::parse_constraints_file;
 use super::types::{FitnessRule, LintIssue, NotApplicableRule};
@@ -649,6 +649,22 @@ pub struct OverrideReportEntry {
     pub note: String,
 }
 
+/// Покрытие требования стандарта механикой (волна S, ADR-070): по каждому
+/// правилу скоупа — `mechanized` (проверка исполняется) | `unverifiable`
+/// (ручной контроль с владельцем) | `vacuous` (проверка вырождена: glob не
+/// совпал ни с одним файлом либо сработал B4-детектор вакуумного префикса) |
+/// `na` (условия `applies_to` не выполнены). Появляется в отчёте только по
+/// флагу `--coverage`.
+#[derive(Debug, Clone, Serialize)]
+pub struct RequirementCoverage {
+    /// Имя правила (= требование стандарта).
+    pub rule: String,
+    /// mechanized | unverifiable | vacuous | na.
+    pub status: String,
+    /// Пояснение статуса.
+    pub reason: String,
+}
+
 /// Отчёт вверх по корпоративному контуру (`arch-be control report`,
 /// `docs/corp-spine.md`): агрегат по текущему репо — покрытие корп-правил,
 /// overrides со статусами, просроченные правила.
@@ -690,6 +706,15 @@ pub struct ControlReport {
     /// `--shadow-constraints` по проектам и агрегат «что покраснеет по флоту».
     /// Пусто, если у проектов нет сохранённых shadow-результатов.
     pub shadow_fleet: crate::control::ShadowFleet,
+    /// Правила в скоупе уровня, давшие error-находки (имена) — источник
+    /// `top_violations` флотового отчёта без повторного прогона (волна S,
+    /// ADR-070). Пусто — поле в JSON не сериализуется (аддитивно).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failing_rules: Vec<String>,
+    /// Покрытие требований механикой (`control report --coverage`, волна S,
+    /// ADR-070): по каждому правилу скоупа. Пусто без флага.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub coverage: Vec<RequirementCoverage>,
 }
 
 /// Отчёт `control report --level corp|all` по текущему репо: прогоняет
@@ -699,6 +724,22 @@ pub struct ControlReport {
 /// # Errors
 /// Неизвестный уровень; те же, что у [`check`].
 pub fn control_report(repo: &Path, constraints: &Path, level: &str) -> Result<ControlReport> {
+    control_report_opts(repo, constraints, level, false)
+}
+
+/// Отчёт [`control_report`] с опциональным расчётом покрытия стандарта
+/// (волна S, ADR-070): `coverage: true` дополняет отчёт статусом каждого
+/// правила скоупа (`mechanized`/`unverifiable`/`vacuous`/`na`). Отдельная
+/// точка входа — чтобы обычный отчёт не платил за обходы glob'ов.
+///
+/// # Errors
+/// Неизвестный уровень; те же, что у [`check`]; io при обходе glob'ов покрытия.
+pub fn control_report_opts(
+    repo: &Path,
+    constraints: &Path,
+    level: &str,
+    coverage: bool,
+) -> Result<ControlReport> {
     if level != "corp" && level != "all" {
         return Err(HarnessError::Control(format!(
             "неизвестный уровень отчёта '{level}' (допустимы: corp, all)"
@@ -728,6 +769,9 @@ pub fn control_report(repo: &Path, constraints: &Path, level: &str) -> Result<Co
         .map(|n| n.rule.as_str())
         .collect();
     let mut not_applicable_rules: Vec<NotApplicableRule> = Vec::new();
+    // Волна S (ADR-070): имена красных правил — источник top-violations
+    // флотового отчёта (`control fleet-report`).
+    let mut failing_rules: Vec<String> = Vec::new();
     for rule in &scoped {
         match &rule.source {
             Some(source) => *inherited.entry(source.clone()).or_default() += 1,
@@ -753,6 +797,7 @@ pub fn control_report(repo: &Path, constraints: &Path, level: &str) -> Result<Co
             .any(|i| i.rule == rule.name && i.severity == "warn");
         if has_error {
             fail += 1;
+            failing_rules.push(rule.name.clone());
         } else if has_warn {
             warn += 1;
         } else {
@@ -783,6 +828,23 @@ pub fn control_report(repo: &Path, constraints: &Path, level: &str) -> Result<Co
         })
         .collect();
 
+    // Волна S (ADR-070): покрытие требований механикой — считаем только по
+    // запросу (флаг `--coverage`): классификация дёргает обходы glob'ов.
+    let coverage_rows: Vec<RequirementCoverage> = if coverage {
+        let mut rows = Vec::with_capacity(scoped.len());
+        for rule in &scoped {
+            rows.push(requirement_coverage(
+                repo,
+                rule,
+                &fitness.issues,
+                &na_names,
+            )?);
+        }
+        rows
+    } else {
+        Vec::new()
+    };
+
     Ok(ControlReport {
         repo: repo.to_path_buf(),
         constraints: constraints.to_path_buf(),
@@ -804,7 +866,257 @@ pub fn control_report(repo: &Path, constraints: &Path, level: &str) -> Result<Co
         // подкаталоги). Артефакт прогона, не вердикт: отсутствие записей
         // даёт пустой (а не ошибочный) срез.
         shadow_fleet: crate::control::shadow_fleet(repo),
+        failing_rules,
+        coverage: coverage_rows,
     })
+}
+
+/// Классифицирует требование стандарта по покрытию механикой (волна S,
+/// ADR-070). Приоритет статусов: `unverifiable` > `na` > `vacuous` >
+/// `mechanized`.
+fn requirement_coverage(
+    repo: &Path,
+    rule: &FitnessRule,
+    issues: &[LintIssue],
+    na_names: &BTreeSet<&str>,
+) -> Result<RequirementCoverage> {
+    if rule.unverifiable {
+        return Ok(RequirementCoverage {
+            rule: rule.name.clone(),
+            status: "unverifiable".into(),
+            reason: "unverifiable: true — ручной контроль с владельцем".into(),
+        });
+    }
+    if na_names.contains(rule.name.as_str()) {
+        return Ok(RequirementCoverage {
+            rule: rule.name.clone(),
+            status: "na".into(),
+            reason: "условия applies_to не выполнены".into(),
+        });
+    }
+    if let Some(reason) = vacuous_reason(repo, rule, issues)? {
+        return Ok(RequirementCoverage {
+            rule: rule.name.clone(),
+            status: "vacuous".into(),
+            reason,
+        });
+    }
+    Ok(RequirementCoverage {
+        rule: rule.name.clone(),
+        status: "mechanized".into(),
+        reason: "проверка исполняется механически".into(),
+    })
+}
+
+/// Причина вырожденности (вакуумности) проверки правила — `None`, если
+/// проверка не вырождена. Две механические сигнатуры (волна S, ADR-070):
+/// B4-находка `rule_vacuous_prefix`, привязанная к имени правила, и пустой
+/// набор файлов по glob'у правила.
+fn vacuous_reason(repo: &Path, rule: &FitnessRule, issues: &[LintIssue]) -> Result<Option<String>> {
+    if let Some(raw) = vacuous_prefix(rule, issues) {
+        return Ok(Some(format!(
+            "B4: префикс '{raw}' не встречается среди импортов — проверка вырождена"
+        )));
+    }
+    // «0 files by glob»: без явного glob'а у правила оценка по файлам
+    // неприменима (`**/*` дал бы ложную непустоту).
+    if rule.glob.is_empty() {
+        return Ok(None);
+    }
+    let files = collect_content_files(repo, &rule.glob, &rule.exclude_glob)?;
+    if files.is_empty() {
+        return Ok(Some(format!(
+            "glob не совпал ни с одним файлом: {}",
+            rule.glob.join(", ")
+        )));
+    }
+    Ok(None)
+}
+
+/// Извлекает префикс из B4-находки, привязанной к правилу
+/// (`префикс '<raw>' не встречается ... (правило '<name>')`). Формат
+/// сообщения — контракт `exec::runner`; `LintIssue` не несёт структурного
+/// указателя на правило-источник, поэтому сопоставляем по маркеру имени.
+fn vacuous_prefix<'a>(rule: &FitnessRule, issues: &'a [LintIssue]) -> Option<&'a str> {
+    let marker = format!("(правило '{}')", rule.name);
+    let msg = &issues
+        .iter()
+        .find(|i| i.rule == "rule_vacuous_prefix" && i.message.contains(&marker))?
+        .message;
+    let start = msg.find("префикс '")? + "префикс '".len();
+    let end = msg[start..].find('\'')? + start;
+    Some(&msg[start..end])
+}
+
+/// Запись флотового отчёта по одному репозиторию (волна S, ADR-070).
+#[derive(Debug, Clone, Serialize)]
+pub struct FleetEntry {
+    /// Корень репозитория.
+    pub repo: PathBuf,
+    /// Итог гейта по корп-правилам.
+    pub passed: bool,
+    /// Красных корп-правил.
+    pub fail: usize,
+    /// Правил только с warn.
+    pub warn: usize,
+    /// Неприменимых правил (N/A).
+    pub na: usize,
+    /// Действующих overrides.
+    pub overrides: usize,
+    /// Просроченных правил.
+    pub expired: usize,
+}
+
+/// Топ нарушенного требования по флоту (волна S, ADR-070).
+#[derive(Debug, Clone, Serialize)]
+pub struct FleetViolation {
+    /// Правило-требование.
+    pub rule: String,
+    /// В скольких репозиториях красное.
+    pub repos: usize,
+}
+
+/// Флотовой отчёт (`arch-be control fleet-report <root>`, волна S, ADR-070):
+/// обходит репозитории под root по файлам `CONSTRAINTS.yaml`, прогоняет
+/// [`control_report_opts`] уровня `corp` по каждому и агрегирует в сводку DCA
+/// «N repos PASS / M override / K expired / L N/A» + топ нарушенных
+/// требований. Только файлы, без сервиса (ADR-033).
+#[derive(Debug, Clone, Serialize)]
+pub struct FleetReport {
+    /// Корень обхода.
+    pub root: PathBuf,
+    /// Найдено репозиториев.
+    pub repos: usize,
+    /// Репозиториев с PASS.
+    pub pass: usize,
+    /// Репозиториев с FAIL.
+    pub fail: usize,
+    /// Репозиториев с действующими overrides.
+    pub with_override: usize,
+    /// Репозиториев с просроченными правилами.
+    pub with_expired: usize,
+    /// Репозиториев с N/A-правилами.
+    pub with_na: usize,
+    /// Топ нарушенных требований (по числу репозиториев).
+    pub top_violations: Vec<FleetViolation>,
+    /// По-репозиторные записи.
+    pub entries: Vec<FleetEntry>,
+}
+
+/// Прогоняет [`control_report_opts`] по каждому репозиторию под `root` и
+/// агрегирует результат во флотовой отчёт (волна S, ADR-070).
+///
+/// # Errors
+/// Те же, что у [`control_report_opts`].
+pub fn fleet_report(root: &Path) -> Result<FleetReport> {
+    let repos = discover_repos(root)?;
+    let mut entries = Vec::with_capacity(repos.len());
+    let mut violations: BTreeMap<String, usize> = BTreeMap::new();
+    for (repo, constraints) in &repos {
+        let report = control_report_opts(repo, constraints, "corp", false)?;
+        for rule in &report.failing_rules {
+            *violations.entry(rule.clone()).or_default() += 1;
+        }
+        entries.push(FleetEntry {
+            repo: repo.clone(),
+            passed: report.passed,
+            fail: report.fail,
+            warn: report.warn,
+            na: report.not_applicable_rules.len(),
+            overrides: report.overrides.len(),
+            expired: report.expired_rules.len(),
+        });
+    }
+    let pass = entries.iter().filter(|e| e.passed).count();
+    let with_override = entries.iter().filter(|e| e.overrides > 0).count();
+    let with_expired = entries.iter().filter(|e| e.expired > 0).count();
+    let with_na = entries.iter().filter(|e| e.na > 0).count();
+    let mut top_violations: Vec<FleetViolation> = violations
+        .into_iter()
+        .map(|(rule, repos)| FleetViolation { rule, repos })
+        .collect();
+    top_violations.sort_by(|a, b| b.repos.cmp(&a.repos).then(a.rule.cmp(&b.rule)));
+    Ok(FleetReport {
+        root: root.to_path_buf(),
+        repos: entries.len(),
+        pass,
+        fail: entries.len() - pass,
+        with_override,
+        with_expired,
+        with_na,
+        top_violations,
+        entries,
+    })
+}
+
+/// Находит репозитории под `root` по файлам ограничений (волна S, ADR-070):
+/// `<repo>/CONSTRAINTS.yaml` или `<repo>/.arch-handoff/CONSTRAINTS.yaml`.
+/// Возвращает пары (корень репозитория, путь к CONSTRAINTS.yaml).
+fn discover_repos(root: &Path) -> Result<Vec<(PathBuf, PathBuf)>> {
+    let mut found: BTreeMap<PathBuf, PathBuf> = BTreeMap::new();
+    for pattern in ["**/CONSTRAINTS.yaml", "**/.arch-handoff/CONSTRAINTS.yaml"] {
+        for (_rel, abs) in super::exec::collect_files(root, pattern)? {
+            if let Some(repo) = constraint_repo_root(&abs) {
+                found.entry(repo).or_insert(abs);
+            }
+        }
+    }
+    Ok(found.into_iter().collect())
+}
+
+/// Корень репозитория по пути к CONSTRAINTS.yaml: снимает `.arch-handoff`
+/// (handoff-контур), иначе — каталог файла.
+fn constraint_repo_root(constraints: &Path) -> Option<PathBuf> {
+    let dir = constraints.parent()?;
+    if dir.file_name().and_then(|s| s.to_str()) == Some(".arch-handoff") {
+        dir.parent().map(Path::to_path_buf)
+    } else {
+        Some(dir.to_path_buf())
+    }
+}
+
+/// Рендерит [`FleetReport`] в markdown (человекочитаемый режим
+/// `arch-be control fleet-report`).
+#[must_use]
+pub fn render_fleet_report(report: &FleetReport) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "# Флотовой отчёт контроля: {}", report.root.display());
+    let _ = writeln!(out, "\nРепозиториев: {}", report.repos);
+    let _ = writeln!(
+        out,
+        "{} repos PASS / {} override / {} expired / {} N/A",
+        report.pass, report.with_override, report.with_expired, report.with_na
+    );
+    let _ = writeln!(out, "Провалено: {}", report.fail);
+
+    let _ = writeln!(out, "\n## Топ нарушенных требований");
+    if report.top_violations.is_empty() {
+        let _ = writeln!(out, "- нет");
+    }
+    for v in &report.top_violations {
+        let _ = writeln!(out, "- {}: {} реп.", v.rule, v.repos);
+    }
+
+    let _ = writeln!(out, "\n## Репозитории");
+    let _ = writeln!(
+        out,
+        "| Репозиторий | Гейт | fail | warn | N/A | override | expired |"
+    );
+    let _ = writeln!(out, "|---|---|---:|---:|---:|---:|---:|");
+    for e in &report.entries {
+        let _ = writeln!(
+            out,
+            "| {} | {} | {} | {} | {} | {} | {} |",
+            e.repo.display(),
+            if e.passed { "PASS" } else { "FAIL" },
+            e.fail,
+            e.warn,
+            e.na,
+            e.overrides,
+            e.expired
+        );
+    }
+    out
 }
 
 /// Рендерит [`ControlReport`] в markdown (человекочитаемый режим
@@ -842,6 +1154,27 @@ pub fn render_control_report(report: &ControlReport) -> String {
         "Итог гейта: {}",
         if report.passed { "PASS" } else { "FAIL" }
     );
+
+    // Волна S (ADR-070): покрытие стандарта — статус каждого требования
+    // (`--coverage`). Раздел аддитивен: без флага массив пуст.
+    if !report.coverage.is_empty() {
+        let mechanized = report
+            .coverage
+            .iter()
+            .filter(|c| c.status == "mechanized")
+            .count();
+        let _ = writeln!(
+            out,
+            "\n## Покрытие стандарта\nМеханизировано: {}/{} (волна S, ADR-070)",
+            mechanized,
+            report.coverage.len()
+        );
+        let _ = writeln!(out, "\n| Требование | Статус | Причина |");
+        let _ = writeln!(out, "|---|---|---|");
+        for c in &report.coverage {
+            let _ = writeln!(out, "| {} | {} | {} |", c.rule, c.status, c.reason);
+        }
+    }
 
     let _ = writeln!(out, "\n## Overrides");
     if report.overrides.is_empty() {
@@ -1614,5 +1947,113 @@ mod tests {
         );
         // Валидное правило — в таблице.
         assert!(md.contains("| readme | file_exists |"), "{md}");
+    }
+
+    /// Волна S (ADR-070): `--coverage` классифицирует каждое требование
+    /// скоупа: `mechanized` / `unverifiable` / `na` / `vacuous`. Без флага
+    /// массив покрытия пуст (аддитивность JSON).
+    #[test]
+    fn coverage_classifies_requirements() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "src/Foo.java", "package com.example;\n");
+        let constraints = write_file(
+            dir.path(),
+            "CONSTRAINTS.yaml",
+            "rules:\n\
+             \x20 - name: pkg_present\n\
+             \x20   type: must_contain\n\
+             \x20   glob: \"**/*.java\"\n\
+             \x20   pattern: \"package \"\n\
+             \x20 - name: manual_obs\n\
+             \x20   unverifiable: true\n\
+             \x20   owner: \"@corp\"\n\
+             \x20 - name: java_only\n\
+             \x20   type: dependency_direction\n\
+             \x20   glob: \"**/*.java\"\n\
+             \x20   forbid: [foo.bar]\n\
+             \x20   applies_to:\n\
+             \x20     stack: [java-maven, java-gradle]\n\
+             \x20   severity: error\n\
+             \x20 - name: ghost_glob\n\
+             \x20   type: must_contain\n\
+             \x20   glob: \"**/nope/**/*.java\"\n\
+             \x20   pattern: \"package \"\n",
+        );
+        // Обычный отчёт: покрытие не считается.
+        let plain = control_report(dir.path(), &constraints, "all").unwrap();
+        assert!(plain.coverage.is_empty(), "без флага покрытия нет");
+        let plain_json = serde_json::to_value(&plain).unwrap();
+        assert!(plain_json.get("coverage").is_none(), "{plain_json}");
+
+        let corp = control_report_opts(dir.path(), &constraints, "all", true).unwrap();
+        let status = |name: &str| {
+            corp.coverage.iter().find(|c| c.rule == name).map_or_else(
+                || panic!("нет записи покрытия для {name}: {:?}", corp.coverage),
+                |c| c.status.as_str(),
+            )
+        };
+        assert_eq!(status("pkg_present"), "mechanized");
+        assert_eq!(status("manual_obs"), "unverifiable");
+        assert_eq!(status("java_only"), "na");
+        assert_eq!(status("ghost_glob"), "vacuous");
+        assert_eq!(corp.coverage.len(), 4);
+        // JSON-контракт: аддитивное поле появилось.
+        let json = serde_json::to_value(&corp).unwrap();
+        assert_eq!(json["coverage"].as_array().map(Vec::len), Some(4), "{json}");
+        // Markdown: раздел покрытия со счётчиком механизированных.
+        let md = render_control_report(&corp);
+        assert!(md.contains("## Покрытие стандарта"), "{md}");
+        assert!(md.contains("Механизировано: 1/4"), "{md}");
+    }
+
+    /// Волна S (ADR-070): `fleet-report` агрегирует `control report` уровня
+    /// corp по набору репозиториев под общим корнем: сводка PASS/override/
+    /// expired/N/A и топ нарушенных требований.
+    #[test]
+    fn fleet_report_aggregates_repositories() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(dir.path(), "corp/CONSTRAINTS.corp.yaml", CORP_YAML);
+        // alpha: README есть, манифестов нет → PASS.
+        write_file(dir.path(), "alpha/README.md", "# alpha\n");
+        write_file(
+            dir.path(),
+            "alpha/CONSTRAINTS.yaml",
+            "extends: [\"../corp/CONSTRAINTS.corp.yaml@2026.3\"]\nrules: []\n",
+        );
+        // beta: держит запрещённый крейт → C-CORP-001 красный.
+        write_file(dir.path(), "beta/README.md", "# beta\n");
+        write_file(
+            dir.path(),
+            "beta/Cargo.toml",
+            "[package]\nname = \"beta\"\nversion = \"0.1.0\"\n\
+             [dependencies]\nleft-pad = \"0.1\"\n",
+        );
+        write_file(
+            dir.path(),
+            "beta/CONSTRAINTS.yaml",
+            "extends: [\"../corp/CONSTRAINTS.corp.yaml@2026.3\"]\nrules: []\n",
+        );
+
+        let fleet = fleet_report(dir.path()).unwrap();
+        assert_eq!(fleet.repos, 2, "{fleet:?}");
+        assert_eq!(fleet.pass, 1, "alpha PASS: {fleet:?}");
+        assert_eq!(fleet.fail, 1, "beta FAIL: {fleet:?}");
+        assert_eq!(fleet.with_override, 0);
+        assert_eq!(fleet.with_expired, 0);
+        assert_eq!(fleet.with_na, 0);
+        let no_hold = fleet
+            .top_violations
+            .iter()
+            .find(|v| v.rule == "no_hold_crates")
+            .unwrap_or_else(|| panic!("нет no_hold_crates: {:?}", fleet.top_violations));
+        assert_eq!(no_hold.repos, 1);
+
+        let md = render_fleet_report(&fleet);
+        assert!(md.contains("1 repos PASS"), "{md}");
+        assert!(md.contains("no_hold_crates: 1 реп."), "{md}");
+        // JSON-контракт флотового отчёта.
+        let json = serde_json::to_value(&fleet).unwrap();
+        assert_eq!(json["repos"], 2, "{json}");
+        assert!(json.get("top_violations").is_some(), "{json}");
     }
 }

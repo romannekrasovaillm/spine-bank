@@ -960,8 +960,9 @@ fn compile_regex(rule_name: &str, pattern: &str) -> Result<Regex> {
 }
 
 /// Набор файлов по glob'ам с исключениями (волна S, ADR-070): общий сбор для
-/// новых типов правил. Пустой набор glob'ов — `**/*`.
-fn collect_content_files(
+/// новых типов правил. Пустой набор glob'ов — `**/*`. `pub(crate)`: реюз
+/// отчётом покрытия стандарта (проверка вакуумности glob'а).
+pub(crate) fn collect_content_files(
     repo: &Path,
     globs: &[String],
     excludes: &[String],

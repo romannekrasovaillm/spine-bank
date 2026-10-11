@@ -28,6 +28,7 @@ mod glob;
 mod runner;
 
 pub(crate) use glob::{collect_dirs, collect_files, glob_matches};
+pub(crate) use runner::collect_content_files;
 use runner::{not_applicable, run_rule};
 
 /// Прогон fitness functions из `CONSTRAINTS.yaml` по репозиторию.
