@@ -242,6 +242,25 @@ fn collect_components(
         }
     }
     candidate_dirs.retain(|dir| !layout.is_aggregator(dir) && !layout.is_test(dir));
+    // R4: одномодульный репозиторий (единственный модуль сборки = корень, модели
+    // нет) — компонент «по факту» разбирается на кластеры пакетов, иначе он
+    // выродился бы в корень репозитория. Пусто — кластеризовать нечего.
+    if layout.modules.is_empty() && comps.is_empty() && candidate_dirs.iter().all(String::is_empty)
+    {
+        let clusters = super::packages::clusters(snap);
+        if clusters.len() >= 2 {
+            return clusters
+                .into_iter()
+                .map(|c| ComponentCtx {
+                    id: c.id,
+                    title: c.title,
+                    inferred: true,
+                    model_id: None,
+                    roots: c.roots,
+                })
+                .collect();
+        }
+    }
     for dir in candidate_dirs {
         let covered = comps.iter().any(|c| {
             c.roots

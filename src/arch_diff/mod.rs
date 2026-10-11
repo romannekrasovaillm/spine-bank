@@ -32,6 +32,7 @@ mod calls;
 mod decisions;
 mod diff;
 mod modules;
+mod packages;
 mod providers;
 mod report;
 mod snapshot;
