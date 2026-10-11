@@ -1091,6 +1091,10 @@ pub struct GateConfig {
     /// Составляющая `secrets` (C3 волны C 0.3.12): литеральные секреты в
     /// исходниках — детекторы [`crate::secrets::builtin_rules`].
     pub secrets: SecretsConfig,
+    /// Составляющая `approval_conditions` (G, ADR-074): условия согласования
+    /// решений — механическая проверка каждого условия с `check` разрешается
+    /// в правило реестра `CONSTRAINTS.yaml`. Детали — [`ConditionsConfig`].
+    pub conditions: ConditionsConfig,
     /// Составляющая `arch_drift` (K6 волны K 0.3.14): рёбра графа «как
     /// построено» против модели. Дорогая (снимок базовой ревизии + обход
     /// рабочего дерева), поэтому по умолчанию SKIP: включается записью
@@ -1231,6 +1235,51 @@ pub struct SecretsConfig {
     pub severity: SecretSeverity,
     /// Область сканирования (дефолт `changed`).
     pub scope: SecretScope,
+}
+
+/// Severity находки `approval_condition_violated` составляющей
+/// `approval_conditions` (G, ADR-074).
+///
+/// `warn` по умолчанию: условие согласования, чья механическая проверка
+/// (`check`) не разрешается в правило реестра `CONSTRAINTS.yaml`, — сигнал
+/// разрыва между обещанием решения и механикой, но краснить им чужой
+/// пайплайн без явного решения проекта нельзя. Проект, готовый к строгому
+/// режиму, ставит `[gate.conditions] severity = "error"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConditionSeverity {
+    /// Предупреждение (дефолт): находка видна, вердикт не меняется.
+    #[default]
+    Warn,
+    /// Блок: нарушенное условие валит составляющую `approval_conditions`.
+    Error,
+}
+
+impl ConditionSeverity {
+    /// Нормализованная метка severity (`warn`/`error`).
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Warn => "warn",
+            Self::Error => "error",
+        }
+    }
+}
+
+/// Настройки составляющей `approval_conditions` (G, ADR-074): секция
+/// `[gate.conditions]`.
+///
+/// Составляющая проверяет условия согласования решений (поле `conditions`
+/// сущности `ADR` модели): у каждого условия с механической проверкой
+/// (`check`) проверка должна разрешаться в правило реестра — иначе находка
+/// `approval_condition_violated`. Условие без проверки — warn
+/// `approval_condition_unchecked` + паспорт. Дефолт `warn`: чужие пайплайны
+/// не краснеют, ужесточение (`error`) — явное решение проекта.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ConditionsConfig {
+    /// Severity находки `approval_condition_violated` (дефолт `warn`).
+    pub severity: ConditionSeverity,
 }
 
 /// Настройки составляющей `arch_drift` (K6): секция `[gate.arch_drift]`.

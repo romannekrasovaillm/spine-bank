@@ -1130,3 +1130,254 @@ fn gate_finds_evidence_bundle_in_repo_root() {
     );
     assert_eq!(report.outcome, GateOutcome::Fail, "{}", render(&report));
 }
+
+// --- G (ADR-074): условия согласования решений -------------------------
+
+/// Репозиторий с моделью: один ПРИНЯТЫЙ `ADR-100` с блоком `conditions:`
+/// (готовые строки YAML). `write_model` из testkit тут не годится — он жёстко
+/// ставит `status: designed` и не умеет условия, а статус и условия пишутся
+/// вручную.
+fn make_conditions_repo(dir: &Path, conditions_yaml: &str) {
+    make_gate_repo(dir);
+    write_fixture(
+        dir,
+        "model/ADR-100-uslovie.md",
+        &format!(
+            "---\nid: ADR-100\ntype: adr\ntitle: Решение под условием\n\
+             status: Accepted\nconditions:\n{conditions_yaml}---\n\nТело решения.\n"
+        ),
+    );
+    // Фиксация модели в коммите: иначе `delta_guard` краснит гейт правкой
+    // спайна мимо дельты и вердикт падает не из-за условий.
+    git(dir, &["add", "."]);
+    git(dir, &["commit", "-q", "-m", "model"]);
+}
+
+/// Находки составляющей `approval_conditions`.
+fn condition_findings(report: &crate::gate::GateReport) -> &[GateFinding] {
+    &report
+        .components
+        .iter()
+        .find(|c| c.name == "approval_conditions")
+        .expect("составляющая")
+        .findings
+}
+
+/// Нет каталога `model/` — проверять нечего (fail-soft SKIP).
+#[test]
+fn approval_conditions_skips_without_model() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let dir = tmp.path();
+    make_gate_repo(dir);
+    let report = run_with(
+        dir,
+        Some(Route::Fast),
+        None,
+        None,
+        (1, 4),
+        &GateRequirements::default(),
+    )
+    .expect("gate");
+    assert_eq!(status_of(&report, "approval_conditions"), GateStatus::Skip);
+}
+
+/// Модель есть, но принятых ADR с условиями нет — SKIP (нет входа).
+#[test]
+fn approval_conditions_skips_without_conditional_adr() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let dir = tmp.path();
+    make_gate_repo(dir);
+    write_model(dir, &[("ADR-100", "")]);
+    git(dir, &["add", "."]);
+    git(dir, &["commit", "-q", "-m", "model"]);
+    let report = run_with(
+        dir,
+        Some(Route::Fast),
+        None,
+        None,
+        (1, 4),
+        &GateRequirements::default(),
+    )
+    .expect("gate");
+    assert_eq!(
+        status_of(&report, "approval_conditions"),
+        GateStatus::Skip,
+        "{}",
+        render(&report)
+    );
+}
+
+/// `check` не разрешается в правило реестра — обещание без механики.
+/// Дефолт `warn`: находка видна, вердикт не меняется.
+#[test]
+fn approval_conditions_dangling_check_warns_by_default() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let dir = tmp.path();
+    make_conditions_repo(
+        dir,
+        "  - id: C1\n    text: нет новых внешних хостов\n    check: net_guard\n",
+    );
+    let report = run_with(
+        dir,
+        Some(Route::Fast),
+        None,
+        None,
+        (1, 4),
+        &GateRequirements::default(),
+    )
+    .expect("gate");
+    assert_eq!(
+        status_of(&report, "approval_conditions"),
+        GateStatus::Pass,
+        "{}",
+        render(&report)
+    );
+    assert_eq!(report.outcome, GateOutcome::Pass, "{}", render(&report));
+    assert!(
+        condition_findings(&report).iter().any(|f| {
+            f.rule.as_deref() == Some("approval_condition_violated") && f.severity == "warn"
+        }),
+        "{:?}",
+        condition_findings(&report)
+    );
+}
+
+/// Тот же висячий `check`, но проект ужесточил `[gate.conditions] severity =
+/// "error"` — составляющая краснеет, вердикт падает.
+#[test]
+fn approval_conditions_dangling_check_errors_under_strict_severity() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let dir = tmp.path();
+    make_conditions_repo(
+        dir,
+        "  - id: C1\n    text: нет новых внешних хостов\n    check: net_guard\n",
+    );
+    let options = GateOptions {
+        conditions: crate::config::ConditionsConfig {
+            severity: crate::config::ConditionSeverity::Error,
+        },
+        ..GateOptions::default()
+    };
+    let report = run_opts(
+        dir,
+        Some(Route::Fast),
+        None,
+        None,
+        (1, 4),
+        &GateRequirements::default(),
+        &options,
+    )
+    .expect("gate");
+    assert_eq!(status_of(&report, "approval_conditions"), GateStatus::Fail);
+    assert_eq!(report.outcome, GateOutcome::Fail, "{}", render(&report));
+    assert!(
+        condition_findings(&report)
+            .iter()
+            .any(|f| f.rule.as_deref() == Some("approval_condition_violated")
+                && f.severity == "error"),
+        "{:?}",
+        condition_findings(&report)
+    );
+}
+
+/// Условие без `check` — следит человек: warn с владельцем/сроком и граница
+/// вердикта (блок 2 паспорта), но не блок.
+#[test]
+fn approval_conditions_unchecked_warns_and_notes_owner() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let dir = tmp.path();
+    make_conditions_repo(
+        dir,
+        "  - id: C2\n    text: миграция завершена до конца квартала\n    owner: Иванов\n    due: 2026-12-31\n",
+    );
+    let report = run_with(
+        dir,
+        Some(Route::Fast),
+        None,
+        None,
+        (1, 4),
+        &GateRequirements::default(),
+    )
+    .expect("gate");
+    assert_eq!(status_of(&report, "approval_conditions"), GateStatus::Pass);
+    assert!(
+        condition_findings(&report).iter().any(|f| {
+            f.rule.as_deref() == Some("approval_condition_unchecked") && f.severity == "warn"
+        }),
+        "{:?}",
+        condition_findings(&report)
+    );
+    let component = report
+        .components
+        .iter()
+        .find(|c| c.name == "approval_conditions")
+        .expect("составляющая");
+    assert!(
+        component.not_verified.iter().any(|n| n.contains("Иванов")),
+        "условие без механики обязано назвать владельца: {:?}",
+        component.not_verified
+    );
+}
+
+/// Связанное правило сработало — условие нарушено (находка `violated`).
+#[test]
+fn approval_conditions_violated_when_linked_rule_fires() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let dir = tmp.path();
+    make_conditions_repo(
+        dir,
+        "  - id: C1\n    text: никаких PAN\n    check: no_pan\n",
+    );
+    // Правило `no_pan` (`**/*.py`, паттерн `PAN`) срабатывает на файле.
+    write_fixture(dir, "src/leak.py", "PAN = '4111'\n");
+    git(dir, &["add", "."]);
+    git(dir, &["commit", "-q", "-m", "leak"]);
+    let report = run_with(
+        dir,
+        Some(Route::Fast),
+        None,
+        None,
+        (1, 4),
+        &GateRequirements::default(),
+    )
+    .expect("gate");
+    assert!(
+        condition_findings(&report).iter().any(|f| {
+            f.rule.as_deref() == Some("approval_condition_violated")
+                && f.message.contains("нарушено")
+        }),
+        "{:?}",
+        condition_findings(&report)
+    );
+}
+
+/// Связанное правило чисто — условие соблюдено, находок нет.
+#[test]
+fn approval_conditions_pass_when_linked_rule_clean() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let dir = tmp.path();
+    make_conditions_repo(
+        dir,
+        "  - id: C1\n    text: спина на месте\n    check: spine_present\n",
+    );
+    let report = run_with(
+        dir,
+        Some(Route::Fast),
+        None,
+        None,
+        (1, 4),
+        &GateRequirements::default(),
+    )
+    .expect("gate");
+    assert_eq!(
+        status_of(&report, "approval_conditions"),
+        GateStatus::Pass,
+        "{}",
+        render(&report)
+    );
+    assert!(
+        condition_findings(&report).is_empty(),
+        "{:?}",
+        condition_findings(&report)
+    );
+}

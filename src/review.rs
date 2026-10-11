@@ -501,6 +501,25 @@ pub struct AffectedEntity {
     pub title: String,
 }
 
+/// Условие согласования затронутого решения (ADR-074): решение `adr` принято
+/// «под условием» — изменение, его задевающее, требует перепроверки условия
+/// (механикой при `check`, иначе человеком `owner`). Гейт ловит НАРУШЕНИЕ в
+/// момент правки; здесь радиус изменения называет условия заранее, чтобы
+/// согласование не потерялось между сессиями.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AffectedCondition {
+    /// ID решения, к которому привязано условие (`ADR-100`).
+    pub adr: String,
+    /// Идентификатор условия в пределах решения (`C1`).
+    pub id: String,
+    /// Текст условия — что должно быть выполнено.
+    pub text: String,
+    /// Механическая проверка (имя/ID правила `CONSTRAINTS.yaml`), если задана.
+    pub check: Option<String>,
+    /// Владелец условия (для условий без `check`).
+    pub owner: Option<String>,
+}
+
 /// Правило CONSTRAINTS.yaml, затронутое изменением (через `verified_by`
 /// достигнутых сущностей).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -531,6 +550,9 @@ pub struct ImpactReport {
     pub affected: Vec<AffectedEntity>,
     /// Затронутые правила CONSTRAINTS.yaml (по `verified_by` C-NNN).
     pub rules: Vec<ImpactRule>,
+    /// Условия согласования затронутых решений (ADR-074): решения в статусе
+    /// `Accepted` с непустым блоком `conditions` задетых сущностей-ADR.
+    pub conditions: Vec<AffectedCondition>,
     /// Контрактные файлы достигнутых INT (поле `contract`, ADR-035).
     pub contracts: Vec<String>,
     /// Достигнутые владельцы (`OWNER-* · заголовок`) — с кем согласовывать.
@@ -791,6 +813,29 @@ fn impact_core(
         });
     }
 
+    // Условия согласования затронутых решений (ADR-074): решение принято «под
+    // условием» — правка в его радиусе требует перепроверки. Порядок стабилен
+    // (обход `reached` — BTreeSet, ADR сортируются по ID в `affected`, но здесь
+    // идём по отсортированному `reached`).
+    let mut conditions: Vec<AffectedCondition> = Vec::new();
+    for rid in &reached {
+        let Some(e) = model.get(rid) else {
+            continue;
+        };
+        if e.kind != EntityKind::Adr {
+            continue;
+        }
+        for c in &e.conditions {
+            conditions.push(AffectedCondition {
+                adr: e.id.clone(),
+                id: c.id.clone(),
+                text: c.text.clone(),
+                check: c.check.clone(),
+                owner: c.owner.clone(),
+            });
+        }
+    }
+
     // Контракты достигнутых INT (поле contract, ADR-035).
     let contracts: Vec<String> = reached
         .iter()
@@ -886,6 +931,15 @@ fn impact_core(
     if !gaps.is_empty() {
         let _ = write!(summary, "; путей без CMP-покрытия (gap): {}", gaps.len());
     }
+    if !conditions.is_empty() {
+        // Условия — не «ещё сущности», а обязательства: называются в сводке
+        // отдельно, чтобы читатель не пропустил условное согласование.
+        let _ = write!(
+            summary,
+            "; условия согласования затронутых решений: {}",
+            conditions.len()
+        );
+    }
     ImpactReport {
         case: case.to_path_buf(),
         seeds: seeds.into_iter().collect(),
@@ -893,6 +947,7 @@ fn impact_core(
         load_issues: model.load_issues.clone(),
         affected,
         rules,
+        conditions,
         contracts,
         owners,
         owners_note,
@@ -949,6 +1004,32 @@ pub fn render_impact(report: &ImpactReport) -> String {
             let _ = writeln!(out, "  {c}");
         }
     }
+    if !report.conditions.is_empty() {
+        // Условное согласование видно ДО правки: решение в статусе Accepted
+        // принято «под условием» — изменение в его радиусе требует перепроверки.
+        let _ = writeln!(out, "Условия согласования затронутых решений (ADR-074):");
+        for c in &report.conditions {
+            match (&c.check, &c.owner) {
+                (Some(check), _) => {
+                    let _ = writeln!(out, "  {} · {} — {} (check: {check})", c.adr, c.id, c.text);
+                }
+                (None, Some(owner)) => {
+                    let _ = writeln!(
+                        out,
+                        "  {} · {} — {} (владелец: {owner})",
+                        c.adr, c.id, c.text
+                    );
+                }
+                (None, None) => {
+                    let _ = writeln!(
+                        out,
+                        "  {} · {} — {} (без механической проверки)",
+                        c.adr, c.id, c.text
+                    );
+                }
+            }
+        }
+    }
     if !report.owners.is_empty() {
         let _ = writeln!(out, "Согласовать с владельцами:");
         for o in &report.owners {
@@ -979,6 +1060,13 @@ pub fn impact_json(report: &ImpactReport) -> Value {
             "id": r.id,
             "name": r.name,
             "owner": r.owner,
+        })).collect::<Vec<_>>(),
+        "conditions": report.conditions.iter().map(|c| json!({
+            "adr": c.adr,
+            "id": c.id,
+            "text": c.text,
+            "check": c.check,
+            "owner": c.owner,
         })).collect::<Vec<_>>(),
         "contracts": report.contracts,
         "owners": report.owners,
@@ -1393,6 +1481,50 @@ mod tests {
         assert!(text.contains("C-001 (no_float_money"), "{text}");
         let json = impact_json(&report);
         assert_eq!(json["affected"].as_array().expect("affected").len(), 10);
+    }
+
+    /// ADR-074: условие согласования затронутого решения показывается в
+    /// радиусе изменения — и в тексте, и в JSON, и в сводке: «да, но…»
+    /// не должно теряться при правке в радиусе условно принятого решения.
+    #[test]
+    fn impact_surfaces_conditions_of_affected_accepted_adr() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let case = tmp.path().join("case");
+        std::fs::create_dir_all(&case).expect("mkdir");
+        make_case(&case);
+        std::fs::write(
+            case.join("model/ADR-100.md"),
+            "---\nid: ADR-100\ntype: adr\ntitle: Вендор под условием\nstatus: Accepted\n\
+             affects: [CMP-001]\nconditions:\n  - id: C1\n    text: только через \
+             антикоррупционный слой\n    check: no_new_external_hosts\n  - id: C2\n    \
+             text: миграция до конца квартала\n    owner: Иванов\n---\n\nТело.\n",
+        )
+        .expect("adr");
+        let report = change_impact(&case, Some("CMP-001"), &[]).expect("impact");
+        assert_eq!(report.conditions.len(), 2, "{:?}", report.conditions);
+        assert_eq!(report.conditions[0].adr, "ADR-100");
+        assert_eq!(report.conditions[0].id, "C1");
+        assert_eq!(
+            report.conditions[0].check.as_deref(),
+            Some("no_new_external_hosts")
+        );
+        assert_eq!(report.conditions[1].owner.as_deref(), Some("Иванов"));
+        let text = render_impact(&report);
+        assert!(
+            text.contains("Условия согласования затронутых решений"),
+            "{text}"
+        );
+        assert!(text.contains("no_new_external_hosts"), "{text}");
+        assert!(text.contains("владелец: Иванов"), "{text}");
+        assert!(
+            report
+                .summary
+                .contains("условия согласования затронутых решений: 2"),
+            "{}",
+            report.summary
+        );
+        let json = impact_json(&report);
+        assert_eq!(json["conditions"].as_array().expect("conditions").len(), 2);
     }
 
     /// T-11: владельцы называются и из КАРТОЧЕК ПРАВИЛ, а не только из

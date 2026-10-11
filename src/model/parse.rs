@@ -18,10 +18,35 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{HarnessError, Result};
 use crate::model::{EntityKind, parse_id};
+
+/// Условие согласования решения (`approval_condition`, ADR-074).
+///
+/// Решение, принятое «под условием»: согласовано не безусловно, а при
+/// выполнении `text`. Условие либо механически проверяемо (`check` — имя или
+/// идентификатор правила fitness-реестра `CONSTRAINTS.yaml`, исполняемого
+/// гейтом), либо оставлено на человека — тогда `check` пуст, а следит `owner`
+/// (и, опционально, до `due`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Condition {
+    /// Идентификатор условия в пределах сущности (например, `C1`).
+    pub id: String,
+    /// Текст условия (что должно быть выполнено).
+    pub text: String,
+    /// Механическая проверка: имя или идентификатор правила реестра
+    /// ограничений (`CONSTRAINTS.yaml`). `None` — условие без механической
+    /// проверки (следит человек, [`Condition::owner`]).
+    pub check: Option<String>,
+    /// Владелец условия — кто следит за выполнением (для условий без `check`).
+    pub owner: Option<String>,
+    /// Срок проверки условия (для условий без `check`; как записано,
+    /// обычно `YYYY-MM-DD`).
+    pub due: Option<String>,
+}
 
 /// Сущность модели архитектуры.
 #[derive(Debug, Clone)]
@@ -53,6 +78,10 @@ pub struct Entity {
     /// Несущий инвариант (для `AD`, ADR-050): `load_bearing: true` —
     /// инвариант, на котором держится решение. Необязательный признак.
     pub load_bearing: bool,
+    /// Условия согласования решения (для `ADR`, ADR-074): решение принято
+    /// под условием — каждое проверяется механикой (если задан `check`) или
+    /// человеком (владелец `owner`). Пустой список — согласовано безусловно.
+    pub conditions: Vec<Condition>,
     /// Заявленный latency-бюджет hop'а, мс (для `INT`, ADR-007).
     pub latency_budget_ms: Option<f64>,
     /// Целевой p99 цепочки, мс (для `NFR`, ADR-007).
@@ -191,6 +220,10 @@ struct Frontmatter {
     /// проверки поведения» адресуется только им.
     #[serde(default)]
     load_bearing: bool,
+    /// Условия согласования решения (для `ADR`, ADR-074): решение принято
+    /// под условием. Пустой список — согласовано безусловно.
+    #[serde(default)]
+    conditions: Vec<Condition>,
     /// Latency-бюджет hop'а, мс (для `INT`, ADR-007).
     latency_budget_ms: Option<f64>,
     /// Цель p99 цепочки, мс (для `NFR`, ADR-007).
@@ -315,6 +348,24 @@ pub fn parse_entity(file: &Path, text: &str) -> Result<Entity> {
             EntityKind::type_names().join(", ")
         ))
     })?;
+    // Условия согласования (ADR-074): у каждого непустые `id` и `text` —
+    // иначе условие неразличимо в вердикте и нечитаемо человеком. Пустой
+    // `id`/`text` — ошибка разбора (fail-closed), а не тихий пропуск.
+    for cond in &fm.conditions {
+        if cond.id.trim().is_empty() {
+            return Err(HarnessError::Model(format!(
+                "{}: пустой `id` условия согласования",
+                file.display()
+            )));
+        }
+        if cond.text.trim().is_empty() {
+            return Err(HarnessError::Model(format!(
+                "{}: пустой `text` условия согласования '{}'",
+                file.display(),
+                cond.id
+            )));
+        }
+    }
     Ok(Entity {
         id: fm.id,
         kind,
@@ -328,6 +379,7 @@ pub fn parse_entity(file: &Path, text: &str) -> Result<Entity> {
         verification: fm.verification,
         unverifiable: fm.unverifiable,
         load_bearing: fm.load_bearing,
+        conditions: fm.conditions,
         latency_budget_ms: fm.latency_budget_ms,
         p99_target_ms: fm.p99_target_ms,
         availability_target: fm.availability_target,
@@ -566,6 +618,75 @@ mod tests {
         assert_eq!(e.latency_budget_ms, None);
         assert_eq!(e.instances, None);
         assert_eq!(e.source, None);
+        // Условия согласования (ADR-074) опциональны: без них — пусто.
+        assert_eq!(e.conditions, [] as [Condition; 0]);
+    }
+
+    #[test]
+    fn parse_conditions_with_and_without_check() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let adr = write(
+            dir.path(),
+            "ADR-100-vendor.md",
+            concat!(
+                "---\n",
+                "id: ADR-100\n",
+                "type: adr\n",
+                "title: Новый вендор\n",
+                "status: Accepted\n",
+                "conditions:\n",
+                "  - id: C1\n",
+                "    text: новый вендор только через антикоррупционный слой\n",
+                "    check: no_new_external_hosts\n",
+                "  - id: C2\n",
+                "    text: миграция завершена до конца квартала\n",
+                "    owner: Иванов\n",
+                "    due: 2026-12-31\n",
+                "---\n\nРешение под условием.\n",
+            ),
+        );
+        let e = parse_entity(&adr, &std::fs::read_to_string(&adr).expect("чтение"))
+            .expect("условия разбираются");
+        assert_eq!(e.kind, EntityKind::Adr);
+        assert_eq!(e.conditions.len(), 2);
+        let c1 = &e.conditions[0];
+        assert_eq!(c1.id, "C1");
+        assert_eq!(c1.check.as_deref(), Some("no_new_external_hosts"));
+        assert_eq!(c1.owner, None);
+        assert_eq!(c1.due, None);
+        let c2 = &e.conditions[1];
+        assert_eq!(c2.id, "C2");
+        assert_eq!(c2.check, None);
+        assert_eq!(c2.owner.as_deref(), Some("Иванов"));
+        assert_eq!(c2.due.as_deref(), Some("2026-12-31"));
+    }
+
+    #[test]
+    fn parse_condition_empty_id_is_error() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let adr = write(
+            dir.path(),
+            "ADR-101-bad.md",
+            "---\nid: ADR-101\ntype: adr\ntitle: Битое условие\nstatus: Accepted\n\
+             conditions:\n  - id: \"\"\n    text: что-то\n---\n\nТело.\n",
+        );
+        let err = parse_entity(&adr, &std::fs::read_to_string(&adr).expect("чтение"))
+            .expect_err("пустой id условия — ошибка");
+        assert!(err.to_string().contains("пустой `id` условия"), "{err}");
+    }
+
+    #[test]
+    fn parse_condition_empty_text_is_error() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let adr = write(
+            dir.path(),
+            "ADR-102-bad.md",
+            "---\nid: ADR-102\ntype: adr\ntitle: Битое условие\nstatus: Accepted\n\
+             conditions:\n  - id: C1\n    text: \"  \"\n---\n\nТело.\n",
+        );
+        let err = parse_entity(&adr, &std::fs::read_to_string(&adr).expect("чтение"))
+            .expect_err("пустой text условия — ошибка");
+        assert!(err.to_string().contains("пустой `text` условия"), "{err}");
     }
 
     #[test]
