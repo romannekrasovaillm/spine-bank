@@ -9,12 +9,14 @@
 //! ([`render_json`], [`render_md`]) и fail-closed автопроверку ([`check`]).
 //!
 //! AD-11 дельты `report-v1`: сборка модели и назначение ID/уверенности живут
-//! ТОЛЬКО здесь; CLI (`arch-be report`) и будущий MCP-мост — тонкие обёртки.
+//! ТОЛЬКО здесь; CLI (`arch-be report`) и MCP-мост (`report` в
+//! `BRIDGE_READ_ONLY`) — тонкие обёртки.
 
 pub mod build;
 pub mod check;
 pub mod model;
 pub mod render;
+pub mod tool;
 
 pub use build::build;
 pub use check::{check, resolve_ref};
@@ -23,4 +25,5 @@ pub use model::{
     ReportModel, ReportRelation, ReportSection, SECTION_COUNT, SECTION_KINDS, SECTION_TITLES,
     STATUS_AUTO, SectionItem, SectionKind,
 };
-pub use render::{render_json, render_md};
+pub use render::{render_check, render_json, render_md};
+pub use tool::tools;

@@ -21,18 +21,18 @@ pub(crate) enum McpCmd {
         args: String,
     },
     /// MCP-сервер (stdio JSON-RPC, NDJSON): архитектурный контроль кодовым
-    /// агентам (Claude Code и др.), ADR-008. Read-only состав: 42 инструмента
+    /// агентам (Claude Code и др.), ADR-008. Read-only состав: 43 инструмента
     /// + 10 промптов-плейбуков spine-* (capability prompts). Ручные (16):
     ///   `spine_lint`, `fitness_check`, `significance_score`,
     ///   `significance_from_diff`, `trace_check`, `model_query`, `rubric_run`,
     ///   `rubric_prompt`, `rubric_verify`, `kb_search`, `skill_search`,
     ///   `skill_load`, `mermaid_render`, `rules_suggest`, `trust_report`,
     ///   `verdict_explain`. Мостовые read-only
-    ///   (26): `adr_registry`, `agentsmd_lint`, `arch_diff`, `archify_validate`,
+    ///   (27): `adr_registry`, `agentsmd_lint`, `arch_diff`, `archify_validate`,
     ///   `architect_review`, `asyncapi_lint`, `change_impact`, `contract_diff`,
     ///   `delta_guard`, `evidence_verify`, `fleet_audit`, `landscape_report`,
     ///   `model_drift`, `model_graph`, `model_validate`, `nfr_check`,
-    ///   `openapi_lint`, `openspec_coverage`, `plugin_list`, `recover`,
+    ///   `openapi_lint`, `openspec_coverage`, `plugin_list`, `recover`, `report`,
     ///   `rubric_accept`, `rubric_handover`, `rubric_list`, `rule_template_list`,
     ///   `rule_template_show`, `rules_report`.
     Serve {

@@ -114,6 +114,9 @@ fn domain_tools(cfg: &Config) -> Vec<Arc<dyn Tool>> {
     out.push(Arc::new(crate::fleet::FleetAuditTool));
     out.extend(crate::survey::tools());
     out.extend(crate::arch_diff::tools());
+    // Отчёт о восстановленной архитектуре (ADR-080 + ADR-083): read-only мост
+    // к `src/report/`, отдаётся MCP по белому списку `BRIDGE_READ_ONLY`.
+    out.extend(crate::report::tools());
     #[cfg(feature = "harness")]
     out.extend(crate::distill::tools(cfg));
     out
@@ -136,6 +139,7 @@ mod tests {
             "reverse_survey",
             "recover",
             "arch_diff",
+            "report",
             "skill_search",
             "mermaid_render",
             "archify_validate",
