@@ -1148,4 +1148,88 @@ mod tests {
         assert_eq!(refs[0].1, LinkKind::DependsOn);
         assert!(m.referents("CMP-001").is_empty());
     }
+
+    #[test]
+    fn v7_appendix_z23_seven_cards_load_without_edits() {
+        // Регрессия боли SA-Bench (ADR-081, Д-2): эталонные карточки формата v7
+        // (приложение З.2.3) — INT с внешними идентификаторами в шапке
+        // (meta_id/registry_api/agreement) + FLOW с integrations + SYS/CMP/NFR —
+        // до 0.4.10 грузились 1 из 7 (закрытая схема frontmatter, ADR-003
+        // отвергала незнакомые поля). С 0.4.10 — 7/7 без правок.
+        let dir = tempfile::tempdir().expect("tmp");
+        let cards: [(&str, &str); 7] = [
+            (
+                "FLOW-001.md",
+                "---\nid: FLOW-001\ntype: flow\ntitle: Курсы бонусов в АБС\n\
+                 status: accepted\nintegrations:\n  - INT-001\n  - INT-002\n---\n\
+                 поток КА ФО\n",
+            ),
+            (
+                "INT-001.md",
+                "---\nid: INT-001\ntype: int\ntitle: Курсы бонусов\nstatus: accepted\n\
+                 meta_id: ИВ-12345\nregistry_api: Курсы бонусов v2.3\n\
+                 agreement: agreements/courses.md\n---\n",
+            ),
+            (
+                "INT-002.md",
+                "---\nid: INT-002\ntype: int\ntitle: Лимиты\nstatus: accepted\n\
+                 meta_id: IV-77\nregistry_api: Лимиты v1.0\n\
+                 agreement: agreements/limits.md\n---\n",
+            ),
+            (
+                "SYS-001.md",
+                "---\nid: SYS-001\ntype: sys\ntitle: АБС\nstatus: adopted\n---\n",
+            ),
+            (
+                "CMP-001.md",
+                "---\nid: CMP-001\ntype: cmp\ntitle: Шина ИВ\nstatus: adopted\n\
+                 depends_on:\n  - SYS-001\n---\n",
+            ),
+            (
+                "NFR-001.md",
+                "---\nid: NFR-001\ntype: nfr\ntitle: SLA расчёта курса\n\
+                 status: accepted\n---\n",
+            ),
+            (
+                "CAP-001.md",
+                "---\nid: CAP-001\ntype: cap\ntitle: Выплата бонусами\n\
+                 status: adopted\n---\n",
+            ),
+        ];
+        for (name, text) in cards {
+            write(dir.path(), name, text);
+        }
+
+        let m = load_model(dir.path()).expect("все 7 карточек v7 грузятся без правок");
+        assert_eq!(m.entities.len(), 7, "7/7 карточек");
+        assert!(m.load_issues.is_empty(), "без пропущенных карточек");
+
+        let expected = [
+            ("FLOW-001", EntityKind::Flow),
+            ("INT-001", EntityKind::Int),
+            ("INT-002", EntityKind::Int),
+            ("SYS-001", EntityKind::Sys),
+            ("CMP-001", EntityKind::Cmp),
+            ("NFR-001", EntityKind::Nfr),
+            ("CAP-001", EntityKind::Cap),
+        ];
+        for (id, kind) in expected {
+            let e = m.get(id).unwrap_or_else(|| panic!("{id} не загружен"));
+            assert_eq!(e.kind, kind, "{id}");
+        }
+
+        // Цепочка потока «КА ФО → ИВ» и внешние идентификаторы — на месте.
+        let flow = m.get("FLOW-001").expect("FLOW-001");
+        assert_eq!(flow.integrations, vec!["INT-001", "INT-002"]);
+        let int1 = m.get("INT-001").expect("INT-001");
+        assert_eq!(int1.meta_id.as_deref(), Some("ИВ-12345"), "кириллица ИВ-");
+        assert_eq!(int1.registry_api.as_deref(), Some("Курсы бонусов v2.3"));
+        assert_eq!(int1.agreement.as_deref(), Some("agreements/courses.md"));
+        let int2 = m.get("INT-002").expect("INT-002");
+        assert_eq!(
+            int2.meta_id.as_deref(),
+            Some("IV-77"),
+            "ASCII-префикс допустим"
+        );
+    }
 }
