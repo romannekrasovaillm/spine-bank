@@ -66,8 +66,7 @@ pub use validate::{ModelIssue, Severity, ValidationReport, validate};
 /// ([`parse_id`] сверяет длину совпадения), и для префиксного разбора имён
 /// файлов (`ADR-001-saga.md` в `control::adr_new`). Группы: 1 — префикс,
 /// 2 — номер.
-pub const ID_PATTERN: &str =
-    r"^(CAP|SYS|CMP|INT|NFR|REQ|AD|ADR|RISK|OWNER|QAS|FLOW)-([0-9]+)";
+pub const ID_PATTERN: &str = r"^(CAP|SYS|CMP|INT|NFR|REQ|AD|ADR|RISK|OWNER|QAS|FLOW)-([0-9]+)";
 
 /// Компилирует [`ID_PATTERN`]. Единственное место сборки regex идентификатора.
 ///

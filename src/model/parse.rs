@@ -129,6 +129,16 @@ pub struct Entity {
     pub response: Option<String>,
     /// Мера реакции — проверяемый порог (для `QAS`, ADR-007).
     pub measure: Option<String>,
+    /// Список интеграционных взаимодействий потока (для `FLOW`, ADR-081):
+    /// упорядоченный перечень ID сущностей `INT`. Пустой список допустим на
+    /// разборе (находка `flow-empty` — warn).
+    pub integrations: Vec<String>,
+    /// Внешний идентификатор ИВ (для `INT`, ADR-081).
+    pub meta_id: Option<String>,
+    /// Реестровый API ИВ (для `INT`, ADR-081).
+    pub registry_api: Option<String>,
+    /// Путь к файлу договорённости ИВ (для `INT`, ADR-081).
+    pub agreement: Option<String>,
     /// Тело документа (проза после frontmatter); ведущие пустые строки и
     /// хвостовые переводы строк срезаны.
     pub body: String,
@@ -265,6 +275,22 @@ struct Frontmatter {
     response: Option<String>,
     /// Мера реакции (для `QAS`, ADR-007).
     measure: Option<String>,
+    /// Список интеграционных взаимодействий потока (для `FLOW`, ADR-081):
+    /// упорядоченный перечень ID сущностей `INT`. Пустой список допустим
+    /// на разборе (находка — `flow-empty`, warn, в [`crate::model::validate`]).
+    #[serde(default)]
+    integrations: Vec<String>,
+    /// Внешний идентификатор ИВ (для `INT`, ADR-081): `ИВ-<цифры>`
+    /// (кириллица) либо `<PREFIX>-<цифры>` (ASCII). Формат проверяется в
+    /// [`crate::model::validate`] (`int-meta-id-format`, error).
+    meta_id: Option<String>,
+    /// Реестровый API ИВ (для `INT`, ADR-081): `Имя vMAJOR.MINOR`.
+    /// Формат проверяется в [`crate::model::validate`]
+    /// (`int-registry-api-format`, error).
+    registry_api: Option<String>,
+    /// Путь к файлу договорённости ИВ (для `INT`, ADR-081). Существование
+    /// проверяется в [`crate::model::validate`] (`agreement-missing`, error).
+    agreement: Option<String>,
 }
 
 /// Отделяет frontmatter от тела: `---` в первой строке, затем ближайший
@@ -442,6 +468,10 @@ pub fn parse_entity(file: &Path, text: &str) -> Result<Entity> {
         artifact: fm.artifact,
         response: fm.response,
         measure: fm.measure,
+        integrations: fm.integrations,
+        meta_id: fm.meta_id,
+        registry_api: fm.registry_api,
+        agreement: fm.agreement,
         body: body.trim_start_matches(['\r', '\n']).trim_end().to_string(),
         file: file.to_path_buf(),
     })
@@ -880,20 +910,21 @@ mod tests {
 
     #[test]
     fn parse_external_id_field_gets_hint() {
-        // `meta_id` — внешний идентификатор из словаря: поле по-прежнему
-        // отвергается (схема закрыта, ADR-003), но к ошибке добавляется
-        // подсказка, что такие идентификаторы держат в теле карточки.
+        // `system` — внешний идентификатор из словаря, но НЕ поле шапки
+        // (ADR-081: в шапку добавлены только meta_id/registry_api/agreement
+        // и FLOW-поле integrations): поле по-прежнему отвергается (схема
+        // закрыта, ADR-003), к ошибке добавляется подсказка.
         let dir = tempfile::tempdir().expect("tmp");
         let file = write(
             dir.path(),
             "x.md",
-            "---\nid: CMP-001\ntype: cmp\ntitle: T\nstatus: ok\nmeta_id: M-42\n---\n",
+            "---\nid: CMP-001\ntype: cmp\ntitle: T\nstatus: ok\nsystem: billing\n---\n",
         );
         let err = parse_entity(&file, &std::fs::read_to_string(&file).expect("чтение"))
-            .expect_err("meta_id в шапке");
+            .expect_err("system в шапке");
         let msg = err.to_string();
         assert!(msg.contains("frontmatter"), "{msg}");
-        assert!(msg.contains("meta_id"), "имя поля сохранено: {msg}");
+        assert!(msg.contains("system"), "имя поля сохранено: {msg}");
         assert!(
             msg.contains("держите в теле карточки"),
             "подсказка про тело карточки: {msg}"
@@ -919,6 +950,50 @@ mod tests {
             !msg.contains("держите в теле карточки"),
             "без подсказки для чужих полей: {msg}"
         );
+    }
+
+    #[test]
+    fn parse_flow_and_int_v7_fields() {
+        // ADR-081: FLOW несёт integrations (упорядоченный список INT);
+        // INT несёт опциональные внешние идентификаторы meta_id/registry_api/
+        // agreement. Все — поля шапки, разбираются без правок.
+        let dir = tempfile::tempdir().expect("tmp");
+        let flow = write(
+            dir.path(),
+            "FLOW-001.md",
+            "---\nid: FLOW-001\ntype: flow\ntitle: Курсы бонусов\nstatus: accepted\n\
+             integrations:\n  - INT-001\n  - INT-002\n---\nпоток\n",
+        );
+        let e = parse_entity(&flow, &std::fs::read_to_string(&flow).expect("чтение"))
+            .expect("FLOW разбирается");
+        assert_eq!(e.kind, EntityKind::Flow);
+        assert_eq!(e.integrations, vec!["INT-001", "INT-002"]);
+        assert!(e.meta_id.is_none(), "у FLOW нет meta_id");
+
+        let int = write(
+            dir.path(),
+            "INT-001.md",
+            "---\nid: INT-001\ntype: int\ntitle: Курсы\nstatus: accepted\n\
+             meta_id: ИВ-12345\nregistry_api: Курсы бонусов v2.3\n\
+             agreement: agreements/courses.md\n---\n",
+        );
+        let e = parse_entity(&int, &std::fs::read_to_string(&int).expect("чтение"))
+            .expect("INT с внешними ID разбирается");
+        assert_eq!(e.meta_id.as_deref(), Some("ИВ-12345"));
+        assert_eq!(e.registry_api.as_deref(), Some("Курсы бонусов v2.3"));
+        assert_eq!(e.agreement.as_deref(), Some("agreements/courses.md"));
+        assert!(e.integrations.is_empty(), "у INT нет integrations");
+
+        // Пустой integrations допустим на разборе (находка flow-empty — warn
+        // в model_validate, не ошибка парсера).
+        let empty = write(
+            dir.path(),
+            "FLOW-002.md",
+            "---\nid: FLOW-002\ntype: flow\ntitle: Пустой\nstatus: draft\n---\n",
+        );
+        let e = parse_entity(&empty, &std::fs::read_to_string(&empty).expect("чтение"))
+            .expect("FLOW без integrations разбирается");
+        assert!(e.integrations.is_empty(), "пустой integrations допустим");
     }
 
     #[test]
