@@ -19,7 +19,9 @@ Metric 12: две ноги контура на реальном коде (§9: �
     money честно НЕ ловится — правила нет в реестре кейса).
 
 Итог metric 12 — detection (объединённый по счётчикам K2+K3) и FP (из K2)
-против порогов ≥0.80 / ≤0.03. Клоны и SHA — repos.lock. Для K3 путь к кейсу
+против порогов ≥0.80 / ≤0.03, плюс независимая нога K4 (§7) — доля красных
+вердиктов на заведомо чистой истории (реплей `fp_replay.measure_k4`, порог
+≤0.03). Клоны и SHA — repos.lock. Для K3 путь к кейсу
 и корпусу передаётся АБСОЛЮТНЫМ (`Path.resolve()`): `corpus.rs::git_apply`
 делает `git -C <мутант> apply <patch>`, поэтому относительный путь патча
 разрешается от мутанта, а не от cwd прогонщика.
@@ -152,28 +154,56 @@ def k3_corpus(repo_root):
     return caught, found
 
 
+def metric12_k4(repos_root):
+    """K4 (§7): доля красных вердиктов на заведомо чистой истории (petclinic).
+
+    Переиспользует `fp_replay.measure_k4` с emit=False — печатает одну строку
+    metric 12, не дублируя блок K4 прогонщика. Нога независима от K2/K3: клан
+    на чистой истории измеряется, даже если K2/K3 недоступны."""
+    import fp_replay
+    res = fp_replay.measure_k4(repos_root, emit=False)
+    if res is None:
+        avlib.emit_skip("metric 12 (K4, FP на чистой истории)", "реплей недоступен")
+        return
+    red, measured, share = res
+    ok = share <= TARGET_FP
+    avlib.emit_run(
+        "metric 12 (K4, FP на чистой истории)",
+        f"{fp_replay.REPO}, последние {measured} first-parent коммитов: "
+        f"красных {red}/{measured}={share:.2f} (порог ≤{TARGET_FP})"
+        f"{' OK' if ok else ' ABOVE'}",
+    )
+    if not ok:
+        avlib.emit_find(
+            "metric 12 (K4)",
+            f"доля красных на чистой истории {share:.2f} > {TARGET_FP} — "
+            "ложные срабатывания детектора (см. fp_replay.py)",
+        )
+
+
 def metric12(repo_root, repos_root):
     k2 = k2_stdcomply(repos_root)
     k3 = k3_corpus(repo_root)
     if k2 is None and k3 is None:
-        avlib.emit_skip("metric 12", "обе ноги (K2/K3) недоступны")
-        return
-    c2, t2, fp = k2 if k2 else (0, 0, 0.0)
-    c3, t3 = k3 if k3 else (0, 0)
-    caught, total = c2 + c3, t2 + t3
-    det = (caught / total) if total else 0.0
-    ok = det >= TARGET_DETECTION and fp <= TARGET_FP
-    avlib.emit_run(
-        "metric 12 (K2+K3)",
-        f"detection={det:.2f} ({caught}/{total}) (порог ≥{TARGET_DETECTION}), "
-        f"FP={fp:.2f} (порог ≤{TARGET_FP}){' OK' if ok else ' BELOW'}",
-    )
-    if not ok:
-        avlib.emit_find(
-            "metric 12",
-            "объединённое обнаружение ниже порога либо FP выше — "
-            "проверить корпус K3 и стандарт K2",
+        avlib.emit_skip("metric 12 (K2+K3)", "обе ноги (K2/K3) недоступны")
+    else:
+        c2, t2, fp = k2 if k2 else (0, 0, 0.0)
+        c3, t3 = k3 if k3 else (0, 0)
+        caught, total = c2 + c3, t2 + t3
+        det = (caught / total) if total else 0.0
+        ok = det >= TARGET_DETECTION and fp <= TARGET_FP
+        avlib.emit_run(
+            "metric 12 (K2+K3)",
+            f"detection={det:.2f} ({caught}/{total}) (порог ≥{TARGET_DETECTION}), "
+            f"FP={fp:.2f} (порог ≤{TARGET_FP}){' OK' if ok else ' BELOW'}",
         )
+        if not ok:
+            avlib.emit_find(
+                "metric 12",
+                "объединённое обнаружение ниже порога либо FP выше — "
+                "проверить корпус K3 и стандарт K2",
+            )
+    metric12_k4(repos_root)
 
 
 def main(repos_root=None):

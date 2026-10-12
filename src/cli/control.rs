@@ -243,6 +243,8 @@ pub(crate) fn cmd_control(cfg: &arch_harness::config::Config, cmd: ControlCmd) -
                 probes: arch_harness::control::requires::ProbeRegistry::from_config(
                     &cfg.gate.requires,
                 )?,
+                // S6: доступность JDK — детект на прогон (CLI не форсирует).
+                jdk: None,
             };
             // П5: сверка состава правил с git-базой — «правило выполняется»
             // плюс «правило ещё существует» в любом канале, не только в gate.

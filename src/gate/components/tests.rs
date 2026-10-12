@@ -1381,3 +1381,90 @@ fn approval_conditions_pass_when_linked_rule_clean() {
         condition_findings(&report)
     );
 }
+
+// --- S6 (0.4.0): строка паспорта о расхождении текстового/байткод-слоёв ---
+
+/// Репо-фикстура строки паспорта S6: JVM-правило слоёв `dependency_direction`
+/// по `**/*.java` (+ опц. `target/classes`, + опц. правило `type: archunit`).
+/// Возвращает `(repo, CONSTRAINTS.yaml)`.
+fn archunit_note_repo(dir: &Path, classes: bool, with_archunit: bool) -> (PathBuf, PathBuf) {
+    let repo = dir.join("repo");
+    write_fixture(
+        &repo,
+        "src/main/java/io/reflectoring/domain/DomainService.java",
+        "package io.reflectoring.domain;\nimport java.util.List;\n",
+    );
+    if classes {
+        write_fixture(
+            &repo,
+            "target/classes/io/reflectoring/domain/DomainService.class",
+            "\u{ca}\u{fe}\u{ba}\u{be}",
+        );
+    }
+    let archunit_rule = if with_archunit {
+        "  - name: bytecode_bridge\n    type: archunit\n"
+    } else {
+        ""
+    };
+    let constraints = dir.join("CONSTRAINTS.yaml");
+    std::fs::write(
+        &constraints,
+        format!(
+            "rules:\n  - name: domain_pure\n    type: dependency_direction\n    glob: '**/*.java'\n    forbid: ['io.reflectoring.persistence']\n{archunit_rule}"
+        ),
+    )
+    .expect("constraints");
+    (repo, constraints)
+}
+
+/// Нет JVM-правил слоёв — текстовый/байткод-слои не расходятся, строки нет.
+#[test]
+fn archunit_layer_note_absent_without_jvm_rules() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let dir = tmp.path();
+    let repo = dir.join("repo");
+    write_fixture(&repo, "ARCHITECTURE-SPINE.md", "# Spine\n");
+    let constraints = dir.join("CONSTRAINTS.yaml");
+    std::fs::write(
+        &constraints,
+        "rules:\n  - name: spine_present\n    type: file_exists\n    path: \"ARCHITECTURE-SPINE.md\"\n    severity: error\n",
+    )
+    .expect("constraints");
+    assert!(
+        archunit_layer_note(&repo, &constraints).is_none(),
+        "текстовые правила — строки о байткод-слое нет"
+    );
+}
+
+/// JVM-правило есть, но классов нет — байткод-слою нечего анализировать.
+#[test]
+fn archunit_layer_note_absent_without_classes() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (repo, constraints) = archunit_note_repo(tmp.path(), false, false);
+    assert!(
+        archunit_layer_note(&repo, &constraints).is_none(),
+        "нет скомпилированных классов — строки нет"
+    );
+}
+
+/// Классы есть, `type: archunit` не подключён — строка называет расхождение и выход.
+#[test]
+fn archunit_layer_note_suggests_archunit_with_classes() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (repo, constraints) = archunit_note_repo(tmp.path(), true, false);
+    let note = archunit_layer_note(&repo, &constraints).expect("строка есть");
+    assert!(note.contains("1/5") && note.contains("5/5"), "{note}");
+    assert!(note.contains("НЕ подключён"), "{note}");
+    assert!(note.contains("type: archunit"), "{note}");
+}
+
+/// `type: archunit` подключён — строка отмечает закрытое расхождение слоёв.
+#[test]
+fn archunit_layer_note_reports_active_layer() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (repo, constraints) = archunit_note_repo(tmp.path(), true, true);
+    let note = archunit_layer_note(&repo, &constraints).expect("строка есть");
+    assert!(note.contains("подключён"), "{note}");
+    assert!(!note.contains("НЕ подключён"), "{note}");
+    assert!(note.contains("5/5"), "{note}");
+}
