@@ -15,7 +15,7 @@
 //! контракта относительно корня кейса; проверяется звеном трассировки
 //! «INT → контракт»). Тело после frontmatter — свободная проза.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -129,6 +129,16 @@ pub struct Entity {
     pub response: Option<String>,
     /// Мера реакции — проверяемый порог (для `QAS`, ADR-007).
     pub measure: Option<String>,
+    /// Список интеграционных взаимодействий потока (для `FLOW`, ADR-081):
+    /// упорядоченный перечень ID сущностей `INT`. Пустой список допустим на
+    /// разборе (находка `flow-empty` — warn).
+    pub integrations: Vec<String>,
+    /// Внешний идентификатор ИВ (для `INT`, ADR-081).
+    pub meta_id: Option<String>,
+    /// Реестровый API ИВ (для `INT`, ADR-081).
+    pub registry_api: Option<String>,
+    /// Путь к файлу договорённости ИВ (для `INT`, ADR-081).
+    pub agreement: Option<String>,
     /// Тело документа (проза после frontmatter); ведущие пустые строки и
     /// хвостовые переводы строк срезаны.
     pub body: String,
@@ -265,6 +275,22 @@ struct Frontmatter {
     response: Option<String>,
     /// Мера реакции (для `QAS`, ADR-007).
     measure: Option<String>,
+    /// Список интеграционных взаимодействий потока (для `FLOW`, ADR-081):
+    /// упорядоченный перечень ID сущностей `INT`. Пустой список допустим
+    /// на разборе (находка — `flow-empty`, warn, в [`crate::model::validate`]).
+    #[serde(default)]
+    integrations: Vec<String>,
+    /// Внешний идентификатор ИВ (для `INT`, ADR-081): `ИВ-<цифры>`
+    /// (кириллица) либо `<PREFIX>-<цифры>` (ASCII). Формат проверяется в
+    /// [`crate::model::validate`] (`int-meta-id-format`, error).
+    meta_id: Option<String>,
+    /// Реестровый API ИВ (для `INT`, ADR-081): `Имя vMAJOR.MINOR`.
+    /// Формат проверяется в [`crate::model::validate`]
+    /// (`int-registry-api-format`, error).
+    registry_api: Option<String>,
+    /// Путь к файлу договорённости ИВ (для `INT`, ADR-081). Существование
+    /// проверяется в [`crate::model::validate`] (`agreement-missing`, error).
+    agreement: Option<String>,
 }
 
 /// Отделяет frontmatter от тела: `---` в первой строке, затем ближайший
@@ -300,20 +326,19 @@ pub fn split_frontmatter(text: &str) -> Result<(&str, &str)> {
     Err(HarnessError::Model("нет закрывающего маркера `---`".into()))
 }
 
-/// Внешние идентификаторы, которые пользователи по инерции кладут в шапку
-/// карточки вместо тела (формат Д-2 — поля потока/МЕТЫ в шапке — в разработке).
+/// Поля-«сироты» из мира Д-2, которые пользователи по инерции кладут в шапку
+/// карточки.
+///
+/// С 0.4.10 (ADR-081) `meta_id`, `registry_api` и `agreement` — ЛЕГАЛЬНЫЕ поля
+/// шапки `INT`, поэтому в словарь не входят (их отвергнет только грубый формат —
+/// это забота `model_validate`, а не serde). Осталось два случая:
+/// - `flow` — поток теперь ОТДЕЛЬНАЯ сущность `FLOW` со списком `integrations`;
+/// - `system`/`owner` — свободные атрибуты, их место в теле карточки.
 ///
 /// Схема frontmatter ЗАКРЫТА (ADR-003): поле отвергается (severity остаётся
 /// error). К ошибке лишь добавляем подсказку, КУДА такие идентификаторы класть,
 /// чтобы человек не гадал над «unknown field».
-const EXTERNAL_ID_FIELDS: [&str; 6] = [
-    "flow",
-    "meta_id",
-    "registry_api",
-    "agreement",
-    "system",
-    "owner",
-];
+const EXTERNAL_ID_FIELDS: [&str; 3] = ["flow", "system", "owner"];
 
 /// Достаёт имя поля из серде-сообщения «unknown field NAME, expected …».
 fn unknown_field_name(err: &str) -> Option<&str> {
@@ -322,14 +347,21 @@ fn unknown_field_name(err: &str) -> Option<&str> {
 }
 
 /// Подсказка к ошибке незнакомого поля frontmatter. Если отвергнутое поле —
-/// внешний идентификатор из [`EXTERNAL_ID_FIELDS`], возвращает строку с
-/// объяснением (начинается с `\n`); иначе — пустую строку (сообщение прежнее).
+/// «сирота» из [`EXTERNAL_ID_FIELDS`], возвращает строку с объяснением
+/// (начинается с `\n`); иначе — пустую строку (сообщение прежнее).
+///
+/// Для `flow` — подсказка про переезд механизма в сущность `FLOW` (ADR-081);
+/// для `system`/`owner` — прежняя «держите в теле карточки».
 fn external_id_hint(err: &str) -> String {
     match unknown_field_name(err) {
+        Some("flow") => "\nподсказка: поток — ОТДЕЛЬНАЯ сущность `FLOW` (ADR-081) с полем \
+             `integrations: [INT-…]`; в шапке `INT` с 0.4.10 доступны внешние \
+             идентификаторы `meta_id`, `registry_api`, `agreement` — \
+             см. docs/adr/ADR-081-*"
+            .to_string(),
         Some(name) if EXTERNAL_ID_FIELDS.contains(&name) => {
-            "\nподсказка: внешние идентификаторы (meta_id, registry_api, flow, agreement) \
-             держите в теле карточки — формат Д-2 (поля потока/МЕТЫ в шапке) в разработке; \
-             см. docs/adr/ADR-080-линия и Сценарии v7 З.2.3"
+            "\nподсказка: внешние идентификаторы держите в теле карточки — \
+             поля потока/МЕТЫ в шапке ведёт сущность `FLOW` (ADR-081)"
                 .to_string()
         }
         _ => String::new(),
@@ -442,6 +474,10 @@ pub fn parse_entity(file: &Path, text: &str) -> Result<Entity> {
         artifact: fm.artifact,
         response: fm.response,
         measure: fm.measure,
+        integrations: fm.integrations,
+        meta_id: fm.meta_id,
+        registry_api: fm.registry_api,
+        agreement: fm.agreement,
         body: body.trim_start_matches(['\r', '\n']).trim_end().to_string(),
         file: file.to_path_buf(),
     })
@@ -520,6 +556,27 @@ impl Model {
             }
         }
         out
+    }
+
+    /// Множество ID `INT`, входящих хотя бы в один поток `FLOW` (ADR-081):
+    /// объединение `integrations` всех сущностей вида `flow`.
+    ///
+    /// `None` — потоков в модели нет вовсе: производная проверка
+    /// `int-without-flow` (nfr budget / trace) в этом случае молчит
+    /// (ADR-081, реш. 4: «модель малых кейсов без потоков легальна»).
+    #[must_use]
+    pub fn flow_members(&self) -> Option<BTreeSet<&str>> {
+        let mut has_flow = false;
+        let mut out = BTreeSet::new();
+        for e in &self.entities {
+            if e.kind == EntityKind::Flow {
+                has_flow = true;
+                for t in &e.integrations {
+                    out.insert(t.as_str());
+                }
+            }
+        }
+        has_flow.then_some(out)
     }
 }
 
@@ -880,23 +937,50 @@ mod tests {
 
     #[test]
     fn parse_external_id_field_gets_hint() {
-        // `meta_id` — внешний идентификатор из словаря: поле по-прежнему
-        // отвергается (схема закрыта, ADR-003), но к ошибке добавляется
-        // подсказка, что такие идентификаторы держат в теле карточки.
+        // `system` — внешний идентификатор из словаря, но НЕ поле шапки
+        // (ADR-081: в шапку добавлены только meta_id/registry_api/agreement
+        // и FLOW-поле integrations): поле по-прежнему отвергается (схема
+        // закрыта, ADR-003), к ошибке добавляется подсказка.
         let dir = tempfile::tempdir().expect("tmp");
         let file = write(
             dir.path(),
             "x.md",
-            "---\nid: CMP-001\ntype: cmp\ntitle: T\nstatus: ok\nmeta_id: M-42\n---\n",
+            "---\nid: CMP-001\ntype: cmp\ntitle: T\nstatus: ok\nsystem: billing\n---\n",
         );
         let err = parse_entity(&file, &std::fs::read_to_string(&file).expect("чтение"))
-            .expect_err("meta_id в шапке");
+            .expect_err("system в шапке");
         let msg = err.to_string();
         assert!(msg.contains("frontmatter"), "{msg}");
-        assert!(msg.contains("meta_id"), "имя поля сохранено: {msg}");
+        assert!(msg.contains("system"), "имя поля сохранено: {msg}");
         assert!(
             msg.contains("держите в теле карточки"),
             "подсказка про тело карточки: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_flow_header_field_gets_adr081_hint() {
+        // ADR-081: `flow` в шапке карточки — сирота старого формата. Схема
+        // закрыта (ADR-003), поле отвергается, но подсказка теперь ведёт к
+        // сущности `FLOW` с `integrations` (а не «в тело карточки»).
+        let dir = tempfile::tempdir().expect("tmp");
+        let file = write(
+            dir.path(),
+            "x.md",
+            "---\nid: INT-001\ntype: int\ntitle: T\nstatus: ok\nflow: Курсы\n---\n",
+        );
+        let err = parse_entity(&file, &std::fs::read_to_string(&file).expect("чтение"))
+            .expect_err("flow в шапке");
+        let msg = err.to_string();
+        assert!(msg.contains("frontmatter"), "{msg}");
+        assert!(msg.contains("flow"), "имя поля сохранено: {msg}");
+        assert!(
+            msg.contains("FLOW") && msg.contains("integrations"),
+            "подсказка про отдельную сущность FLOW: {msg}"
+        );
+        assert!(
+            msg.contains("meta_id") && msg.contains("registry_api") && msg.contains("agreement"),
+            "напоминание легальных полей шапки INT: {msg}"
         );
     }
 
@@ -919,6 +1003,50 @@ mod tests {
             !msg.contains("держите в теле карточки"),
             "без подсказки для чужих полей: {msg}"
         );
+    }
+
+    #[test]
+    fn parse_flow_and_int_v7_fields() {
+        // ADR-081: FLOW несёт integrations (упорядоченный список INT);
+        // INT несёт опциональные внешние идентификаторы meta_id/registry_api/
+        // agreement. Все — поля шапки, разбираются без правок.
+        let dir = tempfile::tempdir().expect("tmp");
+        let flow = write(
+            dir.path(),
+            "FLOW-001.md",
+            "---\nid: FLOW-001\ntype: flow\ntitle: Курсы бонусов\nstatus: accepted\n\
+             integrations:\n  - INT-001\n  - INT-002\n---\nпоток\n",
+        );
+        let e = parse_entity(&flow, &std::fs::read_to_string(&flow).expect("чтение"))
+            .expect("FLOW разбирается");
+        assert_eq!(e.kind, EntityKind::Flow);
+        assert_eq!(e.integrations, vec!["INT-001", "INT-002"]);
+        assert!(e.meta_id.is_none(), "у FLOW нет meta_id");
+
+        let int = write(
+            dir.path(),
+            "INT-001.md",
+            "---\nid: INT-001\ntype: int\ntitle: Курсы\nstatus: accepted\n\
+             meta_id: ИВ-12345\nregistry_api: Курсы бонусов v2.3\n\
+             agreement: agreements/courses.md\n---\n",
+        );
+        let e = parse_entity(&int, &std::fs::read_to_string(&int).expect("чтение"))
+            .expect("INT с внешними ID разбирается");
+        assert_eq!(e.meta_id.as_deref(), Some("ИВ-12345"));
+        assert_eq!(e.registry_api.as_deref(), Some("Курсы бонусов v2.3"));
+        assert_eq!(e.agreement.as_deref(), Some("agreements/courses.md"));
+        assert!(e.integrations.is_empty(), "у INT нет integrations");
+
+        // Пустой integrations допустим на разборе (находка flow-empty — warn
+        // в model_validate, не ошибка парсера).
+        let empty = write(
+            dir.path(),
+            "FLOW-002.md",
+            "---\nid: FLOW-002\ntype: flow\ntitle: Пустой\nstatus: draft\n---\n",
+        );
+        let e = parse_entity(&empty, &std::fs::read_to_string(&empty).expect("чтение"))
+            .expect("FLOW без integrations разбирается");
+        assert!(e.integrations.is_empty(), "пустой integrations допустим");
     }
 
     #[test]
@@ -1019,5 +1147,89 @@ mod tests {
         assert_eq!(refs[0].0.id, "CMP-001");
         assert_eq!(refs[0].1, LinkKind::DependsOn);
         assert!(m.referents("CMP-001").is_empty());
+    }
+
+    #[test]
+    fn v7_appendix_z23_seven_cards_load_without_edits() {
+        // Регрессия боли SA-Bench (ADR-081, Д-2): эталонные карточки формата v7
+        // (приложение З.2.3) — INT с внешними идентификаторами в шапке
+        // (meta_id/registry_api/agreement) + FLOW с integrations + SYS/CMP/NFR —
+        // до 0.4.10 грузились 1 из 7 (закрытая схема frontmatter, ADR-003
+        // отвергала незнакомые поля). С 0.4.10 — 7/7 без правок.
+        let dir = tempfile::tempdir().expect("tmp");
+        let cards: [(&str, &str); 7] = [
+            (
+                "FLOW-001.md",
+                "---\nid: FLOW-001\ntype: flow\ntitle: Курсы бонусов в АБС\n\
+                 status: accepted\nintegrations:\n  - INT-001\n  - INT-002\n---\n\
+                 поток КА ФО\n",
+            ),
+            (
+                "INT-001.md",
+                "---\nid: INT-001\ntype: int\ntitle: Курсы бонусов\nstatus: accepted\n\
+                 meta_id: ИВ-12345\nregistry_api: Курсы бонусов v2.3\n\
+                 agreement: agreements/courses.md\n---\n",
+            ),
+            (
+                "INT-002.md",
+                "---\nid: INT-002\ntype: int\ntitle: Лимиты\nstatus: accepted\n\
+                 meta_id: IV-77\nregistry_api: Лимиты v1.0\n\
+                 agreement: agreements/limits.md\n---\n",
+            ),
+            (
+                "SYS-001.md",
+                "---\nid: SYS-001\ntype: sys\ntitle: АБС\nstatus: adopted\n---\n",
+            ),
+            (
+                "CMP-001.md",
+                "---\nid: CMP-001\ntype: cmp\ntitle: Шина ИВ\nstatus: adopted\n\
+                 depends_on:\n  - SYS-001\n---\n",
+            ),
+            (
+                "NFR-001.md",
+                "---\nid: NFR-001\ntype: nfr\ntitle: SLA расчёта курса\n\
+                 status: accepted\n---\n",
+            ),
+            (
+                "CAP-001.md",
+                "---\nid: CAP-001\ntype: cap\ntitle: Выплата бонусами\n\
+                 status: adopted\n---\n",
+            ),
+        ];
+        for (name, text) in cards {
+            write(dir.path(), name, text);
+        }
+
+        let m = load_model(dir.path()).expect("все 7 карточек v7 грузятся без правок");
+        assert_eq!(m.entities.len(), 7, "7/7 карточек");
+        assert!(m.load_issues.is_empty(), "без пропущенных карточек");
+
+        let expected = [
+            ("FLOW-001", EntityKind::Flow),
+            ("INT-001", EntityKind::Int),
+            ("INT-002", EntityKind::Int),
+            ("SYS-001", EntityKind::Sys),
+            ("CMP-001", EntityKind::Cmp),
+            ("NFR-001", EntityKind::Nfr),
+            ("CAP-001", EntityKind::Cap),
+        ];
+        for (id, kind) in expected {
+            let e = m.get(id).unwrap_or_else(|| panic!("{id} не загружен"));
+            assert_eq!(e.kind, kind, "{id}");
+        }
+
+        // Цепочка потока «КА ФО → ИВ» и внешние идентификаторы — на месте.
+        let flow = m.get("FLOW-001").expect("FLOW-001");
+        assert_eq!(flow.integrations, vec!["INT-001", "INT-002"]);
+        let int1 = m.get("INT-001").expect("INT-001");
+        assert_eq!(int1.meta_id.as_deref(), Some("ИВ-12345"), "кириллица ИВ-");
+        assert_eq!(int1.registry_api.as_deref(), Some("Курсы бонусов v2.3"));
+        assert_eq!(int1.agreement.as_deref(), Some("agreements/courses.md"));
+        let int2 = m.get("INT-002").expect("INT-002");
+        assert_eq!(
+            int2.meta_id.as_deref(),
+            Some("IV-77"),
+            "ASCII-префикс допустим"
+        );
     }
 }

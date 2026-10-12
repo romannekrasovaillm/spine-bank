@@ -279,6 +279,28 @@ pub fn budget_check(case: &Path) -> Result<BudgetReport> {
             );
         }
     }
+    // ADR-081 (реш. 4): INT с бюджетом обязан входить хотя бы в один поток
+    // `FLOW` — иначе `int-without-flow` (warn, зеркало `budget-hop-uncovered`).
+    // Молчим, если потоков в модели нет: малый кейс без потоков легален.
+    if let Some(members) = model.flow_members() {
+        for e in model
+            .entities
+            .iter()
+            .filter(|e| e.kind == EntityKind::Int && e.latency_budget_ms.is_some())
+        {
+            if !members.contains(e.id.as_str()) {
+                issue(
+                    &mut issues,
+                    Severity::Warn,
+                    "int-without-flow",
+                    format!(
+                        "{}: бюджет заявлен, но ИВ не входит ни в один поток FLOW",
+                        e.id
+                    ),
+                );
+            }
+        }
+    }
     Ok(BudgetReport {
         case: case.to_path_buf(),
         targets,
@@ -1518,6 +1540,18 @@ mod tests {
         );
     }
 
+    /// FLOW с `integrations` (ADR-081).
+    fn flow(case: &Path, n: u32, integrations: &[&str]) {
+        let list = integrations.join(", ");
+        entity(
+            case,
+            &format!("FLOW-{n:03}-f.md"),
+            &format!(
+                "id: FLOW-{n:03}\ntype: flow\ntitle: Flow {n}\nstatus: accepted\nintegrations: [{list}]"
+            ),
+        );
+    }
+
     // --- budget ------------------------------------------------------------
 
     /// Битая сущность E3 (`availability_target` строкой) рядом с валидными.
@@ -1665,6 +1699,50 @@ mod tests {
             .find(|i| i.rule == "budget-hop-uncovered")
             .expect("warn");
         assert_eq!(w.severity, Severity::Warn);
+    }
+
+    #[test]
+    fn int_without_flow_is_warn_when_flows_exist() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let case = tmp.path();
+        int(case, 1, Some(800.0));
+        int(case, 2, Some(300.0));
+        nfr(case, 1, "p99_target_ms: 2000\n", "INT-001, INT-002");
+        flow(case, 1, &["INT-001"]);
+        let report = budget_check(case).expect("отчёт");
+        assert!(!report.has_errors(), "{:?}", report.issues);
+        let warns: Vec<&str> = report
+            .issues
+            .iter()
+            .filter(|i| i.rule == "int-without-flow")
+            .map(|i| i.message.as_str())
+            .collect();
+        assert_eq!(warns.len(), 1, "{:?}", report.issues);
+        assert!(warns[0].contains("INT-002"), "{warns:?}");
+        assert_eq!(
+            report
+                .issues
+                .iter()
+                .find(|i| i.rule == "int-without-flow")
+                .map(|i| i.severity),
+            Some(Severity::Warn)
+        );
+    }
+
+    #[test]
+    fn int_without_flow_silent_when_no_flows() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let case = tmp.path();
+        int(case, 1, Some(800.0));
+        int(case, 2, Some(300.0));
+        nfr(case, 1, "p99_target_ms: 2000\n", "INT-001, INT-002");
+        let report = budget_check(case).expect("отчёт");
+        assert!(!report.has_errors(), "{:?}", report.issues);
+        assert!(
+            !report.issues.iter().any(|i| i.rule == "int-without-flow"),
+            "без потоков проверка молчит: {:?}",
+            report.issues
+        );
     }
 
     #[test]

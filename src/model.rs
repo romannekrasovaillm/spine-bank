@@ -66,7 +66,7 @@ pub use validate::{ModelIssue, Severity, ValidationReport, validate};
 /// ([`parse_id`] сверяет длину совпадения), и для префиксного разбора имён
 /// файлов (`ADR-001-saga.md` в `control::adr_new`). Группы: 1 — префикс,
 /// 2 — номер.
-pub const ID_PATTERN: &str = r"^(CAP|SYS|CMP|INT|NFR|REQ|AD|ADR|RISK|OWNER|QAS)-([0-9]+)";
+pub const ID_PATTERN: &str = r"^(CAP|SYS|CMP|INT|NFR|REQ|AD|ADR|RISK|OWNER|QAS|FLOW)-([0-9]+)";
 
 /// Компилирует [`ID_PATTERN`]. Единственное место сборки regex идентификатора.
 ///
@@ -119,11 +119,16 @@ pub enum EntityKind {
     /// `QAS-` — сценарий атрибута качества (source/stimulus/artifact/
     /// response/measure, ADR-007).
     Qas,
+    /// `FLOW-` — поток КА ФО (цепочка «возможность ФО → ИВ → API →
+    /// договорённость», ADR-081). Поле `integrations` — список `INT-…`,
+    /// входит в модель/реестры/ландшафт, но НЕ в компонентный граф
+    /// `depends_on`.
+    Flow,
 }
 
 impl EntityKind {
     /// Все типы в стабильном порядке.
-    pub const ALL: [EntityKind; 11] = [
+    pub const ALL: [EntityKind; 12] = [
         EntityKind::Cap,
         EntityKind::Sys,
         EntityKind::Cmp,
@@ -135,6 +140,7 @@ impl EntityKind {
         EntityKind::Risk,
         EntityKind::Owner,
         EntityKind::Qas,
+        EntityKind::Flow,
     ];
 
     /// Префикс идентификатора (`CAP`, `ADR`, …).
@@ -152,6 +158,7 @@ impl EntityKind {
             EntityKind::Risk => "RISK",
             EntityKind::Owner => "OWNER",
             EntityKind::Qas => "QAS",
+            EntityKind::Flow => "FLOW",
         }
     }
 
@@ -176,6 +183,7 @@ impl EntityKind {
             EntityKind::Risk => "risk",
             EntityKind::Owner => "owner",
             EntityKind::Qas => "qas",
+            EntityKind::Flow => "flow",
         }
     }
 
@@ -200,6 +208,7 @@ impl EntityKind {
             EntityKind::Risk => "риск",
             EntityKind::Owner => "владелец",
             EntityKind::Qas => "сценарий атрибута качества",
+            EntityKind::Flow => "поток",
         }
     }
 
@@ -397,7 +406,7 @@ impl Tool for ModelQueryTool {
             description: "Запрос к типизированной модели архитектуры (каталог model/): \
                           карточка сущности по id со связями и обратными ссылками, либо \
                           список сущностей (с фильтром по типу: cap, sys, cmp, int, nfr, \
-                          req, ad, adr, risk, owner, qas)"
+                          req, ad, adr, risk, owner, qas, flow)"
                 .into(),
             parameters: json!({
                 "type": "object",
@@ -632,6 +641,7 @@ mod tests {
             ("RISK", EntityKind::Risk),
             ("OWNER", EntityKind::Owner),
             ("QAS", EntityKind::Qas),
+            ("FLOW", EntityKind::Flow),
         ] {
             let got = parse_id(&format!("{prefix}-7")).expect("валидный ID");
             assert_eq!(got, (kind, 7), "префикс {prefix}");
