@@ -326,20 +326,19 @@ pub fn split_frontmatter(text: &str) -> Result<(&str, &str)> {
     Err(HarnessError::Model("нет закрывающего маркера `---`".into()))
 }
 
-/// Внешние идентификаторы, которые пользователи по инерции кладут в шапку
-/// карточки вместо тела (формат Д-2 — поля потока/МЕТЫ в шапке — в разработке).
+/// Поля-«сироты» из мира Д-2, которые пользователи по инерции кладут в шапку
+/// карточки.
+///
+/// С 0.4.10 (ADR-081) `meta_id`, `registry_api` и `agreement` — ЛЕГАЛЬНЫЕ поля
+/// шапки `INT`, поэтому в словарь не входят (их отвергнет только грубый формат —
+/// это забота `model_validate`, а не serde). Осталось два случая:
+/// - `flow` — поток теперь ОТДЕЛЬНАЯ сущность `FLOW` со списком `integrations`;
+/// - `system`/`owner` — свободные атрибуты, их место в теле карточки.
 ///
 /// Схема frontmatter ЗАКРЫТА (ADR-003): поле отвергается (severity остаётся
 /// error). К ошибке лишь добавляем подсказку, КУДА такие идентификаторы класть,
 /// чтобы человек не гадал над «unknown field».
-const EXTERNAL_ID_FIELDS: [&str; 6] = [
-    "flow",
-    "meta_id",
-    "registry_api",
-    "agreement",
-    "system",
-    "owner",
-];
+const EXTERNAL_ID_FIELDS: [&str; 3] = ["flow", "system", "owner"];
 
 /// Достаёт имя поля из серде-сообщения «unknown field NAME, expected …».
 fn unknown_field_name(err: &str) -> Option<&str> {
@@ -348,14 +347,21 @@ fn unknown_field_name(err: &str) -> Option<&str> {
 }
 
 /// Подсказка к ошибке незнакомого поля frontmatter. Если отвергнутое поле —
-/// внешний идентификатор из [`EXTERNAL_ID_FIELDS`], возвращает строку с
-/// объяснением (начинается с `\n`); иначе — пустую строку (сообщение прежнее).
+/// «сирота» из [`EXTERNAL_ID_FIELDS`], возвращает строку с объяснением
+/// (начинается с `\n`); иначе — пустую строку (сообщение прежнее).
+///
+/// Для `flow` — подсказка про переезд механизма в сущность `FLOW` (ADR-081);
+/// для `system`/`owner` — прежняя «держите в теле карточки».
 fn external_id_hint(err: &str) -> String {
     match unknown_field_name(err) {
+        Some("flow") => "\nподсказка: поток — ОТДЕЛЬНАЯ сущность `FLOW` (ADR-081) с полем \
+             `integrations: [INT-…]`; в шапке `INT` с 0.4.10 доступны внешние \
+             идентификаторы `meta_id`, `registry_api`, `agreement` — \
+             см. docs/adr/ADR-081-*"
+            .to_string(),
         Some(name) if EXTERNAL_ID_FIELDS.contains(&name) => {
-            "\nподсказка: внешние идентификаторы (meta_id, registry_api, flow, agreement) \
-             держите в теле карточки — формат Д-2 (поля потока/МЕТЫ в шапке) в разработке; \
-             см. docs/adr/ADR-080-линия и Сценарии v7 З.2.3"
+            "\nподсказка: внешние идентификаторы держите в теле карточки — \
+             поля потока/МЕТЫ в шапке ведёт сущность `FLOW` (ADR-081)"
                 .to_string()
         }
         _ => String::new(),
@@ -949,6 +955,32 @@ mod tests {
         assert!(
             msg.contains("держите в теле карточки"),
             "подсказка про тело карточки: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_flow_header_field_gets_adr081_hint() {
+        // ADR-081: `flow` в шапке карточки — сирота старого формата. Схема
+        // закрыта (ADR-003), поле отвергается, но подсказка теперь ведёт к
+        // сущности `FLOW` с `integrations` (а не «в тело карточки»).
+        let dir = tempfile::tempdir().expect("tmp");
+        let file = write(
+            dir.path(),
+            "x.md",
+            "---\nid: INT-001\ntype: int\ntitle: T\nstatus: ok\nflow: Курсы\n---\n",
+        );
+        let err = parse_entity(&file, &std::fs::read_to_string(&file).expect("чтение"))
+            .expect_err("flow в шапке");
+        let msg = err.to_string();
+        assert!(msg.contains("frontmatter"), "{msg}");
+        assert!(msg.contains("flow"), "имя поля сохранено: {msg}");
+        assert!(
+            msg.contains("FLOW") && msg.contains("integrations"),
+            "подсказка про отдельную сущность FLOW: {msg}"
+        );
+        assert!(
+            msg.contains("meta_id") && msg.contains("registry_api") && msg.contains("agreement"),
+            "напоминание легальных полей шапки INT: {msg}"
         );
     }
 
