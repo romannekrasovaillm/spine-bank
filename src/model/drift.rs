@@ -29,7 +29,7 @@ use serde_json::{Value, json};
 use walkdir::WalkDir;
 
 use crate::control::LintIssue;
-use crate::error::Result;
+use crate::error::{HarnessError, Result};
 use crate::llm::ToolSpec;
 use crate::model::{EntityKind, load_model_tolerant};
 use crate::tool::{Tool, ToolContext, ToolOutput};
@@ -447,6 +447,16 @@ pub fn drift_check(case_dir: &Path) -> Result<DriftReport> {
 /// Как у [`drift_check`].
 pub fn drift_check_with(case_dir: &Path, options: &DriftOptions) -> Result<DriftReport> {
     let model_dir = case_dir.join("model");
+    // UX-5 (0.4.9): без явной проверки отсутствие `model/` падало сырым
+    // io-стеком «No such file or directory (os error 2)» без подсказки, где
+    // искать. Формат — как у nfr (`нет каталога модели (ожидается <путь>)`).
+    if !model_dir.is_dir() {
+        return Err(HarnessError::Model(format!(
+            "{}: нет каталога модели (ожидается {})",
+            case_dir.display(),
+            model_dir.display()
+        )));
+    }
     let model = load_model_tolerant(&model_dir)?;
     let mut issues = Vec::new();
     // E3: пропущенные при загрузке сущности — warn-находки, дрейф считается
@@ -919,7 +929,16 @@ mod tests {
     #[test]
     fn missing_model_dir_is_error() {
         let dir = tempfile::tempdir().expect("tmp");
-        assert!(drift_check(dir.path()).is_err());
+        // UX-5 (0.4.9): сырой io-стек «No such file or directory (os error 2)»
+        // без подсказки заменён сообщением с ожидаемым путём (как у nfr).
+        let msg = drift_check(dir.path())
+            .expect_err("нет каталога model/")
+            .to_string();
+        assert!(msg.contains("нет каталога модели"), "{msg}");
+        assert!(
+            msg.contains(&dir.path().join("model").display().to_string()),
+            "в ошибке ожидается путь к model/: {msg}"
+        );
     }
 
     /// Фикстура C2: два CMP с `code_roots`; CMP-001 объявляет `depends_on`
