@@ -324,6 +324,9 @@ pub const PLUGIN_ARCH_CORE_SKILLS_SIGNIFICANCE_ROUTING_SKILL_MD: &str =
 /// Встроенный файл плагина `assets/plugins/arch-core/skills/skill-authoring/SKILL.md`.
 pub const PLUGIN_ARCH_CORE_SKILLS_SKILL_AUTHORING_SKILL_MD: &str =
     include_str!("../assets/plugins/arch-core/skills/skill-authoring/SKILL.md");
+/// Встроенный файл плагина `assets/plugins/arch-core/skills/spec-first/SKILL.md`.
+pub const PLUGIN_ARCH_CORE_SKILLS_SPEC_FIRST_SKILL_MD: &str =
+    include_str!("../assets/plugins/arch-core/skills/spec-first/SKILL.md");
 /// Встроенный файл плагина `assets/plugins/arch-core/skills/spine-invariants/SKILL.md`.
 pub const PLUGIN_ARCH_CORE_SKILLS_SPINE_INVARIANTS_SKILL_MD: &str =
     include_str!("../assets/plugins/arch-core/skills/spine-invariants/SKILL.md");
@@ -745,6 +748,7 @@ const PLUGIN_FILES: &[(&str, &str)] = &[
     ("plugins/arch-core/skills/rubric-judging/SKILL.md", PLUGIN_ARCH_CORE_SKILLS_RUBRIC_JUDGING_SKILL_MD),
     ("plugins/arch-core/skills/significance-routing/SKILL.md", PLUGIN_ARCH_CORE_SKILLS_SIGNIFICANCE_ROUTING_SKILL_MD),
     ("plugins/arch-core/skills/skill-authoring/SKILL.md", PLUGIN_ARCH_CORE_SKILLS_SKILL_AUTHORING_SKILL_MD),
+    ("plugins/arch-core/skills/spec-first/SKILL.md", PLUGIN_ARCH_CORE_SKILLS_SPEC_FIRST_SKILL_MD),
     ("plugins/arch-core/skills/spine-invariants/SKILL.md", PLUGIN_ARCH_CORE_SKILLS_SPINE_INVARIANTS_SKILL_MD),
     ("plugins/arch-core/skills/spine-invariants/references/spine-template.md", PLUGIN_ARCH_CORE_SKILLS_SPINE_INVARIANTS_REFERENCES_SPINE_TEMPLATE_MD),
     ("plugins/patterns-integration/agents/pattern-selector.md", PLUGIN_PATTERNS_INTEGRATION_AGENTS_PATTERN_SELECTOR_MD),
