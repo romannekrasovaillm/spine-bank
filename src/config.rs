@@ -39,6 +39,9 @@ pub struct Config {
     pub hooks: HooksConfig,
     /// Изоляция окружения bash-команд (scrub секретоподобных переменных).
     pub bash: BashConfig,
+    /// Периметр файловых инструментов (песочница путей, ADR-083): зона
+    /// чтения/записи = рабочий каталог + `fs_allow`.
+    pub tools: ToolsConfig,
     /// Настройки планировщика.
     pub cron: CronSettings,
     /// Настройки LLM-судьи рубрик (калибровка, ADR-004).
@@ -750,6 +753,41 @@ impl BashConfig {
                 "[bash] sandbox: неизвестное значение \"{other}\" \
                  (допустимы: \"none\", \"bwrap\")"
             ))),
+        }
+    }
+}
+
+/// Периметр файловых инструментов (песочница путей, ADR-083 п.1).
+///
+/// Файловые инструменты (`read_file`/`write_file`/`edit_file`/`glob`/`grep`)
+/// не выходят за рабочую зону: рабочий каталог сессии ([`crate::tool::ToolContext::cwd`])
+/// плюс каталоги из `fs_allow`. Побег через `..`, абсолютный путь или symlink
+/// наружу — отказ (`is_error`) без исполнения. Это НЕ замена bash-песочнице
+/// (bwrap, ADR-038): та про дочерние процессы, эта — про путь, который
+/// инструмент открывает сам.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ToolsConfig {
+    /// Дополнительные каталоги вне `cwd`, куда файловым инструментам
+    /// разрешено (абсолютные пути; `~` раскрывается при загрузке). Дефолт —
+    /// `~/.arch-harness` (дом ассетов харнесса: скиллы, отчёты, сессии —
+    /// инструменты их читают из любой рабочей директории).
+    pub fs_allow: Vec<PathBuf>,
+    /// Песочница путей включена. `false` — аварийный откат к поведению до
+    /// ADR-083 (любой путь без проверки зоны): осознанный обход на случай,
+    /// если реальный прогон упрётся в ложное срабатывание. Дефолт `true`.
+    pub fs_sandbox: bool,
+}
+
+impl Default for ToolsConfig {
+    fn default() -> Self {
+        // Литерал `~/.arch-harness`, а не `Config::home_dir()`: `init`
+        // сериализует дефолт в файл, и пользователь должен увидеть ровно
+        // `~/.arch-harness` (портабельно, раскрывается `expand_tildes` при
+        // загрузке), а не абсолютный путь конкретной машины.
+        Self {
+            fs_allow: vec![PathBuf::from("~/.arch-harness")],
+            fs_sandbox: true,
         }
     }
 }
@@ -1983,6 +2021,7 @@ impl Default for Config {
             policy: PolicyConfig::default(),
             hooks: HooksConfig::default(),
             bash: BashConfig::default(),
+            tools: ToolsConfig::default(),
             cron: CronSettings::default(),
             judge: JudgeConfig::default(),
             trust: TrustConfig::default(),
@@ -2078,6 +2117,9 @@ impl Config {
         }
         expand(&mut self.mcp.servers_file);
         for d in &mut self.plugins.dirs {
+            expand(d);
+        }
+        for d in &mut self.tools.fs_allow {
             expand(d);
         }
         expand(&mut self.cron.file);
@@ -2210,6 +2252,30 @@ mod tests {
         let back: Config = toml::from_str(&text).expect("deserialize");
         assert_eq!(back.default_model, cfg.default_model);
         assert_eq!(back.models.len(), cfg.models.len());
+    }
+
+    /// Периметр файловых инструментов в дефолтах (ADR-083 п.1): песочница
+    /// включена, allowlist — литерал `~/.arch-harness` (init сериализует его
+    /// как есть; `expand_tildes` раскрывает при загрузке).
+    #[test]
+    fn tools_default_sandbox_and_allowlist() {
+        let cfg = Config::default();
+        assert!(cfg.tools.fs_sandbox, "песочница включена по умолчанию");
+        assert_eq!(cfg.tools.fs_allow, vec![PathBuf::from("~/.arch-harness")]);
+        // init-файл несёт литерал (портабельно), а не путь конкретной машины.
+        let text = toml::to_string_pretty(&cfg).expect("serialize");
+        assert!(text.contains("[tools]"), "{text}");
+        assert!(text.contains("~/.arch-harness"), "{text}");
+        // Загрузка раскрывает `~` в абсолютный путь (если дом известен).
+        let mut loaded = Config::default();
+        loaded.expand_tildes();
+        if dirs::home_dir().is_some() {
+            assert!(
+                loaded.tools.fs_allow[0].is_absolute(),
+                "expand_tildes раскрывает fs_allow: {:?}",
+                loaded.tools.fs_allow
+            );
+        }
     }
 
     #[test]

@@ -504,6 +504,20 @@ impl AgentSession {
                 if out.is_error {
                     self.note_tool_failure(&call.name, &redacted, &events);
                 }
+                // Аудит периметра файловых инструментов (ADR-083 п.1): отказ
+                // «вне рабочей зоны» пишется отдельным событием журнала сессии
+                // — видно, что модель пыталась выйти за cwd, каким инструментом
+                // и куда (без содержимого аргументов; секреты уже вычищены).
+                if crate::tool::is_fs_zone_denial(&out) {
+                    self.log_event(
+                        "event",
+                        serde_json::json!({
+                            "event": "fs_zone_denied",
+                            "tool": call.name,
+                            "reason": redacted.chars().take(300).collect::<String>(),
+                        }),
+                    );
+                }
                 // Аудит интерактивных выборов: метрика «approval theater»
                 // (обзоры _24_августа: >90–95% авто-согласий = театр) в arch-be metrics.
                 if call.name == crate::tools::ask::PROPOSE_OPTIONS {

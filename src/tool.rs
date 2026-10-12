@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -15,7 +15,7 @@ use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::config::Config;
-use crate::error::Result;
+use crate::error::{HarnessError, Result};
 use crate::llm::{LlmRegistry, ToolSpec};
 
 /// Вариант ответа на вопрос агента (инструмент `propose_options`).
@@ -133,6 +133,88 @@ impl ToolContext {
             p.to_path_buf()
         } else {
             self.cwd.join(p)
+        }
+    }
+
+    /// Резолвит путь относительно рабочего каталога и проверяет его
+    /// принадлежность файловой зоне (ADR-083 п.1): зона — рабочий каталог
+    /// плюс каталоги [`crate::config::ToolsConfig::fs_allow`].
+    ///
+    /// Проверка ведётся по КАНОНИЧЕСКОМУ пути, поэтому `..` и symlink'
+    /// наружу не обманывают зону; несуществующий путь (будущая запись)
+    /// канонизируется по ближайшему существующему предку. Возвращается
+    /// запрошенный (не канонизированный) путь — так сохраняется привычный
+    /// вид путей в выводе инструментов.
+    ///
+    /// # Errors
+    /// Путь вне зоны: `HarnessError::Tool` с текстом
+    /// «вне рабочей зоны: <запрошенный>; допустимо внутри <cwd>[, <allow>…]»
+    /// (маркер [`FS_ZONE_DENIAL_MARKER`]). Отключённая песочница
+    /// (`[tools] fs_sandbox = false`) возвращает путь без проверки.
+    pub fn resolve_checked(&self, path: impl AsRef<Path>) -> Result<PathBuf> {
+        let requested = self.resolve(path);
+        if !self.config.tools.fs_sandbox {
+            return Ok(requested);
+        }
+        let target = canonicalize_lenient(&requested);
+        let in_zone = |root: &Path| target.starts_with(canonicalize_lenient(root));
+        if in_zone(&self.cwd) || self.config.tools.fs_allow.iter().any(|a| in_zone(a)) {
+            return Ok(requested);
+        }
+        let mut allowed = vec![self.cwd.display().to_string()];
+        allowed.extend(
+            self.config
+                .tools
+                .fs_allow
+                .iter()
+                .map(|a| a.display().to_string()),
+        );
+        Err(HarnessError::Tool(format!(
+            "{FS_ZONE_DENIAL_MARKER} {}; допустимо внутри {}",
+            requested.display(),
+            allowed.join(", ")
+        )))
+    }
+}
+
+/// Маркер отказа файловой песочницы (ADR-083 п.1) в [`ToolOutput::content`].
+/// Агентный цикл ищет его ([`is_fs_zone_denial`]) и пишет отказ в журнал
+/// сессии; файловые инструменты кладут маркер через [`HarnessError::Tool`]
+/// (см. [`ToolContext::resolve_checked`]).
+pub const FS_ZONE_DENIAL_MARKER: &str = "вне рабочей зоны:";
+
+/// Отказ инструмента — выход за файловую зону (ADR-083 п.1): ошибка с
+/// маркером [`FS_ZONE_DENIAL_MARKER`] в тексте.
+#[must_use]
+pub fn is_fs_zone_denial(out: &ToolOutput) -> bool {
+    out.is_error && out.content.contains(FS_ZONE_DENIAL_MARKER)
+}
+
+/// Канонизирует путь максимально полно; если путь ещё не существует
+/// (например, создаётся последующей записью), канонизирует ближайшего
+/// существующего предка и дописывает несуществующий хвост как есть.
+/// Симлинки в существующей части раскрываются (как у `std::fs::canonicalize`).
+fn canonicalize_lenient(path: &Path) -> PathBuf {
+    if let Ok(c) = std::fs::canonicalize(path) {
+        return c;
+    }
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    let mut cur = path.to_path_buf();
+    loop {
+        if let Ok(c) = std::fs::canonicalize(&cur) {
+            let mut out = c;
+            for seg in tail.iter().rev() {
+                out.push(seg);
+            }
+            return out;
+        }
+        match (cur.file_name(), cur.parent()) {
+            (Some(name), Some(parent)) => {
+                tail.push(name.to_os_string());
+                cur = parent.to_path_buf();
+            }
+            // Дошли до корня (file_name = None) — канонизировать нечего.
+            _ => return path.to_path_buf(),
         }
     }
 }
@@ -488,5 +570,67 @@ mod tests {
         assert_eq!(c.resolve("sub/f.md"), dir.path().join("sub/f.md"));
         let abs = c.resolve("/etc/hostname");
         assert_eq!(abs, PathBuf::from("/etc/hostname"));
+    }
+
+    /// Песочница путей (ADR-083 п.1): внутри cwd — ок; побег `..` и
+    /// абсолютный путь наружу — отказ с маркером и подсказкой зоны.
+    #[test]
+    fn resolve_checked_confines_to_cwd() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let c = ctx(&dir);
+        assert_eq!(
+            c.resolve_checked("sub/f.md").expect("в зоне"),
+            dir.path().join("sub/f.md"),
+            "относительный путь внутри cwd проходит"
+        );
+        let esc = c.resolve_checked("../escape.md").unwrap_err();
+        assert!(
+            is_fs_zone_denial(&ToolOutput::err(esc.to_string())),
+            "побег через .. отклонён: {esc}"
+        );
+        let abs = c.resolve_checked("/etc/passwd").unwrap_err();
+        assert!(abs.to_string().contains(FS_ZONE_DENIAL_MARKER), "{abs}");
+        assert!(abs.to_string().contains("допустимо внутри"), "{abs}");
+    }
+
+    /// `fs_allow` расширяет зону; `fs_sandbox = false` — аварийный откат без
+    /// проверки.
+    #[test]
+    fn resolve_checked_allowlist_and_rollback() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let extra = tempfile::tempdir().expect("extra");
+        let mut cfg = Config::default();
+        cfg.tools.fs_allow = vec![extra.path().to_path_buf()];
+        let c = ToolContext::new(dir.path().to_path_buf(), Arc::new(cfg));
+        assert!(
+            c.resolve_checked(extra.path().join("f.md")).is_ok(),
+            "каталог из fs_allow доступен"
+        );
+        assert!(
+            c.resolve_checked("/etc/passwd").is_err(),
+            "allowlist не открывает всю ФС"
+        );
+        let mut cfg2 = Config::default();
+        cfg2.tools.fs_sandbox = false;
+        let c2 = ToolContext::new(dir.path().to_path_buf(), Arc::new(cfg2));
+        assert_eq!(
+            c2.resolve_checked("/etc/passwd").expect("откат"),
+            PathBuf::from("/etc/passwd"),
+            "fs_sandbox=false — путь проходит без проверки"
+        );
+    }
+
+    /// Симлинк формально внутри cwd, но ведёт наружу — канонизация зоны
+    /// раскрывает и отклоняет.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_checked_follows_symlink_out_of_zone() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let outside = tempfile::tempdir().expect("outside");
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(outside.path(), &link).expect("symlink");
+        let c = ctx(&dir);
+        let err = c.resolve_checked(&link).unwrap_err();
+        assert!(err.to_string().contains(FS_ZONE_DENIAL_MARKER), "{err}");
     }
 }
