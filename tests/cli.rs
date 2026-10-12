@@ -5524,3 +5524,42 @@ fn mcp_list_offline_skips_live_probe() {
         .stdout(contains("не проверялись"))
         .stdout(contains("kb-mcp"));
 }
+
+/// `arch-be agents-md refresh` принимает репозиторий и позиционно, и флагом
+/// `--repo`/`--path` (BACKLOG 0.4.8, П2). Смешение форм — ошибка.
+#[test]
+fn agents_md_refresh_accepts_positional_and_flag() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = tmp.path().join("proj");
+    std::fs::create_dir_all(&repo).expect("mkdir proj");
+
+    // Позиционная форма.
+    let mut positional = arch_cmd(tmp.path());
+    positional
+        .args(["agents-md", "refresh"])
+        .arg(repo.as_os_str());
+    positional.assert().success().stdout(contains("AGENTS.md"));
+    assert!(repo.join("AGENTS.md").is_file(), "AGENTS.md создан");
+
+    // Флаг `--repo`.
+    let mut flag = arch_cmd(tmp.path());
+    flag.args(["agents-md", "refresh", "--repo"])
+        .arg(repo.as_os_str());
+    flag.assert().success().stdout(contains("AGENTS.md"));
+
+    // Синоним `--path`.
+    let mut path_alias = arch_cmd(tmp.path());
+    path_alias
+        .args(["agents-md", "refresh", "--path"])
+        .arg(repo.as_os_str());
+    path_alias.assert().success().stdout(contains("AGENTS.md"));
+
+    // Смешение форм — явная ошибка, а не молчаливый выбор.
+    let mut mixed = arch_cmd(tmp.path());
+    mixed
+        .args(["agents-md", "refresh"])
+        .arg(repo.as_os_str())
+        .arg("--repo")
+        .arg(repo.as_os_str());
+    mixed.assert().failure().stderr(contains("смешение форм"));
+}

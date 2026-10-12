@@ -215,9 +215,16 @@ pub(crate) enum OpenspecCmd {
 #[derive(Subcommand)]
 pub(crate) enum AgentsMdCmd {
     /// Сгенерировать или обновить AGENTS.md (рукописная зона сохраняется).
+    ///
+    /// Репозиторий задаётся позиционно (`<repo>`) либо флагом `--repo`
+    /// (синоним `--path`) — как у `harness-run` и соседних команд.
     Refresh {
-        /// Репозиторий.
-        repo: PathBuf,
+        /// Репозиторий (позиционно или флагом `--repo`/`--path`).
+        #[arg(value_name = "REPO")]
+        repo: Option<PathBuf>,
+        /// Репозиторий (альтернатива позиционному `<repo>`; синоним `--path`).
+        #[arg(long = "repo", visible_alias = "path", value_name = "REPO")]
+        repo_flag: Option<PathBuf>,
     },
     /// Проверить AGENTS.md: свежесть (дрейф источников), ссылки, заглушки.
     Lint {
@@ -631,7 +638,20 @@ fn ensure_root_is_dir(root: &std::path::Path) -> Result<()> {
 /// `arch-be agents-md`: AGENTS.md как канал архитектурного контроля.
 pub(crate) fn cmd_agents_md(cfg: &Config, cmd: AgentsMdCmd) -> Result<()> {
     match cmd {
-        AgentsMdCmd::Refresh { repo } => {
+        AgentsMdCmd::Refresh { repo, repo_flag } => {
+            // П2 0.4.10: репозиторий — позиционно ИЛИ флагом `--repo`/`--path`
+            // (BACKLOG, живой тест Harness 0.4.8). Смешивать формы нельзя:
+            // неоднозначно, какая из них главнее.
+            let repo = match (repo, repo_flag) {
+                (Some(_), Some(_)) => {
+                    anyhow::bail!(
+                        "смешение форм не поддерживается: задайте репозиторий либо \
+                         позиционно (`<repo>`), либо флагом `--repo`/`--path`"
+                    );
+                }
+                (Some(p), None) | (None, Some(p)) => p,
+                (None, None) => anyhow::bail!("не задан репозиторий: <repo> или --repo/--path"),
+            };
             let report = arch_harness::agentsmd::generate(&repo)?;
             println!(
                 "AGENTS.md: {} ({}) — инвариантов: {}, fitness: {}",
