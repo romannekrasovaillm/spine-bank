@@ -45,11 +45,19 @@ pub(in crate::gate) fn component_model_drift(
             return GateComponent::fail("model_drift", format!("сбой выполнения: {e}"), Vec::new());
         }
     };
+    // Число исходных error-находок считаем ДО понижения (честность сводки,
+    // дефект 2 0.4.7): после понижения вне [gate.required] их всегда 0, и
+    // detail ложно выглядел как «серьёзных нет», хотя отдельная команда
+    // `model drift` на том же дереве даёт FAIL с error.
+    let mut original_errors = 0usize;
     let findings: Vec<GateFinding> = report
         .issues
         .iter()
         .map(|i| {
             let mut finding = GateFinding::lint(i);
+            if finding.severity == "error" {
+                original_errors += 1;
+            }
             if !required {
                 // Схема «warn → error по [gate.required]»: без явного
                 // включения дрейф предупреждает, но вердикт не ломает.
@@ -72,19 +80,21 @@ pub(in crate::gate) fn component_model_drift(
         )
         .noting(vec![unbound]);
     }
+    // Вердикт — по фактическим severity находок (после понижения): PASS вне
+    // [gate.required] остаётся PASS.
     let errors = findings.iter().filter(|f| f.severity == "error").count();
+    // detail показывает ИСХОДНЫЕ severity: при понижении прямо называем, что
+    // error-находки дрейфа не исчезли, а ослаблены схемой гейта.
+    let error_note = if original_errors > errors {
+        format!("error: {original_errors} — вне [gate.required] понижены до warn")
+    } else {
+        format!("error: {errors}")
+    };
     let detail = format!(
-        "CMP с code_roots: {} из {}, находок: {} (error: {errors}){}",
+        "CMP с code_roots: {} из {}, находок: {} ({error_note})",
         report.components_with_roots,
         report.components_total,
         findings.len(),
-        if required || errors == 0 {
-            String::new()
-        } else {
-            " — вне [gate.required] error дрейфа предупреждают; добавьте 'model_drift' \
-             в [gate.required] маршрута, чтобы дрейф блокировал выпуск"
-                .to_string()
-        }
     );
     if errors > 0 {
         GateComponent::fail("model_drift", detail, findings)
