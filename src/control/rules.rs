@@ -864,7 +864,15 @@ pub(super) fn parse_constraints_file(
     yaml: &str,
     file: &Path,
 ) -> Result<(ConstraintsFile, Vec<SkippedUnknownRule>, Vec<LintIssue>)> {
-    let shadow: ConstraintsFileShadow = serde_yaml_ng::from_str(yaml)?;
+    // P0-4 (0.4.9): ошибка YAML — это ошибка конкретного файла. Без пути в
+    // сообщении `control check` на битом реестре печатал голое
+    // «found unexpected end of stream…» — непонятно, какой из трёх входов
+    // (корень, `.arch-handoff/`, корпоративный `extends`) сломан. Обёртка
+    // пути здесь покрывает все входы: через эту функцию идут и корневая
+    // копия, и пакетная, и рекурсивный родитель `extends`.
+    let shadow: ConstraintsFileShadow = serde_yaml_ng::from_str(yaml).map_err(|e| {
+        HarnessError::Control(format!("{}: не разобрать YAML: {e}", file.display()))
+    })?;
     let mut skipped = Vec::new();
     let mut findings = Vec::new();
     let rules = parse_rules_tolerant(shadow.rules, file, &mut skipped, &mut findings)?;
