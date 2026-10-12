@@ -2962,6 +2962,62 @@ fn contract_diff_cli_text_and_sarif() {
     cmd.assert().success().stdout(contains("Итог: PASS"));
 }
 
+/// Диагностика 5 (0.4.7): `--semantic` без смысловых сдвигов печатает честную
+/// сводку «применено N, сигналов 0» (искали и чисто), а не молчит; без флага
+/// этой строки нет. Формат вне области зондов (proto) — «применено 0»,
+/// отличая «не искали» от «искали и чисто».
+#[test]
+fn contract_diff_semantic_zero_signal_line() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let old = tmp.path().join("old.yaml");
+    let new = tmp.path().join("new.yaml");
+    // Безобидное изменение: правим только `summary` — структурных и
+    // семантических сдвигов нет, но зонды применены (формат OpenAPI).
+    std::fs::write(
+        &old,
+        "openapi: 3.0.3\ninfo: {title: T, version: '1'}\npaths:\n  /v1/pets:\n    get:\n      responses:\n        '200': {description: ok}\n",
+    )
+    .expect("write old");
+    std::fs::write(
+        &new,
+        "openapi: 3.0.3\ninfo: {title: T, version: '1'}\npaths:\n  /v1/pets:\n    get:\n      summary: список\n      responses:\n        '200': {description: ok}\n",
+    )
+    .expect("write new");
+
+    // С флагом — строка «применено 4, сигналов 0» (зонды искали, чисто).
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("contract-diff")
+        .arg(&old)
+        .arg(&new)
+        .arg("--semantic");
+    cmd.assert().success().stdout(contains(
+        "Семантические зонды (--semantic): применено 4, сигналов 0",
+    ));
+
+    // Без флага — о зондах ни слова (вывод байт-в-байт прежний).
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("contract-diff").arg(&old).arg(&new);
+    cmd.assert()
+        .success()
+        .stdout(contains("Семантические зонды").not());
+
+    // Формат вне области зондов AB-12 (ADR-079 — только OpenAPI): флаг задан,
+    // но применять нечего — честный «применено 0», а не молчание.
+    let proto_old = tmp.path().join("old.proto");
+    let proto_new = tmp.path().join("new.proto");
+    let proto = "syntax = \"proto3\";\npackage demo.v1;\nmessage Ping { string id = 1; }\n";
+    std::fs::write(&proto_old, proto).expect("write old proto");
+    std::fs::write(&proto_new, proto).expect("write new proto");
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("contract-diff")
+        .arg(&proto_old)
+        .arg(&proto_new)
+        .arg("--semantic");
+    cmd.assert().success().stdout(contains(
+        "Семантические зонды (--semantic): применено 0, сигналов 0",
+    ));
+}
+
 /// `arch-be connect ci --dry-run` для трёх провайдеров: план с путём джобы,
 /// ничего не пишется; без `--provider` — понятная ошибка (exit 1).
 #[test]

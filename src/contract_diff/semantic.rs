@@ -36,6 +36,11 @@ use crate::error::Result;
 use super::openapi::read_openapi;
 use super::types::{Finding, location};
 
+/// Число семантических зондов (ADR-079: enum, единица измерения, `default`,
+/// ключ партиционирования). Диагностика 5 (0.4.7): рендер честно печатает
+/// «применено N, сигналов 0», отличая «зонд не искали» от «искали и чисто».
+pub(crate) const PROBE_COUNT: usize = 4;
+
 /// Методы операций `OpenAPI` (дублирует приватный список openapi.rs — зонд
 /// самостоятелен).
 const OPERATION_METHODS: [&str; 8] = [

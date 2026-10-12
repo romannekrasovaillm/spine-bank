@@ -81,6 +81,16 @@ pub fn render_report(report: &DiffReport) -> String {
                 f.severity, f.location, f.rule, f.message
             );
         }
+    } else if let Some(n) = report.semantic_probes {
+        // Диагностика 5 (0.4.7): флаг `--semantic` задан, зондов применено `n`,
+        // но смысловых сдвигов не нашлось. Печатаем явно, чтобы «искали и
+        // чисто» (`применено 4, сигналов 0`) не выглядело как «зонд не
+        // запускали» (без этой строки вывод пуст). Сигналов > 0 — прежний
+        // вывод выше, без изменений.
+        let _ = writeln!(
+            out,
+            "Семантические зонды (--semantic): применено {n}, сигналов 0"
+        );
     }
     if !report.semantic_consumers.is_empty() {
         let _ = writeln!(
@@ -197,6 +207,7 @@ mod tests {
             impact: None,
             semantic_changes: Vec::new(),
             semantic_consumers: Vec::new(),
+            semantic_probes: None,
         };
         let text = render_report(&report);
         assert!(
@@ -211,6 +222,7 @@ mod tests {
             impact: None,
             semantic_changes: Vec::new(),
             semantic_consumers: Vec::new(),
+            semantic_probes: None,
         };
         let text = render_report(&clean);
         assert!(
@@ -218,5 +230,35 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("Итог: PASS"), "{text}");
+    }
+
+    /// Диагностика 5 (0.4.7): при флаге `--semantic` и нуле сигналов рендер
+    /// печатает «применено N, сигналов 0» (искали и чисто), а без флага
+    /// (`semantic_probes: None`) такой строки нет — вывод байт-в-байт прежний.
+    #[test]
+    fn render_report_prints_zero_signal_line_only_with_probe_flag() {
+        let base = |probes: Option<usize>| DiffReport {
+            format: ContractFormat::OpenApi,
+            findings: vec![finding("warn")],
+            impact: None,
+            semantic_changes: Vec::new(),
+            semantic_consumers: Vec::new(),
+            semantic_probes: probes,
+        };
+        // Флаг задан, зондов применено 4, сигналов 0 — строка печатается.
+        let text = render_report(&base(Some(4)));
+        assert!(
+            text.contains("Семантические зонды (--semantic): применено 4, сигналов 0"),
+            "{text}"
+        );
+        // Формат вне области зонда: применено 0 — та же строка с нулём.
+        let text = render_report(&base(Some(0)));
+        assert!(
+            text.contains("Семантические зонды (--semantic): применено 0, сигналов 0"),
+            "{text}"
+        );
+        // Флага не было — ни слова о зондах (обратная совместимость вывода).
+        let text = render_report(&base(None));
+        assert!(!text.contains("Семантические зонды"), "{text}");
     }
 }
