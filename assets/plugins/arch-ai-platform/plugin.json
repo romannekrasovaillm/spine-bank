@@ -1,0 +1,17 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "arch-ai-platform",
+  "version": "1.0.0",
+  "description": "Архитектура корпоративной AI/LLM-платформы для solution-архитектора банка: референсная архитектура (AI-шлюз, каталог моделей, инференс, RAG, агентный рантайм, guardrails, наблюдаемость, эвалы), TCO внешнего API против собственного инференса с точкой безубыточности, FinOps AI-шлюза (маршрутизация, каскады, кэширование) и экономика токенов харнесса (cache-aware промпт, компакция, субагент как context firewall, failure-spend governance).",
+  "keywords": [
+    "architecture",
+    "ai-platform",
+    "llm",
+    "tco",
+    "finops",
+    "token-economics",
+    "inference",
+    "gateway",
+    "bank"
+  ]
+}
