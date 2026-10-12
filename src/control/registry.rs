@@ -570,14 +570,14 @@ pub(super) fn evaluate_overrides(
             // равно не отключается, поэтому находка — warn (вердикт не меняется,
             // `override_unknown_rule_is_warn` остаётся зелёным), а отдельный код
             // зовёт механику, а не только человеческий текст.
-            if let Some((code, note)) = adr_rejection(adr, (y, m, d), adr_policy)
-                && code == "override_adr_missing"
-            {
-                findings.push(finding(
-                    "warn",
-                    &code,
-                    format!("override '{rule}' (adr {adr}) — {note}"),
-                ));
+            if let Some((code, note)) = adr_rejection(adr, (y, m, d), adr_policy) {
+                if code == "override_adr_missing" {
+                    findings.push(finding(
+                        "warn",
+                        &code,
+                        format!("override '{rule}' (adr {adr}) — {note}"),
+                    ));
+                }
             }
             infos.push(info);
             continue;
