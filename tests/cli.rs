@@ -5493,3 +5493,34 @@ fn b9_cli_error_hides_backtrace_under_rust_backtrace_env() {
     assert_eq!(out.status.code(), Some(1), "вывод: {all}");
     assert!(all.contains("Error: "), "нет края `Error:`: {all}");
 }
+
+/// `arch-be mcp list --offline` (он же `--no-probe`) печатает конфигурацию
+/// серверов БЕЗ живых опросов (BACKLOG 0.4.8, П1): в офлайн-периметре
+/// команда не «висит» минутами, статус — «не проверялись».
+#[test]
+fn mcp_list_offline_skips_live_probe() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let home = tmp.path().join(".arch-harness");
+    std::fs::create_dir_all(&home).expect("mkdir .arch-harness");
+    std::fs::write(
+        home.join("mcp.json"),
+        r#"{"mcpServers": {"kb": {"command": "kb-mcp", "args": ["--stdio"]}}}"#,
+    )
+    .expect("write mcp.json");
+
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.args(["mcp", "list", "--offline"]);
+    cmd.assert()
+        .success()
+        .stdout(contains("не проверялись"))
+        .stdout(contains("kb-mcp"));
+
+    // Исторический синоним `--no-probe` даёт тот же результат.
+    let mut alias = arch_cmd(tmp.path());
+    alias.args(["mcp", "list", "--no-probe"]);
+    alias
+        .assert()
+        .success()
+        .stdout(contains("не проверялись"))
+        .stdout(contains("kb-mcp"));
+}

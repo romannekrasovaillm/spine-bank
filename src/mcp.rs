@@ -18,7 +18,7 @@ use std::fmt;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use futures::{StreamExt, stream};
@@ -409,6 +409,16 @@ async fn list_indexed(item: (usize, &McpServer)) -> Option<(usize, Vec<ToolSpec>
     }
 }
 
+/// Итог подключения с бюджетом ([`McpManager::connect_with_budget`]):
+/// какие серверы не ответили и был ли исчерпан суммарный бюджет.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ConnectReport {
+    /// Имена серверов, не подключившихся (сбой, таймаут или не опрошен).
+    pub unreachable: Vec<String>,
+    /// Суммарный бюджет времени исчерпан: часть серверов не опрошена.
+    pub budget_exhausted: bool,
+}
+
 /// Менеджер MCP-подключений (stdio JSON-RPC).
 pub struct McpManager {
     /// Подключённые серверы (в порядке конфигурации).
@@ -452,6 +462,57 @@ impl McpManager {
             )));
         }
         Ok(Self { servers: connected })
+    }
+
+    /// Подключение с суммарным бюджетом времени на **все** серверы.
+    ///
+    /// В отличие от [`McpManager::connect`], дедлайн ограничивает суммарное
+    /// ожидание, а не каждый сервер отдельно: последовательный офлайн-опрос
+    /// внешних серверов не «зависает» на минуты. По исчерпании бюджета
+    /// возвращаются уже собранные подключения и список неответивших — это
+    /// не ошибка (листинг конфигурации продолжается).
+    #[must_use]
+    pub async fn connect_with_budget(
+        servers: &[McpServerConfig],
+        per_server_timeout_secs: u64,
+        total_budget: Duration,
+    ) -> (Self, ConnectReport) {
+        let timeout = Duration::from_secs(per_server_timeout_secs);
+        // Таймаут пристраивается через zip/repeat (см. [`McpManager::connect`]) —
+        // замыкание с `&`-параметром не проходит HRTB-проверку Send в spawn.
+        let items = servers.iter().enumerate().zip(std::iter::repeat(timeout));
+        let started = Instant::now();
+        let deadline = tokio::time::sleep(total_budget);
+        // `take_until` обрывает поток по дедлайну, сохраняя уже собранные
+        // подключения (партиальный вывод), — в отличие от `timeout`, который
+        // отменил бы внутренний future и потерял результаты.
+        let mut indexed: Vec<(usize, McpServer)> = stream::iter(items)
+            .map(connect_indexed)
+            .buffer_unordered(CONNECT_CONCURRENCY)
+            .filter_map(std::future::ready)
+            .take_until(deadline)
+            .collect()
+            .await;
+        indexed.sort_by_key(|(idx, _)| *idx);
+        let connected_idx: std::collections::BTreeSet<usize> =
+            indexed.iter().map(|(idx, _)| *idx).collect();
+        let unreachable: Vec<String> = servers
+            .iter()
+            .enumerate()
+            .filter(|(idx, _)| !connected_idx.contains(idx))
+            .map(|(_, s)| s.name.clone())
+            .collect();
+        // Бюджет исчерпан ⟺ что-то не опрошено И прошло всё отведённое время
+        // (быстрый сбой сервера даёт elapsed < бюджета).
+        let budget_exhausted = !unreachable.is_empty() && started.elapsed() >= total_budget;
+        let connected: Vec<McpServer> = indexed.into_iter().map(|(_, server)| server).collect();
+        (
+            Self { servers: connected },
+            ConnectReport {
+                unreachable,
+                budget_exhausted,
+            },
+        )
     }
 
     /// Имена подключённых серверов.
@@ -965,6 +1026,46 @@ mod tests {
             .await
             .expect("пустой список — ок");
         assert_eq!(manager.server_names(), [] as [std::string::String; 0]);
+    }
+
+    #[tokio::test]
+    async fn connect_with_budget_stops_at_deadline() {
+        // `sleep` не читает stdin и не отвечает на handshake — имитация
+        // внешнего сервера в офлайн-периметре, «висящего» на подключении.
+        let servers = vec![McpServerConfig {
+            name: "hang".into(),
+            command: "sleep".into(),
+            args: vec!["30".into()],
+            env: BTreeMap::new(),
+        }];
+        let started = Instant::now();
+        let (manager, report) =
+            McpManager::connect_with_budget(&servers, 60, Duration::from_millis(300)).await;
+        assert!(manager.server_names().is_empty(), "никто не подключился");
+        assert_eq!(report.unreachable, vec!["hang".to_string()]);
+        assert!(report.budget_exhausted, "бюджет исчерпан");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "дедлайн обрывает раньше per-server таймаута (60 с)"
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_with_budget_fast_failure_not_exhausted() {
+        let servers = vec![McpServerConfig {
+            name: "bad".into(),
+            command: "arch-harness-nonexistent-binary-xyz".into(),
+            args: Vec::new(),
+            env: BTreeMap::new(),
+        }];
+        let (manager, report) =
+            McpManager::connect_with_budget(&servers, 5, Duration::from_secs(10)).await;
+        assert_eq!(manager.server_names(), [] as [std::string::String; 0]);
+        assert_eq!(report.unreachable, vec!["bad".to_string()]);
+        assert!(
+            !report.budget_exhausted,
+            "быстрый сбой — бюджет не исчерпан"
+        );
     }
 
     #[test]
