@@ -820,16 +820,22 @@ pub fn build_registry(root: &Path) -> Result<RegistryReport> {
     })
 }
 
-/// Маркеры отступления от инварианта в тексте решения (E10.2): решение
-/// объявляет исключение — значит, обоснование обязано быть проверено.
-const EXCEPTION_MARKERS: [&str; 6] = [
+/// Маркеры отступления от инварианта, достаточные сами по себе (E10.2):
+/// решение объявляет исключение — значит, обоснование обязано быть проверено.
+/// `override` здесь нет: это обычный термин механики правил, шумный в
+/// одиночку (см. `OVERRIDE_VERBS`).
+const EXCEPTION_MARKERS: [&str; 5] = [
     "отступлен",
     "исключени",
-    "override",
     "waiver",
     "обход инвариант",
     "не соблюда",
 ];
+
+/// Глаголы объявления, с которыми `override` в одной строке образует
+/// объявление отступления («допускается override правила R»). Одиночное
+/// `override` — упоминание механики, не объявление.
+const OVERRIDE_VERBS: [&str; 6] = ["применя", "допуска", "разреш", "ввод", "объявля", "использ"];
 
 /// Находки «исключение без обоснования» (E10.2): ADR, объявивший отступление
 /// от инварианта, обязан иметь свежий отчёт рубрики `adr_exception_justification`
@@ -874,13 +880,78 @@ fn exception_findings(project: &str, dir: &Path) -> Vec<RegistryFinding> {
     out
 }
 
-/// Объявлено ли в тексте отступление от инварианта (E10.2). Ищем маркеры в
-/// строках решения: слово в середине прозы — не объявление, а упоминание.
+/// Объявлено ли в тексте отступление от инварианта (E10.2). Матчим только
+/// зоны ОБЪЯВЛЕНИЯ: (а) секцию Decision (`## Decision`/`## Решение` до
+/// следующего заголовка `## `) и (б) строку `Status:`/`Статус:` в шапке
+/// (статусы вида «Accepted (исключение из AD-3)»). Провенанс, Context,
+/// Consequences, Alternatives, References — упоминания, а не объявления:
+/// слово в прозе не делает решение отступлением. Если секции Decision нет
+/// (ADR в свободной форме) — честно сканируем весь текст, но исключаем
+/// строку провенанса.
 fn declares_exception(text: &str) -> bool {
+    if status_line_declares_exception(text) {
+        return true;
+    }
+    if let Some(section) = decision_section(text) {
+        return section.lines().any(line_declares_exception);
+    }
+    text.lines()
+        .filter(|line| !is_provenance_line(line))
+        .any(line_declares_exception)
+}
+
+/// Строка объявляет отступление: несёт безусловный маркер, либо `override`
+/// рядом с глаголом объявления / в формате правила `override:`.
+fn line_declares_exception(line: &str) -> bool {
+    let low = line.to_lowercase();
+    if EXCEPTION_MARKERS.iter().any(|m| low.contains(m)) {
+        return true;
+    }
+    low.contains("override")
+        && (low.contains("override:") || OVERRIDE_VERBS.iter().any(|v| low.contains(v)))
+}
+
+/// Текст секции Decision (заголовок `## Decision` или `## Решение`) до
+/// следующего заголовка `## `, либо `None`, если секции нет.
+fn decision_section(text: &str) -> Option<String> {
+    let mut collecting = false;
+    let mut out = String::new();
+    for line in text.lines() {
+        if let Some(head) = line.trim_start().strip_prefix("## ") {
+            if collecting {
+                break;
+            }
+            let head = head.trim().to_lowercase();
+            if head.starts_with("decision") || head.starts_with("решение") {
+                collecting = true;
+            }
+            continue;
+        }
+        if collecting {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    collecting.then_some(out)
+}
+
+/// Строка `Status:`/`Статус:` в шапке объявляет отступление, если сама несёт
+/// маркер: статусы вида «Accepted (исключение из AD-3)».
+fn status_line_declares_exception(text: &str) -> bool {
     text.lines().any(|line| {
-        let low = line.to_lowercase();
-        EXCEPTION_MARKERS.iter().any(|m| low.contains(m))
+        let t = line
+            .trim_start_matches([' ', '\t', '-', '*'])
+            .to_lowercase();
+        (t.starts_with("status") || t.starts_with("статус")) && line_declares_exception(line)
     })
+}
+
+/// Строка провенанса в шапке (`- Провенанс: …`): упоминание механики правил,
+/// а не объявление отступления.
+fn is_provenance_line(line: &str) -> bool {
+    line.trim_start_matches([' ', '\t', '-', '*'])
+        .to_lowercase()
+        .starts_with("провенанс")
 }
 
 /// Есть ли у проекта свежий отчёт `adr_exception_justification` с решением
@@ -1611,6 +1682,191 @@ mod tests {
             &root,
             "docs/adr/ADR-001-plain.md",
             "# ADR-001. Обычное решение\n\n- Date: 2026-09-19\n- Status: Accepted\n\n             Решение соблюдает инвариант AD-2 без оговорок.\n",
+        );
+        let report = build_registry(&root).unwrap();
+        assert!(report.findings.is_empty(), "{:?}", report.findings);
+    }
+
+    // --- E10.2: матчинг по зоне объявления, а не по любой строке -----------
+
+    /// Кейс ADR-070: слово `override` в строке провенанса — упоминание
+    /// механики правил, не объявление отступления. Провенанс вне зоны
+    /// Decision — детектор молчит.
+    #[test]
+    fn declares_exception_ignores_override_in_provenance() {
+        // Строка воспроизводит провенанс ADR-070 до переформулировки.
+        let text = r"# ADR-070. Применимость правил
+
+- Date: 2026-10-11
+- Status: Accepted
+- Провенанс: продолжает линию корп-спайна (`extends`, override с
+  ADR/expiry, `docs/corp-spine.md`) и тех-радара `deny_dependency`
+
+## Decision
+
+Вводим `applies_to` и новые типы правил.
+";
+        assert!(
+            !declares_exception(text),
+            "упоминание override в провенансе — не объявление"
+        );
+    }
+
+    /// Полный цикл по репо-фикстуре: ADR-070-подобный документ с `override`
+    /// в провенансе не даёт находки `exception_unjustified`.
+    #[test]
+    fn registry_ignores_override_mention_in_provenance() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        write_file(
+            &root,
+            "docs/adr/ADR-070-pravila.md",
+            r"# ADR-070. Применимость правил
+
+- Date: 2026-10-11
+- Status: Accepted
+- Провенанс: продолжает линию корп-спайна (`extends`, override с
+  ADR/expiry, `docs/corp-spine.md`)
+
+## Decision
+
+Вводим `applies_to`.
+",
+        );
+        let report = build_registry(&root).unwrap();
+        assert!(
+            report.findings.is_empty(),
+            "упоминание override в провенансе не даёт находки: {:?}",
+            report.findings
+        );
+    }
+
+    /// `override` в секции Decision рядом с глаголом объявления — настоящее
+    /// объявление отступления.
+    #[test]
+    fn declares_exception_in_decision_with_override_verb() {
+        let text = r"# ADR-001. X
+
+- Date: 2026-01-01
+- Status: Accepted
+
+## Decision
+
+Для сервисов X допускается override правила R с ADR-099.
+";
+        assert!(declares_exception(text), "override + глагол в Decision");
+    }
+
+    /// Статус вида «Accepted (исключение из AD-3)» — объявление отступления
+    /// в шапке, даже если Decision чист.
+    #[test]
+    fn declares_exception_in_status_line() {
+        let text = r"# ADR-001. X
+
+- Date: 2026-01-01
+- Status: Accepted (исключение из AD-3)
+
+## Decision
+
+Обычное решение.
+";
+        assert!(declares_exception(text), "маркер в строке статуса");
+    }
+
+    /// ADR в свободной форме (без секции Decision): честно сканируем весь
+    /// текст — упоминание исключения в прозе считается объявлением.
+    #[test]
+    fn declares_exception_free_form_without_decision_section() {
+        let text = r"# ADR-001. X
+
+- Date: 2026-01-01
+- Status: Accepted
+
+## Consequences
+
+Здесь упомянем исключение из общего правила.
+";
+        assert!(
+            declares_exception(text),
+            "свободная форма: скан всего текста"
+        );
+    }
+
+    /// ADR С секцией Decision: упоминание маркера вне Decision (Consequences,
+    /// Alternatives, References) — не объявление.
+    #[test]
+    fn declares_exception_ignores_mention_outside_decision_zone() {
+        let text = r"# ADR-001. X
+
+- Date: 2026-01-01
+- Status: Accepted
+
+## Decision
+
+Вводим правило и следуем инвариантам.
+
+## Consequences
+
+Может создать исключение из общего случая.
+
+## Alternatives
+
+Осознанное исключение — отвергнуто.
+";
+        assert!(
+            !declares_exception(text),
+            "маркер вне Decision — упоминание, не объявление"
+        );
+    }
+
+    /// Честное объявление в Decision, закрытое свежим pass-отчётом, находки
+    /// не даёт (существующее поведение `exception_justified` не сломано).
+    #[test]
+    fn registry_decision_exception_closed_by_passing_report() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        let adr = "docs/adr/ADR-001-exception.md";
+        write_file(
+            &root,
+            adr,
+            r"# ADR-001. Отступление от AD-2
+
+- Date: 2026-09-19
+- Status: Accepted
+
+## Decision
+
+Допускаем отступление от инварианта AD-2 для скорости.
+",
+        );
+        // Без отчёта — находка есть (зона Decision ловит объявление).
+        let report = build_registry(&root).unwrap();
+        assert_eq!(
+            report
+                .findings
+                .iter()
+                .filter(|f| f.kind == "exception_unjustified")
+                .count(),
+            1,
+            "{:?}",
+            report.findings
+        );
+        // Свежий pass-отчёт закрывает исключение.
+        let artifact = serde_json::json!({
+            "schema": "arch-rubric-artifact/1",
+            "rubric": "adr_exception_justification",
+            "target": adr,
+            "judge_model": "judge-1",
+            "weighted_total": 4.0,
+            "verdict": "v",
+            "decision": "pass",
+            "scores": [],
+            "judged_at": "2026-09-25T12:00:00Z",
+        });
+        write_file(
+            &root,
+            "reports/rubric/ADR-001-exception--adr_vs_spine.json",
+            &serde_json::to_string(&artifact).unwrap(),
         );
         let report = build_registry(&root).unwrap();
         assert!(report.findings.is_empty(), "{:?}", report.findings);
