@@ -1571,6 +1571,68 @@ mod tests {
         assert!(!report.passed, "error-находка ломает вердикт");
     }
 
+    /// П4 0.4.10: `must_not_contain` с ДЕФОЛТНЫМ glob (поле `glob` не задано)
+    /// не сканирует сам реестр — иначе правило находит «запрещённый» паттерн
+    /// в теле собственного определения (самонаход).
+    #[test]
+    fn fitness_must_not_contain_default_glob_skips_registry_self() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        // Паттерн 'PAN' встречается в теле самого правила (строка pattern):
+        // дефолтный glob `**/*` нашёл бы реестр и дал самонаход.
+        let constraints = write_file(
+            &repo,
+            "CONSTRAINTS.yaml",
+            "rules:\n\
+             \x20 - name: no_pan\n\
+             \x20   type: must_not_contain\n\
+             \x20   pattern: 'PAN'\n\
+             \x20   severity: error\n",
+        );
+        // Корпоративный реестр тоже в дефолтном списке исключений.
+        write_file(&repo, "CONSTRAINTS.corp.yaml", "comment: PAN\n");
+        write_file(&repo, "src/app.py", "print('ok')\n");
+        let report = check(&repo, &constraints).unwrap();
+        assert!(
+            report.issues.iter().all(|i| i.rule != "no_pan"),
+            "реестр не должен быть самонаходом: {:?}",
+            report.issues
+        );
+        assert!(report.passed, "{:?}", report.issues);
+    }
+
+    /// П4 0.4.10: ЯВНЫЙ glob сохраняет прежнее поведение — реестр остаётся в
+    /// выборке, самонаход виден (автор правила сам решает, включать ли его).
+    #[test]
+    fn fitness_must_not_contain_explicit_glob_sees_registry_self() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        let constraints = write_file(
+            &repo,
+            "CONSTRAINTS.yaml",
+            "rules:\n\
+             \x20 - name: no_pan\n\
+             \x20   type: must_not_contain\n\
+             \x20   glob: '**/*'\n\
+             \x20   pattern: 'PAN'\n\
+             \x20   severity: error\n",
+        );
+        write_file(&repo, "src/app.py", "print('ok')\n");
+        let report = check(&repo, &constraints).unwrap();
+        let hits: Vec<_> = report
+            .issues
+            .iter()
+            .filter(|i| i.rule == "no_pan")
+            .collect();
+        assert_eq!(
+            hits.len(),
+            1,
+            "явный glob видит реестр: {:?}",
+            report.issues
+        );
+        assert!(hits[0].file.ends_with("CONSTRAINTS.yaml"));
+    }
+
     // --- dependency_direction (ADR-029) -----------------------------------
 
     /// Мини-репозиторий для слоевых тестов: `src/llm/engine.rs` импортирует
