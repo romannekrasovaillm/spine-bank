@@ -232,9 +232,14 @@ enum Cmd {
     /// Standard/Critical — количественные NFR и проверка evidence-бандлов.
     /// Провал любой составляющей — exit 1 (механически, без разбора строк).
     Gate {
-        /// Репозиторий (по умолчанию — текущий каталог).
+        /// Репозиторий (по умолчанию — текущий каталог). Принимается и
+        /// флагом `--repo <путь>`, и позиционно (`gate <путь>`) — как у
+        /// `control check`/`model validate` (П6 0.4.10).
         #[arg(long)]
         repo: Option<PathBuf>,
+        /// Позиционный синоним `--repo`: `gate <путь>` (П6 0.4.10).
+        #[arg(value_name = "REPO")]
+        repo_pos: Option<PathBuf>,
         /// Маршрут: auto (механически из git-диффа, дефолт) | fast |
         /// standard | critical. Явное значение переопределяет авто-режим.
         #[arg(long, default_value = "auto")]
@@ -1189,6 +1194,7 @@ pub(crate) async fn run() -> Result<()> {
         Some(Cmd::Control { cmd }) => cmd_control(&cfg, cmd)?,
         Some(Cmd::Gate {
             repo,
+            repo_pos,
             route,
             base,
             constraints,
@@ -1198,7 +1204,9 @@ pub(crate) async fn run() -> Result<()> {
             no_exec,
             shadow_constraints,
         }) => {
-            let repo = repo.unwrap_or_else(|| PathBuf::from("."));
+            // П6 0.4.10: `--repo` и позиционный `<repo>` — синонимы; флаг
+            // имеет приоритет при одновременной передаче.
+            let repo = repo.or(repo_pos).unwrap_or_else(|| PathBuf::from("."));
             // Режим сверки конверта: пересчитывает входы на текущем дереве и
             // отвечает, относится ли вердикт к этому состоянию.
             if let Some(envelope) = verify_envelope {

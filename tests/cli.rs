@@ -1539,6 +1539,29 @@ fn gate_clean_repo_exits_0() {
         .stdout(contains("Итог: PASS"));
 }
 
+/// П6 0.4.10: `gate` принимает позиционный `<repo>` как синоним `--repo`
+/// (`control check`/`model validate` позиционны) — оба синтаксиса работают
+/// и дают тот же вердикт.
+#[test]
+fn gate_accepts_positional_repo_alias() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = gate_repo(tmp.path());
+
+    // Позиционный `<repo>`.
+    let mut positional = arch_cmd(tmp.path());
+    positional.arg("gate").arg(repo.as_os_str());
+    positional
+        .assert()
+        .success()
+        .stdout(contains("Маршрут: Fast (auto"))
+        .stdout(contains("Итог: PASS"));
+
+    // Флаг `--repo` — прежняя форма, тот же вердикт.
+    let mut flag = arch_cmd(tmp.path());
+    flag.arg("gate").arg("--repo").arg(repo.as_os_str());
+    flag.assert().success().stdout(contains("Итог: PASS"));
+}
+
 /// D2 (ADR-059): `gate --shadow-constraints` добавляет теневой блок —
 /// новые находки по правилам-кандидатам, — не меняя основной вердикт и
 /// exit-код; без флага блока нет, а отчёт прогона сохраняется для флота.
