@@ -544,6 +544,10 @@ pub(crate) fn cmd_openspec(cfg: &Config, cmd: OpenspecCmd) -> Result<()> {
                         "с --change идентификатор задаётся значением флага, позиционный <change-id> не нужен"
                     );
                 }
+                // Дефект 4 (0.4.7): значение --change — идентификатор change,
+                // а не путь; иначе перепутанные аргументы молча уходят дальше.
+                ensure_change_id_not_path(&change)?;
+                ensure_root_is_dir(&root)?;
                 let limits = cfg
                     .significance
                     .limits()
@@ -571,6 +575,16 @@ pub(crate) fn cmd_openspec(cfg: &Config, cmd: OpenspecCmd) -> Result<()> {
             let Some(change_id) = change_id else {
                 anyhow::bail!("--archive требует <change-id> позиционным аргументом");
             };
+            // Дефект 4 (0.4.7), слои 1–2: позиционные root и change_id не
+            // привязаны к флагам — перепутанный порядок
+            // (`gate --archive <change-id> <repo>`) не должен молча уходить
+            // в гейт, где id становится путём. Сначала id, потом root:
+            // в перепутанном вызове именно id = <repo> и выдаёт ошибку.
+            ensure_change_id_not_path(&change_id)?;
+            ensure_root_is_dir(&root)?;
+            // Слой 3: `gate_archive` на несуществующем change не PASS —
+            // `active_change_dir` возвращает ошибку «change '<id>' не найден»
+            // (exit ≠ 0), а не зелёный вердикт.
             let report =
                 arch_harness::openspec::gate_archive(&root, &change_id, constraints.as_deref())?;
             print!("{}", report.to_markdown());
@@ -578,6 +592,38 @@ pub(crate) fn cmd_openspec(cfg: &Config, cmd: OpenspecCmd) -> Result<()> {
                 std::process::exit(1);
             }
         }
+    }
+    Ok(())
+}
+
+/// Дефект 4 (0.4.7), слой 1: идентификатор change не может выглядеть как путь.
+///
+/// `openspec gate` принимает позиционные `<repo>` и `<change-id>`; при
+/// перепутанном порядке (`gate --archive <change-id> <repo>`) в id попадает
+/// путь репозитория, и гейт молча прогоняется с неверным идентификатором.
+/// Отвергаем id, содержащий разделитель пути или резолвящийся в существующий
+/// путь (`.`, `repo`, `./x`) — с подсказкой о синтаксисе.
+fn ensure_change_id_not_path(change_id: &str) -> Result<()> {
+    let looks_like_path = change_id.contains('/')
+        || change_id.contains('\\')
+        || std::path::Path::new(change_id).exists();
+    if looks_like_path {
+        anyhow::bail!(
+            "аргументы перепутаны: '{change_id}' похож на путь к репозиторию; \
+             синтаксис: openspec gate --archive <repo> <change-id>"
+        );
+    }
+    Ok(())
+}
+
+/// Дефект 4 (0.4.7), слой 2: `root` обязан быть существующим каталогом —
+/// иначе понятная ошибка вместо дальнего падения при чтении `openspec/`.
+fn ensure_root_is_dir(root: &std::path::Path) -> Result<()> {
+    if !root.is_dir() {
+        anyhow::bail!(
+            "каталог репозитория '{}' не найден: позиционный <repo> должен существовать",
+            root.display()
+        );
     }
     Ok(())
 }

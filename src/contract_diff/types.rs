@@ -76,6 +76,13 @@ pub struct DiffReport {
     /// Подсказка о потребителях поля (`[inferred]`): файлы кейса, упоминающие
     /// имена семантически изменённых полей. Пусто без `--semantic`/`--model`.
     pub semantic_consumers: Vec<String>,
+    /// Диагностика 5 (0.4.7): сколько семантических зондов применено.
+    /// `None` — зонд не запускался (флага `--semantic` нет) — рендер молчит,
+    /// как раньше. `Some(n)` — флаг задан: `n` зондов применено (0 — формат
+    /// вне области зонда, AB-12 только `OpenAPI`); при нуле сигналов рендер
+    /// печатает `применено n, сигналов 0`, отличая «не искали» от «искали и
+    /// чисто».
+    pub semantic_probes: Option<usize>,
 }
 
 impl DiffReport {
@@ -178,6 +185,7 @@ mod tests {
             impact: None,
             semantic_changes: Vec::new(),
             semantic_consumers: Vec::new(),
+            semantic_probes: None,
         };
         assert!(!report(vec![]).has_breaking());
         assert!(!report(vec![finding("warn")]).has_breaking());
@@ -199,6 +207,7 @@ mod tests {
                 message: "единица измерения изменилась".to_string(),
             }],
             semantic_consumers: Vec::new(),
+            semantic_probes: None,
         };
         assert!(report.has_breaking());
     }

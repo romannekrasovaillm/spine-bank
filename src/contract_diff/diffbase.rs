@@ -130,15 +130,22 @@ fn diff_report_impl(
     };
     // Семантические зонды — только для OpenAPI (основной формат AB-12) и
     // только по флагу: иначе вывод не меняется.
-    let (semantic_changes, semantic_consumers) = if semantic && format == ContractFormat::OpenApi {
-        let (changes, fields) = semantic::diff_openapi_semantic(&old_text, &new_text, old, new)?;
-        let consumers = match model_case {
-            Some(case) => semantic::scan_consumers(case, &fields),
-            None => Vec::new(),
-        };
-        (changes, consumers)
+    let (semantic_changes, semantic_consumers, semantic_probes) = if semantic {
+        if format == ContractFormat::OpenApi {
+            let (changes, fields) =
+                semantic::diff_openapi_semantic(&old_text, &new_text, old, new)?;
+            let consumers = match model_case {
+                Some(case) => semantic::scan_consumers(case, &fields),
+                None => Vec::new(),
+            };
+            (changes, consumers, Some(semantic::PROBE_COUNT))
+        } else {
+            // Зонд AB-12 — только OpenAPI (ADR-079): флаг задан, но применить
+            // зонд нечего — честный `Some(0)`, а не молчание «не искали».
+            (Vec::new(), Vec::new(), Some(0))
+        }
     } else {
-        (Vec::new(), Vec::new())
+        (Vec::new(), Vec::new(), None)
     };
     Ok(DiffReport {
         format,
@@ -146,6 +153,7 @@ fn diff_report_impl(
         impact,
         semantic_changes,
         semantic_consumers,
+        semantic_probes,
     })
 }
 
@@ -192,6 +200,7 @@ pub fn diff_report_str(
         impact: None,
         semantic_changes: Vec::new(),
         semantic_consumers: Vec::new(),
+        semantic_probes: None,
     })
 }
 

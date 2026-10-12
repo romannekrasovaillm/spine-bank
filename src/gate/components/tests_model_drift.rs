@@ -99,6 +99,18 @@ fn model_drift_off_by_default_warns_without_breaking() {
         render(&report)
     );
     assert_eq!(report.outcome, GateOutcome::Pass);
+    // Дефект 2 (0.4.7): detail считает ИСХОДНЫЕ severity и прямо называет
+    // понижение — иначе «error: 0» ложно выглядел как «серьёзных нет».
+    assert!(
+        comp.detail.contains("error: 1"),
+        "detail честно называет исходный error: {}",
+        comp.detail
+    );
+    assert!(
+        comp.detail.contains("понижены"),
+        "detail называет понижение вне [gate.required]: {}",
+        comp.detail
+    );
 }
 
 /// C1: в `[gate.required]` маршрута error-находки дрейфа ломают гейт.
@@ -130,6 +142,18 @@ fn model_drift_in_required_breaks_the_gate_on_errors() {
     assert_eq!(finding.severity, "error", "{:?}", comp.findings);
     assert!(!report.passed, "{}", render(&report));
     assert_eq!(report.outcome, GateOutcome::Fail);
+    // Дефект 2 (0.4.7): без понижения строка прежняя — «error: 1» и БЕЗ
+    // пометки о понижении.
+    assert!(
+        comp.detail.contains("error: 1"),
+        "detail в required: {}",
+        comp.detail
+    );
+    assert!(
+        !comp.detail.contains("понижены"),
+        "в required понижения нет: {}",
+        comp.detail
+    );
 }
 
 /// C1: warn-находки дрейфа (непокрытый манифест) и в required не ломают

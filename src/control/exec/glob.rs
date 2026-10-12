@@ -129,13 +129,97 @@ pub(super) fn segment_matches(pattern: &str, name: &str) -> bool {
 }
 
 /// Матч относительного пути по glob-шаблону с поддержкой `**` (любая глубина,
-/// включая ноль сегментов: `**/*.rs` матчит и `main.rs`).
+/// включая ноль сегментов: `**/*.rs` матчит и `main.rs`) и фигурных скобок
+/// `{a,b,c}` (brace expansion, как в bash — см. [`expand_braces`]).
 ///
 /// `pub(crate)`: разделяется с аудитом флота (`crate::fleet`, флаг `--include`).
 pub(crate) fn glob_matches(pattern: &str, path: &str) -> bool {
+    expand_braces(pattern)
+        .iter()
+        .any(|variant| glob_matches_literal(variant, path))
+}
+
+/// Матч пути по УЖЕ раскрытому шаблону (без `{}`).
+fn glob_matches_literal(pattern: &str, path: &str) -> bool {
     let pat: Vec<&str> = pattern.split('/').collect();
     let parts: Vec<&str> = path.split('/').collect();
     match_glob_segments(&pat, &parts)
+}
+
+/// Раскрывает фигурные скобки glob-шаблона в список альтернатив (brace
+/// expansion, как в bash): `**/*.{java,yml,yaml}` → `**/*.java`, `**/*.yml`,
+/// `**/*.yaml`. Вложенные скобки дают декартово произведение (`{a,{b,c}}` →
+/// `a`, `b`, `c`), `{}` без запятой верхнего уровня не раскрывается (`{x}`
+/// остаётся литералом), незакрытая `{` — тоже литерал.
+///
+/// Без `{}` возвращает единственный вариант, равный входу (поведение
+/// байт-в-байт прежнее).
+pub(crate) fn expand_braces(pattern: &str) -> Vec<String> {
+    let Some(open) = pattern.find('{') else {
+        return vec![pattern.to_string()];
+    };
+    // Парная `}` для первой `{` с учётом вложенности.
+    let mut depth = 0usize;
+    let mut close = None;
+    for (i, ch) in pattern.char_indices().skip_while(|(i, _)| *i < open) {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let Some(close) = close else {
+        // Незакрытая `{` — литерал: фиксируем её и раскрываем остаток.
+        let head = &pattern[..=open];
+        return expand_braces(&pattern[open + 1..])
+            .into_iter()
+            .map(|tail| format!("{head}{tail}"))
+            .collect();
+    };
+    let parts = split_top_level_commas(&pattern[open + 1..close]);
+    if parts.len() < 2 {
+        // Запятой верхнего уровня нет — эти скобки не раскрываются (bash):
+        // оставляем `{...}` литералом и раскрываем только остаток.
+        let head = &pattern[..=close];
+        return expand_braces(&pattern[close + 1..])
+            .into_iter()
+            .map(|tail| format!("{head}{tail}"))
+            .collect();
+    }
+    let prefix = &pattern[..open];
+    let suffix = &pattern[close + 1..];
+    let mut out = Vec::new();
+    for part in parts {
+        out.extend(expand_braces(&format!("{prefix}{part}{suffix}")));
+    }
+    out
+}
+
+/// Делит тело `{...}` на альтернативы по запятым ВЕРХНЕГО уровня (запятые
+/// внутри вложенных `{}` не разделяют).
+fn split_top_level_commas(body: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    for (i, ch) in body.char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                parts.push(&body[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&body[start..]);
+    parts
 }
 
 fn match_glob_segments(pat: &[&str], parts: &[&str]) -> bool {

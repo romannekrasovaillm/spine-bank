@@ -1470,6 +1470,94 @@ mod tests {
         assert!(segment_matches("*", "anything"));
     }
 
+    /// Дефект 1 (0.4.7): скобочные глобы `{a,b,c}` раскрываются (bash
+    /// brace expansion), а не трактуются буквально — иначе правило молчит.
+    #[test]
+    fn glob_brace_expansion_matches_alternatives() {
+        // (а) `**/*.{java,yml,yaml}` матчит каждую альтернативу, но не прочее.
+        for yes in ["x.java", "y.yml", "z.yaml", "pkg/deep/App.java"] {
+            assert!(
+                glob_matches("**/*.{java,yml,yaml}", yes),
+                "должен матчить {yes}"
+            );
+        }
+        assert!(
+            !glob_matches("**/*.{java,yml,yaml}", "w.txt"),
+            "w.txt не входит в альтернативы"
+        );
+        // (в) без `{}` поведение прежнее (байт-в-байт по смыслу матчинга).
+        assert!(glob_matches("**/*.java", "a/b.java"));
+        assert!(!glob_matches("**/*.java", "a/b.yml"));
+        // Префикс/суффикс вокруг скобок сохраняются.
+        assert!(glob_matches("src/*.{rs,go}", "src/main.rs"));
+        assert!(glob_matches("src/*.{rs,go}", "src/lib.go"));
+        assert!(!glob_matches("src/*.{rs,go}", "src/lib.py"));
+    }
+
+    /// Дефект 1 (0.4.7): вложенные скобки — декартово произведение;
+    /// незакрытая `{` и `{x}` без запятой — литерал (как в bash).
+    #[test]
+    fn glob_brace_expansion_nested_and_literal() {
+        // (г) вложенность: `{a,{b,c}}` → a, b, c.
+        let expanded = expand_braces("{a,{b,c}}");
+        assert_eq!(expanded, vec!["a", "b", "c"], "{expanded:?}");
+        // Декартово произведение: `{a,b}{c,d}` → ac, ad, bc, bd.
+        let mut prod = expand_braces("{a,b}{c,d}");
+        prod.sort();
+        assert_eq!(prod, vec!["ac", "ad", "bc", "bd"], "{prod:?}");
+        // Незакрытая `{` — литерал.
+        assert_eq!(expand_braces("{a,b"), vec!["{a,b"]);
+        assert_eq!(expand_braces("x{y,z"), vec!["x{y,z"]);
+        // `{x}` без запятой верхнего уровня не раскрывается.
+        assert_eq!(expand_braces("{x}"), vec!["{x}"]);
+        // Без скобок — единственный вариант, равный входу.
+        assert_eq!(expand_braces("**/*.rs"), vec!["**/*.rs"]);
+    }
+
+    /// Дефект 1 (0.4.7), регрессия из отчёта: правило `must_not_contain` с
+    /// скобочным глобом `**/*.{java,yml,yaml}` и паттерном номера карты
+    /// ЛОВИТ PAN в `.java`-файле (раньше скобки трактовались буквально —
+    /// правило молча не находило нарушение).
+    #[test]
+    fn fitness_must_not_contain_brace_glob_catches_pan() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        write_file(
+            &repo,
+            "wallet-service/src/BonusDebit.java",
+            "class BonusDebit {\n  // PAN: 4111 1111 1111 1111\n}\n",
+        );
+        // Чистый файл вне альтернатив глоба — находки быть не должно.
+        write_file(
+            &repo,
+            "wallet-service/src/notes.txt",
+            "PAN: 4111 1111 1111 1111\n",
+        );
+        let constraints = write_file(
+            dir.path(),
+            "CONSTRAINTS.yaml",
+            "rules:\n\
+             \x20 - name: no_pan_in_payment_code\n\
+             \x20   type: must_not_contain\n\
+             \x20   glob: '**/*.{java,yml,yaml}'\n\
+             \x20   pattern: '\\d{4} \\d{4} \\d{4} \\d{4}'\n\
+             \x20   severity: error\n",
+        );
+        let report = check(&repo, &constraints).unwrap();
+        let hits: Vec<_> = report
+            .issues
+            .iter()
+            .filter(|i| i.rule == "no_pan_in_payment_code")
+            .collect();
+        assert_eq!(
+            hits.len(),
+            1,
+            "ровно один нарушитель (PAN в .java), не тихий PASS: {hits:?}"
+        );
+        assert!(hits[0].file.ends_with("BonusDebit.java"));
+        assert!(!report.passed, "error-находка ломает вердикт");
+    }
+
     // --- dependency_direction (ADR-029) -----------------------------------
 
     /// Мини-репозиторий для слоевых тестов: `src/llm/engine.rs` импортирует

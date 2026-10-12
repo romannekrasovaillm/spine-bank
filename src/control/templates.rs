@@ -6,6 +6,12 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{HarnessError, Result};
 
+/// Метка-заглушка автора в свежем каркасе ADR (диагностика 8, 0.4.7): явно
+/// называет, что документ — черновик и провенанс не заполнен. Разбирается
+/// парсером провенанса (`adr_registry`) и судьёй (`judge::is_human_author`)
+/// как автор-человек, находок реестра не порождает.
+pub const ADR_DRAFT_AUTHOR: &str = "human (черновик, заполните перед коммитом)";
+
 /// Создаёт новый ADR по шаблону AI-DLC (Status/Context/Decision/Alternatives/
 /// Consequences/Reversibility/References) с очередным номером в каталоге.
 ///
@@ -13,6 +19,10 @@ use crate::error::{HarnessError, Result};
 /// отсутствии. Имя файла: `ADR-NNN-kebab-case-title.md` (кириллица
 /// транслитерируется, ADR-002). Разбор ID — общий regex модели
 /// (`crate::model::id_re`, ADR-003), файлы не-ADR сущностей игнорируются.
+///
+/// Автор без явной модели — метка-заглушка [`ADR_DRAFT_AUTHOR`] (диагностика
+/// 8): пустая шапка маскирует незаполненный провенанс под отсутствие поля, а
+/// «черновик» виден и реестру, и человеку.
 ///
 /// # Errors
 /// Каталог недоступен/не создаётся, файл уже существует.
@@ -23,7 +33,8 @@ pub fn adr_new(dir: &Path, title: &str) -> Result<PathBuf> {
 /// То же с явной моделью-автором документа (J3, ADR-048): метка пишется в
 /// шапку (`- Модель-автор: …`) и становится частью документа — судья берёт
 /// автора оттуда, а не со слов в момент судейства. `human` / `human:<имя>` —
-/// документ пишет человек.
+/// документ пишет человек. Не задана — пишется метка-заглушка
+/// [`ADR_DRAFT_AUTHOR`] (диагностика 8), а не пустая шапка.
 ///
 /// # Errors
 /// Как у [`adr_new`].
@@ -135,9 +146,15 @@ pub(crate) fn kebab_slug(title: &str) -> String {
 /// Шаблон ADR по AI-DLC с placeholder-комментариями.
 fn adr_template(n: u64, title: &str, date: &str, author_model: Option<&str>) -> String {
     // Метка автора — часть шапки: по ней судья отличает автора от судьи
-    // (J3, ADR-048). Не задана — строки нет: выдумывать автора нельзя.
-    let author =
-        author_model.map_or_else(String::new, |author| format!("- Модель-автор: {author}\n"));
+    // (J3, ADR-048). Не задана — метка-заглушка `ADR_DRAFT_AUTHOR` вместо
+    // пустой шапки (диагностика 8): пустота маскирует незаполненный
+    // провенанс под отсутствие поля, а «черновик» виден и реестру, и
+    // человеку. Выдуманной модели здесь нет — метка честно говорит, что
+    // автор ещё не проставлен.
+    let author = format!(
+        "- Модель-автор: {}\n",
+        author_model.unwrap_or(ADR_DRAFT_AUTHOR)
+    );
     format!(
         "# ADR-{n:03}. {title}\n\
         \n\
@@ -213,6 +230,38 @@ mod tests {
             second.file_name().unwrap().to_string_lossy(),
             "ADR-002-shina-sobytiy.md",
             "кириллица транслитерируется (ADR-002)"
+        );
+    }
+
+    /// Диагностика 8 (0.4.7): свежий каркас без явного автора несёт
+    /// метку-заглушку [`ADR_DRAFT_AUTHOR`] вместо пустой шапки, и парсер
+    /// провенанса читает её как автора (строка не ломает реестр). Явный автор
+    /// по-прежнему главнее заглушки.
+    #[test]
+    fn adr_new_without_author_writes_draft_placeholder() {
+        let dir = tempfile::tempdir().unwrap();
+        let adr_dir = dir.path().join("docs/adr");
+        let placeholder = adr_new(&adr_dir, "Без автора").unwrap();
+        let text = std::fs::read_to_string(&placeholder).unwrap();
+        assert!(
+            text.contains(&format!("- Модель-автор: {ADR_DRAFT_AUTHOR}")),
+            "шапка без автора должна нести заглушку: {text}"
+        );
+        assert_eq!(
+            crate::adr_registry::author_model_in(&text).as_deref(),
+            Some(ADR_DRAFT_AUTHOR),
+            "парсер провенанса читает заглушку как автора — реестр не ломается"
+        );
+
+        let explicit = adr_new_with_author(&adr_dir, "Явный автор", Some("claude-opus-4")).unwrap();
+        let text = std::fs::read_to_string(&explicit).unwrap();
+        assert!(
+            text.contains("- Модель-автор: claude-opus-4"),
+            "явный автор не затирается заглушкой: {text}"
+        );
+        assert!(
+            !text.contains(ADR_DRAFT_AUTHOR),
+            "заглушки нет при явном авторе"
         );
     }
 

@@ -564,6 +564,21 @@ pub(super) fn evaluate_overrides(
                 "override",
                 format!("override на несуществующее правило '{rule}' (adr {adr}) — игнорируется"),
             ));
+            // Диагностика 6 (0.4.7): отдельная находка о нерезолвимой ADR-ссылке.
+            // Раньше эта ветка сообщала ТОЛЬКО о правиле и молчала про ADR — а
+            // ссылка на несуществующий ADR и здесь не менее ложна. Правило всё
+            // равно не отключается, поэтому находка — warn (вердикт не меняется,
+            // `override_unknown_rule_is_warn` остаётся зелёным), а отдельный код
+            // зовёт механику, а не только человеческий текст.
+            if let Some((code, note)) = adr_rejection(adr, (y, m, d), adr_policy)
+                && code == "override_adr_missing"
+            {
+                findings.push(finding(
+                    "warn",
+                    &code,
+                    format!("override '{rule}' (adr {adr}) — {note}"),
+                ));
+            }
             infos.push(info);
             continue;
         }
@@ -2030,6 +2045,31 @@ mod tests {
         assert!(report.issues.iter().any(|i| i.rule == "override"
             && i.severity == "warn"
             && i.message.contains("несуществующее правило")));
+        assert_eq!(report.overrides[0].status, "invalid");
+    }
+
+    /// Диагностика 6 (0.4.7): override на несуществующее правило с нерезолвимой
+    /// ADR-ссылкой называет ОБЕ проблемы — и правило, и ADR. Раньше ветка
+    /// «правило не найдено» сообщала только о правиле и молчала про ADR.
+    /// Правило всё равно не отключается, поэтому находка про ADR — warn:
+    /// вердикт гейта не меняется.
+    #[test]
+    fn override_unknown_rule_with_missing_adr_reports_both() {
+        let (dir, product) =
+            override_fixture("  - rule: C-CORP-999\n    adr: ADR-999\n    until: \"2999-01\"\n");
+        let report = check(&dir.path().join("product"), &product).unwrap();
+        assert!(report.passed, "warn не ломает гейт: {:?}", report.issues);
+        assert!(report.issues.iter().any(|i| i.rule == "override"
+            && i.severity == "warn"
+            && i.message.contains("несуществующее правило")));
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|i| i.rule == "override_adr_missing" && i.severity == "warn"),
+            "отдельная находка про несуществующий ADR: {:?}",
+            report.issues
+        );
         assert_eq!(report.overrides[0].status, "invalid");
     }
 
