@@ -358,9 +358,9 @@ pub fn rules_report(repo: &Path, constraints: &Path) -> Result<String> {
     }
     let yaml =
         std::fs::read_to_string(constraints).map_err(|e| HarnessError::io(constraints, e))?;
-    let (parsed, skipped_unknown) = parse_constraints_file(&yaml, constraints)?;
+    let (parsed, skipped_unknown, parse_findings) = parse_constraints_file(&yaml, constraints)?;
     let rules: Vec<&FitnessRule> = parsed.all_rules().collect();
-    if rules.is_empty() && skipped_unknown.is_empty() {
+    if rules.is_empty() && skipped_unknown.is_empty() && parse_findings.is_empty() {
         return Err(HarnessError::Control(format!(
             "{}: файл не содержит правил — ожидается непустой корень `rules:` или `constraints:`",
             constraints.display()
@@ -380,6 +380,14 @@ pub fn rules_report(repo: &Path, constraints: &Path) -> Result<String> {
             "Пропущено правил: {} (неизвестные типы: {})",
             skipped_unknown.len(),
             types.into_iter().collect::<Vec<_>>().join(", ")
+        );
+    }
+    // P0-1: находки разбора записей (нет `type`; лишние поля) — как в `check`.
+    for issue in &parse_findings {
+        let _ = writeln!(
+            out,
+            "[{}] {}: {}",
+            issue.severity, issue.rule, issue.message
         );
     }
 

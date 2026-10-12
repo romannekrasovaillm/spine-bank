@@ -150,14 +150,18 @@ fn resolve_constraints(path: &Path, stack: &mut Vec<PathBuf>) -> Result<Resolved
     stack.push(canonical);
 
     let yaml = std::fs::read_to_string(path).map_err(|e| HarnessError::io(path, e))?;
-    let (parsed, skipped) = parse_constraints_file(&yaml, path)?;
+    let (parsed, skipped, mut findings) = parse_constraints_file(&yaml, path)?;
 
     let mut rules = Vec::new();
     let mut parents = Vec::new();
     let mut overrides = Vec::new();
-    let mut findings = Vec::new();
     let mut skipped_unknown = Vec::new();
 
+    // P0-1: находки разбора записей приходят из парсера (error
+    // `rule_type_missing` при отсутствии `type` у исполняемой записи, warn
+    // `unknown_rule_field` о лишних полях); error краснит гейт. Находки
+    // собственного файла — первыми (до находок родителей из `extends`).
+    //
     // Неизвестный тип правила (словарь другой редакции, E8) — громкая
     // warn-находка, а не падение резолва и не тихий пропуск.
     for s in skipped {
@@ -1234,8 +1238,8 @@ pub fn rule_weakened_scoped(
     // Толерантный разбор (E8): записи с неизвестными типами в сравнении не
     // участвуют (сравнивать не с чем — они не из нашего словаря); их
     // warn-пропуск покажет `check`.
-    let (current, _) = parse_constraints_file(current_src, file)?;
-    let (base, _) = parse_constraints_file(base_src, file)?;
+    let (current, _, _) = parse_constraints_file(current_src, file)?;
+    let (base, _, _) = parse_constraints_file(base_src, file)?;
     let current_rules = rules_snapshot(&current)?;
     let base_rules = rules_snapshot(&base)?;
     let (legalized, self_by_key) = legalization(

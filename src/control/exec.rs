@@ -164,7 +164,12 @@ pub fn check_with_options(
     for rule in &resolved.rules {
         options.probes.validate(&rule.name, &rule.requires)?;
     }
-    if resolved.rules.is_empty() {
+    // P0-1: если пустота реестра вызвана error-находками разбора (например,
+    // `rule_type_missing` — запись без `type` отброшена fail-closed), не
+    // прячем причину за общей ошибкой «нет правил»: отчёт с error-находкой
+    // краснит гейт и называет виновника.
+    let has_error_finding = resolved.findings.iter().any(|f| f.severity == "error");
+    if resolved.rules.is_empty() && !has_error_finding {
         // E8: файл, где ВСЕ правила с неизвестными типами, — это не
         // «нет правил», а чужой словарь; сообщение должно это различать.
         if resolved.skipped_unknown.is_empty() {
