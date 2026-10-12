@@ -79,8 +79,9 @@ pub use diff_triggers::{
 // Реюз детекторов графом as-built (волна K): примитивы без смены логики
 // самих детекторов.
 pub(crate) use diff_triggers::{content_looks_like_contract, looks_like_config};
-pub(crate) use exec::glob_matches;
+// Реюз обхода файлов конвертом вердикта (П1 0.4.8): входы `extra:<глоб>`.
 pub use exec::{check, check_with_options, command_strings};
+pub(crate) use exec::{collect_files, glob_matches};
 pub use registry::{
     AdrPolicy, AgentRange, CONSTRAINTS_REGISTRY_ENV, DEFAULT_ADR_DIR, ResolvedConstraints,
     ResolvedParent, RuleAnchor, RuleWeakenedOutcome, SelfApproved, adr_status_accepted,
