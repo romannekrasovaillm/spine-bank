@@ -121,6 +121,21 @@ No-LLM smoke: `arch-be mermaid examples/mermaid/flow.mmd`,
   сравнение кодовых харнессов для handoff. Документация:
   `docs/platformv-benchmark.md`. Тяжёлые прогоны (`runs/`) в git не входят.
 
+## Нативные вызовы прежде bash
+
+Харнесс поставляет свои инструменты (MCP `spine`, нативные `read_file`/`edit_file`
+и т. п.) — вызывай их, а не grep/curl/cat по умолчанию. Контур напоминает об этом
+хуком `[arch-core]`, скилл `native-tools-discipline` называет точное соответствие:
+
+- новая тема → `kb_search` (до веба) и `significance_score` (маршрут);
+- правка ADR → `adr_registry` + `rubric_evaluate` (`adr_quality`) до коммита;
+- правка `ARCHITECTURE-SPINE` → `spine_lint`;
+- проверка правил репозитория → `fitness_check` (нативный исполняет команды;
+  для быстрого цикла — CLI `ARCH_NO_EXEC=1 arch-be control check .`).
+
+bash остаётся законным для сборки, `cargo test`, `git` и пайплайнов сравнения:
+это исполнение, а не архитектурный вопрос.
+
 <!-- ARCH:GENERATED hash=7663710e594c057f ts="2026-09-02 16:27" -->
 > Сгенерировано харнессом `arch` (`arch agents-md refresh`). Не редактируйте
 > внутри маркеров — правьте источники (spine, CONSTRAINTS.yaml) или зону снаружи.

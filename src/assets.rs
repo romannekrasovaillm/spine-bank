@@ -300,6 +300,9 @@ pub const PLUGIN_ARCH_CORE_SKILLS_FITNESS_FUNCTIONS_SKILL_MD: &str =
 /// Встроенный файл плагина `assets/plugins/arch-core/skills/handoff-packaging/SKILL.md`.
 pub const PLUGIN_ARCH_CORE_SKILLS_HANDOFF_PACKAGING_SKILL_MD: &str =
     include_str!("../assets/plugins/arch-core/skills/handoff-packaging/SKILL.md");
+/// Встроенный файл плагина `assets/plugins/arch-core/skills/native-tools-discipline/SKILL.md`.
+pub const PLUGIN_ARCH_CORE_SKILLS_NATIVE_TOOLS_DISCIPLINE_SKILL_MD: &str =
+    include_str!("../assets/plugins/arch-core/skills/native-tools-discipline/SKILL.md");
 /// Встроенный файл плагина `assets/plugins/arch-core/skills/nfr-design/SKILL.md`.
 pub const PLUGIN_ARCH_CORE_SKILLS_NFR_DESIGN_SKILL_MD: &str =
     include_str!("../assets/plugins/arch-core/skills/nfr-design/SKILL.md");
@@ -625,6 +628,7 @@ const PLUGIN_FILES: &[(&str, &str)] = &[
     ("plugins/arch-core/skills/dsh-harness-patterns/SKILL.md", PLUGIN_ARCH_CORE_SKILLS_DSH_HARNESS_PATTERNS_SKILL_MD),
     ("plugins/arch-core/skills/fitness-functions/SKILL.md", PLUGIN_ARCH_CORE_SKILLS_FITNESS_FUNCTIONS_SKILL_MD),
     ("plugins/arch-core/skills/handoff-packaging/SKILL.md", PLUGIN_ARCH_CORE_SKILLS_HANDOFF_PACKAGING_SKILL_MD),
+    ("plugins/arch-core/skills/native-tools-discipline/SKILL.md", PLUGIN_ARCH_CORE_SKILLS_NATIVE_TOOLS_DISCIPLINE_SKILL_MD),
     ("plugins/arch-core/skills/nfr-design/SKILL.md", PLUGIN_ARCH_CORE_SKILLS_NFR_DESIGN_SKILL_MD),
     ("plugins/arch-core/skills/readiness-gate/SKILL.md", PLUGIN_ARCH_CORE_SKILLS_READINESS_GATE_SKILL_MD),
     ("plugins/arch-core/skills/recover-review/SKILL.md", PLUGIN_ARCH_CORE_SKILLS_RECOVER_REVIEW_SKILL_MD),
