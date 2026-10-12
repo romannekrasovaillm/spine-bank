@@ -36,7 +36,7 @@ mod packages;
 mod providers;
 mod recover;
 mod report;
-mod snapshot;
+pub(crate) mod snapshot;
 mod types;
 
 pub use accept::{

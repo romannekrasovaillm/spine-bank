@@ -223,12 +223,16 @@ impl SurveyDenylist {
 }
 
 /// Одна находка сканера: текст + доказательства `файл:строка`.
+///
+/// `pub(crate)`: read-only потребитель — строитель отчёта о восстановленной
+/// архитектуре (`crate::report`, ADR-080) — читает находки обследования, не
+/// меняя семантику сканера (AD-11: SSOT остаётся здесь).
 #[derive(Debug, Clone)]
-struct Finding {
+pub(crate) struct Finding {
     /// Текст находки (без метки — метку добавляет рендер).
-    text: String,
+    pub(crate) text: String,
     /// Ссылки-доказательства (`путь:строка` или `путь/` для каталогов).
-    refs: Vec<String>,
+    pub(crate) refs: Vec<String>,
 }
 
 impl Finding {
@@ -242,14 +246,18 @@ impl Finding {
 }
 
 /// Секция карты обследования (один из 9 артефактов скилла reverse-discovery).
+///
+/// `pub(crate)`: read-only потребитель — строитель отчёта (`crate::report`,
+/// ADR-080) — маппит находки секций в разделы отчёта (SSOT обследования
+/// остаётся здесь, AD-11).
 #[derive(Debug, Clone)]
-struct Section {
+pub(crate) struct Section {
     /// Заголовок секции (как в скилле).
-    title: &'static str,
+    pub(crate) title: &'static str,
     /// Находки сканеров ([confirmed]).
-    findings: Vec<Finding>,
+    pub(crate) findings: Vec<Finding>,
     /// Вопрос владельцу домена, если находок нет ([gap]).
-    gap_question: &'static str,
+    pub(crate) gap_question: &'static str,
 }
 
 /// Отчёт обследования: каркас карты с метками и сроком годности.
@@ -262,7 +270,7 @@ pub struct SurveyReport {
     /// Дата истечения срока годности (`created_at` + [`SURVEY_TTL_DAYS`]).
     pub expires_at: NaiveDate,
     /// Секции по 9 артефактам скилла.
-    sections: Vec<Section>,
+    pub(crate) sections: Vec<Section>,
 }
 
 impl SurveyReport {
