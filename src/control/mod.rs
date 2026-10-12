@@ -73,8 +73,8 @@ pub use diff_triggers::{
     CONNECT_MANIFEST_PATH, DEFAULT_FAST_MAX, DEFAULT_STANDARD_MAX, DIFF_BLIND_TRIGGERS, DiffGlobs,
     DiffTriggers, SIGNIFICANCE_TRIGGERS, SPINEIGNORE_PATH, ScoredTriggers, TriggerSource, base_rev,
     blind_triggers_unfired, detect_diff_triggers, detect_diff_triggers_with, normalize_base_range,
-    score_with_sources, significance_score, significance_score_with_limits, suggest_trigger,
-    unknown_trigger_names, unknown_triggers_error,
+    render_undeclared_note, score_with_sources, significance_score, significance_score_with_limits,
+    suggest_trigger, unknown_trigger_names, unknown_triggers_error,
 };
 // Реюз детекторов графом as-built (волна K): примитивы без смены логики
 // самих детекторов.

@@ -2,16 +2,28 @@
 //! инструментов, MCP-сервер (B1: выделено из `main.rs`).
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Subcommand;
 
 use arch_harness::config::Config;
 
+/// Суммарный бюджет живых опросов всего `mcp list` (не на каждый сервер):
+/// в офлайн-периметре команда завершается за это время с перечнем недоступных.
+const LIST_PROBE_BUDGET: Duration = Duration::from_secs(10);
+
 #[derive(Subcommand)]
 pub(crate) enum McpCmd {
     /// Список серверов и их инструментов.
-    List,
+    ///
+    /// `--offline` (он же `--no-probe`): вывести конфигурацию без живых
+    /// опросов (статус «не проверялся») — не зависает в офлайн-периметре.
+    List {
+        /// Не опрашивать серверы: только конфигурация, без подключений.
+        #[arg(long, alias = "no-probe")]
+        offline: bool,
+    },
     /// Вызвать MCP-инструмент.
     Call {
         /// Составное имя `server__tool`.
@@ -68,24 +80,57 @@ pub(crate) async fn cmd_mcp(cfg: &Arc<Config>, cmd: McpCmd) -> Result<()> {
         let plugins = arch_harness::plugin::discover(&cfg.plugins.dirs);
         servers.extend(arch_harness::plugin::mcp_servers(&plugins));
     }
-    let manager =
-        Arc::new(arch_harness::mcp::McpManager::connect(&servers, cfg.mcp.timeout_secs).await?);
     match cmd {
-        McpCmd::List => {
+        McpCmd::List { offline } => {
+            if offline {
+                // Без живых опросов: конфигурация как есть, статус «не проверялся».
+                let names: Vec<&str> = servers.iter().map(|s| s.name.as_str()).collect();
+                println!("Серверы (не проверялись): {}", names.join(", "));
+                for s in &servers {
+                    println!("  {:<40} {}", s.name, s.command);
+                }
+                return Ok(());
+            }
+            let (manager, report) = arch_harness::mcp::McpManager::connect_with_budget(
+                &servers,
+                cfg.mcp.timeout_secs,
+                LIST_PROBE_BUDGET,
+            )
+            .await;
             println!("Серверы: {}", manager.server_names().join(", "));
             for spec in manager.tools().await {
                 println!("  {:<40} {}", spec.name, spec.description);
             }
+            if !report.unreachable.is_empty() {
+                if report.budget_exhausted {
+                    println!(
+                        "{} сервер(ов) не отвечали (бюджет {} с исчерпан): {}",
+                        report.unreachable.len(),
+                        LIST_PROBE_BUDGET.as_secs(),
+                        report.unreachable.join(", ")
+                    );
+                } else {
+                    println!(
+                        "{} сервер(ов) недоступны: {}",
+                        report.unreachable.len(),
+                        report.unreachable.join(", ")
+                    );
+                }
+            }
+            manager.shutdown().await;
         }
         McpCmd::Call { name, args } => {
+            let manager = Arc::new(
+                arch_harness::mcp::McpManager::connect(&servers, cfg.mcp.timeout_secs).await?,
+            );
             let args: serde_json::Value =
                 serde_json::from_str(&args).context("невалидный JSON аргументов")?;
             let out = manager.call(&name, args).await?;
             println!("{}", out.content);
+            manager.shutdown().await;
         }
         // Недостижимо: Serve обработан выше возвратом до подключения к серверам.
         McpCmd::Serve { .. } => {}
     }
-    manager.shutdown().await;
     Ok(())
 }

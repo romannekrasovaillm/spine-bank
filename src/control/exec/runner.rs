@@ -37,6 +37,16 @@ fn apply_excludes<T: AsRef<str>>(paths: &mut Vec<T>, excludes: &[String]) {
 /// Дефолтный таймаут `command_succeeds`, секунды.
 const COMMAND_TIMEOUT_DEFAULT_SECS: u64 = 60;
 
+/// Файлы-реестры ограничений, исключаемые из выборки правила
+/// `must_not_contain` с ДЕФОЛТНЫМ glob `**/*` (П4 0.4.10): иначе правило
+/// находит «запрещённый» паттерн в собственном тексте (самонаход). Явный
+/// glob правило не трогает.
+const REGISTRY_SELF_PATHS: [&str; 3] = [
+    "CONSTRAINTS.yaml",
+    "CONSTRAINTS.corp.yaml",
+    ".arch-handoff/CONSTRAINTS.yaml",
+];
+
 /// Текст находки `deny_dependency` (волна S, ADR-070): для простой записи —
 /// «пакет '<имя>' из deny-списка»; для записи с диапазоном версии добавляется
 /// факт нарушения «'<версия>' < '<порог>'».
@@ -151,6 +161,21 @@ pub(super) fn run_rule(
                 return Ok(());
             };
             let pattern = rule.pattern.as_deref().unwrap_or_default();
+            // П5 0.4.10: различаем «по glob не нашлось ни одного файла» и
+            // «файлы есть, но паттерна в них нет». Первое — вероятно неверный
+            // glob (набор пуст, правилу нечего проверять), маркируется кодом
+            // `glob-empty`; второе — правило действительно нарушено (прежнее
+            // сообщение). Так же устроена ветка each_file_must_contain.
+            if files.is_empty() {
+                issue(
+                    PathBuf::from(&glob),
+                    0,
+                    format!(
+                        "must_contain: по glob '{glob}' не найдено ни одного файла (glob-empty) — проверьте glob"
+                    ),
+                );
+                return Ok(());
+            }
             let mut found = false;
             for (_, abs) in &files {
                 let bytes = std::fs::read(abs).map_err(|e| HarnessError::io(abs, e))?;
@@ -170,7 +195,14 @@ pub(super) fn run_rule(
             }
         }
         RuleKind::MustNotContain => {
-            let (re, glob, files) = prep_content_rule(rule, repo)?;
+            let (re, glob, mut files) = prep_content_rule(rule, repo)?;
+            // П4 0.4.10: правило с ДЕФОЛТНЫМ glob `**/*` не сканирует сам
+            // реестр — иначе `must_not_contain` находит «запрещённый» паттерн
+            // в собственном тексте правила (самонаход). Явный glob — прежнее
+            // поведение (автор правила сам решает, включать ли реестр).
+            if rule.glob.is_empty() {
+                files.retain(|(rel, _)| !REGISTRY_SELF_PATHS.contains(&rel.as_str()));
+            }
             let Some(files) = scope_files(rule, changed, files, &glob, skipped) else {
                 return Ok(());
             };

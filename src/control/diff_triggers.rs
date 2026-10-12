@@ -1315,6 +1315,28 @@ pub fn score_with_sources(
     }
 }
 
+/// Строка-примечание о триггерах, найденных диффом, но не заявленных флагами.
+///
+/// Различает два случая (anti-bypass wording):
+/// - `flags_declared` — флаги `--trigger` задавались: расхождение «заявлено
+///   vs видно по диффу» (ВНИМАНИЕ — расхождение);
+/// - флаги не задавались: маршрут поднят floor-детектором диффа, это не
+///   расхождение, а информативная строка.
+///
+/// `None`, если необъявленных триггеров нет.
+#[must_use]
+pub fn render_undeclared_note(flags_declared: bool, undeclared: &[String]) -> Option<String> {
+    if undeclared.is_empty() {
+        return None;
+    }
+    let list = undeclared.join(", ");
+    Some(if flags_declared {
+        format!("ВНИМАНИЕ — расхождение: заявлено флагами vs видно по диффу: {list}")
+    } else {
+        format!("маршрут поднят детектором диффа: {list} (floor; флаги не задавались)")
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -1330,6 +1352,35 @@ mod tests {
         assert_eq!(significance_score(&answers).route, Route::Standard);
         answers.insert("security_boundary_change".into(), true);
         assert_eq!(significance_score(&answers).route, Route::Critical);
+    }
+
+    // --- П3: anti-bypass wording (undeclared) -----------------------------------
+
+    /// Флаги заданы и противоречат диффу → прежнее «расхождение».
+    #[test]
+    fn undeclared_note_flags_declared_is_discrepancy() {
+        let note = render_undeclared_note(true, &["new_component".to_string()])
+            .expect("непустой список → есть примечание");
+        assert!(note.contains("ВНИМАНИЕ — расхождение"), "{note}");
+        assert!(note.contains("new_component"), "{note}");
+    }
+
+    /// Флаги не задавались, floor-детектор поднял триггер → без «расхождения».
+    #[test]
+    fn undeclared_note_flags_absent_is_informative() {
+        let note = render_undeclared_note(false, &["new_component".to_string()])
+            .expect("непустой список → есть примечание");
+        assert!(!note.contains("расхождение"), "{note}");
+        assert!(note.contains("детектором диффа"), "{note}");
+        assert!(note.contains("floor; флаги не задавались"), "{note}");
+        assert!(note.contains("new_component"), "{note}");
+    }
+
+    /// Нет необъявленных триггеров → примечания нет.
+    #[test]
+    fn undeclared_note_empty_is_none() {
+        assert_eq!(render_undeclared_note(true, &[]), None);
+        assert_eq!(render_undeclared_note(false, &[]), None);
     }
 
     /// Пишет файл в каталог и возвращает его путь.

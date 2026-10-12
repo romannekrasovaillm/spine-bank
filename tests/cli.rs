@@ -1539,6 +1539,29 @@ fn gate_clean_repo_exits_0() {
         .stdout(contains("Итог: PASS"));
 }
 
+/// П6 0.4.10: `gate` принимает позиционный `<repo>` как синоним `--repo`
+/// (`control check`/`model validate` позиционны) — оба синтаксиса работают
+/// и дают тот же вердикт.
+#[test]
+fn gate_accepts_positional_repo_alias() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = gate_repo(tmp.path());
+
+    // Позиционный `<repo>`.
+    let mut positional = arch_cmd(tmp.path());
+    positional.arg("gate").arg(repo.as_os_str());
+    positional
+        .assert()
+        .success()
+        .stdout(contains("Маршрут: Fast (auto"))
+        .stdout(contains("Итог: PASS"));
+
+    // Флаг `--repo` — прежняя форма, тот же вердикт.
+    let mut flag = arch_cmd(tmp.path());
+    flag.arg("gate").arg("--repo").arg(repo.as_os_str());
+    flag.assert().success().stdout(contains("Итог: PASS"));
+}
+
 /// D2 (ADR-059): `gate --shadow-constraints` добавляет теневой блок —
 /// новые находки по правилам-кандидатам, — не меняя основной вердикт и
 /// exit-код; без флага блока нет, а отчёт прогона сохраняется для флота.
@@ -5492,4 +5515,125 @@ fn b9_cli_error_hides_backtrace_under_rust_backtrace_env() {
     let all = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(1), "вывод: {all}");
     assert!(all.contains("Error: "), "нет края `Error:`: {all}");
+}
+
+/// `arch-be mcp list --offline` (он же `--no-probe`) печатает конфигурацию
+/// серверов БЕЗ живых опросов (BACKLOG 0.4.8, П1): в офлайн-периметре
+/// команда не «висит» минутами, статус — «не проверялись».
+#[test]
+fn mcp_list_offline_skips_live_probe() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let home = tmp.path().join(".arch-harness");
+    std::fs::create_dir_all(&home).expect("mkdir .arch-harness");
+    std::fs::write(
+        home.join("mcp.json"),
+        r#"{"mcpServers": {"kb": {"command": "kb-mcp", "args": ["--stdio"]}}}"#,
+    )
+    .expect("write mcp.json");
+
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.args(["mcp", "list", "--offline"]);
+    cmd.assert()
+        .success()
+        .stdout(contains("не проверялись"))
+        .stdout(contains("kb-mcp"));
+
+    // Исторический синоним `--no-probe` даёт тот же результат.
+    let mut alias = arch_cmd(tmp.path());
+    alias.args(["mcp", "list", "--no-probe"]);
+    alias
+        .assert()
+        .success()
+        .stdout(contains("не проверялись"))
+        .stdout(contains("kb-mcp"));
+}
+
+/// `arch-be agents-md refresh` принимает репозиторий и позиционно, и флагом
+/// `--repo`/`--path` (BACKLOG 0.4.8, П2). Смешение форм — ошибка.
+#[test]
+fn agents_md_refresh_accepts_positional_and_flag() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = tmp.path().join("proj");
+    std::fs::create_dir_all(&repo).expect("mkdir proj");
+
+    // Позиционная форма.
+    let mut positional = arch_cmd(tmp.path());
+    positional
+        .args(["agents-md", "refresh"])
+        .arg(repo.as_os_str());
+    positional.assert().success().stdout(contains("AGENTS.md"));
+    assert!(repo.join("AGENTS.md").is_file(), "AGENTS.md создан");
+
+    // Флаг `--repo`.
+    let mut flag = arch_cmd(tmp.path());
+    flag.args(["agents-md", "refresh", "--repo"])
+        .arg(repo.as_os_str());
+    flag.assert().success().stdout(contains("AGENTS.md"));
+
+    // Синоним `--path`.
+    let mut path_alias = arch_cmd(tmp.path());
+    path_alias
+        .args(["agents-md", "refresh", "--path"])
+        .arg(repo.as_os_str());
+    path_alias.assert().success().stdout(contains("AGENTS.md"));
+
+    // Смешение форм — явная ошибка, а не молчаливый выбор.
+    let mut mixed = arch_cmd(tmp.path());
+    mixed
+        .args(["agents-md", "refresh"])
+        .arg(repo.as_os_str())
+        .arg("--repo")
+        .arg(repo.as_os_str());
+    mixed.assert().failure().stderr(contains("смешение форм"));
+}
+
+/// П3: `control score --from-diff` различает словарь undeclared-примечания.
+///
+/// (а) флаги заданы и противоречат диффу → «ВНИМАНИЕ — расхождение»;
+/// (б) флаги не задавались, маршрут поднят floor-детектором диффа →
+/// информативная строка БЕЗ «расхождения».
+#[test]
+fn control_score_diff_undeclared_wording_depends_on_flags() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = tmp.path().join("score-repo");
+    std::fs::create_dir_all(&repo).expect("mkdir");
+    std::fs::write(repo.join("README.md"), "# t\n").expect("readme");
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "init"]);
+    // untracked новый компонент: манифест (new_component) + зависимость (new_vendor).
+    std::fs::create_dir_all(repo.join("services/risk/src")).expect("mkdir svc");
+    std::fs::write(
+        repo.join("services/risk/Cargo.toml"),
+        "[package]\nname = \"risk\"\nversion = \"0.1.0\"\n\n[dependencies]\nserde = \"1.0\"\n",
+    )
+    .expect("manifest");
+    std::fs::write(repo.join("services/risk/src/lib.rs"), "pub fn f() {}\n").expect("src");
+
+    // (б) флаги не задавались → информативная строка, без слова «расхождение».
+    let mut no_flags = arch_cmd(tmp.path());
+    no_flags
+        .current_dir(&repo)
+        .args(["control", "score", "--from-diff"]);
+    no_flags
+        .assert()
+        .success()
+        .stdout(contains("детектором диффа"))
+        .stdout(contains("floor; флаги не задавались"))
+        .stdout(predicate::str::contains("расхождение").not());
+
+    // (а) флаги заданы (иной триггер) → дифф добавляет свой → «расхождение».
+    let mut with_flags = arch_cmd(tmp.path());
+    with_flags.current_dir(&repo).args([
+        "control",
+        "score",
+        "--trigger",
+        "new_component=true",
+        "--from-diff",
+    ]);
+    with_flags
+        .assert()
+        .success()
+        .stdout(contains("ВНИМАНИЕ — расхождение"))
+        .stdout(contains("new_vendor"));
 }
