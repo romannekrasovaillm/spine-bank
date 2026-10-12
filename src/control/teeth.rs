@@ -380,11 +380,21 @@ struct Sandbox {
 
 impl Sandbox {
     fn new() -> Result<Self> {
+        // Уникальность против параллельных прогонов (тесты cargo идут в
+        // потоках одного процесса: PID одинаков, а гранулярность системных
+        // часов на нагруженной машине не гарантирует уникальные наносекунды
+        // — наблюдались коллизии с взаимным remove_dir_all). Атомарный
+        // счётчик исключает совпадение в пределах процесса, PID — между
+        // процессами.
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos());
-        let root =
-            std::env::temp_dir().join(format!("arch-be-teeth-{}-{nanos}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "arch-be-teeth-{}-{nanos}-{seq}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&root).map_err(|e| HarnessError::io(&root, e))?;
         Ok(Self { root })
     }
