@@ -95,13 +95,21 @@ pub(crate) enum Constraints {
     Broken(String),
 }
 
-/// Читает ID правил из `<model_dir>/../CONSTRAINTS.yaml`
+/// Читает ID правил из реестра ограничений рядом с моделью
 /// (корни `constraints:` или `rules:`, элементы с `id`/`name`).
+///
+/// Путь резолвится единым резолвером E2 ([`crate::control::resolve_constraints_path`]):
+/// корень кейса (`<model_dir>/..`) → `.arch-handoff/CONSTRAINTS.yaml`
+/// (приоритет пакета) → fallback `CONSTRAINTS.yaml`. Так трассировка и
+/// проверка ссылок модели видят ту же копию, что и гейт, — кейс с реестром
+/// только в `.arch-handoff/` больше не даёт ложного SKIP.
 pub(crate) fn load_constraint_ids(model_dir: &Path) -> Constraints {
-    let Some(parent) = model_dir.parent() else {
+    let Some(repo) = model_dir.parent() else {
         return Constraints::Absent;
     };
-    let path = parent.join("CONSTRAINTS.yaml");
+    let Some(path) = crate::control::resolve_constraints_path(repo, None) else {
+        return Constraints::Absent;
+    };
     let text = match std::fs::read_to_string(&path) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Constraints::Absent,

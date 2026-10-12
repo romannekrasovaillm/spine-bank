@@ -9,8 +9,56 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use super::diff_triggers::diff_regex;
-use super::types::{DenySpec, FitnessRule, OverrideEntry, RuleCard, RuleKind, SkippedUnknownRule};
+use super::types::{
+    DenySpec, FitnessRule, LintIssue, OverrideEntry, RuleCard, RuleKind, SkippedUnknownRule,
+};
 use crate::error::{HarnessError, Result};
+
+/// Известные поля записи правила — имена, которые serde читает из YAML
+/// (совпадает с [`FitnessRule`]; `source` — `#[serde(skip)]`, из YAML не
+/// читается). Используется warn-находкой `unknown_rule_field` (P0-1):
+/// неизвестный ключ десериализатор молча игнорирует, поэтому называем его
+/// явно — `kind:` вместо `type:` больше не проходит незамеченным.
+const KNOWN_RULE_FIELDS: &[&str] = &[
+    "name",
+    "id",
+    "type",
+    "glob",
+    "pattern",
+    "path",
+    "exclude_glob",
+    "max_age_days",
+    "command",
+    "forbid",
+    "allow",
+    "model_dir",
+    "classes_dir",
+    "jar_dir",
+    "trigger",
+    "rationale",
+    "ad",
+    "adr",
+    "fix_hint",
+    "skill",
+    "evidence",
+    "reversibility",
+    "owner",
+    "expiry",
+    "effort_hours",
+    "covers",
+    "requires",
+    "manifests",
+    "deny",
+    "reference",
+    "unverifiable",
+    "severity",
+    "timeout_secs",
+    "applies_to",
+    "multiline",
+    "if",
+    "then",
+    "owners",
+];
 
 /// Auto-набор манифестов для `deny_dependency` (поле `manifests` не задано):
 /// девять форматов тех-радара банка (Maven, Gradle Groovy/KTS, npm,
@@ -674,25 +722,117 @@ fn unknown_rule_type(value: &serde_yaml_ng::Value) -> Option<(String, String)> {
     if known {
         return None;
     }
-    let name = value
+    Some((raw_rule_name(value), rule_type.to_string()))
+}
+
+/// Имя правила из сырой записи (для находок до/без типизированного разбора).
+fn raw_rule_name(value: &serde_yaml_ng::Value) -> String {
+    value
         .get("name")
         .and_then(|n| n.as_str())
-        .unwrap_or("<без имени>");
-    Some((name.to_string(), rule_type.to_string()))
+        .unwrap_or("<без имени>")
+        .to_string()
+}
+
+/// Лишние ключи записи правила (P0-1): имена YAML-мапы, которых нет среди
+/// [`KNOWN_RULE_FIELDS`]. Нестроковые ключи пропускаются — они и так не
+/// читаются как поля, шума не создаём. Порядок — как в записи.
+fn unknown_rule_fields(value: &serde_yaml_ng::Value) -> Vec<String> {
+    let serde_yaml_ng::Value::Mapping(map) = value else {
+        return Vec::new();
+    };
+    let mut extra = Vec::new();
+    for key in map.keys() {
+        if let Some(name) = key.as_str() {
+            if !KNOWN_RULE_FIELDS.contains(&name) {
+                extra.push(name.to_string());
+            }
+        }
+    }
+    extra
+}
+
+/// Warn-находка о лишних полях записи правила (P0-1). Если среди них `kind` —
+/// вероятная опечатка вместо `type` (классический источник ложного зелёного:
+/// `kind: must_not_contain` тихо деградирует правило до `must_contain`):
+/// добавляем подсказку.
+fn unknown_rule_field_issue(
+    file: &Path,
+    value: &serde_yaml_ng::Value,
+    extra: &[String],
+) -> LintIssue {
+    let name = raw_rule_name(value);
+    let mut message = format!(
+        "правило '{name}': неизвестные поля записи: {} — неизвестные ключи молча игнорируются",
+        extra.join(", ")
+    );
+    if extra.iter().any(|f| f == "kind") {
+        message.push_str(
+            " (поле 'kind' не читается: тип задаётся ключом 'type', \
+             например 'type: must_not_contain')",
+        );
+    }
+    LintIssue {
+        file: file.to_path_buf(),
+        line: 0,
+        rule: "unknown_rule_field".to_string(),
+        message,
+        severity: "warn".to_string(),
+        ..LintIssue::default()
+    }
+}
+
+/// Error-находка: у исполняемой записи нет `type` (P0-1, fail-closed). Раньше
+/// такая запись молча получала дефолт `must_contain` — при опечатке `kind:`
+/// вместо `type:` правило `must_not_contain` переставало ловить нарушение, а
+/// гейт оставался зелёным. Теперь правило НЕ исполняется, находка краснит
+/// гейт. Дефолт сохраняется только у `unverifiable: true` (ручной контроль).
+fn rule_type_missing_issue(file: &Path, name: &str) -> LintIssue {
+    LintIssue {
+        file: file.to_path_buf(),
+        line: 0,
+        rule: "rule_type_missing".to_string(),
+        message: format!(
+            "правило '{name}': не задан тип проверки ('type') — правило не исполнено \
+             (молчаливый дефолт недопустим); укажите 'type' или пометьте запись \
+             'unverifiable: true' для ручного контроля"
+        ),
+        severity: "error".to_string(),
+        ..LintIssue::default()
+    }
 }
 
 /// Разбирает список сырых записей правил: валидные — в [`FitnessRule`],
 /// записи с неизвестным `type` — в `skipped` (E8). Остальные ошибки разбора
 /// записи — ошибка всего файла (строгость к битым правилам сохранена).
+///
+/// P0-1 добавляет в `findings`: warn `unknown_rule_field` (лишние поля) и
+/// error `rule_type_missing` (нет `type` у исполняемой записи — правило
+/// отбрасывается, fail-closed).
 fn parse_rules_tolerant(
     values: Vec<serde_yaml_ng::Value>,
     file: &Path,
     skipped: &mut Vec<SkippedUnknownRule>,
+    findings: &mut Vec<LintIssue>,
 ) -> Result<Vec<FitnessRule>> {
     let mut out = Vec::with_capacity(values.len());
     for value in values {
+        // P0-1: лишние поля записи — `kind:` вместо `type:` serde молча
+        // игнорирует; называем явно, чтобы опечатка была видимой.
+        let extra = unknown_rule_fields(&value);
+        if !extra.is_empty() {
+            findings.push(unknown_rule_field_issue(file, &value, &extra));
+        }
         match serde_yaml_ng::from_value::<FitnessRule>(value.clone()) {
             Ok(rule) => {
+                // P0-1 (fail-closed): у исполняемой записи нет `type` —
+                // не дефолт `must_contain` (тихий ложный зелёный), а
+                // error-находка; правило НЕ исполняется. Дефолт сохраняется
+                // только у `unverifiable: true`.
+                if value.get("type").is_none() && !rule.unverifiable {
+                    findings.push(rule_type_missing_issue(file, &rule.name));
+                    continue;
+                }
                 // Схема `requires` (неизвестный ресурс — ошибка реестра)
                 // проверяется в [`super::exec::check_with_options`]: только там
                 // известен реестр зондов конфига `[gate.requires.<имя>]`
@@ -716,14 +856,27 @@ fn parse_rules_tolerant(
 /// Толерантный разбор constraint-файла (E8): неизвестный `type` отдельного
 /// правила — warn-пропуск (второй элемент кортежа), а не падение файла;
 /// невалидный YAML и битые записи правил — по-прежнему ошибка.
+///
+/// Третий элемент — находки разбора записей (P0-1): warn
+/// `unknown_rule_field` (лишние поля, подсказка для `kind:`) и error
+/// `rule_type_missing` (нет `type` у исполняемой записи).
 pub(super) fn parse_constraints_file(
     yaml: &str,
     file: &Path,
-) -> Result<(ConstraintsFile, Vec<SkippedUnknownRule>)> {
-    let shadow: ConstraintsFileShadow = serde_yaml_ng::from_str(yaml)?;
+) -> Result<(ConstraintsFile, Vec<SkippedUnknownRule>, Vec<LintIssue>)> {
+    // P0-4 (0.4.9): ошибка YAML — это ошибка конкретного файла. Без пути в
+    // сообщении `control check` на битом реестре печатал голое
+    // «found unexpected end of stream…» — непонятно, какой из трёх входов
+    // (корень, `.arch-handoff/`, корпоративный `extends`) сломан. Обёртка
+    // пути здесь покрывает все входы: через эту функцию идут и корневая
+    // копия, и пакетная, и рекурсивный родитель `extends`.
+    let shadow: ConstraintsFileShadow = serde_yaml_ng::from_str(yaml).map_err(|e| {
+        HarnessError::Control(format!("{}: не разобрать YAML: {e}", file.display()))
+    })?;
     let mut skipped = Vec::new();
-    let rules = parse_rules_tolerant(shadow.rules, file, &mut skipped)?;
-    let constraints = parse_rules_tolerant(shadow.constraints, file, &mut skipped)?;
+    let mut findings = Vec::new();
+    let rules = parse_rules_tolerant(shadow.rules, file, &mut skipped, &mut findings)?;
+    let constraints = parse_rules_tolerant(shadow.constraints, file, &mut skipped, &mut findings)?;
     Ok((
         ConstraintsFile {
             rules,
@@ -732,6 +885,7 @@ pub(super) fn parse_constraints_file(
             overrides: shadow.overrides,
         },
         skipped,
+        findings,
     ))
 }
 
@@ -767,7 +921,7 @@ pub fn load_fitness_rules_with_skips(
 ) -> Result<(Vec<FitnessRule>, Vec<SkippedUnknownRule>)> {
     let yaml =
         std::fs::read_to_string(constraints).map_err(|e| HarnessError::io(constraints, e))?;
-    let (parsed, skipped) = parse_constraints_file(&yaml, constraints)?;
+    let (parsed, skipped, _findings) = parse_constraints_file(&yaml, constraints)?;
     let ConstraintsFile {
         rules, constraints, ..
     } = parsed;
@@ -949,6 +1103,108 @@ mod tests {
             "rules:\n  - name: x\n    type: must_contain\n    glob: 123\n",
         );
         assert!(load_fitness_rules(&c).is_err(), "битая запись — ошибка");
+    }
+
+    // --- P0-1: `kind:` вместо `type:` — не ложный зелёный, а error-находка ---
+
+    /// (a) Опечатка `kind:` вместо `type:` у `must_not_contain`. Раньше serde
+    /// молча игнорировал `kind`, правило получало дефолт `must_contain` и
+    /// «проходило» на файле с запрещённой строкой — ложный зелёный. Теперь
+    /// запись отброшена fail-closed, гейт красный, имя правила в тексте.
+    #[test]
+    fn kind_typo_without_type_is_error_not_false_green() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        write_file(repo, "src/a.rs", "let x = FORBIDDEN;\n");
+        let c = write_file(
+            repo,
+            "CONSTRAINTS.yaml",
+            "rules:\n  - name: no-forbidden\n    kind: must_not_contain\n    glob: 'src/**'\n    pattern: FORBIDDEN\n",
+        );
+        let report = check(repo, &c).expect("прогон");
+        assert!(!report.passed, "{}", report.summary);
+        let missing: Vec<&LintIssue> = report
+            .issues
+            .iter()
+            .filter(|i| i.rule == "rule_type_missing")
+            .collect();
+        assert_eq!(missing.len(), 1, "{}", report.summary);
+        assert_eq!(missing[0].severity, "error");
+        assert!(
+            missing[0].message.contains("no-forbidden"),
+            "{}",
+            missing[0].message
+        );
+        assert!(
+            missing[0].message.contains("не задан тип проверки"),
+            "{}",
+            missing[0].message
+        );
+        // Заодно warn про лишнее поле `kind` с подсказкой использовать `type`.
+        let extra: Vec<&LintIssue> = report
+            .issues
+            .iter()
+            .filter(|i| i.rule == "unknown_rule_field")
+            .collect();
+        assert_eq!(extra.len(), 1, "{}", report.summary);
+        assert_eq!(extra[0].severity, "warn");
+        assert!(extra[0].message.contains("kind"), "{}", extra[0].message);
+        assert!(
+            extra[0].message.contains("'kind' не читается"),
+            "{}",
+            extra[0].message
+        );
+    }
+
+    /// (b) `unverifiable: true` без `type` — прежнее поведение (ручной
+    /// контроль): находки нет, гейт зелёный, правило сохраняется как карточка.
+    #[test]
+    fn unverifiable_without_type_keeps_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        let c = write_file(
+            repo,
+            "CONSTRAINTS.yaml",
+            "rules:\n  - name: manual\n    unverifiable: true\n    rationale: 'вручную'\n",
+        );
+        let report = check(repo, &c).expect("прогон");
+        assert!(report.passed, "{}", report.summary);
+        assert!(
+            report.issues.iter().all(|i| i.rule != "rule_type_missing"),
+            "{}",
+            report.summary
+        );
+        // Плоский разбор без `type` не ошибка для unverifiable-записи.
+        let rules = load_fitness_rules(&c).expect("разбор");
+        assert_eq!(rules.len(), 1);
+    }
+
+    /// (c) Правило с `type` И лишним полем → warn `unknown_rule_field`, но
+    /// правило исполняется и гейт не краснеет от одного лишь лишнего ключа.
+    #[test]
+    fn extra_rule_field_is_warn_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        write_file(repo, "README.md", "ридми\n");
+        let c = write_file(
+            repo,
+            "CONSTRAINTS.yaml",
+            "rules:\n  - name: readme\n    type: file_exists\n    path: README.md\n    flavour: x\n",
+        );
+        let report = check(repo, &c).expect("прогон");
+        assert!(report.passed, "{}", report.summary);
+        let extra: Vec<&LintIssue> = report
+            .issues
+            .iter()
+            .filter(|i| i.rule == "unknown_rule_field")
+            .collect();
+        assert_eq!(extra.len(), 1, "{}", report.summary);
+        assert!(extra[0].message.contains("flavour"), "{}", extra[0].message);
+        assert!(
+            report.issues.iter().all(|i| i.rule != "rule_type_missing"),
+            "{}",
+            report.summary
+        );
     }
 
     // --- ADR-068: requires — ресурсы среды правила ---

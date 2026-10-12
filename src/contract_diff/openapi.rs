@@ -608,8 +608,39 @@ fn diff_response_body(
     }
 }
 
-/// CD-006: изменение типа поля схемы (поверхностно, без `$ref`-резолюции).
-fn diff_schemas(old: &Value, new: &Value, out: &mut Vec<Finding>) {
+/// Сайт сравнимой схемы документа: JSON-путь до схемы (для локации находки),
+/// метка для сообщений и значения схемы в старом/новом документе. Сайты общие
+/// для CD-006 (этот модуль) и семантических зондов (`semantic.rs`).
+pub(crate) struct SchemaSite<'a> {
+    /// Сегменты JSON-пути до схемы, например `["components","schemas","Pet"]`
+    /// или `["paths","/pay","post","responses","200","content","application/json","schema"]`.
+    pub base: Vec<String>,
+    /// Человекочитаемая метка схемы (имя компонента либо
+    /// `метод путь (тело запроса|ответ код), media`).
+    pub label: String,
+    /// Схема в старом документе.
+    pub old: &'a Value,
+    /// Схема в новом документе.
+    pub new: &'a Value,
+}
+
+/// Все сравнимые схемы документа: `components.schemas.*` и inline-схемы тел
+/// запросов/ответов в `paths` (P0-2 — раньше inline-схемы не виделись вовсе,
+/// и смена типа/enum в теле ответа проходила как «0 изменений, PASS»).
+///
+/// Порядок — сначала компоненты, затем inline: для контрактов без inline-схем
+/// вывод прежний (CD-006 байт-в-байт). Читаются только прямые `properties`
+/// схемы: цель инлайнового `$ref` в `components.schemas` покрыта отдельным
+/// сайтом компонента, и резолв здесь дал бы дубль-находку.
+pub(crate) fn schema_sites<'a>(old: &'a Value, new: &'a Value) -> Vec<SchemaSite<'a>> {
+    let mut sites = Vec::new();
+    collect_component_sites(old, new, &mut sites);
+    collect_inline_sites(old, new, &mut sites);
+    sites
+}
+
+/// Сайты `components.schemas.*` (совпавшие по имени схемы).
+fn collect_component_sites<'a>(old: &'a Value, new: &'a Value, sites: &mut Vec<SchemaSite<'a>>) {
     let old_schemas = old
         .get("components")
         .and_then(|c| c.get("schemas"))
@@ -625,19 +656,133 @@ fn diff_schemas(old: &Value, new: &Value, out: &mut Vec<Finding>) {
         let Some(new_schema) = new_schemas.get(name) else {
             continue;
         };
-        diff_schema_properties(name, old_schema, new_schema, out);
+        sites.push(SchemaSite {
+            base: vec!["components".into(), "schemas".into(), name.clone()],
+            label: name.clone(),
+            old: old_schema,
+            new: new_schema,
+        });
+    }
+}
+
+/// Inline-схемы тел запросов/ответов: `paths → <method> → requestBody` и
+/// `paths → <method> → responses.<code>`, затем `content.<media>.schema`
+/// (P0-2: `paths → operations → responses/*/content/<media>/schema` и
+/// `requestBody/content/<media>/schema`).
+fn collect_inline_sites<'a>(old: &'a Value, new: &'a Value, sites: &mut Vec<SchemaSite<'a>>) {
+    let old_paths = old.get("paths").and_then(Value::as_object);
+    let new_paths = new.get("paths").and_then(Value::as_object);
+    let (Some(old_paths), Some(new_paths)) = (old_paths, new_paths) else {
+        return;
+    };
+    for (path, old_item) in old_paths {
+        let path = path.as_str();
+        let Some(new_item) = new_paths.get(path) else {
+            continue;
+        };
+        for method in OPERATION_METHODS {
+            let (Some(old_op), Some(new_op)) = (
+                old_item.get(method).filter(|v| v.is_object()),
+                new_item.get(method).filter(|v| v.is_object()),
+            ) else {
+                continue;
+            };
+            collect_body_sites(
+                &format!("{method} {path} (тело запроса)"),
+                &["paths", path, method, "requestBody"],
+                old_op.get("requestBody"),
+                new_op.get("requestBody"),
+                sites,
+            );
+            collect_response_sites(path, method, old_op, new_op, sites);
+        }
+    }
+}
+
+/// Сайты тел ответов операции (`responses.<code>.content.<media>.schema`).
+fn collect_response_sites<'a>(
+    path: &str,
+    method: &str,
+    old_op: &'a Value,
+    new_op: &'a Value,
+    sites: &mut Vec<SchemaSite<'a>>,
+) {
+    let old_responses = old_op.get("responses").and_then(Value::as_object);
+    let new_responses = new_op.get("responses").and_then(Value::as_object);
+    let (Some(old_responses), Some(new_responses)) = (old_responses, new_responses) else {
+        return;
+    };
+    for (code, old_response) in old_responses {
+        let Some(new_response) = new_responses.get(code) else {
+            continue;
+        };
+        collect_body_sites(
+            &format!("{method} {path} (ответ {code})"),
+            &["paths", path, method, "responses", code],
+            Some(old_response),
+            Some(new_response),
+            sites,
+        );
+    }
+}
+
+/// Сайты `content.<media>.schema` одного тела (запроса или ответа).
+fn collect_body_sites<'a>(
+    label: &str,
+    base: &[&str],
+    old_body: Option<&'a Value>,
+    new_body: Option<&'a Value>,
+    sites: &mut Vec<SchemaSite<'a>>,
+) {
+    let old_content = old_body
+        .and_then(|b| b.get("content"))
+        .and_then(Value::as_object);
+    let new_content = new_body
+        .and_then(|b| b.get("content"))
+        .and_then(Value::as_object);
+    let (Some(old_content), Some(new_content)) = (old_content, new_content) else {
+        return;
+    };
+    for (media, old_media) in old_content {
+        let Some(old_schema) = old_media.get("schema") else {
+            continue;
+        };
+        let Some(new_schema) = new_content.get(media).and_then(|m| m.get("schema")) else {
+            continue;
+        };
+        let mut segments: Vec<String> = base.iter().map(|s| (*s).to_string()).collect();
+        segments.push("content".into());
+        segments.push(media.clone());
+        segments.push("schema".into());
+        sites.push(SchemaSite {
+            base: segments,
+            label: format!("{label}, {media}"),
+            old: old_schema,
+            new: new_schema,
+        });
+    }
+}
+
+/// Локация свойства внутри схемы-сайта: `…/properties/<prop>`.
+pub(crate) fn site_location(site: &SchemaSite, prop: &str) -> String {
+    let mut segments: Vec<&str> = site.base.iter().map(String::as_str).collect();
+    segments.push("properties");
+    segments.push(prop);
+    location(&segments)
+}
+
+/// CD-006: изменение типа поля схемы (поверхностно, без `$ref`-резолюции).
+/// Схемы — компонентные и inline (P0-2).
+fn diff_schemas(old: &Value, new: &Value, out: &mut Vec<Finding>) {
+    for site in schema_sites(old, new) {
+        diff_schema_properties(&site, out);
     }
 }
 
 /// Сравнивает типы верхнеуровневых `properties` одной схемы.
-fn diff_schema_properties(
-    name: &str,
-    old_schema: &Value,
-    new_schema: &Value,
-    out: &mut Vec<Finding>,
-) {
-    let old_props = old_schema.get("properties").and_then(Value::as_object);
-    let new_props = new_schema.get("properties").and_then(Value::as_object);
+fn diff_schema_properties(site: &SchemaSite, out: &mut Vec<Finding>) {
+    let old_props = site.old.get("properties").and_then(Value::as_object);
+    let new_props = site.new.get("properties").and_then(Value::as_object);
     let (Some(old_props), Some(new_props)) = (old_props, new_props) else {
         return;
     };
@@ -649,18 +794,18 @@ fn diff_schema_properties(
         // Поверхностно: только прямое поле type, без $ref-резолюции и рекурсии.
         let old_type = old_prop.get("type").and_then(Value::as_str);
         let new_type = new_prop.get("type").and_then(Value::as_str);
-        match (old_type, new_type) {
-            (Some(old_type), Some(new_type)) if old_type != new_type => {
+        if let (Some(old_type), Some(new_type)) = (old_type, new_type) {
+            if old_type != new_type {
                 out.push(Finding {
                     severity: "error".into(),
                     rule: "CD-006".into(),
-                    location: location(&["components", "schemas", name, "properties", prop]),
+                    location: site_location(site, prop),
                     message: format!(
-                        "изменился тип поля «{prop}» схемы «{name}»: {old_type} → {new_type}"
+                        "изменился тип поля «{prop}» схемы «{}»: {old_type} → {new_type}",
+                        site.label
                     ),
                 });
             }
-            _ => {}
         }
     }
 }
@@ -1347,5 +1492,106 @@ paths:
         let map = effective_parameters(&doc, &path_item, &op);
         assert_eq!(map.len(), 1, "{map:?}");
         assert!(map.contains_key(&("limit".to_string(), "query".to_string())));
+    }
+
+    /// P0-2: смена типа в inline-схеме тела ОТВЕТА (в `paths`, без
+    /// `components/schemas`) раньше не виделась — «0 изменений, PASS».
+    /// Теперь CD-006 ловит и inline-схемы, а локация называет путь до схемы.
+    #[tokio::test]
+    async fn cd006_inline_response_schema_type_change_is_breaking() {
+        let contract = |ty: &str| {
+            format!(
+                "openapi: 3.0.3\ninfo:\n  title: T\n  version: 1.0.0\npaths:\n  /v1/pay:\n    post:\n      operationId: pay\n      responses:\n        '200':\n          description: ok\n          content:\n            application/json:\n              schema:\n                type: object\n                properties:\n                  amount:\n                    type: {ty}\n"
+            )
+        };
+        let out = diff_text(
+            &contract("number"),
+            &contract("object"),
+            "old.yaml",
+            "new.yaml",
+        )
+        .await;
+        assert!(!out.is_error, "{}", out.content);
+        assert_eq!(out.content.matches("CD-006").count(), 1, "{}", out.content);
+        assert!(
+            out.content.contains(
+                "[error] #/paths/~1v1~1pay/post/responses/200/content/application~1json/schema/properties/amount CD-006"
+            ),
+            "{}",
+            out.content
+        );
+        assert!(out.content.contains("Итог: FAIL"), "{}", out.content);
+    }
+
+    /// P0-2: то же для inline-схемы ТЕЛА ЗАПРОСА
+    /// (`requestBody/content/<media>/schema`).
+    #[tokio::test]
+    async fn cd006_inline_request_body_schema_type_change_is_breaking() {
+        let contract = |ty: &str| {
+            format!(
+                "openapi: 3.0.3\ninfo:\n  title: T\n  version: 1.0.0\npaths:\n  /v1/pay:\n    post:\n      operationId: pay\n      requestBody:\n        content:\n          application/json:\n            schema:\n              type: object\n              properties:\n                amount:\n                  type: {ty}\n      responses:\n        '200':\n          description: ok\n"
+            )
+        };
+        let out = diff_text(
+            &contract("number"),
+            &contract("object"),
+            "old.yaml",
+            "new.yaml",
+        )
+        .await;
+        assert!(!out.is_error, "{}", out.content);
+        assert_eq!(out.content.matches("CD-006").count(), 1, "{}", out.content);
+        assert!(
+            out.content.contains(
+                "[error] #/paths/~1v1~1pay/post/requestBody/content/application~1json/schema/properties/amount CD-006"
+            ),
+            "{}",
+            out.content
+        );
+    }
+
+    /// P0-2: расширение на inline-схемы не задевает прежний вывод по
+    /// `components.schemas` — строка находки CD-006 байт-в-байт как раньше,
+    /// ровно одна находка (нет дубля из inline-обхода).
+    #[tokio::test]
+    async fn cd006_component_schema_output_is_unchanged() {
+        let new = BASE.replace(
+            "        age:\n          type: integer",
+            "        age:\n          type: string",
+        );
+        let out = diff_text(BASE, &new, "old.yaml", "new.yaml").await;
+        assert!(!out.is_error, "{}", out.content);
+        assert_eq!(out.content.matches("CD-006").count(), 1, "{}", out.content);
+        assert!(
+            out.content.contains(
+                "[error] #/components/schemas/Pet/properties/age CD-006 — изменился тип поля «age» схемы «Pet»: integer → string"
+            ),
+            "{}",
+            out.content
+        );
+    }
+
+    /// P0-2: счётчик изменений в заголовке включает inline-факты — две смены
+    /// типа в inline-схемах (тело запроса и тело ответа) дают ровно 2 находки.
+    /// Версия поднята до 2.0.0, чтобы погасить CD-007 и видеть только факты
+    /// смены типа (проверка, что inline-схемы реально попали в общий обход).
+    #[tokio::test]
+    async fn inline_schema_findings_count_in_report_header() {
+        let contract = |version: &str, amount: &str, status: &str| {
+            format!(
+                "openapi: 3.0.3\ninfo:\n  title: T\n  version: {version}\npaths:\n  /v1/pay:\n    post:\n      operationId: pay\n      requestBody:\n        content:\n          application/json:\n            schema:\n              type: object\n              properties:\n                amount:\n                  type: {amount}\n      responses:\n        '200':\n          description: ok\n          content:\n            application/json:\n              schema:\n                type: object\n                properties:\n                  status:\n                    type: {status}\n"
+            )
+        };
+        let old = contract("1.0.0", "integer", "string");
+        let new = contract("2.0.0", "string", "integer");
+        let out = diff_text(&old, &new, "old.yaml", "new.yaml").await;
+        assert!(!out.is_error, "{}", out.content);
+        assert!(
+            out.content
+                .contains("contract_diff: 2 изменений (breaking: 2, non-breaking: 0)"),
+            "{}",
+            out.content
+        );
+        assert!(!out.content.contains("CD-007"), "{}", out.content);
     }
 }

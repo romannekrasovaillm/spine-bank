@@ -1211,6 +1211,27 @@ mod tests {
         assert_eq!(report.constraint_rules, None);
     }
 
+    /// P0-3 (0.4.9): реестр только в `.arch-handoff/CONSTRAINTS.yaml` —
+    /// трассировка обязана его увидеть (единый резолвер E2), а не давать
+    /// ложный `constraints-missing`/SKIP. Тот же кейс, что и
+    /// [`missing_constraints_file_is_error`], но копия лежит в пакетном пути.
+    #[test]
+    fn handoff_only_constraints_file_is_seen() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let case = write_case(dir.path(), &full_entities(), None, Some(SPINE));
+        let handoff = case.join(".arch-handoff");
+        std::fs::create_dir_all(&handoff).expect("dirs");
+        std::fs::write(handoff.join("CONSTRAINTS.yaml"), CONSTRAINTS).expect("constraints");
+        let report = trace_check(&case).expect("trace");
+        let rules: Vec<_> = report.issues.iter().map(|i| i.rule).collect();
+        assert!(
+            !rules.contains(&"constraints-missing"),
+            "реестр из .arch-handoff обязан быть виден: {rules:?}"
+        );
+        assert_eq!(report.constraint_rules, Some(1));
+        assert!(!report.has_errors(), "{:?}", report.issues);
+    }
+
     #[test]
     fn missing_spine_file_skips_crosscheck() {
         let dir = tempfile::tempdir().expect("tmp");

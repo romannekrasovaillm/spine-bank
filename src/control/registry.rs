@@ -150,14 +150,18 @@ fn resolve_constraints(path: &Path, stack: &mut Vec<PathBuf>) -> Result<Resolved
     stack.push(canonical);
 
     let yaml = std::fs::read_to_string(path).map_err(|e| HarnessError::io(path, e))?;
-    let (parsed, skipped) = parse_constraints_file(&yaml, path)?;
+    let (parsed, skipped, mut findings) = parse_constraints_file(&yaml, path)?;
 
     let mut rules = Vec::new();
     let mut parents = Vec::new();
     let mut overrides = Vec::new();
-    let mut findings = Vec::new();
     let mut skipped_unknown = Vec::new();
 
+    // P0-1: находки разбора записей приходят из парсера (error
+    // `rule_type_missing` при отсутствии `type` у исполняемой записи, warn
+    // `unknown_rule_field` о лишних полях); error краснит гейт. Находки
+    // собственного файла — первыми (до находок родителей из `extends`).
+    //
     // Неизвестный тип правила (словарь другой редакции, E8) — громкая
     // warn-находка, а не падение резолва и не тихий пропуск.
     for s in skipped {
@@ -1234,8 +1238,8 @@ pub fn rule_weakened_scoped(
     // Толерантный разбор (E8): записи с неизвестными типами в сравнении не
     // участвуют (сравнивать не с чем — они не из нашего словаря); их
     // warn-пропуск покажет `check`.
-    let (current, _) = parse_constraints_file(current_src, file)?;
-    let (base, _) = parse_constraints_file(base_src, file)?;
+    let (current, _, _) = parse_constraints_file(current_src, file)?;
+    let (base, _, _) = parse_constraints_file(base_src, file)?;
     let current_rules = rules_snapshot(&current)?;
     let base_rules = rules_snapshot(&base)?;
     let (legalized, self_by_key) = legalization(
@@ -1388,6 +1392,48 @@ mod tests {
             ),
         );
     }
+    // --- P0-4: путь к битому файлу в ошибке YAML ---------------------------
+
+    /// P0-4 (0.4.9): ошибка YAML реестра обязана нести путь к файлу. Без него
+    /// `control check` на битом реестре печатал голое «found unexpected end of
+    /// stream…» — непонятно, какой из трёх входов (корень, `.arch-handoff/`,
+    /// корпоративный `extends`) сломан.
+    #[test]
+    fn broken_yaml_error_names_the_file() {
+        const BROKEN: &str = "rules:\n  - name: \"незакрытая кавычка\n";
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path();
+
+        // 1. Корневая копия.
+        let root = write_file(repo, "CONSTRAINTS.yaml", BROKEN);
+        let msg = load_constraints_resolved(&root)
+            .expect_err("корневой YAML бит")
+            .to_string();
+        assert!(msg.contains("CONSTRAINTS.yaml"), "{msg}");
+        assert!(msg.contains("не разобрать YAML"), "{msg}");
+
+        // 2. Пакетная копия `.arch-handoff/CONSTRAINTS.yaml`.
+        let pkg = write_file(repo, ".arch-handoff/CONSTRAINTS.yaml", BROKEN);
+        let msg = load_constraints_resolved(&pkg)
+            .expect_err("пакетный YAML бит")
+            .to_string();
+        assert!(msg.contains(".arch-handoff/CONSTRAINTS.yaml"), "{msg}");
+        assert!(msg.contains("не разобрать YAML"), "{msg}");
+
+        // 3. Корпоративный родитель `extends` (путь — относительно дочернего).
+        let child = write_file(
+            repo,
+            "child/CONSTRAINTS.yaml",
+            "extends: [\"./corp.yaml@1\"]\nrules: []\n",
+        );
+        write_file(repo, "child/corp.yaml", BROKEN);
+        let msg = load_constraints_resolved(&child)
+            .expect_err("родитель бит")
+            .to_string();
+        assert!(msg.contains("corp.yaml"), "{msg}");
+        assert!(msg.contains("не разобрать YAML"), "{msg}");
+    }
+
     // --- Анти-ослабление гейта (rule_weakened) ------------------------------
 
     /// Базовая версия CONSTRAINTS.yaml для тестов `rule_weakened`: два
