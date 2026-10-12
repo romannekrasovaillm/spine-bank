@@ -64,7 +64,11 @@ fn render_header(out: &mut String, model: &ReportModel) {
     }
     let _ = writeln!(out, "> **Ревизия:** {}", m.rev);
     let _ = writeln!(out, "> **Дата ревизии:** {}", m.generated_at);
-    let _ = writeln!(out, "> **Схема:** `{}` (arch-be {})", model.schema, model.arch_be);
+    let _ = writeln!(
+        out,
+        "> **Схема:** `{}` (arch-be {})",
+        model.schema, model.arch_be
+    );
     let _ = writeln!(
         out,
         "> **Автопроверка (fail-closed, байпас-флага нет):** {} error / {} warn",
@@ -156,11 +160,26 @@ fn render_items(out: &mut String, items: &[crate::report::model::SectionItem]) {
 fn render_legend(out: &mut String, section: &ReportSection) {
     let _ = writeln!(out, "\n## §{}. {}", section.id, section.title);
     let _ = writeln!(out, "\n_детерминированный раздел_");
-    let _ = writeln!(out, "\n- **A** — элемент опирается на модель (`model_id`) или подтверждённое ребро.");
-    let _ = writeln!(out, "- **B** — элемент выведен сканером/эвристикой (манифест, конфиг).");
-    let _ = writeln!(out, "- **C** — пробел (`[gap]`), кандидат в решение или LLM-вывод.");
-    let _ = writeln!(out, "- **Основания** — адреса `путь:строка` в дереве ревизии; для A/B обязательны.");
-    let _ = writeln!(out, "- **fail-closed** — любая находка `error` блокирует выдачу; байпас-флага нет.");
+    let _ = writeln!(
+        out,
+        "\n- **A** — элемент опирается на модель (`model_id`) или подтверждённое ребро."
+    );
+    let _ = writeln!(
+        out,
+        "- **B** — элемент выведен сканером/эвристикой (манифест, конфиг)."
+    );
+    let _ = writeln!(
+        out,
+        "- **C** — пробел (`[gap]`), кандидат в решение или LLM-вывод."
+    );
+    let _ = writeln!(
+        out,
+        "- **Основания** — адреса `путь:строка` в дереве ревизии; для A/B обязательны."
+    );
+    let _ = writeln!(
+        out,
+        "- **fail-closed** — любая находка `error` блокирует выдачу; байпас-флага нет."
+    );
 }
 
 /// §14 Неопределённости: 14.1 C-элементы, 14.2 пробелы, 14.3 промпт, 14.4 метод.
@@ -227,7 +246,12 @@ fn render_context_mermaid(out: &mut String, model: &ReportModel) {
     let _ = writeln!(out, "flowchart LR");
     let mut declared: BTreeSet<String> = BTreeSet::new();
     for e in model.elements_of(Family::Context) {
-        let _ = writeln!(out, "  {}([\"{}\"])", mermaid_id(&e.id), mermaid_label(&e.title));
+        let _ = writeln!(
+            out,
+            "  {}([\"{}\"])",
+            mermaid_id(&e.id),
+            mermaid_label(&e.title)
+        );
         declared.insert(e.id.clone());
     }
     for r in &model.relations {
@@ -310,8 +334,14 @@ fn render_appendices(out: &mut String, model: &ReportModel) {
     let _ = writeln!(out, "\n---\n\n# Приложения");
 
     let _ = writeln!(out, "\n## Приложение A. Трассируемость");
-    let _ = writeln!(out, "\n| ID | Семейство | graph_id | Уверенность | Основания |");
-    let _ = writeln!(out, "|----|-----------|----------|-------------|-----------|");
+    let _ = writeln!(
+        out,
+        "\n| ID | Семейство | graph_id | Уверенность | Основания |"
+    );
+    let _ = writeln!(
+        out,
+        "|----|-----------|----------|-------------|-----------|"
+    );
     for e in &model.elements {
         let gid = e.graph_id.as_deref().unwrap_or(DASH);
         let _ = writeln!(
@@ -383,7 +413,11 @@ fn render_appendices(out: &mut String, model: &ReportModel) {
     let dist = &m.confidence_distribution;
     let dist_line: Vec<String> = dist.iter().map(|(k, v)| format!("{k}={v}")).collect();
     let _ = writeln!(out, "| confidence | {} |", dist_line.join(" · "));
-    let stats: Vec<String> = m.statistics.iter().map(|(k, v)| format!("{k}={v}")).collect();
+    let stats: Vec<String> = m
+        .statistics
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect();
     if !stats.is_empty() {
         let _ = writeln!(out, "| statistics | {} |", stats.join(" · "));
     }
@@ -408,12 +442,27 @@ fn render_expert_sheet(out: &mut String, model: &ReportModel) {
         let _ = writeln!(out, "| §{}. {} | | | | | | |", s.id, s.title);
     }
     let _ = writeln!(out, "\n### Итоговые вопросы");
-    let _ = writeln!(out, "\n1. Сводка (§1) соответствует вашему пониманию системы?");
-    let _ = writeln!(out, "2. Верны ли границы контекста (§4): что лишнее, что пропущено?");
-    let _ = writeln!(out, "3. Верна ли декомпозиция на контейнеры и компоненты (§5–§6)?");
-    let _ = writeln!(out, "4. Достоверны ли интерфейсы (§8) и автопути сценариев (§9)?");
+    let _ = writeln!(
+        out,
+        "\n1. Сводка (§1) соответствует вашему пониманию системы?"
+    );
+    let _ = writeln!(
+        out,
+        "2. Верны ли границы контекста (§4): что лишнее, что пропущено?"
+    );
+    let _ = writeln!(
+        out,
+        "3. Верна ли декомпозиция на контейнеры и компоненты (§5–§6)?"
+    );
+    let _ = writeln!(
+        out,
+        "4. Достоверны ли интерфейсы (§8) и автопути сценариев (§9)?"
+    );
     let _ = writeln!(out, "5. Какие риски (§13) ложные, а какие упущены?");
-    let _ = writeln!(out, "6. Какие разделы наиболее и наименее полезны для передачи системы?");
+    let _ = writeln!(
+        out,
+        "6. Какие разделы наиболее и наименее полезны для передачи системы?"
+    );
 }
 
 /// Склеивает ссылки через запятую или отдаёт тире.
@@ -432,7 +481,9 @@ fn escape_cell(s: &str) -> String {
 
 /// Идентификатор узла mermaid: только алфанумерика из report-ID.
 fn mermaid_id(id: &str) -> String {
-    id.chars().filter(|c: &char| c.is_ascii_alphanumeric()).collect()
+    id.chars()
+        .filter(|c: &char| c.is_ascii_alphanumeric())
+        .collect()
 }
 
 /// Метка узла mermaid: кавычки/скобки вычищаются.

@@ -101,7 +101,10 @@ fn check_relations(
                 findings.push(CheckFinding {
                     invariant: INV_LOCATION.to_string(),
                     severity: CheckSeverity::Error,
-                    message: format!("связь {}→{}: ссылка `{r}` не разрешается — {why}", rel.from, rel.to),
+                    message: format!(
+                        "связь {}→{}: ссылка `{r}` не разрешается — {why}",
+                        rel.from, rel.to
+                    ),
                     element_id: None,
                 });
             }
@@ -120,7 +123,10 @@ fn check_sections(model: &ReportModel, ids: &BTreeSet<&str>, findings: &mut Vec<
                 findings.push(CheckFinding {
                     invariant: INV_REFERENCE.to_string(),
                     severity: CheckSeverity::Error,
-                    message: format!("раздел §{} ссылается на несуществующий report-ID {id}", s.id),
+                    message: format!(
+                        "раздел §{} ссылается на несуществующий report-ID {id}",
+                        s.id
+                    ),
                     element_id: Some(id.clone()),
                 });
             }
@@ -175,7 +181,9 @@ pub fn resolve_ref(repo: &Path, snap: &Snapshot, reference: &str) -> Option<Stri
     if let (Some(line), Some(content)) = (line, snap.content(path)) {
         let count = content.lines().count();
         if line > count {
-            return Some(format!("строка {line} за пределами `{path}` (строк: {count})"));
+            return Some(format!(
+                "строка {line} за пределами `{path}` (строк: {count})"
+            ));
         }
     }
     None

@@ -13,7 +13,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
-use arch_harness::report::{build, render_json, render_md, ReportModel};
+use arch_harness::report::{ReportModel, build, render_json, render_md};
 
 /// Прогон `report`: отчёт о восстановленной архитектуре в формате md | json | check.
 pub(crate) fn cmd_report(

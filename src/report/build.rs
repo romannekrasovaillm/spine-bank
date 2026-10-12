@@ -362,7 +362,8 @@ fn assign_ids(elements: &mut [ReportElement]) {
         idx.sort_by(|&a, &b| {
             let ka = elements[a].graph_id.as_deref().unwrap_or("");
             let kb = elements[b].graph_id.as_deref().unwrap_or("");
-            ka.cmp(kb).then_with(|| elements[a].title.cmp(&elements[b].title))
+            ka.cmp(kb)
+                .then_with(|| elements[a].title.cmp(&elements[b].title))
         });
         for (n, i) in idx.into_iter().enumerate() {
             elements[i].id = format!("{}-{:02}", family.prefix(), n + 1);
@@ -372,10 +373,7 @@ fn assign_ids(elements: &mut [ReportElement]) {
 }
 
 /// Связи отчёта из рёбер графа: обе стороны имеют report-ID.
-fn relations_from_edges(
-    ctx: &Ctx,
-    graph_to_id: &BTreeMap<String, String>,
-) -> Vec<ReportRelation> {
+fn relations_from_edges(ctx: &Ctx, graph_to_id: &BTreeMap<String, String>) -> Vec<ReportRelation> {
     let mut out = Vec::new();
     for e in &ctx.graph.edges {
         let (Some(from), Some(to)) = (graph_to_id.get(&e.from), graph_to_id.get(&e.to)) else {
@@ -434,7 +432,11 @@ fn sections(
         .collect();
 
     let mut overview_items: Vec<SectionItem> = Vec::new();
-    for needle in ["Карта компонентов", "Ограничения платформы", "Тесты и наблюдаемость"] {
+    for needle in [
+        "Карта компонентов",
+        "Ограничения платформы",
+        "Тесты и наблюдаемость",
+    ] {
         for (text, raw) in survey_findings(ctx.survey, needle) {
             overview_items.push(SectionItem {
                 label: text,
@@ -489,8 +491,8 @@ fn sections(
         })
         .collect();
 
-    let exec = |idx: usize, element_ids: Vec<String>, counts, items: Vec<SectionItem>| {
-        ReportSection {
+    let exec =
+        |idx: usize, element_ids: Vec<String>, counts, items: Vec<SectionItem>| ReportSection {
             id: (idx + 1).to_string(),
             title: SECTION_TITLES[idx].to_string(),
             kind: SECTION_KINDS[idx],
@@ -498,8 +500,7 @@ fn sections(
             counts,
             placeholder: None,
             items,
-        }
-    };
+        };
     let mut interp = |idx: usize, items: Vec<SectionItem>| {
         let empty = items.is_empty();
         ReportSection {
@@ -587,11 +588,12 @@ fn meta(ctx: &Ctx) -> ReportMeta {
         .repo
         .canonicalize()
         .unwrap_or_else(|_| ctx.repo.to_path_buf());
-    let system = canonical
-        .file_name()
-        .map_or_else(|| canonical.display().to_string(), |n| n.to_string_lossy().into());
-    let branch = git_stdout(ctx.repo, &["rev-parse", "--abbrev-ref", "HEAD"])
-        .filter(|b| b != "HEAD");
+    let system = canonical.file_name().map_or_else(
+        || canonical.display().to_string(),
+        |n| n.to_string_lossy().into(),
+    );
+    let branch =
+        git_stdout(ctx.repo, &["rev-parse", "--abbrev-ref", "HEAD"]).filter(|b| b != "HEAD");
     let generated_at = git_stdout(ctx.repo, &["show", "-s", "--format=%cI", &ctx.graph.rev])
         .unwrap_or_else(|| ctx.graph.rev.clone());
     ReportMeta {
@@ -641,10 +643,8 @@ fn import_cycles(graph: &ArchGraph) -> Vec<(Vec<String>, Vec<String>)> {
         .map(|n| n.id.clone())
         .collect();
     let nodes: Vec<String> = comps.iter().cloned().collect();
-    let mut adj: BTreeMap<String, BTreeSet<String>> = nodes
-        .iter()
-        .map(|n| (n.clone(), BTreeSet::new()))
-        .collect();
+    let mut adj: BTreeMap<String, BTreeSet<String>> =
+        nodes.iter().map(|n| (n.clone(), BTreeSet::new())).collect();
     for e in &graph.edges {
         if e.kind == EdgeKind::Import && comps.contains(&e.from) && comps.contains(&e.to) {
             adj.entry(e.from.clone()).or_default().insert(e.to.clone());
@@ -783,16 +783,35 @@ mod tests {
         write_file(repo, "Dockerfile", "FROM scratch\n");
     }
 
-    /// Собирает фикстуру и модель HEAD; tempdir возвращается, чтобы репозиторий
-    /// жил до конца теста (снимок читает рабочее дерево для резолва ссылок).
-    fn build_fixture() -> (tempfile::TempDir, std::path::PathBuf, ReportModel) {
+    /// Фикстура с подтверждённым межкомпонентным ребром и пробелом: к базовой
+    /// добавляется конфиг `api`, где `lb://ledger` точно совпадает с
+    /// компонентом `ledger` (ребро `calls` = confirmed → A), а
+    /// `lb://phantom-service` не разрешается (пробел `[gap]` → C).
+    fn confirmed_fixture(repo: &Path) {
+        report_fixture(repo);
+        write_file(
+            repo,
+            "api/config/application.yaml",
+            "routes:\n  - uri: lb://ledger\n  - uri: lb://phantom-service\n",
+        );
+    }
+
+    /// Общая сборка: tempdir + фикстура + git + модель HEAD; tempdir
+    /// возвращается, чтобы репозиторий жил до конца теста (снимок читает
+    /// рабочее дерево для резолва ссылок).
+    fn build_with(fixture: fn(&Path)) -> (tempfile::TempDir, std::path::PathBuf, ReportModel) {
         let dir = tempfile::tempdir().expect("tmp");
         let repo = dir.path().join("repo");
         std::fs::create_dir_all(&repo).expect("mkdir");
-        report_fixture(&repo);
+        fixture(&repo);
         git_repo(&repo);
         let model = build(&repo, Some("HEAD")).expect("build");
         (dir, repo, model)
+    }
+
+    /// Собирает базовую фикстуру (все шесть семейств) и модель HEAD.
+    fn build_fixture() -> (tempfile::TempDir, std::path::PathBuf, ReportModel) {
+        build_with(report_fixture)
     }
 
     /// Группа 1: все шесть семейств присутствуют, ID стабильны между прогонами,
@@ -876,15 +895,23 @@ mod tests {
                 .iter()
                 .any(|f| f.invariant == inv && f.severity == sev)
         };
-        assert!(has("и1", CheckSeverity::Error), "и1 не найден: {findings:?}");
-        assert!(has("и2", CheckSeverity::Error), "и2 не найден: {findings:?}");
-        assert!(has("и3", CheckSeverity::Error), "и3 не найден: {findings:?}");
+        assert!(
+            has("и1", CheckSeverity::Error),
+            "и1 не найден: {findings:?}"
+        );
+        assert!(
+            has("и2", CheckSeverity::Error),
+            "и2 не найден: {findings:?}"
+        );
+        assert!(
+            has("и3", CheckSeverity::Error),
+            "и3 не найден: {findings:?}"
+        );
         // Инжектированные элементы не упомянуты ни в одном разделе → orphan.
         assert!(
             findings
                 .iter()
-                .any(|f| f.severity == CheckSeverity::Warn
-                    && f.message.contains("orphan_element")),
+                .any(|f| f.severity == CheckSeverity::Warn && f.message.contains("orphan_element")),
             "orphan warn не найден: {findings:?}"
         );
         // Ошибки блокируют выдачу (fail-closed: CLI по этому флагу делает bail).
@@ -936,5 +963,117 @@ mod tests {
             .map(|k| dist.get(*k).copied().unwrap_or(0) * 100 / total)
             .sum();
         assert!((97..=100).contains(&sum_pct), "доли не сходятся: {sum_pct}");
+    }
+
+    /// Группа 5: правила уверенности — манифест без модели → B с основанием,
+    /// подтверждённое ребро вызовов → A, неразрешённое имя из конфигурации →
+    /// C-пробел без основания.
+    #[test]
+    fn confidence_rules_manifest_b_confirmed_edge_a_gap_c() {
+        // База: компонент из манифеста без `model_id` и без confirmed-рёбер.
+        let (_dir, _repo, base) = build_fixture();
+        let api = base
+            .elements
+            .iter()
+            .find(|e| e.graph_id.as_deref() == Some("dir:api"))
+            .expect("нет элемента dir:api");
+        assert_eq!(api.confidence, ConfidenceAbc::B, "манифест без модели → B");
+        assert!(!api.evidence.is_empty(), "B обязан нести основание");
+
+        // Вторая фикстура: `lb://ledger` разрешается точно (confirmed `calls`),
+        // `lb://phantom-service` не разрешается (пробел `[gap]`).
+        let (_dir2, _repo2, model) = build_with(confirmed_fixture);
+
+        // A: конечная точка подтверждённого ребра вызовов.
+        let ledger = model
+            .elements
+            .iter()
+            .find(|e| e.graph_id.as_deref() == Some("dir:services/ledger"))
+            .expect("нет элемента dir:services/ledger");
+        assert_eq!(
+            ledger.confidence,
+            ConfidenceAbc::A,
+            "подтверждённое ребро → A"
+        );
+        assert!(!ledger.evidence.is_empty(), "A обязан нести основание");
+
+        // Оба конца ребра видны в ссылках: api (Container) → ledger (Component).
+        let api_id = model
+            .elements
+            .iter()
+            .find(|e| e.graph_id.as_deref() == Some("dir:api"))
+            .map(|e| e.id.clone())
+            .expect("нет api во второй фикстуре");
+        assert!(
+            model
+                .relations
+                .iter()
+                .any(|r| r.from == api_id && r.to == ledger.id),
+            "нет связи {api_id}→{}: {:?}",
+            ledger.id,
+            model
+                .relations
+                .iter()
+                .map(|r| format!("{}→{}", r.from, r.to))
+                .collect::<Vec<_>>()
+        );
+
+        // C-пробел: неразрешённое имя из конфигурации, без основания.
+        let gap = model
+            .elements
+            .iter()
+            .find(|e| e.props.get("source").is_some_and(|s| s == "gap"))
+            .expect("нет элемента-пробела (source=gap)");
+        assert_eq!(gap.confidence, ConfidenceAbc::C, "пробел → C");
+        assert!(gap.evidence.is_empty(), "пробел не несёт основания");
+        assert!(
+            gap.title.contains("phantom-service"),
+            "пробел не про phantom-service: {}",
+            gap.title
+        );
+    }
+
+    /// Группа 6: висячий элемент (orphan) — только `warn`, выдача не
+    /// блокируется: в проверках нет `error`, `has_errors()` ложно.
+    #[test]
+    fn orphan_element_warns_without_blocking() {
+        let (_dir, repo, mut model) = build_fixture();
+        let snap = snapshot_at(&repo, &model.meta.rev).expect("снимок");
+        assert!(!model.has_errors(), "база неожиданно красная");
+
+        // C без основания и без ссылки ни в одном разделе → ровно orphan.
+        model.elements.push(ReportElement {
+            id: "CMP-98".to_string(),
+            family: Family::Component,
+            graph_id: None,
+            title: "висячий компонент".to_string(),
+            confidence: ConfidenceAbc::C,
+            evidence: Vec::new(),
+            props: BTreeMap::new(),
+        });
+        model.checks = check::check(&model, &snap, &repo);
+
+        assert!(
+            !model
+                .checks
+                .iter()
+                .any(|f| f.severity == CheckSeverity::Error),
+            "orphan не должен давать error: {:?}",
+            model.checks
+        );
+        assert!(
+            model
+                .checks
+                .iter()
+                .any(|f| f.severity == CheckSeverity::Warn
+                    && f.message.contains("orphan_element")
+                    && f.element_id.as_deref() == Some("CMP-98")),
+            "нет orphan warn про CMP-98: {:?}",
+            model.checks
+        );
+        assert!(
+            !model.has_errors(),
+            "warn не должен блокировать выдачу (fail-closed только на error)"
+        );
     }
 }
