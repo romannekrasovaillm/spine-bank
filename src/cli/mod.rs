@@ -1712,14 +1712,13 @@ pub(crate) async fn run() -> Result<()> {
             // без существующего пути отвечает явной подсказкой, а не глухим
             // «репозиторий недоступен». Существующий каталог `pack` — это
             // реальный репозиторий, обрабатывается как обычно.
-            if let Some(word) = dir.to_str().map(str::trim)
-                && matches!(word, "pack" | "decide")
-                && !dir.exists()
-            {
-                anyhow::bail!(
-                    "подкоманды review '{word}' нет (одна страница ревью КА — \
-                     Д-4, roadmap); позиционный аргумент review — путь к репозиторию"
-                );
+            if let Some(word) = dir.to_str().map(str::trim) {
+                if matches!(word, "pack" | "decide") && !dir.exists() {
+                    anyhow::bail!(
+                        "подкоманды review '{word}' нет (одна страница ревью КА — \
+                         Д-4, roadmap); позиционный аргумент review — путь к репозиторию"
+                    );
+                }
             }
             // Пороги маршрутов — из конфига ([significance], ADR-034).
             let limits = cfg
