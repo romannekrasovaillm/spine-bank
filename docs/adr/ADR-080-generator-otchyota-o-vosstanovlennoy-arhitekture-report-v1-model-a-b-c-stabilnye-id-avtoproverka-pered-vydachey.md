@@ -1,7 +1,11 @@
 # ADR-080. Генератор отчёта о восстановленной архитектуре (report/v1): модель A/B/C, стабильные ID, автопроверка перед выдачей
 
 - Date: 2026-10-12
-- Status: Proposed
+- Status: Accepted [ADOPTED] — контракт `arch-be/report/v1`, правила ID и
+  A/B/C-уверенности, fail-closed автопроверка реализованы (этап 1 влит,
+  `src/report/`, dogfood на самом spine-bank: 124 элемента, A 18 % / B 77 % /
+  C 5 %, детерминизм байт-в-байт); этап 2 (MCP-мост, survey-глубина, PDF)
+  — по дельте report-v1
 - Модель-автор: spine-arch (claude)
 - Маршрут: Standard (significance score 2: new_component + api_contract_change)
 - Пересмотр: при появлении второго потребителя схемы `report/v1` (кроме CLI, MCP и
