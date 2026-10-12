@@ -127,6 +127,10 @@ pub struct CheckOptions {
     /// `Default` — встроенные дефолты (`cuda`/`stand`); край передаёт реестр
     /// из конфига `[gate.requires.<имя>]`.
     pub probes: crate::control::requires::ProbeRegistry,
+    /// Доступность JDK для байткод-проверки `ArchUnit` (S6). `None` (дефолт) —
+    /// детект инструментария (`java`/`javac` в PATH, снимок на прогон);
+    /// `Some` — явный снимок (край/тесты: детект подпроцесса не выполняется).
+    pub jdk: Option<bool>,
 }
 
 /// Baseline-файл долга: снимок error-находок `control check`, которые гейт

@@ -49,6 +49,55 @@ pub fn check(repo: &Path, constraints: &Path) -> Result<FitnessReport> {
     check_with_options(repo, constraints, &baseline::CheckOptions::default())
 }
 
+/// S6 (0.4.0): подсказка о байткод-слое `ArchUnit`. `Some(находка)` — в
+/// репозитории есть скомпилированные классы и доступен JDK, JVM-правило слоёв
+/// маппится в спек `ArchUnit`, но правила `type: archunit` в реестре нет:
+/// текстовая проверка остаётся слепой к FQN-обходам (C.3: текст видит 1/5,
+/// байткод — 5/5). Иначе `None`. Уровень warn — гейт не краснит, но молчаливо
+/// зелёный текстовый слой становится видимым (ADR-039, ADR-068).
+#[allow(clippy::question_mark)] // S6: ранний выход по is_none — не Result-ветка
+fn archunit_available_hint(
+    repo: &Path,
+    rules: &[&FitnessRule],
+    options: &baseline::CheckOptions,
+) -> Option<LintIssue> {
+    // Байткод-слой уже подключён (`type: archunit`) — предлагать нечего.
+    if rules.iter().any(|r| matches!(r.kind, RuleKind::ArchUnit)) {
+        return None;
+    }
+    // Нечего маппить: JVM-правил слоёв (dependency_direction/context_boundary
+    // по `**/*.java`) в реестре нет — подсказка адресована им.
+    if crate::archunit::spec_from_constraints(repo, rules, None)
+        .rules
+        .is_empty()
+    {
+        return None;
+    }
+    // Байткод-слою нечего анализировать без скомпилированных классов.
+    if crate::archunit::find_classes_dir(repo).is_none() {
+        return None;
+    }
+    // Байткод-слой не запустить без JDK. Явный снимок из опций (край/тесты)
+    // сильнее детекта инструментария.
+    let jdk = options.jdk.unwrap_or_else(|| {
+        crate::rule_templates::runner_available(crate::rule_templates::RunnerKind::Java)
+    });
+    if !jdk {
+        return None;
+    }
+    Some(LintIssue {
+        file: std::path::PathBuf::from("CONSTRAINTS.yaml"),
+        line: 0,
+        rule: "rule_archunit_available".to_string(),
+        message: "найдены скомпилированные классы и JDK — включите `type: archunit` \
+                  для байткод-проверки: текстовый слой видит 1/5 классов обходов, \
+                  байткод — 5/5 (C.3, ADR-039)"
+            .to_string(),
+        severity: "warn".to_string(),
+        ..LintIssue::default()
+    })
+}
+
 /// Полный вариант [`check`] с опциями ([`baseline::CheckOptions`], модуль
 /// [`baseline`], `docs/control.md`):
 ///
@@ -336,6 +385,13 @@ pub fn check_with_options(
             });
         }
         issues.extend(warn_issues);
+    }
+
+    // S6 (0.4.0): подсказка о байткод-слое — ПОСЛЕ ratchet, чтобы не попасть
+    // в долг и не потеряться в любом режиме baseline. Уровень warn: гейт не
+    // краснит (passed считается от error-находок ниже).
+    if let Some(hint) = archunit_available_hint(repo, rule_refs.as_slice(), options) {
+        issues.push(hint);
     }
 
     issues.sort_by(|a, b| {
@@ -1724,6 +1780,142 @@ mod tests {
         assert!(
             w.message.contains("io.reflectoring.persistence"),
             "префикс не назван: {w:?}"
+        );
+    }
+
+    // --- S6 (0.4.0): ArchUnit-подсказка при скомпилированных классах + JDK ---
+
+    /// Репозиторий с JVM-правилом слоёв (`dependency_direction` по `**/*.java`).
+    /// `classes` — положить ли рядом скомпилированный `target/classes/*.class`.
+    fn jvm_layer_repo(dir: &Path, classes: bool) -> (PathBuf, PathBuf) {
+        let repo = dir.join("repo");
+        write_file(
+            &repo,
+            "src/main/java/io/reflectoring/domain/DomainService.java",
+            "package io.reflectoring.domain;\nimport java.util.List;\n",
+        );
+        if classes {
+            write_file(
+                &repo,
+                "target/classes/io/reflectoring/domain/DomainService.class",
+                "\u{ca}\u{fe}\u{ba}\u{be}",
+            );
+        }
+        let constraints = write_file(
+            dir,
+            "CONSTRAINTS.yaml",
+            "rules:\n\
+             \x20 - name: domain_pure\n\
+             \x20   type: dependency_direction\n\
+             \x20   glob: '**/*.java'\n\
+             \x20   forbid: ['io.reflectoring.persistence']\n",
+        );
+        (repo, constraints)
+    }
+
+    /// S6 (0.4.0): скомпилированные классы + JDK + JVM-правило без `type: archunit`
+    /// → `control check` предлагает (warn) включить байткод-слой. Находка уровня
+    /// warn (гейт не краснит) и называет расхождение текста и байткода (C.3).
+    #[test]
+    fn fitness_archunit_available_warns_with_classes_and_jdk() {
+        let dir = tempfile::tempdir().unwrap();
+        let (repo, constraints) = jvm_layer_repo(dir.path(), true);
+        let opts = baseline::CheckOptions {
+            jdk: Some(true),
+            ..baseline::CheckOptions::default()
+        };
+        let report = check_with_options(&repo, &constraints, &opts).unwrap();
+        assert!(
+            report.passed,
+            "подсказка — warn, гейт не краснит: {:?}",
+            report.issues
+        );
+        let w = report
+            .issues
+            .iter()
+            .find(|i| i.rule == "rule_archunit_available")
+            .unwrap_or_else(|| panic!("ожидался rule_archunit_available: {:?}", report.issues));
+        assert_eq!(w.severity, "warn");
+        assert!(w.message.contains("type: archunit"), "{w:?}");
+        assert!(
+            w.message.contains("1/5"),
+            "текстовая доля не названа: {w:?}"
+        );
+        assert!(w.message.contains("5/5"), "байткод-доля не названа: {w:?}");
+    }
+
+    /// S6: без скомпилированных классов подсказка не нужна — байткод-слою
+    /// нечего анализировать.
+    #[test]
+    fn fitness_archunit_available_absent_without_classes() {
+        let dir = tempfile::tempdir().unwrap();
+        let (repo, constraints) = jvm_layer_repo(dir.path(), false);
+        let opts = baseline::CheckOptions {
+            jdk: Some(true),
+            ..baseline::CheckOptions::default()
+        };
+        let report = check_with_options(&repo, &constraints, &opts).unwrap();
+        assert!(
+            !report
+                .issues
+                .iter()
+                .any(|i| i.rule == "rule_archunit_available"),
+            "без классов подсказки быть не должно: {:?}",
+            report.issues
+        );
+    }
+
+    /// S6: без JDK подсказка не нужна — байткод-слой не запустить.
+    #[test]
+    fn fitness_archunit_available_absent_without_jdk() {
+        let dir = tempfile::tempdir().unwrap();
+        let (repo, constraints) = jvm_layer_repo(dir.path(), true);
+        let opts = baseline::CheckOptions {
+            jdk: Some(false),
+            ..baseline::CheckOptions::default()
+        };
+        let report = check_with_options(&repo, &constraints, &opts).unwrap();
+        assert!(
+            !report
+                .issues
+                .iter()
+                .any(|i| i.rule == "rule_archunit_available"),
+            "без JDK подсказки быть не должно: {:?}",
+            report.issues
+        );
+    }
+
+    /// S6: при уже подключённом `type: archunit` подсказка молчит — байткод-слой
+    /// включён, предлагать нечего. `jar_dir` заведомо пуст, чтобы правило (не)
+    /// исполнилось быстро и без сети.
+    #[test]
+    fn fitness_archunit_available_silent_when_archunit_rule_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let (repo, constraints) = jvm_layer_repo(dir.path(), true);
+        std::fs::write(
+            dir.path().join("CONSTRAINTS.yaml"),
+            "rules:\n\
+             \x20 - name: domain_pure\n\
+             \x20   type: dependency_direction\n\
+             \x20   glob: '**/*.java'\n\
+             \x20   forbid: ['io.reflectoring.persistence']\n\
+             \x20 - name: bytecode_bridge\n\
+             \x20   type: archunit\n\
+             \x20   jar_dir: 'no-such-jar-dir'\n",
+        )
+        .unwrap();
+        let opts = baseline::CheckOptions {
+            jdk: Some(true),
+            ..baseline::CheckOptions::default()
+        };
+        let report = check_with_options(&repo, &constraints, &opts).unwrap();
+        assert!(
+            !report
+                .issues
+                .iter()
+                .any(|i| i.rule == "rule_archunit_available"),
+            "при наличии type: archunit подсказка не нужна: {:?}",
+            report.issues
         );
     }
 

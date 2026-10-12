@@ -139,6 +139,8 @@ fn run_fitness_hook(cfg: &Config, repo: &Path) -> Result<i32> {
         resources: None,
         // ADR-068 Am.3: реестр зондов — из `[gate.requires.<имя>]`.
         probes: crate::control::requires::ProbeRegistry::from_config(&cfg.gate.requires)?,
+        // S6: доступность JDK — детект (`None`).
+        jdk: None,
     };
     let report = crate::control::check_anchored(repo, &constraints, &options, None)?;
     if !report.passed {

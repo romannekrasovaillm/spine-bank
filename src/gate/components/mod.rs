@@ -78,7 +78,12 @@ pub(super) fn component_fitness(
     // «копии реестра различаются» — то есть зелёный там, где контур проверяет
     // не то, что написал архитектор (и где `redteam` D7 не ловил ослабления).
     let divergence = registry_divergence(repo, constraints);
-    let notes = mention_rule_notes(repo, &constraints.path);
+    // W1: доля текстовых правил; S6: расхождение текстового и байткод-слоёв
+    // (JVM-обходы слоёв — отдельная строка паспорта).
+    let mut notes = mention_rule_notes(repo, &constraints.path);
+    if let Some(line) = archunit_layer_note(repo, &constraints.path) {
+        notes.push(line);
+    }
     // A3: политика исполнения команд реестра — из опций гейта (CLI/MCP-край
     // выставил; библиотечный дефолт — legacy, AD-7).
     let check_options = control::baseline::CheckOptions {
@@ -258,6 +263,53 @@ fn mention_rule_notes(repo: &Path, constraints: &Path) -> Vec<String> {
         notes.push(line);
     }
     notes
+}
+
+/// S6 (0.4.0): строка паспорта о расхождении текстового и байткод-слоёв на
+/// JVM-правилах слоёв. Текстовый слой слеп к обходам по полному имени (FQN,
+/// B5/ADR-070): на замороженном корпусе C.3 он ловит 1 обход из 5, байткод
+/// (`ArchUnit`) — 5 из 5 (ADR-039). Зелёный текстовый слой на JVM-правиле,
+/// поэтому, — не полнота, а половина картины; паспорт обязан это показать.
+///
+/// Строка появляется, когда репозиторий несёт хотя бы одно JVM-правило слоёв
+/// (`dependency_direction`/`context_boundary` по `**/*.java`), маппящееся в
+/// спек `ArchUnit` ([`crate::archunit::spec_from_constraints`]) — и в нём есть
+/// скомпилированные классы ([`crate::archunit::find_classes_dir`], S6 —
+/// «когда есть классы»). Без классов байткод-слой исполнять нечего — о
+/// расхождении говорить не о чем. Готовность jar'ов/JDK — забота прогонщика
+/// (её след — `runner_skipped` в отчёте, A2), здесь фиксируется только факт
+/// подключения слоя (`type: archunit`).
+///
+/// `None` — JVM-правил слоёв нет либо нет классов (нечего показывать).
+#[allow(clippy::question_mark)] // S6: ранний выход по is_none — не Result-ветка
+fn archunit_layer_note(repo: &Path, constraints: &Path) -> Option<String> {
+    let Ok(resolved) = control::load_constraints_resolved(constraints) else {
+        return None;
+    };
+    let rules: Vec<&control::FitnessRule> = resolved.rules.iter().collect();
+    // JVM-правил слоёв нет — текстовый/байткод-слои не расходятся.
+    if crate::archunit::spec_from_constraints(repo, &rules, None)
+        .rules
+        .is_empty()
+    {
+        return None;
+    }
+    // Байткод-слою нечего анализировать без скомпилированных классов.
+    if crate::archunit::find_classes_dir(repo).is_none() {
+        return None;
+    }
+    let has_archunit = rules
+        .iter()
+        .any(|r| matches!(r.kind, control::RuleKind::ArchUnit));
+    Some(if has_archunit {
+        "байткод-слой ArchUnit подключён (`type: archunit`): текст видит 1/5 обходов \
+         слоёв, байткод — 5/5 (C.3, ADR-039) — расхождение слоёв закрыто"
+            .to_string()
+    } else {
+        "текстовый слой видит 1/5 обходов слоёв, байткод-слой (5/5) НЕ подключён — \
+         добавьте правило `type: archunit` для байткод-проверки (C.3, ADR-039)"
+            .to_string()
+    })
 }
 
 /// Потолок имён инвариантов в строке блока 2 паспорта (W1/ADR-050): дальше —

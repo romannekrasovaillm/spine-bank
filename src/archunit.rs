@@ -847,6 +847,19 @@ pub fn default_runner_cache() -> PathBuf {
         .join("runner")
 }
 
+/// Готов ли каталог jar'ов к байткод-проверке: содержит хотя бы один `*.jar`.
+/// Отличие от [`classpath_of`]: не падает, а честно отвечает `false` — нужно
+/// для предупреждения-подсказки (S6), а не для прогона гейта.
+#[must_use]
+pub fn jar_dir_ready(dir: &Path) -> bool {
+    match std::fs::read_dir(dir) {
+        Ok(rd) => rd
+            .filter_map(std::result::Result::ok)
+            .any(|e| e.path().extension().is_some_and(|x| x == "jar")),
+        Err(_) => false,
+    }
+}
+
 /// Classpath из всех jar'ов каталога (детерминированный порядок).
 fn classpath_of(jar_dir: &Path) -> Result<String> {
     let mut jars: Vec<PathBuf> = std::fs::read_dir(jar_dir)
