@@ -33,7 +33,7 @@ use serde_json::{Map, Value};
 
 use crate::error::Result;
 
-use super::openapi::read_openapi;
+use super::openapi::{SchemaSite, read_openapi, schema_sites, site_location};
 use super::types::{Finding, location};
 
 /// Число семантических зондов (ADR-079: enum, единица измерения, `default`,
@@ -147,68 +147,54 @@ pub(crate) fn diff_openapi_semantic(
     Ok((out, fields.into_iter().collect()))
 }
 
-/// Зонды по `components.schemas.*.properties.*` (глубина — как у CD-006).
+/// Зонды по схемам документа: `components.schemas.*` и inline-схемы тел
+/// запросов/ответов в `paths` (P0-2 — раньше inline-схемы не зондировались, и
+/// удаление значения `enum` в теле ответа проходило незамеченным).
+///
+/// Считываются прямые `properties` схемы: цель инлайнового `$ref` в
+/// `components.schemas` зондируется отдельным сайтом компонента (`schema_sites`),
+/// и резолв здесь дал бы дубль-находку.
 fn probe_schemas(old: &Value, new: &Value, out: &mut Vec<Finding>, fields: &mut BTreeSet<String>) {
-    let old_schemas = old
-        .get("components")
-        .and_then(|c| c.get("schemas"))
-        .and_then(Value::as_object);
-    let new_schemas = new
-        .get("components")
-        .and_then(|c| c.get("schemas"))
-        .and_then(Value::as_object);
-    let (Some(old_schemas), Some(new_schemas)) = (old_schemas, new_schemas) else {
-        return;
-    };
-    for (name, old_schema) in old_schemas {
-        let Some(new_schema) = new_schemas.get(name) else {
-            continue;
-        };
-        probe_schema(name, old_schema, new_schema, out, fields);
+    for site in schema_sites(old, new) {
+        probe_schema(&site, out, fields);
     }
 }
 
 /// Зонды одной схемы: совпавшие свойства (enum/default/единица-по-format) и
 /// переименования со сменой единицы (совпадение по основе имени).
-fn probe_schema(
-    name: &str,
-    old_schema: &Value,
-    new_schema: &Value,
-    out: &mut Vec<Finding>,
-    fields: &mut BTreeSet<String>,
-) {
-    let old_props = old_schema.get("properties").and_then(Value::as_object);
-    let new_props = new_schema.get("properties").and_then(Value::as_object);
+fn probe_schema(site: &SchemaSite, out: &mut Vec<Finding>, fields: &mut BTreeSet<String>) {
+    let old_props = site.old.get("properties").and_then(Value::as_object);
+    let new_props = site.new.get("properties").and_then(Value::as_object);
     let (Some(old_props), Some(new_props)) = (old_props, new_props) else {
         return;
     };
     for (prop, old_prop) in old_props {
         let prop = prop.as_str();
         if let Some(new_prop) = new_props.get(prop) {
-            probe_property_pair(name, prop, old_prop, new_prop, out, fields);
+            probe_property_pair(site, prop, old_prop, new_prop, out, fields);
             continue;
         }
-        probe_unit_rename(name, prop, new_props, out, fields);
+        probe_unit_rename(site, prop, new_props, out, fields);
     }
 }
 
 /// Свойство с тем же именем: `enum`, `default`, единица-по-`format`.
 fn probe_property_pair(
-    name: &str,
+    site: &SchemaSite,
     prop: &str,
     old_prop: &Value,
     new_prop: &Value,
     out: &mut Vec<Finding>,
     fields: &mut BTreeSet<String>,
 ) {
-    probe_enum(name, prop, old_prop, new_prop, out, fields);
-    probe_default(name, prop, old_prop, new_prop, out, fields);
-    probe_unit_format(name, prop, old_prop, new_prop, out, fields);
+    probe_enum(site, prop, old_prop, new_prop, out, fields);
+    probe_default(site, prop, old_prop, new_prop, out, fields);
+    probe_unit_format(site, prop, old_prop, new_prop, out, fields);
 }
 
 /// `enum`: удаление значения — error, добавление — warn.
 fn probe_enum(
-    name: &str,
+    site: &SchemaSite,
     prop: &str,
     old_prop: &Value,
     new_prop: &Value,
@@ -218,7 +204,8 @@ fn probe_enum(
     let (Some(old_vals), Some(new_vals)) = (enum_values(old_prop), enum_values(new_prop)) else {
         return;
     };
-    let loc = location(&["components", "schemas", name, "properties", prop]);
+    let loc = site_location(site, prop);
+    let name = &site.label;
     for v in &old_vals {
         if !new_vals.contains(v) {
             fields.insert(prop.to_string());
@@ -252,7 +239,7 @@ fn probe_enum(
 /// `default`: изменён или снят — warn (появление default у поля без него
 /// безопаснее и не флагается).
 fn probe_default(
-    name: &str,
+    site: &SchemaSite,
     prop: &str,
     old_prop: &Value,
     new_prop: &Value,
@@ -275,15 +262,15 @@ fn probe_default(
         out.push(Finding {
             severity: "warn".into(),
             rule: "semantic_default_shift".into(),
-            location: location(&["components", "schemas", name, "properties", prop]),
-            message: format!("поле «{prop}» схемы «{name}»: {what}"),
+            location: site_location(site, prop),
+            message: format!("поле «{prop}» схемы «{}»: {what}", site.label),
         });
     }
 }
 
 /// Единица-по-`format`: у поля с маркером единицы в имени изменился `format`.
 fn probe_unit_format(
-    name: &str,
+    site: &SchemaSite,
     prop: &str,
     old_prop: &Value,
     new_prop: &Value,
@@ -304,10 +291,11 @@ fn probe_unit_format(
         out.push(Finding {
             severity: "error".into(),
             rule: "semantic_unit_changed".into(),
-            location: location(&["components", "schemas", name, "properties", prop]),
+            location: site_location(site, prop),
             message: format!(
-                "поле «{prop}» схемы «{name}» (маркер единицы в имени) сменило формат: \
-                 {old_fmt} → {new_fmt} — потребители парсят по имени"
+                "поле «{prop}» схемы «{}» (маркер единицы в имени) сменило формат: \
+                 {old_fmt} → {new_fmt} — потребители парсят по имени",
+                site.label
             ),
         });
     }
@@ -317,7 +305,7 @@ fn probe_unit_format(
 /// `amount_rubles`) или потерей/появлением маркера — error; смена внутри
 /// одного семейства (`cents` → `kopecks`) допустима.
 fn probe_unit_rename(
-    name: &str,
+    site: &SchemaSite,
     prop: &str,
     new_props: &Map<String, Value>,
     out: &mut Vec<Finding>,
@@ -344,10 +332,11 @@ fn probe_unit_rename(
         out.push(Finding {
             severity: "error".into(),
             rule: "semantic_unit_changed".into(),
-            location: location(&["components", "schemas", name, "properties", prop]),
+            location: site_location(site, prop),
             message: format!(
-                "единица измерения поля «{prop}» → «{cand}» схемы «{name}»: {from} → {to} — \
-                 потребители парсят по имени"
+                "единица измерения поля «{prop}» → «{cand}» схемы «{}»: {from} → {to} — \
+                 потребители парсят по имени",
+                site.label
             ),
         });
         return;
@@ -545,6 +534,31 @@ mod tests {
             "{findings:?}"
         );
         assert_eq!(findings[0].severity, "warn");
+    }
+
+    /// P0-2: `enum` в inline-схеме ТЕЛА ОТВЕТА (в `paths`, без
+    /// `components/schemas`) раньше не зондировался — удаление значения
+    /// проходило как «0 сигналов», ложнозелёный PASS. Теперь зонд видит и
+    /// inline-схемы, а находка называет JSON-путь до схемы.
+    #[test]
+    fn inline_response_enum_narrowing_is_seen() {
+        let contract = |enums: &str| {
+            format!(
+                "openapi: 3.0.3\ninfo:\n  title: T\n  version: 1.0.0\npaths:\n  /v1/pay:\n    post:\n      operationId: pay\n      responses:\n        '200':\n          description: ok\n          content:\n            application/json:\n              schema:\n                type: object\n                properties:\n                  status:\n                    type: string\n                    enum: {enums}\n"
+            )
+        };
+        let (findings, fields) = sem(&contract("[ok, failed]"), &contract("[ok]"));
+        assert_eq!(
+            rules(&findings),
+            vec!["semantic_enum_narrowed"],
+            "{findings:?}"
+        );
+        assert_eq!(findings[0].severity, "error");
+        assert_eq!(
+            findings[0].location,
+            "#/paths/~1v1~1pay/post/responses/200/content/application~1json/schema/properties/status"
+        );
+        assert_eq!(fields, vec!["status".to_string()]);
     }
 
     /// Зонд 2: переименование со сменой семейства единиц
