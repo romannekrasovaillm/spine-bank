@@ -458,12 +458,23 @@ enum Cmd {
     /// `--format sarif|junit|gitlab-codequality|markdown` (волна 2, п.8).
     /// `--semantic` (AB-12, ADR-079) добавляет семантические зонды:
     /// enum/единица измерения в имени поля/default/ключ партиционирования.
+    /// Контракты задаются позиционно (`<OLD> <NEW>`) либо флагами
+    /// `--old`/`--new`; смешивать формы в одном вызове нельзя (П2 0.4.8).
     #[command(name = "contract-diff", visible_alias = "contract_diff")]
     ContractDiff {
-        /// Старая версия контракта (yaml/yml/json/proto/avsc/sql).
-        old: PathBuf,
-        /// Новая версия контракта (тот же формат).
-        new: PathBuf,
+        /// Старая версия контракта (yaml/yml/json/proto/avsc/sql) — позиционно
+        /// или флагом `--old`.
+        #[arg(value_name = "OLD", required_unless_present_any = ["old_flag", "new_flag"])]
+        old: Option<PathBuf>,
+        /// Новая версия контракта (тот же формат) — позиционно или флагом `--new`.
+        #[arg(value_name = "NEW", required_unless_present_any = ["old_flag", "new_flag"])]
+        new: Option<PathBuf>,
+        /// Старая версия контракта (альтернатива позиционному `OLD`).
+        #[arg(long = "old", value_name = "OLD")]
+        old_flag: Option<PathBuf>,
+        /// Новая версия контракта (альтернатива позиционному `NEW`).
+        #[arg(long = "new", value_name = "NEW")]
+        new_flag: Option<PathBuf>,
         /// Язык контракта: auto (детектор, дефолт) | openapi | proto | avro |
         /// jsonschema | ddl.
         #[arg(long, default_value = "auto")]
@@ -1753,12 +1764,40 @@ pub(crate) async fn run() -> Result<()> {
         Some(Cmd::ContractDiff {
             old,
             new,
+            old_flag,
+            new_flag,
             contract_format,
             format,
             model,
             semantic,
             json,
         }) => {
+            // П2 0.4.8: пути контрактов — позиционно ИЛИ флагами `--old`/`--new`
+            // (обещанная в доке форма 0.4.3). Смешивать формы в одном вызове
+            // нельзя: неоднозначно, к какому аргументу отнести остаток
+            // позиционных. При полном отсутствии обоих — сработал clap-край
+            // (`<OLD> <NEW>` required), сюда не доходим.
+            let (old, new) = if old_flag.is_some() || new_flag.is_some() {
+                if old.is_some() || new.is_some() {
+                    anyhow::bail!(
+                        "смешение флагов и позиционных не поддерживается: задайте оба контракта \
+                         либо позиционно (`<OLD> <NEW>`), либо флагами `--old`/`--new`"
+                    );
+                }
+                (
+                    old_flag.ok_or_else(|| {
+                        anyhow::anyhow!("не задана старая версия контракта: --old или <OLD>")
+                    })?,
+                    new_flag.ok_or_else(|| {
+                        anyhow::anyhow!("не задана новая версия контракта: --new или <NEW>")
+                    })?,
+                )
+            } else {
+                (
+                    old.ok_or_else(|| anyhow::anyhow!("не задана старая версия контракта"))?,
+                    new.ok_or_else(|| anyhow::anyhow!("не задана новая версия контракта"))?,
+                )
+            };
             let lang = match contract_format.trim() {
                 "auto" => None,
                 other => Some(

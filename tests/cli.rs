@@ -2986,6 +2986,91 @@ fn contract_diff_cli_text_and_sarif() {
     cmd.assert().success().stdout(contains("Итог: PASS"));
 }
 
+/// П2 0.4.8: `contract-diff` принимает пути и позиционно (`<OLD> <NEW>`), и
+/// флагами `--old`/`--new` (обещанная в доке/CHANGELOG 0.4.3 форма, которую
+/// раньше отбивал clap). Формы нельзя смешивать в одном вызове; полное
+/// отсутствие путей — прежняя clap-ошибка `required <OLD> <NEW>`.
+#[test]
+fn contract_diff_old_new_flags_alias() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let old = tmp.path().join("old.yaml");
+    let new = tmp.path().join("new.yaml");
+    std::fs::write(
+        &old,
+        "openapi: 3.0.3\ninfo: {title: T, version: '1'}\npaths:\n  /v1/pets:\n    get:\n      responses:\n        '200': {description: ok}\n",
+    )
+    .expect("write old");
+    std::fs::write(
+        &new,
+        "openapi: 3.0.3\ninfo: {title: T, version: '1'}\npaths: {}\n",
+    )
+    .expect("write new");
+
+    // Позиционный вызов — эталон: ломающий дифф, exit 1, находка CD-001.
+    let mut cmd = arch_cmd(tmp.path());
+    let positional = cmd
+        .arg("contract-diff")
+        .arg(&old)
+        .arg(&new)
+        .output()
+        .expect("positional run");
+    assert_eq!(positional.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&positional.stdout).contains("CD-001"),
+        "эталонный вывод позиционного вызова содержит CD-001"
+    );
+    let baseline = positional.stdout;
+
+    // Флаги `--old`/`--new` — байт-в-байт тот же вывод и тот же код возврата.
+    let mut cmd = arch_cmd(tmp.path());
+    let flagged = cmd
+        .args(["contract-diff", "--old"])
+        .arg(&old)
+        .args(["--new"])
+        .arg(&new)
+        .output()
+        .expect("flags run");
+    assert_eq!(flagged.status.code(), Some(1));
+    assert_eq!(
+        flagged.stdout, baseline,
+        "флаги --old/--new дают байт-в-байт тот же вывод, что позиционный вызов"
+    );
+
+    // Смешение форм (флаг + позиционный) в любом порядке — usage-ошибка.
+    let old_s = old.to_str().expect("utf8");
+    let new_s = new.to_str().expect("utf8");
+    for args in [
+        ["contract-diff", "--old", old_s, new_s],
+        ["contract-diff", old_s, "--new", new_s],
+    ] {
+        arch_cmd(tmp.path())
+            .args(args)
+            .assert()
+            .failure()
+            .stderr(contains("смешение флагов и позиционных не поддерживается"));
+    }
+
+    // Оба пути отсутствуют — прежняя clap-ошибка (required <OLD> <NEW>).
+    arch_cmd(tmp.path())
+        .arg("contract-diff")
+        .assert()
+        .failure()
+        .stderr(contains("required arguments were not provided"));
+
+    // Один флаг без парного — понятная ошибка, не паника.
+    arch_cmd(tmp.path())
+        .args(["contract-diff", "--old", old_s])
+        .assert()
+        .failure()
+        .stderr(contains("не задана новая версия контракта"));
+
+    // Флаги + --json: машинный вывод не зависит от формы задания путей.
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.args(["contract-diff", "--old", old_s, "--new", old_s])
+        .arg("--json");
+    cmd.assert().success();
+}
+
 /// Диагностика 5 (0.4.7): `--semantic` без смысловых сдвигов печатает честную
 /// сводку «применено N, сигналов 0» (искали и чисто), а не молчит; без флага
 /// этой строки нет. Формат вне области зондов (proto) — «применено 0»,
