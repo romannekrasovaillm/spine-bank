@@ -153,6 +153,46 @@ fn init_creates_config_and_assets_and_preserves_user_edits() {
     );
 }
 
+/// `arch-be init` раскладывает пример реестра в `examples/CONSTRAINTS.example.yaml`
+/// (агентам не нужно идти в исходники spine-bank за форматом). Пример валиден —
+/// `control check` по нему на пустом репозитории проходит (правила N/A-safe);
+/// повторный init не затирает пользовательскую правку файла.
+#[test]
+fn init_ships_valid_constraints_example() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let home = tmp.path();
+
+    arch_cmd(home).arg("init").assert().success();
+
+    let example = home.join(".arch-harness/examples/CONSTRAINTS.example.yaml");
+    assert!(
+        example.is_file(),
+        "пример реестра разложен init: {}",
+        example.display()
+    );
+
+    // Пример валиден: на пустом репозитории нарушений нет → PASS.
+    let repo = home.join("empty-repo");
+    std::fs::create_dir_all(&repo).expect("mkdir repo");
+    arch_cmd(home)
+        .arg("control")
+        .arg("check")
+        .arg(repo.as_os_str())
+        .arg("--constraints")
+        .arg(example.as_os_str())
+        .assert()
+        .success()
+        .stdout(contains("Итог: PASS"));
+
+    // Повторный init не затирает пользовательскую правку примера.
+    let mut edited = std::fs::read_to_string(&example).expect("read example");
+    edited.push_str("\n# правка пользователя\n");
+    std::fs::write(&example, &edited).expect("write example");
+    arch_cmd(home).arg("init").assert().success();
+    let after = std::fs::read_to_string(&example).expect("re-read example");
+    assert_eq!(after, edited, "повторный init затёр пример реестра");
+}
+
 /// `arch-be control check` на падающем CONSTRAINTS.yaml (обязательный файл
 /// отсутствует, severity error) → отчёт FAIL и exit 1 (скриптовый гейт
 /// fitness-функций).

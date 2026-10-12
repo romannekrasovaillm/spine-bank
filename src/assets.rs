@@ -3,7 +3,7 @@
 //! Каждый ассет — `include_str!` из `assets/` и примеров репозитория;
 //! [`write_defaults`] раскладывает их по `~/.arch-harness/` (assets/prompts,
 //! assets/rubrics, assets/benchmarks, assets/ascii, mcp.json, cron.toml,
-//! CONSTRAINTS.example.yaml, cron/*.md, plugins/**), НЕ затирая существующие
+//! examples/CONSTRAINTS.example.yaml, cron/*.md, plugins/**), НЕ затирая существующие
 //! файлы, и возвращает список фактически записанных.
 
 use std::path::{Path, PathBuf};
@@ -935,7 +935,7 @@ const DEFAULT_FILES: &[(&str, &str)] = &[
     ),
     ("mcp.json", MCP_SERVERS_EXAMPLE),
     ("cron.toml", CRON_EXAMPLE),
-    ("CONSTRAINTS.example.yaml", CONSTRAINTS_EXAMPLE),
+    ("examples/CONSTRAINTS.example.yaml", CONSTRAINTS_EXAMPLE),
     (
         "assets/evals/agent-config/01-models-registry.yaml",
         EVAL_AGENT_CONFIG_MODELS_REGISTRY,
