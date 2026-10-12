@@ -80,6 +80,27 @@ service Charging {
 
 /// Запускает инструмент на паре контрактов, записанных во временные файлы.
 pub(crate) async fn diff_text(old: &str, new: &str, old_name: &str, new_name: &str) -> ToolOutput {
+    run_diff(old, new, old_name, new_name, json!({})).await
+}
+
+/// Запускает инструмент с семантическими зондами (`semantic=true`).
+pub(crate) async fn diff_text_semantic(
+    old: &str,
+    new: &str,
+    old_name: &str,
+    new_name: &str,
+) -> ToolOutput {
+    run_diff(old, new, old_name, new_name, json!({"semantic": true})).await
+}
+
+/// Общий прогон: пара контрактов + дополнительные аргументы вызова.
+async fn run_diff(
+    old: &str,
+    new: &str,
+    old_name: &str,
+    new_name: &str,
+    extra: serde_json::Value,
+) -> ToolOutput {
     let dir = tempfile::tempdir().expect("tmp");
     std::fs::write(dir.path().join(old_name), old).expect("запись старого контракта");
     std::fs::write(dir.path().join(new_name), new).expect("запись нового контракта");
@@ -87,8 +108,14 @@ pub(crate) async fn diff_text(old: &str, new: &str, old_name: &str, new_name: &s
         dir.path().to_path_buf(),
         Arc::new(crate::config::Config::default()),
     );
+    let mut args = json!({"old": old_name, "new": new_name});
+    if let (Some(dst), Some(src)) = (args.as_object_mut(), extra.as_object()) {
+        for (k, v) in src {
+            dst.insert(k.clone(), v.clone());
+        }
+    }
     tools()[0]
-        .call(json!({"old": old_name, "new": new_name}), &ctx)
+        .call(args, &ctx)
         .await
         .expect("вызов contract_diff")
 }

@@ -36,7 +36,7 @@ pub(crate) fn diff_openapi(
 ///
 /// # Errors
 /// Текст не парсится, документ не `OpenAPI` 3.x.
-fn read_openapi(content: &str, path: &Path) -> Result<Value> {
+pub(crate) fn read_openapi(content: &str, path: &Path) -> Result<Value> {
     let doc = parse_contract(content, path)?;
     if !is_openapi3(&doc) {
         return Err(HarnessError::Tool(format!(

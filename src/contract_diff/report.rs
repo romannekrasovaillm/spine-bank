@@ -28,7 +28,15 @@ pub fn render_report(report: &DiffReport) -> String {
             f.severity, f.location, f.rule, f.message
         );
     }
-    let _ = writeln!(out, "Итог: {}", if breaking == 0 { "PASS" } else { "FAIL" });
+    let _ = writeln!(
+        out,
+        "Итог: {}",
+        if report.has_breaking() {
+            "FAIL"
+        } else {
+            "PASS"
+        }
+    );
     if let Some(impact) = &report.impact {
         if impact.matched_int.is_empty() {
             let _ = writeln!(
@@ -58,6 +66,29 @@ pub fn render_report(report: &DiffReport) -> String {
             let _ = writeln!(out, "  {}", impact.summary);
         }
     }
+    // Секция семантических зондов печатается только при `--semantic` (иначе
+    // список пуст) — вывод без флага не меняется.
+    if !report.semantic_changes.is_empty() {
+        let _ = writeln!(
+            out,
+            "Семантические изменения (--semantic): {}",
+            report.semantic_changes.len()
+        );
+        for f in &report.semantic_changes {
+            let _ = writeln!(
+                out,
+                "[{}] {} {} — {}",
+                f.severity, f.location, f.rule, f.message
+            );
+        }
+    }
+    if !report.semantic_consumers.is_empty() {
+        let _ = writeln!(
+            out,
+            "Потребители полей [inferred]: {}",
+            report.semantic_consumers.join("; ")
+        );
+    }
     out
 }
 
@@ -69,32 +100,77 @@ pub fn report_json(report: &DiffReport) -> Value {
         .iter()
         .filter(|f| f.severity == "error")
         .count();
-    json!({
-        "tool": "contract_diff",
-        "passed": !report.has_breaking(),
-        "format": report.format.name(),
-        "breaking": breaking,
-        "non_breaking": report.findings.len() - breaking,
-        "findings": report.findings.iter().map(|f| json!({
-            "severity": f.severity,
-            "rule": f.rule,
-            "location": f.location,
-            "message": f.message,
-        })).collect::<Vec<_>>(),
-        "impact": report.impact.as_ref().map(|i| json!({
-            "matched_int": i.matched_int,
-            "matched_paths": i.matched_paths,
-            "consumers": i.consumers,
-            "rules": i.rules,
-            "owners": i.owners,
-            "summary": i.summary,
-        })),
-        "summary": format!(
+    let mut obj = serde_json::Map::new();
+    obj.insert("tool".into(), json!("contract_diff"));
+    obj.insert("passed".into(), json!(!report.has_breaking()));
+    obj.insert("format".into(), json!(report.format.name()));
+    obj.insert("breaking".into(), json!(breaking));
+    obj.insert(
+        "non_breaking".into(),
+        json!(report.findings.len() - breaking),
+    );
+    obj.insert(
+        "findings".into(),
+        json!(
+            report
+                .findings
+                .iter()
+                .map(|f| json!({
+                    "severity": f.severity,
+                    "rule": f.rule,
+                    "location": f.location,
+                    "message": f.message,
+                }))
+                .collect::<Vec<_>>()
+        ),
+    );
+    obj.insert(
+        "impact".into(),
+        report.impact.as_ref().map_or(Value::Null, |i| {
+            json!({
+                "matched_int": i.matched_int,
+                "matched_paths": i.matched_paths,
+                "consumers": i.consumers,
+                "rules": i.rules,
+                "owners": i.owners,
+                "summary": i.summary,
+            })
+        }),
+    );
+    // Семантические блоки — только при непустом значении (`--semantic`):
+    // вывод без флага не приобретает новых ключей.
+    if !report.semantic_changes.is_empty() {
+        obj.insert(
+            "semantic_changes".into(),
+            json!(
+                report
+                    .semantic_changes
+                    .iter()
+                    .map(|f| json!({
+                        "severity": f.severity,
+                        "rule": f.rule,
+                        "location": f.location,
+                        "message": f.message,
+                    }))
+                    .collect::<Vec<_>>()
+            ),
+        );
+    }
+    if !report.semantic_consumers.is_empty() {
+        obj.insert(
+            "semantic_consumers".into(),
+            json!(report.semantic_consumers),
+        );
+    }
+    obj.insert(
+        "summary".into(),
+        json!(format!(
             "{} изменений (breaking: {breaking}), формат {}",
             report.findings.len(),
             report.format.name()
-        ),
-    })
+        )),
+    );
+    Value::Object(obj)
 }
 
 #[cfg(test)]
@@ -119,6 +195,8 @@ mod tests {
             format: ContractFormat::OpenApi,
             findings: vec![finding("error"), finding("error"), finding("warn")],
             impact: None,
+            semantic_changes: Vec::new(),
+            semantic_consumers: Vec::new(),
         };
         let text = render_report(&report);
         assert!(
@@ -131,6 +209,8 @@ mod tests {
             format: ContractFormat::OpenApi,
             findings: vec![finding("warn")],
             impact: None,
+            semantic_changes: Vec::new(),
+            semantic_consumers: Vec::new(),
         };
         let text = render_report(&clean);
         assert!(
