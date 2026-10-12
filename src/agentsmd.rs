@@ -736,7 +736,17 @@ impl Tool for AgentsMdGenerateTool {
         args: serde_json::Value,
         ctx: &crate::tool::ToolContext,
     ) -> Result<crate::tool::ToolOutput> {
-        let repo = args.get("repo").and_then(|r| r.as_str()).unwrap_or(".");
+        // Каноничное имя пути — `path` (объявлено в spec как required); `repo` —
+        // историческое имя, сохранено для обратной совместимости (Н8/T-02/B2).
+        let Some(repo) = args
+            .get("path")
+            .or_else(|| args.get("repo"))
+            .and_then(|r| r.as_str())
+        else {
+            return Ok(crate::tool::ToolOutput::err(
+                "agentsmd_generate: обязательный аргумент 'path' (string; историческое имя 'repo') отсутствует",
+            ));
+        };
         let report = generate(&ctx.resolve(repo))?;
         Ok(crate::tool::ToolOutput::ok(format!(
             "AGENTS.md: {} ({}), инвариантов: {}, fitness: {}",
@@ -776,7 +786,17 @@ impl Tool for AgentsMdLintTool {
         args: serde_json::Value,
         ctx: &crate::tool::ToolContext,
     ) -> Result<crate::tool::ToolOutput> {
-        let repo = args.get("repo").and_then(|r| r.as_str()).unwrap_or(".");
+        // Каноничное имя пути — `path` (объявлено в spec как required); `repo` —
+        // историческое имя, сохранено для обратной совместимости (Н8/T-02/B2).
+        let Some(repo) = args
+            .get("path")
+            .or_else(|| args.get("repo"))
+            .and_then(|r| r.as_str())
+        else {
+            return Ok(crate::tool::ToolOutput::err(
+                "agentsmd_lint: обязательный аргумент 'path' (string; историческое имя 'repo') отсутствует",
+            ));
+        };
         let issues = lint(&ctx.resolve(repo))?;
         if issues.is_empty() {
             return Ok(crate::tool::ToolOutput::ok(
@@ -794,6 +814,8 @@ impl Tool for AgentsMdLintTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::tool::ToolContext;
 
     fn fixture_repo(root: &Path) -> PathBuf {
         let repo = root.join("payments-core");
@@ -1005,5 +1027,83 @@ mod tests {
         assert!(text.contains("`no-unwrap`"), "{text}");
         assert!(text.contains("копии реестра различаются"), "{text}");
         assert!(text.contains("отличается (drift)"), "{text}");
+    }
+
+    /// Третий инцидент класса «схема объявляет `path`, реализация читает
+    /// `repo`» (после T-02 handoff и B2 `reverse_survey`). `agentsmd_lint`
+    /// вызывался с аргументом строго по схеме `{"path": …}`: старая реализация
+    /// читала необъявленный `repo`, тихо дефолтилась на `.` (cwd) и возвращала
+    /// ложный вердикт `agents_md_missing` про чужой каталог. Тест красный на
+    /// старом коде и зелёный на каноничном `path_or_else("repo")`.
+    #[tokio::test]
+    async fn lint_tool_reads_declared_path_not_cwd() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = fixture_repo(tmp.path());
+        generate(&repo).expect("gen");
+
+        // cwd намеренно БЕЗ AGENTS.md (файл лежит только в подкаталоге repo):
+        // тихий дефолт на `.` пролинтил бы его и выдал ложный
+        // `agents_md_missing` вместо вердикта по переданному path.
+        let ctx = ToolContext::new(tmp.path().to_path_buf(), Arc::new(Config::default()));
+        let out = AgentsMdLintTool
+            .call(
+                serde_json::json!({"path": repo.to_str().expect("utf8")}),
+                &ctx,
+            )
+            .await
+            .expect("call");
+        assert!(!out.is_error, "{}", out.content);
+        assert!(
+            !out.content.contains("agents_md_missing"),
+            "инструмент пролинтил cwd вместо объявленного `path`: {}",
+            out.content
+        );
+    }
+
+    /// Отсутствие и `path`, и синонима `repo` — явная ошибка с маркером
+    /// «обязательный аргумент 'path'» (его парсит контракт B2 в `tests/mcp_serve.rs`),
+    /// а не тихий вердикт по cwd.
+    #[tokio::test]
+    async fn lint_tool_errors_without_path_or_repo() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let ctx = ToolContext::new(tmp.path().to_path_buf(), Arc::new(Config::default()));
+        let out = AgentsMdLintTool
+            .call(serde_json::json!({}), &ctx)
+            .await
+            .expect("call");
+        assert!(out.is_error, "{}", out.content);
+        assert!(
+            out.content.contains("обязательный аргумент 'path'"),
+            "{}",
+            out.content
+        );
+    }
+
+    /// RW-инструмент `agentsmd_generate`: с аргументом по схеме `{"path": …}`
+    /// обязан писать AGENTS.md в объявленный репозиторий, а не в cwd. Тихий
+    /// дефолт на `.` означал бы запись не в тот каталог.
+    #[tokio::test]
+    async fn generate_tool_reads_declared_path_not_cwd() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = fixture_repo(tmp.path());
+        let elsewhere = tmp.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).expect("elsewhere");
+        let ctx = ToolContext::new(elsewhere.clone(), Arc::new(Config::default()));
+        let out = AgentsMdGenerateTool
+            .call(
+                serde_json::json!({"path": repo.to_str().expect("utf8")}),
+                &ctx,
+            )
+            .await
+            .expect("call");
+        assert!(!out.is_error, "{}", out.content);
+        assert!(
+            repo.join("AGENTS.md").exists(),
+            "AGENTS.md не записан в объявленный `path`"
+        );
+        assert!(
+            !elsewhere.join("AGENTS.md").exists(),
+            "AGENTS.md не должен появляться в cwd"
+        );
     }
 }
