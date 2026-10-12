@@ -6,6 +6,12 @@
 //! (ADR-006); `QAS` с незаполненными полями сценария — `warn` (ADR-007);
 //! сущность, не разобранная при толерантной загрузке (`load-error`, E3), —
 //! `error`.
+//! Цепочка потока (ADR-081): `FLOW.integrations` на несуществующий `INT` —
+//! `flow-int-missing` (error); `FLOW` без `integrations` — `flow-empty`
+//! (warn); формат внешних ID `INT` — `int-meta-id-format` /
+//! `int-registry-api-format` (error); дубль `meta_id` — `int-meta-id-duplicate`
+//! (error); отсутствующий файл договорённости — `agreement-missing` (error,
+//! по образцу `int-contract-missing`).
 //! Цели `verified_by` могут ссылаться на правила
 //! `C-NNN` файла `CONSTRAINTS.yaml`, лежащего рядом с каталогом модели
 //! (файл отсутствует — такие ссылки не проверяются).
@@ -180,6 +186,7 @@ pub fn validate(model: &Model) -> ValidationReport {
     check_links(model, &mut issues);
     check_cycle(model, &mut issues);
     check_completeness(model, &mut issues);
+    check_flow_and_external_ids(model, &mut issues);
     issues.sort_by(|a, b| {
         a.file
             .cmp(&b.file)
@@ -430,6 +437,137 @@ fn check_completeness(model: &Model, issues: &mut Vec<ModelIssue>) {
                         "{}: сценарий атрибута качества без полей: {}",
                         e.id,
                         missing.join(", ")
+                    ),
+                );
+            }
+        }
+    }
+}
+
+/// Правила ADR-081: целостность потока (`FLOW`) и внешних идентификаторов
+/// `INT` (`meta_id`/`registry_api`/`agreement`).
+///
+/// - `flow-int-missing` (error): `FLOW.integrations` ссылается на сущность,
+///   которой нет, либо на не-`INT`;
+/// - `flow-empty` (warn): `FLOW` без `integrations`;
+/// - `int-meta-id-format` (error): `meta_id` не формата `ИВ-<цифры>` /
+///   `<PREFIX>-<цифры>`;
+/// - `int-meta-id-duplicate` (error): один `meta_id` у двух `INT`;
+/// - `int-registry-api-format` (error): `registry_api` без версии
+///   `vMAJOR.MINOR`;
+/// - `agreement-missing` (error): файл договорённости не найден относительно
+///   корня кейса (по образцу `int-contract-missing`, ADR-035).
+fn check_flow_and_external_ids(model: &Model, issues: &mut Vec<ModelIssue>) {
+    let meta_id_re = Regex::new(r"^(?:ИВ|[A-Za-z][A-Za-z0-9]*)-[0-9]+$").expect("regex meta_id");
+    let registry_api_re = Regex::new(r"^.+?\s+v[0-9]+\.[0-9]+$").expect("regex registry_api");
+    let case_root = model.dir.parent();
+    let mut seen_meta: BTreeMap<&str, &Path> = BTreeMap::new();
+    for e in &model.entities {
+        if e.kind == EntityKind::Flow {
+            if e.integrations.is_empty() {
+                issue(
+                    issues,
+                    Severity::Warn,
+                    &e.file,
+                    "flow-empty",
+                    format!("{}: поток без интеграций (integrations пуст)", e.id),
+                );
+            }
+            for target in &e.integrations {
+                match model.get(target) {
+                    Some(t) if t.kind == EntityKind::Int => {}
+                    Some(_) => issue(
+                        issues,
+                        Severity::Error,
+                        &e.file,
+                        "flow-int-missing",
+                        format!(
+                            "{}: integrations → '{target}' — сущность есть, но это не INT",
+                            e.id
+                        ),
+                    ),
+                    None => issue(
+                        issues,
+                        Severity::Error,
+                        &e.file,
+                        "flow-int-missing",
+                        format!("{}: integrations → '{target}' — INT нет в модели", e.id),
+                    ),
+                }
+            }
+        }
+        if e.kind != EntityKind::Int {
+            continue;
+        }
+        if let Some(mid) = e
+            .meta_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            if !meta_id_re.is_match(mid) {
+                issue(
+                    issues,
+                    Severity::Error,
+                    &e.file,
+                    "int-meta-id-format",
+                    format!(
+                        "{}: meta_id '{mid}' — ожидается ИВ-<цифры> или <PREFIX>-<цифры>",
+                        e.id
+                    ),
+                );
+            }
+            if let Some(first) = seen_meta.get(mid) {
+                issue(
+                    issues,
+                    Severity::Error,
+                    &e.file,
+                    "int-meta-id-duplicate",
+                    format!(
+                        "{}: meta_id '{mid}' уже объявлен ({})",
+                        e.id,
+                        first.display()
+                    ),
+                );
+            } else {
+                seen_meta.insert(mid, &e.file);
+            }
+        }
+        if let Some(api) = e
+            .registry_api
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            if !registry_api_re.is_match(api) {
+                issue(
+                    issues,
+                    Severity::Error,
+                    &e.file,
+                    "int-registry-api-format",
+                    format!(
+                        "{}: registry_api '{api}' — ожидается 'Имя vMAJOR.MINOR'",
+                        e.id
+                    ),
+                );
+            }
+        }
+        if let Some(agr) = e
+            .agreement
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            let exists = case_root.is_some_and(|root| root.join(agr).is_file());
+            if !exists {
+                issue(
+                    issues,
+                    Severity::Error,
+                    &e.file,
+                    "agreement-missing",
+                    format!(
+                        "{}: договорённость '{agr}' не найдена (путь относительно корня кейса)",
+                        e.id
                     ),
                 );
             }
@@ -766,5 +904,200 @@ mod tests {
             .find(|i| i.rule == "empty-unverifiable")
             .expect("error");
         assert_eq!(issue.severity, Severity::Error);
+    }
+
+    // --- ADR-081: FLOW и внешние идентификаторы INT ---
+
+    #[test]
+    fn flow_with_valid_int_is_clean() {
+        let dir = tempfile::tempdir().expect("tmp");
+        entity(
+            dir.path(),
+            "INT-001-courses.md",
+            "---\nid: INT-001\ntype: int\ntitle: Курсы\nstatus: adopted",
+        );
+        entity(
+            dir.path(),
+            "FLOW-001-fo.md",
+            "---\nid: FLOW-001\ntype: flow\ntitle: Поток КА ФО\nstatus: adopted\nintegrations: [INT-001]",
+        );
+        let report = validate_dir(dir.path());
+        assert!(report.issues.is_empty(), "{}", report.summary());
+    }
+
+    #[test]
+    fn flow_without_integrations_is_warn() {
+        let dir = tempfile::tempdir().expect("tmp");
+        entity(
+            dir.path(),
+            "FLOW-001-fo.md",
+            "---\nid: FLOW-001\ntype: flow\ntitle: Поток КА ФО\nstatus: adopted\nintegrations: []",
+        );
+        let report = validate_dir(dir.path());
+        let issue = report
+            .issues
+            .iter()
+            .find(|i| i.rule == "flow-empty")
+            .expect("warn о пустом потоке");
+        assert_eq!(issue.severity, Severity::Warn);
+        assert!(!report.has_errors(), "warn не ломает сборку");
+    }
+
+    #[test]
+    fn flow_missing_int_is_error() {
+        let dir = tempfile::tempdir().expect("tmp");
+        entity(
+            dir.path(),
+            "FLOW-001-fo.md",
+            "---\nid: FLOW-001\ntype: flow\ntitle: Поток КА ФО\nstatus: adopted\nintegrations: [INT-999]",
+        );
+        let report = validate_dir(dir.path());
+        let issue = report
+            .issues
+            .iter()
+            .find(|i| i.rule == "flow-int-missing")
+            .expect("error о несуществующем INT");
+        assert_eq!(issue.severity, Severity::Error);
+        assert!(issue.message.contains("INT-999"), "{}", issue.message);
+    }
+
+    #[test]
+    fn flow_target_not_int_is_error() {
+        let dir = tempfile::tempdir().expect("tmp");
+        base(dir.path()); // CMP-001 существует
+        entity(
+            dir.path(),
+            "FLOW-001-fo.md",
+            "---\nid: FLOW-001\ntype: flow\ntitle: Поток КА ФО\nstatus: adopted\nintegrations: [CMP-001]",
+        );
+        let report = validate_dir(dir.path());
+        assert!(
+            report.issues.iter().any(|i| i.rule == "flow-int-missing"),
+            "цель не INT — та же находка: {}",
+            report.summary()
+        );
+    }
+
+    #[test]
+    fn int_meta_id_duplicate_is_error() {
+        let dir = tempfile::tempdir().expect("tmp");
+        entity(
+            dir.path(),
+            "INT-001-a.md",
+            "---\nid: INT-001\ntype: int\ntitle: A\nstatus: s\nmeta_id: ИВ-12345",
+        );
+        entity(
+            dir.path(),
+            "INT-002-b.md",
+            "---\nid: INT-002\ntype: int\ntitle: B\nstatus: s\nmeta_id: ИВ-12345",
+        );
+        let report = validate_dir(dir.path());
+        let issue = report
+            .issues
+            .iter()
+            .find(|i| i.rule == "int-meta-id-duplicate")
+            .expect("error о дубле meta_id");
+        assert_eq!(issue.severity, Severity::Error);
+    }
+
+    #[test]
+    fn int_meta_id_format_is_error() {
+        let dir = tempfile::tempdir().expect("tmp");
+        entity(
+            dir.path(),
+            "INT-001-a.md",
+            "---\nid: INT-001\ntype: int\ntitle: A\nstatus: s\nmeta_id: мета-1",
+        );
+        let report = validate_dir(dir.path());
+        assert!(
+            report.issues.iter().any(|i| i.rule == "int-meta-id-format"),
+            "{}",
+            report.summary()
+        );
+    }
+
+    #[test]
+    fn int_meta_id_valid_forms_are_clean() {
+        let dir = tempfile::tempdir().expect("tmp");
+        entity(
+            dir.path(),
+            "INT-001-a.md",
+            "---\nid: INT-001\ntype: int\ntitle: A\nstatus: s\nmeta_id: ИВ-12345",
+        );
+        let report = validate_dir(dir.path());
+        assert!(report.issues.is_empty(), "{}", report.summary());
+
+        let dir2 = tempfile::tempdir().expect("tmp");
+        entity(
+            dir2.path(),
+            "INT-001-a.md",
+            "---\nid: INT-001\ntype: int\ntitle: A\nstatus: s\nmeta_id: IV-42",
+        );
+        let report2 = validate_dir(dir2.path());
+        assert!(report2.issues.is_empty(), "{}", report2.summary());
+    }
+
+    #[test]
+    fn int_registry_api_format_is_error() {
+        let dir = tempfile::tempdir().expect("tmp");
+        entity(
+            dir.path(),
+            "INT-001-a.md",
+            "---\nid: INT-001\ntype: int\ntitle: A\nstatus: s\nregistry_api: Курсы бонусов 2.3",
+        );
+        let report = validate_dir(dir.path());
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|i| i.rule == "int-registry-api-format"),
+            "версия без префикса v — error: {}",
+            report.summary()
+        );
+    }
+
+    #[test]
+    fn int_registry_api_valid_is_clean() {
+        let dir = tempfile::tempdir().expect("tmp");
+        entity(
+            dir.path(),
+            "INT-001-a.md",
+            "---\nid: INT-001\ntype: int\ntitle: A\nstatus: s\nregistry_api: Курсы бонусов v2.3",
+        );
+        let report = validate_dir(dir.path());
+        assert!(report.issues.is_empty(), "{}", report.summary());
+    }
+
+    #[test]
+    fn agreement_missing_is_error_and_existing_is_clean() {
+        // Корень кейса = <tmp>/case, модель = <tmp>/case/model, файл — рядом.
+        let tmp = tempfile::tempdir().expect("tmp");
+        let case = tmp.path().join("case");
+        let model_dir = case.join("model");
+        std::fs::create_dir_all(&model_dir).expect("dirs");
+        std::fs::create_dir_all(case.join("agreements")).expect("dirs");
+        std::fs::write(case.join("agreements/courses.md"), "договорённость\n").expect("agr");
+        entity(
+            &model_dir,
+            "INT-001-a.md",
+            "---\nid: INT-001\ntype: int\ntitle: A\nstatus: s\nagreement: agreements/courses.md",
+        );
+        let report = validate_dir(&model_dir);
+        assert!(report.issues.is_empty(), "{}", report.summary());
+
+        // Сломанный путь — error.
+        std::fs::write(
+            model_dir.join("INT-002-b.md"),
+            "---\nid: INT-002\ntype: int\ntitle: B\nstatus: s\nagreement: agreements/gone.md\n---\n",
+        )
+        .expect("фикстура");
+        let report = validate_dir(&model_dir);
+        let issue = report
+            .issues
+            .iter()
+            .find(|i| i.rule == "agreement-missing")
+            .expect("error о ненайденной договорённости");
+        assert_eq!(issue.severity, Severity::Error);
+        assert!(issue.message.contains("gone.md"), "{}", issue.message);
     }
 }

@@ -15,7 +15,7 @@
 //! контракта относительно корня кейса; проверяется звеном трассировки
 //! «INT → контракт»). Тело после frontmatter — свободная проза.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -550,6 +550,27 @@ impl Model {
             }
         }
         out
+    }
+
+    /// Множество ID `INT`, входящих хотя бы в один поток `FLOW` (ADR-081):
+    /// объединение `integrations` всех сущностей вида `flow`.
+    ///
+    /// `None` — потоков в модели нет вовсе: производная проверка
+    /// `int-without-flow` (nfr budget / trace) в этом случае молчит
+    /// (ADR-081, реш. 4: «модель малых кейсов без потоков легальна»).
+    #[must_use]
+    pub fn flow_members(&self) -> Option<BTreeSet<&str>> {
+        let mut has_flow = false;
+        let mut out = BTreeSet::new();
+        for e in &self.entities {
+            if e.kind == EntityKind::Flow {
+                has_flow = true;
+                for t in &e.integrations {
+                    out.insert(t.as_str());
+                }
+            }
+        }
+        has_flow.then_some(out)
     }
 }
 

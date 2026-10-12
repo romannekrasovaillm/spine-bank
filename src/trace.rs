@@ -499,7 +499,7 @@ fn contract_path(e: &crate::model::Entity) -> Option<&str> {
 /// (заявленный контракт потерян), отсутствие поля — `warn` (внешняя
 /// интеграция без артефакта в репо легитимна, но должна быть видна).
 fn int_level(case_dir: &Path, model: &Model, issues: &mut Vec<TraceIssue>) -> LevelReport {
-    level_report(
+    let level = level_report(
         "INT → контракт",
         model,
         EntityKind::Int,
@@ -524,7 +524,30 @@ fn int_level(case_dir: &Path, model: &Model, issues: &mut Vec<TraceIssue>) -> Le
                 ),
             ),
         },
-    )
+    );
+    // ADR-081 (реш. 4): INT с контрактом обязан входить хотя бы в один поток
+    // `FLOW` — иначе `int-without-flow` (warn). Молчим, если потоков в модели
+    // нет: малый кейс без потоков легален.
+    if let Some(members) = model.flow_members() {
+        for e in model
+            .entities
+            .iter()
+            .filter(|e| e.kind == EntityKind::Int && contract_path(e).is_some())
+        {
+            if !members.contains(e.id.as_str()) {
+                issue(
+                    issues,
+                    Severity::Warn,
+                    "int-without-flow",
+                    format!(
+                        "{}: контракт заявлен, но ИВ не входит ни в один поток FLOW",
+                        e.id
+                    ),
+                );
+            }
+        }
+    }
+    level
 }
 
 /// Сверка со spine (если файл есть): каждый AD из ARCHITECTURE-SPINE.md
@@ -820,6 +843,46 @@ mod tests {
         }
         assert_eq!(report.constraint_rules, Some(1));
         assert_eq!(report.spine_ads, Some(1));
+    }
+
+    /// ADR-081 (реш. 4): INT с контрактом вне любого FLOW — warn
+    /// `int-without-flow`. Проверка молчит, когда потоков в модели нет
+    /// (см. `full_chain_covered_passes`: там FLOW нет и находок ноль).
+    #[test]
+    fn int_without_flow_is_warn_when_flows_exist() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let mut entities = full_entities();
+        entities.push((
+            "FLOW-001.md",
+            "---\nid: FLOW-001\ntype: flow\ntitle: Поток\nstatus: accepted\nintegrations: []",
+        ));
+        let case = write_case(dir.path(), &entities, Some(CONSTRAINTS), Some(SPINE));
+        let report = trace_check(&case).expect("trace");
+        let w = report
+            .issues
+            .iter()
+            .find(|i| i.rule == "int-without-flow")
+            .expect("warn int-without-flow");
+        assert_eq!(w.severity, Severity::Warn);
+        assert!(w.message.contains("INT-001"), "{}", w.message);
+    }
+
+    /// Тот же INT, включённый в FLOW, находки `int-without-flow` не даёт.
+    #[test]
+    fn int_in_flow_has_no_without_flow_warn() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let mut entities = full_entities();
+        entities.push((
+            "FLOW-001.md",
+            "---\nid: FLOW-001\ntype: flow\ntitle: Поток\nstatus: accepted\nintegrations: [INT-001]",
+        ));
+        let case = write_case(dir.path(), &entities, Some(CONSTRAINTS), Some(SPINE));
+        let report = trace_check(&case).expect("trace");
+        assert!(
+            !report.issues.iter().any(|i| i.rule == "int-without-flow"),
+            "INT-001 в потоке: {:?}",
+            report.issues.iter().map(|i| i.rule).collect::<Vec<_>>()
+        );
     }
 
     /// ADR-050: звено «AD → исполняемое правило» информационное — оно видно в
