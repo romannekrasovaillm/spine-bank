@@ -996,6 +996,82 @@ mod tests {
         assert_eq!(by_rule("glob_miss").len(), 1, "пустой набор — находка");
     }
 
+    /// П5 0.4.10: `must_contain` по glob, не давшему ни одного файла, даёт
+    /// отдельную находку с кодом `glob-empty` и намёком проверить glob — не
+    /// смешивается с «файлы есть, паттерна нет».
+    #[test]
+    fn fitness_must_contain_empty_glob_is_glob_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        write_file(&repo, "src/main.rs", "fn main() {}\n");
+        let constraints = write_file(
+            dir.path(),
+            "CONSTRAINTS.yaml",
+            "rules:\n\
+             \x20 - name: needs_marker\n\
+             \x20   type: must_contain\n\
+             \x20   glob: 'services/**/*.yaml'\n\
+             \x20   pattern: 'timeout'\n",
+        );
+        let report = check(&repo, &constraints).unwrap();
+        let issue = report
+            .issues
+            .iter()
+            .find(|i| i.rule == "needs_marker")
+            .expect("находка needs_marker");
+        assert!(
+            issue.message.contains("glob-empty"),
+            "код glob-empty: {}",
+            issue.message
+        );
+        assert!(
+            issue.message.contains("проверьте glob"),
+            "намёк проверить glob: {}",
+            issue.message
+        );
+        assert!(
+            !issue.message.contains("паттерн 'timeout' не найден"),
+            "не путать с «паттерна нет»: {}",
+            issue.message
+        );
+    }
+
+    /// П5 0.4.10: файлы по glob есть, но паттерна в них нет — прежнее
+    /// сообщение (правило нарушено), без кода `glob-empty`.
+    #[test]
+    fn fitness_must_contain_pattern_missing_keeps_previous_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        write_file(&repo, "services/a/app.yaml", "retries: 3\n");
+        let constraints = write_file(
+            dir.path(),
+            "CONSTRAINTS.yaml",
+            "rules:\n\
+             \x20 - name: needs_timeout\n\
+             \x20   type: must_contain\n\
+             \x20   glob: 'services/**/*.yaml'\n\
+             \x20   pattern: 'timeout'\n",
+        );
+        let report = check(&repo, &constraints).unwrap();
+        let issue = report
+            .issues
+            .iter()
+            .find(|i| i.rule == "needs_timeout")
+            .expect("находка needs_timeout");
+        assert!(
+            issue
+                .message
+                .contains("must_contain: паттерн 'timeout' не найден ни в одном файле по glob"),
+            "прежнее сообщение: {}",
+            issue.message
+        );
+        assert!(
+            !issue.message.contains("glob-empty"),
+            "файлы есть — не glob-empty: {}",
+            issue.message
+        );
+    }
+
     #[test]
     fn fitness_dir_must_have_file_per_dir_issues() {
         let dir = tempfile::tempdir().unwrap();

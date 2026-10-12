@@ -161,6 +161,21 @@ pub(super) fn run_rule(
                 return Ok(());
             };
             let pattern = rule.pattern.as_deref().unwrap_or_default();
+            // П5 0.4.10: различаем «по glob не нашлось ни одного файла» и
+            // «файлы есть, но паттерна в них нет». Первое — вероятно неверный
+            // glob (набор пуст, правилу нечего проверять), маркируется кодом
+            // `glob-empty`; второе — правило действительно нарушено (прежнее
+            // сообщение). Так же устроена ветка each_file_must_contain.
+            if files.is_empty() {
+                issue(
+                    PathBuf::from(&glob),
+                    0,
+                    format!(
+                        "must_contain: по glob '{glob}' не найдено ни одного файла (glob-empty) — проверьте glob"
+                    ),
+                );
+                return Ok(());
+            }
             let mut found = false;
             for (_, abs) in &files {
                 let bytes = std::fs::read(abs).map_err(|e| HarnessError::io(abs, e))?;
