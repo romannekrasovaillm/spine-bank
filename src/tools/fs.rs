@@ -1044,19 +1044,13 @@ mod tests {
             .call(json!({"path": "/etc/passwd"}), &ctx)
             .await
             .expect_err("Err-контракт: отказ зоны");
-        assert!(
-            err.to_string().contains("вне рабочей зоны:"),
-            "err: {err}"
-        );
+        assert!(err.to_string().contains("вне рабочей зоны:"), "err: {err}");
         // Побег через `..` из cwd — тоже отказ.
         let esc = ReadFileTool
             .call(json!({"path": "../escape.txt"}), &ctx)
             .await
             .expect_err("Err-контракт: отказ зоны");
-        assert!(
-            esc.to_string().contains("вне рабочей зоны:"),
-            "err: {esc}"
-        );
+        assert!(esc.to_string().contains("вне рабочей зоны:"), "err: {esc}");
         Ok(())
     }
 
@@ -1074,10 +1068,7 @@ mod tests {
             )
             .await
             .expect_err("Err-контракт: отказ зоны");
-        assert!(
-            err.to_string().contains("вне рабочей зоны:"),
-            "err: {err}"
-        );
+        assert!(err.to_string().contains("вне рабочей зоны:"), "err: {err}");
         assert!(
             !target.exists(),
             "отказ зоны не создаёт файл вовне: {}",
@@ -1118,10 +1109,7 @@ mod tests {
             .call(json!({"path": "link/secret.txt"}), &ctx)
             .await
             .expect_err("Err-контракт: отказ зоны");
-        assert!(
-            err.to_string().contains("вне рабочей зоны:"),
-            "err: {err}"
-        );
+        assert!(err.to_string().contains("вне рабочей зоны:"), "err: {err}");
         Ok(())
     }
 
