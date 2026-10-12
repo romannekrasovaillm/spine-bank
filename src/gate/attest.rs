@@ -58,7 +58,15 @@ pub fn verify_envelope(
         Some(sha) if sha != "absent" => Some(sha.to_string()),
         _ => None,
     };
-    let current = collect_inputs_for_verify(repo, base_ref.as_deref(), limits);
+    // Глобы документов решения объявлены САМИМ конвертом (входы `extra:<глоб>`):
+    // сверка пересчитывает ровно те, что были в вердикте. Конверт без таких
+    // входов (прежний формат) → пусто, и правка SOL его не расходит: сверяется
+    // только объявленное (backward compat, Н3/ADR-043).
+    let extra_globs: Vec<String> = declared
+        .keys()
+        .filter_map(|k| k.strip_prefix("extra:").map(str::to_string))
+        .collect();
+    let current = collect_inputs_for_verify(repo, base_ref.as_deref(), limits, &extra_globs);
     let mut changed = Vec::new();
     let mut missing = Vec::new();
     for (name, was) in declared {
@@ -88,11 +96,12 @@ fn collect_inputs_for_verify(
     repo: &Path,
     base: Option<&str>,
     _limits: (usize, usize),
+    extra_globs: &[String],
 ) -> BTreeMap<String, String> {
     let constraints = control::resolve_constraints_path_detailed(repo, None)
         .map_or_else(|| repo.join(control::HANDOFF_CONSTRAINTS_PATH), |r| r.path);
     let git = GitProbe::probe(repo);
-    collect_inputs(repo, &constraints, base, &git)
+    collect_inputs(repo, &constraints, base, &git, extra_globs)
         .into_iter()
         .collect()
 }
@@ -102,7 +111,7 @@ mod tests {
     use super::*;
     use crate::control::Route;
     use crate::gate::testkit::*;
-    use crate::gate::{GateRequirements, GateStatus, run, run_with};
+    use crate::gate::{GateOptions, GateRequirements, GateStatus, run, run_opts, run_with};
     use std::path::PathBuf;
 
     // --- Н3: аттестация различает состояния репозитория (ADR-043) ----------
@@ -391,6 +400,165 @@ mod tests {
             "changed={:?} missing={:?}",
             drift.changed,
             drift.missing
+        );
+    }
+
+    // --- П1 0.4.8: документы решения (SOL/CTX) во входах конверта ------------
+
+    /// (a) Глоб `[gate.envelope].extra` добавляет документы решения во входы
+    /// конверта (`extra:<глоб>`), а правка SOL расходит конверт.
+    #[test]
+    fn envelope_extra_glob_tracks_solution_docs() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        make_gate_repo(dir);
+        std::fs::create_dir_all(dir.join("docs/solution")).expect("mkdir");
+        std::fs::write(dir.join("docs/solution/SOL-001.md"), "# SOL\n").expect("sol");
+        git(dir, &["add", "."]);
+        git(dir, &["commit", "-q", "-m", "sol"]);
+        let limits = (1, 4);
+        let mut options = GateOptions::default();
+        options.envelope.extra = vec!["docs/solution/**".to_string()];
+        let report = run_opts(
+            dir,
+            Some(Route::Fast),
+            None,
+            None,
+            limits,
+            &GateRequirements::default(),
+            &options,
+        )
+        .expect("gate");
+        let inputs = report.inputs_map();
+        assert!(
+            inputs.contains_key("extra:docs/solution/**"),
+            "{:?}",
+            inputs.keys().collect::<Vec<_>>()
+        );
+        let envelope = dir.join("verdict.json");
+        std::fs::write(
+            &envelope,
+            serde_json::to_string_pretty(&report.envelope_json()).expect("json"),
+        )
+        .expect("write");
+        // Правка SOL (рабочее дерево) — вход конверта разошёлся.
+        std::fs::write(dir.join("docs/solution/SOL-001.md"), "# SOL v2\n").expect("sol");
+        let drift = verify_envelope(dir, &envelope, limits).expect("verify");
+        assert!(!drift.same, "правка SOL обязана расходить конверт");
+        assert!(
+            drift
+                .changed
+                .iter()
+                .any(|(name, _, _)| name == "extra:docs/solution/**"),
+            "{:?}",
+            drift.changed
+        );
+    }
+
+    /// (b) Конверт БЕЗ входов `extra:` (прежний формат) правкой SOL не
+    /// расходится: сверяется только объявленное (backward compat).
+    #[test]
+    fn envelope_without_extra_ignores_solution_edits() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        make_gate_repo(dir);
+        std::fs::create_dir_all(dir.join("docs/solution")).expect("mkdir");
+        std::fs::write(dir.join("docs/solution/SOL-001.md"), "# SOL\n").expect("sol");
+        git(dir, &["add", "."]);
+        git(dir, &["commit", "-q", "-m", "sol"]);
+        let limits = (1, 4);
+        // Дефолтные настройки: `extra` пуст → входов `extra:` нет.
+        let report = run_with(
+            dir,
+            Some(Route::Fast),
+            None,
+            None,
+            limits,
+            &GateRequirements::default(),
+        )
+        .expect("gate");
+        assert!(report.inputs_map().keys().all(|k| !k.starts_with("extra:")));
+        let envelope = dir.join("verdict.json");
+        std::fs::write(
+            &envelope,
+            serde_json::to_string_pretty(&report.envelope_json()).expect("json"),
+        )
+        .expect("write");
+        std::fs::write(dir.join("docs/solution/SOL-001.md"), "# SOL v2\n").expect("sol");
+        let drift = verify_envelope(dir, &envelope, limits).expect("verify");
+        assert!(
+            drift.same,
+            "старый конверт не должен реагировать на SOL: {:?} {:?}",
+            drift.changed, drift.missing
+        );
+    }
+
+    /// (c) Глоб без единого совпадения — честное `absent`, а не хэш пустоты.
+    #[test]
+    fn envelope_extra_glob_without_matches_is_absent() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        make_gate_repo(dir);
+        let limits = (1, 4);
+        let mut options = GateOptions::default();
+        options.envelope.extra = vec!["docs/ctx/**".to_string()];
+        let report = run_opts(
+            dir,
+            Some(Route::Fast),
+            None,
+            None,
+            limits,
+            &GateRequirements::default(),
+            &options,
+        )
+        .expect("gate");
+        assert_eq!(
+            report
+                .inputs_map()
+                .get("extra:docs/ctx/**")
+                .map(String::as_str),
+            Some("absent")
+        );
+    }
+
+    /// (d) Детерминизм: набор файлов задаёт хэш, а не порядок обхода — та же
+    /// свёртка при разном порядке создания файлов.
+    #[test]
+    fn envelope_extra_glob_hash_is_order_independent() {
+        let limits = (1, 4);
+        let hash_of = |order: &[&str]| {
+            let tmp = tempfile::tempdir().expect("tmp");
+            let dir = tmp.path();
+            make_gate_repo(dir);
+            std::fs::create_dir_all(dir.join("docs/solution")).expect("mkdir");
+            for name in order {
+                std::fs::write(dir.join("docs/solution").join(name), format!("# {name}\n"))
+                    .expect("doc");
+            }
+            git(dir, &["add", "."]);
+            git(dir, &["commit", "-q", "-m", "docs"]);
+            let mut options = GateOptions::default();
+            options.envelope.extra = vec!["docs/solution/**".to_string()];
+            let report = run_opts(
+                dir,
+                Some(Route::Fast),
+                None,
+                None,
+                limits,
+                &GateRequirements::default(),
+                &options,
+            )
+            .expect("gate");
+            report
+                .inputs_map()
+                .get("extra:docs/solution/**")
+                .cloned()
+                .expect("extra key")
+        };
+        assert_eq!(
+            hash_of(&["a.md", "b.md"]),
+            hash_of(&["b.md", "a.md"]),
+            "хэш обязан зависеть от набора, а не от порядка обхода"
         );
     }
 

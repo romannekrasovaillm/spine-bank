@@ -403,6 +403,10 @@ pub struct GateOptions {
     /// (ADR-068 Am.3): как проверяется доступность ресурса. Пусто — только
     /// встроенные дефолты (`cuda`/`stand`) в составляющей `fitness`.
     pub requires: std::collections::BTreeMap<String, control::requires::RequiresProbeConfig>,
+    /// Конверт вердикта (П7, ADR-043): глобы `[gate.envelope].extra` —
+    /// документы решения (SOL/CTX/AGR), входящие во входы аттестации. Пусто
+    /// (дефолт) — прежний конверт без дополнительных входов.
+    pub envelope: crate::config::EnvelopeConfig,
 }
 
 impl GateOptions {
@@ -431,6 +435,7 @@ impl GateOptions {
             arch_drift: cfg.gate.arch_drift.clone(),
             resources: None,
             requires: cfg.gate.requires.clone(),
+            envelope: cfg.gate.envelope.clone(),
         }
     }
 }

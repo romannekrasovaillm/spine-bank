@@ -864,6 +864,16 @@ pub struct OverrideEntry {
     /// Срок действия: `YYYY-MM` (по месяцу включительно) или `YYYY-MM-DD`.
     #[serde(default)]
     pub until: Option<String>,
+    /// 0.4.8+: узкое исключение — override гасит правило ТОЛЬКО на файлах,
+    /// матчащихся этим глобам (та же семантика, что у `exclude_glob` правила).
+    /// Пусто — правило отключается целиком (прежнее поведение). Пустой список
+    /// не сериализуется: реестр без поля остаётся байт-в-байт прежним.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "de_string_or_list"
+    )]
+    pub exclude_glob: Vec<String>,
 }
 
 /// Статус override после оценки (отчёт `check` и `control report`).
@@ -875,6 +885,10 @@ pub struct OverrideInfo {
     pub adr: String,
     /// Срок (как записан).
     pub until: String,
+    /// 0.4.8+: глобы узкого override (пусто — правило отключено целиком).
+    /// Пропуск пустого сохраняет прежний JSON-контракт отчёта.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclude_glob: Vec<String>,
     /// `active` (правило отключено) / `expired` (просрочен, правило снова
     /// действует) / `invalid` (неполный, некорректная дата или правило не
     /// найдено — игнорируется).

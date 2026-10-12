@@ -192,7 +192,7 @@ pub fn check_with_options(
         options.overrides.adr_dir.as_deref(),
         options.overrides.max_horizon_months,
     );
-    let (override_infos, override_findings, disabled) = evaluate_overrides(
+    let (override_infos, override_findings, disabled, scoped_overrides) = evaluate_overrides(
         &resolved.overrides,
         &resolved.rules,
         constraints,
@@ -201,7 +201,15 @@ pub fn check_with_options(
 
     // П5: отпечаток состава реестра — до перемещения правил.
     let fingerprint = Some(rules_fingerprint_of(&resolved.rules));
-    let rules = resolved.rules;
+    let mut rules = resolved.rules;
+    // 0.4.8: узкий override — доливаем глобы в `exclude_glob` правила, чтобы
+    // та же механика исключения погасила проверку лишь на матчащихся файлах.
+    // Полный override (без глобов) идёт прежним путём — через `disabled`.
+    for rule in &mut rules {
+        if let Some(globs) = scoped_overrides.get(&rule.name) {
+            rule.exclude_glob.extend(globs.iter().cloned());
+        }
+    }
     let skipped_unknown = resolved.skipped_unknown;
     let rule_refs: Vec<&FitnessRule> = rules
         .iter()

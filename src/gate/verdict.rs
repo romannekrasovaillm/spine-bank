@@ -284,7 +284,7 @@ pub(super) fn run_inner(
         outcome: GateOutcome::Pass,
         required: requirements.for_route(route).to_vec(),
         not_checked: Vec::new(),
-        inputs: collect_inputs(repo, &constraints.path, base, &git),
+        inputs: collect_inputs(repo, &constraints.path, base, &git, &options.envelope.extra),
         attestation: String::new(),
         passed: true,
     };
@@ -305,6 +305,7 @@ pub(super) fn collect_inputs(
     constraints: &Path,
     base: Option<&str>,
     git: &GitProbe,
+    extra_globs: &[String],
 ) -> Vec<(String, String)> {
     let mut inputs: Vec<(String, String)> = Vec::new();
     let mut push = |name: &str, value: String| inputs.push((name.to_string(), value));
@@ -417,7 +418,42 @@ pub(super) fn collect_inputs(
         None
     };
     push("base", base_commit.unwrap_or_else(|| "absent".to_string()));
+    // Документы решения (SOL/CTX/AGR) — П1 0.4.8: закрытый список входов их не
+    // видит, поэтому правка SOL не расходила конверт. `[gate.envelope].extra` —
+    // глобы таких документов; вход `extra:<глоб>` (глоб как есть) — sha256 по
+    // отсортированному списку (путь + хэш файла). Пустой матч — `absent`:
+    // «документов нет вовсе» отличается от «были и изменились».
+    for glob in extra_globs {
+        push(
+            &format!("extra:{glob}"),
+            extra_glob_hash(repo, glob)
+                .map_or_else(|| "absent".to_string(), |h| format!("sha256:{h}")),
+        );
+    }
     inputs
+}
+
+/// sha256 по отсортированному списку файлов репозитория, попавших под glob
+/// (П1 0.4.8): путь относительно корня + хэш содержимого каждого файла. Пусто
+/// или каталога нет — `None` (честное `absent`, а не хэш пустого списка).
+///
+/// Служебные каталоги исключает сам обход (`crate::control::collect_files`),
+/// тот же, что у content-правил: документ решения в скрытом каталоге сборки —
+/// не документ решения.
+fn extra_glob_hash(repo: &Path, glob: &str) -> Option<String> {
+    let files = crate::control::collect_files(repo, glob).ok()?;
+    if files.is_empty() {
+        return None;
+    }
+    let mut acc = String::new();
+    for (rel, path) in files {
+        let digest = std::fs::read(&path).map_or_else(
+            |_| "unreadable".to_string(),
+            |b| crate::hash::sha256_hex(&b),
+        );
+        let _ = std::fmt::Write::write_fmt(&mut acc, format_args!("{rel}\0{digest}\n"));
+    }
+    Some(crate::hash::sha256_hex(acc.as_bytes()))
 }
 
 /// Резолвит git-ревизию в полный SHA коммита (None — не резолвится).

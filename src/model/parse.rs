@@ -300,6 +300,42 @@ pub fn split_frontmatter(text: &str) -> Result<(&str, &str)> {
     Err(HarnessError::Model("нет закрывающего маркера `---`".into()))
 }
 
+/// Внешние идентификаторы, которые пользователи по инерции кладут в шапку
+/// карточки вместо тела (формат Д-2 — поля потока/МЕТЫ в шапке — в разработке).
+///
+/// Схема frontmatter ЗАКРЫТА (ADR-003): поле отвергается (severity остаётся
+/// error). К ошибке лишь добавляем подсказку, КУДА такие идентификаторы класть,
+/// чтобы человек не гадал над «unknown field».
+const EXTERNAL_ID_FIELDS: [&str; 6] = [
+    "flow",
+    "meta_id",
+    "registry_api",
+    "agreement",
+    "system",
+    "owner",
+];
+
+/// Достаёт имя поля из серде-сообщения «unknown field NAME, expected …».
+fn unknown_field_name(err: &str) -> Option<&str> {
+    let rest = err.split("unknown field `").nth(1)?;
+    rest.split('`').next()
+}
+
+/// Подсказка к ошибке незнакомого поля frontmatter. Если отвергнутое поле —
+/// внешний идентификатор из [`EXTERNAL_ID_FIELDS`], возвращает строку с
+/// объяснением (начинается с `\n`); иначе — пустую строку (сообщение прежнее).
+fn external_id_hint(err: &str) -> String {
+    match unknown_field_name(err) {
+        Some(name) if EXTERNAL_ID_FIELDS.contains(&name) => {
+            "\nподсказка: внешние идентификаторы (meta_id, registry_api, flow, agreement) \
+             держите в теле карточки — формат Д-2 (поля потока/МЕТЫ в шапке) в разработке; \
+             см. docs/adr/ADR-080-линия и Сценарии v7 З.2.3"
+                .to_string()
+        }
+        _ => String::new(),
+    }
+}
+
 /// Разбирает одну сущность из текста файла `file`.
 ///
 /// Проверки структуры: наличие frontmatter, обязательные поля, строгий
@@ -312,8 +348,14 @@ pub fn split_frontmatter(text: &str) -> Result<(&str, &str)> {
 pub fn parse_entity(file: &Path, text: &str) -> Result<Entity> {
     let (yaml, body) = split_frontmatter(text)
         .map_err(|e| HarnessError::Model(format!("{}: {e}", file.display())))?;
-    let fm: Frontmatter = serde_yaml_ng::from_str(yaml)
-        .map_err(|e| HarnessError::Model(format!("{}: frontmatter: {e}", file.display())))?;
+    let fm: Frontmatter = serde_yaml_ng::from_str(yaml).map_err(|e| {
+        let msg = e.to_string();
+        HarnessError::Model(format!(
+            "{}: frontmatter: {msg}{}",
+            file.display(),
+            external_id_hint(&msg)
+        ))
+    })?;
     if fm.id.trim().is_empty() {
         return Err(HarnessError::Model(format!(
             "{}: пустой `id`",
@@ -834,6 +876,49 @@ mod tests {
         let err = parse_entity(&file, &std::fs::read_to_string(&file).expect("чтение"))
             .expect_err("опечатка в поле");
         assert!(err.to_string().contains("frontmatter"), "{err}");
+    }
+
+    #[test]
+    fn parse_external_id_field_gets_hint() {
+        // `meta_id` — внешний идентификатор из словаря: поле по-прежнему
+        // отвергается (схема закрыта, ADR-003), но к ошибке добавляется
+        // подсказка, что такие идентификаторы держат в теле карточки.
+        let dir = tempfile::tempdir().expect("tmp");
+        let file = write(
+            dir.path(),
+            "x.md",
+            "---\nid: CMP-001\ntype: cmp\ntitle: T\nstatus: ok\nmeta_id: M-42\n---\n",
+        );
+        let err = parse_entity(&file, &std::fs::read_to_string(&file).expect("чтение"))
+            .expect_err("meta_id в шапке");
+        let msg = err.to_string();
+        assert!(msg.contains("frontmatter"), "{msg}");
+        assert!(msg.contains("meta_id"), "имя поля сохранено: {msg}");
+        assert!(
+            msg.contains("держите в теле карточки"),
+            "подсказка про тело карточки: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_unknown_field_outside_dictionary_has_no_hint() {
+        // `qwerty` вне словаря внешних идентификаторов — сообщение прежнее,
+        // без подсказки про формат Д-2.
+        let dir = tempfile::tempdir().expect("tmp");
+        let file = write(
+            dir.path(),
+            "x.md",
+            "---\nid: CMP-001\ntype: cmp\ntitle: T\nstatus: ok\nqwerty: 1\n---\n",
+        );
+        let err = parse_entity(&file, &std::fs::read_to_string(&file).expect("чтение"))
+            .expect_err("незнакомое поле");
+        let msg = err.to_string();
+        assert!(msg.contains("frontmatter"), "{msg}");
+        assert!(msg.contains("qwerty"), "{msg}");
+        assert!(
+            !msg.contains("держите в теле карточки"),
+            "без подсказки для чужих полей: {msg}"
+        );
     }
 
     #[test]
