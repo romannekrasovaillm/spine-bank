@@ -1,0 +1,12 @@
+openapi: 3.0.3
+info:
+  title: Payments API
+  version: 1.0.0
+paths: {}
+components:
+  schemas:
+    Payment:
+      type: object
+      properties:
+        amount_cents:
+          type: integer

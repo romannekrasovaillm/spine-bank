@@ -5,6 +5,7 @@
 #   StdComply        — 7, 9, 10 (control check стандарта/манифесты) + 8 (семена C.2/C.3)
 #   arch-diff-replay — 13 (replay.py)
 #   MCP              — 15, 16 (mcp_schema_probe.py)
+#   CONTRACT         — семантические зонды контрактов (AB-12, ADR-079, semantic_diff.py)
 #   ArchRecover      — 1 (survey_compare.py), 2 (components_recover.py),
 #                      3 (edges_recover.py), 18/19 (recover_determinism.py, волна R/R5),
 #                      4 (stores_recover.py), 5 (externals_recover.py), 6 (survey_noise.py)
@@ -76,6 +77,9 @@ run "arch-diff-replay — значимые диффы и окна-шума (ме
 
 # ── MCP ─────────────────────────────────────────────────────────────────────
 run "MCP — схема ↔ реализация (метрики 15, 16)" mcp_schema_probe.py
+
+# ── CONTRACT: семантические зонды контрактов (AB-12, ADR-079) ───────────────
+run "CONTRACT — семантические зонды контрактов (AB-12, ADR-079)" semantic_diff.py
 
 # ── ArchRecover: survey-детерминизм + рёбра + компоненты + recover ──────────
 run "ArchRecover — survey . ≡ survey <abs> (метрика 1)" survey_compare.py

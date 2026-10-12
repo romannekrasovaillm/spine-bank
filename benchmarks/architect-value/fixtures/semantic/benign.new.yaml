@@ -1,0 +1,14 @@
+openapi: 3.0.3
+info:
+  title: Payments API
+  version: 1.0.0
+paths: {}
+components:
+  schemas:
+    Payment:
+      type: object
+      properties:
+        state:
+          type: string
+          title: status
+          description: Текущее состояние платежа (прежнее имя сохранено в title)

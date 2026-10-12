@@ -1,0 +1,19 @@
+openapi: 3.0.3
+info:
+  title: Events API
+  version: 1.0.0
+paths:
+  /v1/events:
+    get:
+      operationId: listEvents
+      parameters:
+        - name: tenant_shard
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: ok
+components:
+  schemas: {}
