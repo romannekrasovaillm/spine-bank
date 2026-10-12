@@ -1345,6 +1345,21 @@ fn run_max_turns_zero_rejected_exits_2() {
     cmd.assert().code(2).stderr(contains("--max-turns"));
 }
 
+/// ADR-083 п.2: агентный цикл без настроенного провайдера не стартует молча
+/// с дефолтом — отказ с перечнем вариантов (код ≠ 0). `arch_cmd` снимает
+/// API-ключи, поэтому дефолтное `default_model = "deepseek"` не готово.
+#[test]
+#[cfg(feature = "harness")]
+fn run_without_provider_refused_exits_nonzero() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("run").arg("пинг");
+    cmd.assert()
+        .failure()
+        .stderr(contains("агентный цикл"))
+        .stderr(contains("kind = \"cli\""));
+}
+
 /// git-репозиторий `home/<name>` с baseline-коммитом и handoff-пакетом
 /// (MANIFEST.json + ROLLBACK.yaml; `{BASELINE}` в плане подменяется на хеш).
 fn repo_with_rollback_plan(home: &Path, name: &str, route: &str, plan_yaml: &str) -> PathBuf {

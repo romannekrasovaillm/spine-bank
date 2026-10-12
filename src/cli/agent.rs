@@ -76,6 +76,10 @@ pub(crate) async fn cmd_run(
         None => cfg.clone(),
     };
 
+    // Fail-closed (ADR-083 п.2): цикл не стартует молча с дефолтным
+    // провайдером без настроенного ключа — отказ со списком вариантов.
+    cfg.ensure_agent_provider(model.as_deref())?;
+
     let registry = Arc::new(LlmRegistry::from_config(&cfg)?);
     let provider = match &model {
         Some(name) => registry.get(name)?,
