@@ -5563,3 +5563,54 @@ fn agents_md_refresh_accepts_positional_and_flag() {
         .arg(repo.as_os_str());
     mixed.assert().failure().stderr(contains("смешение форм"));
 }
+
+/// П3: `control score --from-diff` различает словарь undeclared-примечания.
+///
+/// (а) флаги заданы и противоречат диффу → «ВНИМАНИЕ — расхождение»;
+/// (б) флаги не задавались, маршрут поднят floor-детектором диффа →
+/// информативная строка БЕЗ «расхождения».
+#[test]
+fn control_score_diff_undeclared_wording_depends_on_flags() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = tmp.path().join("score-repo");
+    std::fs::create_dir_all(&repo).expect("mkdir");
+    std::fs::write(repo.join("README.md"), "# t\n").expect("readme");
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "init"]);
+    // untracked новый компонент: манифест (new_component) + зависимость (new_vendor).
+    std::fs::create_dir_all(repo.join("services/risk/src")).expect("mkdir svc");
+    std::fs::write(
+        repo.join("services/risk/Cargo.toml"),
+        "[package]\nname = \"risk\"\nversion = \"0.1.0\"\n\n[dependencies]\nserde = \"1.0\"\n",
+    )
+    .expect("manifest");
+    std::fs::write(repo.join("services/risk/src/lib.rs"), "pub fn f() {}\n").expect("src");
+
+    // (б) флаги не задавались → информативная строка, без слова «расхождение».
+    let mut no_flags = arch_cmd(tmp.path());
+    no_flags
+        .current_dir(&repo)
+        .args(["control", "score", "--from-diff"]);
+    no_flags
+        .assert()
+        .success()
+        .stdout(contains("детектором диффа"))
+        .stdout(contains("floor; флаги не задавались"))
+        .stdout(predicate::str::contains("расхождение").not());
+
+    // (а) флаги заданы (иной триггер) → дифф добавляет свой → «расхождение».
+    let mut with_flags = arch_cmd(tmp.path());
+    with_flags.current_dir(&repo).args([
+        "control",
+        "score",
+        "--trigger",
+        "new_component=true",
+        "--from-diff",
+    ]);
+    with_flags
+        .assert()
+        .success()
+        .stdout(contains("ВНИМАНИЕ — расхождение"))
+        .stdout(contains("new_vendor"));
+}

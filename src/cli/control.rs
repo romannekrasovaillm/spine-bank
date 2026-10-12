@@ -517,11 +517,14 @@ pub(crate) fn cmd_control(cfg: &arch_harness::config::Config, cmd: ControlCmd) -
                 for n in &diff.notes {
                     println!("  заметка: {n}");
                 }
-                if !scored.undeclared.is_empty() {
-                    println!(
-                        "ВНИМАНИЕ — расхождение: заявлено флагами vs видно по диффу: {}",
-                        scored.undeclared.join(", ")
-                    );
+                // П3: различаем «флаги заданы и противоречат диффу» (расхождение)
+                // и «флаги не задавались, маршрут поднят floor-детектором»
+                // (информативная строка без слова «расхождение»).
+                if let Some(note) = arch_harness::control::render_undeclared_note(
+                    !answers.is_empty(),
+                    &scored.undeclared,
+                ) {
+                    println!("{note}");
                 }
             } else {
                 let s = arch_harness::control::significance_score_with_limits(
