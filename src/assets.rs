@@ -610,6 +610,115 @@ pub const PLUGIN_SPINE_WORKFLOWS_SKILLS_SPINE_CONTENT_BOOTSTRAP_SKILL_MD: &str =
 pub const PLUGIN_SPINE_WORKFLOWS_SKILLS_SPINE_ARCHIFY_VIZ_SKILL_MD: &str =
     include_str!("../assets/plugins/spine-workflows/skills/spine-archify-viz/SKILL.md");
 
+// ── Новые скиллы библиотеки оператора: риск-ревью, слои контекста, флот, ──
+//    threat-modeling, prompt-injection и плагин AI-платформы ──
+/// Встроенный файл `skills/agent-fleet-design/SKILL.md`.
+pub const PLUGIN_ARCH_CORE_SKILLS_AGENT_FLEET_DESIGN_SKILL_MD: &str =
+    include_str!("../assets/plugins/arch-core/skills/agent-fleet-design/SKILL.md");
+/// Встроенный файл `skills/agent-fleet-design/assets/fleet-card.md`.
+pub const PLUGIN_ARCH_CORE_SKILLS_AGENT_FLEET_DESIGN_ASSETS_FLEET_CARD_MD: &str =
+    include_str!("../assets/plugins/arch-core/skills/agent-fleet-design/assets/fleet-card.md");
+/// Встроенный файл `skills/agent-fleet-design/references/topologies.md`.
+pub const PLUGIN_ARCH_CORE_SKILLS_AGENT_FLEET_DESIGN_REFERENCES_TOPOLOGIES_MD: &str =
+    include_str!("../assets/plugins/arch-core/skills/agent-fleet-design/references/topologies.md");
+/// Встроенный файл `skills/architecture-as-context/SKILL.md`.
+pub const PLUGIN_ARCH_CORE_SKILLS_ARCHITECTURE_AS_CONTEXT_SKILL_MD: &str =
+    include_str!("../assets/plugins/arch-core/skills/architecture-as-context/SKILL.md");
+/// Встроенный файл `skills/architecture-as-context/assets/claude-md-architecture-section.md`.
+pub const PLUGIN_ARCH_CORE_SKILLS_ARCHITECTURE_AS_CONTEXT_ASSETS_CLAUDE_MD_ARCHITECTURE_SECTION_MD: &str =
+    include_str!(
+        "../assets/plugins/arch-core/skills/architecture-as-context/assets/claude-md-architecture-section.md"
+    );
+/// Встроенный файл `skills/architecture-as-context/assets/constraint-card.md`.
+pub const PLUGIN_ARCH_CORE_SKILLS_ARCHITECTURE_AS_CONTEXT_ASSETS_CONSTRAINT_CARD_MD: &str = include_str!(
+    "../assets/plugins/arch-core/skills/architecture-as-context/assets/constraint-card.md"
+);
+/// Встроенный файл `skills/architecture-as-context/assets/standard-skill-template.md`.
+pub const PLUGIN_ARCH_CORE_SKILLS_ARCHITECTURE_AS_CONTEXT_ASSETS_STANDARD_SKILL_TEMPLATE_MD: &str = include_str!(
+    "../assets/plugins/arch-core/skills/architecture-as-context/assets/standard-skill-template.md"
+);
+/// Встроенный файл `skills/architecture-as-context/references/framework-injection.md`.
+pub const PLUGIN_ARCH_CORE_SKILLS_ARCHITECTURE_AS_CONTEXT_REFERENCES_FRAMEWORK_INJECTION_MD: &str = include_str!(
+    "../assets/plugins/arch-core/skills/architecture-as-context/references/framework-injection.md"
+);
+/// Встроенный файл `skills/risk-tiered-review/SKILL.md`.
+pub const PLUGIN_ARCH_CORE_SKILLS_RISK_TIERED_REVIEW_SKILL_MD: &str =
+    include_str!("../assets/plugins/arch-core/skills/risk-tiered-review/SKILL.md");
+/// Встроенный файл `skills/risk-tiered-review/assets/risk-config.example.json`.
+pub const PLUGIN_ARCH_CORE_SKILLS_RISK_TIERED_REVIEW_ASSETS_RISK_CONFIG_EXAMPLE_JSON: &str = include_str!(
+    "../assets/plugins/arch-core/skills/risk-tiered-review/assets/risk-config.example.json"
+);
+/// Встроенный файл `skills/risk-tiered-review/assets/risk-policy.md`.
+pub const PLUGIN_ARCH_CORE_SKILLS_RISK_TIERED_REVIEW_ASSETS_RISK_POLICY_MD: &str =
+    include_str!("../assets/plugins/arch-core/skills/risk-tiered-review/assets/risk-policy.md");
+/// Встроенный файл `skills/risk-tiered-review/references/review-checklist.md`.
+pub const PLUGIN_ARCH_CORE_SKILLS_RISK_TIERED_REVIEW_REFERENCES_REVIEW_CHECKLIST_MD: &str = include_str!(
+    "../assets/plugins/arch-core/skills/risk-tiered-review/references/review-checklist.md"
+);
+/// Встроенный файл `skills/risk-tiered-review/scripts/change_risk_scan.py`.
+pub const PLUGIN_ARCH_CORE_SKILLS_RISK_TIERED_REVIEW_SCRIPTS_CHANGE_RISK_SCAN_PY: &str = include_str!(
+    "../assets/plugins/arch-core/skills/risk-tiered-review/scripts/change_risk_scan.py"
+);
+/// Встроенный файл `skills/agent-threat-modeling/SKILL.md`.
+pub const PLUGIN_ARCH_GOVERNANCE_SKILLS_AGENT_THREAT_MODELING_SKILL_MD: &str =
+    include_str!("../assets/plugins/arch-governance/skills/agent-threat-modeling/SKILL.md");
+/// Встроенный файл `skills/agent-threat-modeling/references/mitigations.md`.
+pub const PLUGIN_ARCH_GOVERNANCE_SKILLS_AGENT_THREAT_MODELING_REFERENCES_MITIGATIONS_MD: &str = include_str!(
+    "../assets/plugins/arch-governance/skills/agent-threat-modeling/references/mitigations.md"
+);
+/// Встроенный файл `skills/agent-threat-modeling/references/red-teaming.md`.
+pub const PLUGIN_ARCH_GOVERNANCE_SKILLS_AGENT_THREAT_MODELING_REFERENCES_RED_TEAMING_MD: &str = include_str!(
+    "../assets/plugins/arch-governance/skills/agent-threat-modeling/references/red-teaming.md"
+);
+/// Встроенный файл `skills/agent-threat-modeling/references/threats.md`.
+pub const PLUGIN_ARCH_GOVERNANCE_SKILLS_AGENT_THREAT_MODELING_REFERENCES_THREATS_MD: &str = include_str!(
+    "../assets/plugins/arch-governance/skills/agent-threat-modeling/references/threats.md"
+);
+/// Встроенный файл `skills/prompt-injection-defense/SKILL.md`.
+pub const PLUGIN_ARCH_GOVERNANCE_SKILLS_PROMPT_INJECTION_DEFENSE_SKILL_MD: &str =
+    include_str!("../assets/plugins/arch-governance/skills/prompt-injection-defense/SKILL.md");
+/// Встроенный файл `plugin.json` плагина `arch-ai-platform`.
+pub const PLUGIN_ARCH_AI_PLATFORM_PLUGIN_JSON: &str =
+    include_str!("../assets/plugins/arch-ai-platform/plugin.json");
+/// Встроенный файл `skills/ai-gateway-finops/SKILL.md`.
+pub const PLUGIN_ARCH_AI_PLATFORM_SKILLS_AI_GATEWAY_FINOPS_SKILL_MD: &str =
+    include_str!("../assets/plugins/arch-ai-platform/skills/ai-gateway-finops/SKILL.md");
+/// Встроенный файл `skills/ai-gateway-finops/references/litellm-config.md`.
+pub const PLUGIN_ARCH_AI_PLATFORM_SKILLS_AI_GATEWAY_FINOPS_REFERENCES_LITELLM_CONFIG_MD: &str = include_str!(
+    "../assets/plugins/arch-ai-platform/skills/ai-gateway-finops/references/litellm-config.md"
+);
+/// Встроенный файл `skills/ai-platform-reference-architecture/SKILL.md`.
+pub const PLUGIN_ARCH_AI_PLATFORM_SKILLS_AI_PLATFORM_REFERENCE_ARCHITECTURE_SKILL_MD: &str = include_str!(
+    "../assets/plugins/arch-ai-platform/skills/ai-platform-reference-architecture/SKILL.md"
+);
+/// Встроенный файл `skills/ai-platform-reference-architecture/references/components.md`.
+pub const PLUGIN_ARCH_AI_PLATFORM_SKILLS_AI_PLATFORM_REFERENCE_ARCHITECTURE_REFERENCES_COMPONENTS_MD: &str =
+    include_str!(
+        "../assets/plugins/arch-ai-platform/skills/ai-platform-reference-architecture/references/components.md"
+    );
+/// Встроенный файл `skills/ai-platform-reference-architecture/references/nfr-checklist.md`.
+pub const PLUGIN_ARCH_AI_PLATFORM_SKILLS_AI_PLATFORM_REFERENCE_ARCHITECTURE_REFERENCES_NFR_CHECKLIST_MD: &str =
+    include_str!(
+        "../assets/plugins/arch-ai-platform/skills/ai-platform-reference-architecture/references/nfr-checklist.md"
+    );
+/// Встроенный файл `skills/ai-platform-reference-architecture/references/patterns-maturity.md`.
+pub const PLUGIN_ARCH_AI_PLATFORM_SKILLS_AI_PLATFORM_REFERENCE_ARCHITECTURE_REFERENCES_PATTERNS_MATURITY_MD: &str =
+    include_str!(
+        "../assets/plugins/arch-ai-platform/skills/ai-platform-reference-architecture/references/patterns-maturity.md"
+    );
+/// Встроенный файл `skills/harness-token-economics/SKILL.md`.
+pub const PLUGIN_ARCH_AI_PLATFORM_SKILLS_HARNESS_TOKEN_ECONOMICS_SKILL_MD: &str =
+    include_str!("../assets/plugins/arch-ai-platform/skills/harness-token-economics/SKILL.md");
+/// Встроенный файл `skills/llm-tco/SKILL.md`.
+pub const PLUGIN_ARCH_AI_PLATFORM_SKILLS_LLM_TCO_SKILL_MD: &str =
+    include_str!("../assets/plugins/arch-ai-platform/skills/llm-tco/SKILL.md");
+/// Встроенный файл `skills/llm-tco/references/tco-method.md`.
+pub const PLUGIN_ARCH_AI_PLATFORM_SKILLS_LLM_TCO_REFERENCES_TCO_METHOD_MD: &str =
+    include_str!("../assets/plugins/arch-ai-platform/skills/llm-tco/references/tco-method.md");
+/// Встроенный файл `skills/llm-tco/scripts/tco_calc.py`.
+pub const PLUGIN_ARCH_AI_PLATFORM_SKILLS_LLM_TCO_SCRIPTS_TCO_CALC_PY: &str =
+    include_str!("../assets/plugins/arch-ai-platform/skills/llm-tco/scripts/tco_calc.py");
+
 /// Файлы плагинов: «относительный путь в домашнем каталоге → содержимое».
 const PLUGIN_FILES: &[(&str, &str)] = &[
     ("plugins/arch-core/plugin.json", PLUGIN_ARCH_CORE_PLUGIN_JSON),
@@ -657,6 +766,19 @@ const PLUGIN_FILES: &[(&str, &str)] = &[
     ("plugins/patterns-resilience/skills/queue-load-leveling/SKILL.md", PLUGIN_PATTERNS_RESILIENCE_SKILLS_QUEUE_LOAD_LEVELING_SKILL_MD),
     ("plugins/patterns-resilience/skills/rate-limiting-throttling/SKILL.md", PLUGIN_PATTERNS_RESILIENCE_SKILLS_RATE_LIMITING_THROTTLING_SKILL_MD),
     ("plugins/arch-core/skills/agents-md-authoring/SKILL.md", PLUGIN_ARCH_CORE_SKILLS_AGENTS_MD_AUTHORING_SKILL_MD),
+    ("plugins/arch-core/skills/agent-fleet-design/SKILL.md", PLUGIN_ARCH_CORE_SKILLS_AGENT_FLEET_DESIGN_SKILL_MD),
+    ("plugins/arch-core/skills/agent-fleet-design/assets/fleet-card.md", PLUGIN_ARCH_CORE_SKILLS_AGENT_FLEET_DESIGN_ASSETS_FLEET_CARD_MD),
+    ("plugins/arch-core/skills/agent-fleet-design/references/topologies.md", PLUGIN_ARCH_CORE_SKILLS_AGENT_FLEET_DESIGN_REFERENCES_TOPOLOGIES_MD),
+    ("plugins/arch-core/skills/architecture-as-context/SKILL.md", PLUGIN_ARCH_CORE_SKILLS_ARCHITECTURE_AS_CONTEXT_SKILL_MD),
+    ("plugins/arch-core/skills/architecture-as-context/assets/claude-md-architecture-section.md", PLUGIN_ARCH_CORE_SKILLS_ARCHITECTURE_AS_CONTEXT_ASSETS_CLAUDE_MD_ARCHITECTURE_SECTION_MD),
+    ("plugins/arch-core/skills/architecture-as-context/assets/constraint-card.md", PLUGIN_ARCH_CORE_SKILLS_ARCHITECTURE_AS_CONTEXT_ASSETS_CONSTRAINT_CARD_MD),
+    ("plugins/arch-core/skills/architecture-as-context/assets/standard-skill-template.md", PLUGIN_ARCH_CORE_SKILLS_ARCHITECTURE_AS_CONTEXT_ASSETS_STANDARD_SKILL_TEMPLATE_MD),
+    ("plugins/arch-core/skills/architecture-as-context/references/framework-injection.md", PLUGIN_ARCH_CORE_SKILLS_ARCHITECTURE_AS_CONTEXT_REFERENCES_FRAMEWORK_INJECTION_MD),
+    ("plugins/arch-core/skills/risk-tiered-review/SKILL.md", PLUGIN_ARCH_CORE_SKILLS_RISK_TIERED_REVIEW_SKILL_MD),
+    ("plugins/arch-core/skills/risk-tiered-review/assets/risk-config.example.json", PLUGIN_ARCH_CORE_SKILLS_RISK_TIERED_REVIEW_ASSETS_RISK_CONFIG_EXAMPLE_JSON),
+    ("plugins/arch-core/skills/risk-tiered-review/assets/risk-policy.md", PLUGIN_ARCH_CORE_SKILLS_RISK_TIERED_REVIEW_ASSETS_RISK_POLICY_MD),
+    ("plugins/arch-core/skills/risk-tiered-review/references/review-checklist.md", PLUGIN_ARCH_CORE_SKILLS_RISK_TIERED_REVIEW_REFERENCES_REVIEW_CHECKLIST_MD),
+    ("plugins/arch-core/skills/risk-tiered-review/scripts/change_risk_scan.py", PLUGIN_ARCH_CORE_SKILLS_RISK_TIERED_REVIEW_SCRIPTS_CHANGE_RISK_SCAN_PY),
     ("plugins/aws-agentic-ai/agents/agentic-architect.md", PLUGIN_AWS_AGENTIC_AI_AGENTS_AGENTIC_ARCHITECT_MD),
     ("plugins/aws-agentic-ai/hooks/hooks.json", PLUGIN_AWS_AGENTIC_AI_HOOKS_HOOKS_JSON),
     ("plugins/aws-agentic-ai/mcp.json", PLUGIN_AWS_AGENTIC_AI_MCP_JSON),
@@ -712,6 +834,22 @@ const PLUGIN_FILES: &[(&str, &str)] = &[
     ("plugins/arch-governance/skills/architecture-sources-map/SKILL.md", PLUGIN_ARCH_GOVERNANCE_SKILLS_ARCHITECTURE_SOURCES_MAP_SKILL_MD),
     ("plugins/arch-governance/skills/fitness-function-catalog/SKILL.md", PLUGIN_ARCH_GOVERNANCE_SKILLS_FITNESS_FUNCTION_CATALOG_SKILL_MD),
     ("plugins/arch-governance/skills/rule-library-antipatterns/SKILL.md", PLUGIN_ARCH_GOVERNANCE_SKILLS_RULE_LIBRARY_ANTIPATTERNS_SKILL_MD),
+    ("plugins/arch-governance/skills/agent-threat-modeling/SKILL.md", PLUGIN_ARCH_GOVERNANCE_SKILLS_AGENT_THREAT_MODELING_SKILL_MD),
+    ("plugins/arch-governance/skills/agent-threat-modeling/references/mitigations.md", PLUGIN_ARCH_GOVERNANCE_SKILLS_AGENT_THREAT_MODELING_REFERENCES_MITIGATIONS_MD),
+    ("plugins/arch-governance/skills/agent-threat-modeling/references/red-teaming.md", PLUGIN_ARCH_GOVERNANCE_SKILLS_AGENT_THREAT_MODELING_REFERENCES_RED_TEAMING_MD),
+    ("plugins/arch-governance/skills/agent-threat-modeling/references/threats.md", PLUGIN_ARCH_GOVERNANCE_SKILLS_AGENT_THREAT_MODELING_REFERENCES_THREATS_MD),
+    ("plugins/arch-governance/skills/prompt-injection-defense/SKILL.md", PLUGIN_ARCH_GOVERNANCE_SKILLS_PROMPT_INJECTION_DEFENSE_SKILL_MD),
+    ("plugins/arch-ai-platform/plugin.json", PLUGIN_ARCH_AI_PLATFORM_PLUGIN_JSON),
+    ("plugins/arch-ai-platform/skills/ai-gateway-finops/SKILL.md", PLUGIN_ARCH_AI_PLATFORM_SKILLS_AI_GATEWAY_FINOPS_SKILL_MD),
+    ("plugins/arch-ai-platform/skills/ai-gateway-finops/references/litellm-config.md", PLUGIN_ARCH_AI_PLATFORM_SKILLS_AI_GATEWAY_FINOPS_REFERENCES_LITELLM_CONFIG_MD),
+    ("plugins/arch-ai-platform/skills/ai-platform-reference-architecture/SKILL.md", PLUGIN_ARCH_AI_PLATFORM_SKILLS_AI_PLATFORM_REFERENCE_ARCHITECTURE_SKILL_MD),
+    ("plugins/arch-ai-platform/skills/ai-platform-reference-architecture/references/components.md", PLUGIN_ARCH_AI_PLATFORM_SKILLS_AI_PLATFORM_REFERENCE_ARCHITECTURE_REFERENCES_COMPONENTS_MD),
+    ("plugins/arch-ai-platform/skills/ai-platform-reference-architecture/references/nfr-checklist.md", PLUGIN_ARCH_AI_PLATFORM_SKILLS_AI_PLATFORM_REFERENCE_ARCHITECTURE_REFERENCES_NFR_CHECKLIST_MD),
+    ("plugins/arch-ai-platform/skills/ai-platform-reference-architecture/references/patterns-maturity.md", PLUGIN_ARCH_AI_PLATFORM_SKILLS_AI_PLATFORM_REFERENCE_ARCHITECTURE_REFERENCES_PATTERNS_MATURITY_MD),
+    ("plugins/arch-ai-platform/skills/harness-token-economics/SKILL.md", PLUGIN_ARCH_AI_PLATFORM_SKILLS_HARNESS_TOKEN_ECONOMICS_SKILL_MD),
+    ("plugins/arch-ai-platform/skills/llm-tco/SKILL.md", PLUGIN_ARCH_AI_PLATFORM_SKILLS_LLM_TCO_SKILL_MD),
+    ("plugins/arch-ai-platform/skills/llm-tco/references/tco-method.md", PLUGIN_ARCH_AI_PLATFORM_SKILLS_LLM_TCO_REFERENCES_TCO_METHOD_MD),
+    ("plugins/arch-ai-platform/skills/llm-tco/scripts/tco_calc.py", PLUGIN_ARCH_AI_PLATFORM_SKILLS_LLM_TCO_SCRIPTS_TCO_CALC_PY),
     ("plugins/spine-workflows/plugin.json", PLUGIN_SPINE_WORKFLOWS_PLUGIN_JSON),
     ("plugins/spine-workflows/skills/spine-quickstart/SKILL.md", PLUGIN_SPINE_WORKFLOWS_SKILLS_SPINE_QUICKSTART_SKILL_MD),
     ("plugins/spine-workflows/skills/spine-bundle/SKILL.md", PLUGIN_SPINE_WORKFLOWS_SKILLS_SPINE_BUNDLE_SKILL_MD),

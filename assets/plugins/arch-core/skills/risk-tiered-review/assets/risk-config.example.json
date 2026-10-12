@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "tiers": {
+    "0": "T0 Рутина: автоприёмка при зелёных проверках",
+    "1": "T1 Локальное: AI-ревью + выборочная проверка командой",
+    "2": "T2 Структурное: асинхронное ревью архитектора на уровне design/delta",
+    "3": "T3 Критическое: синхронное ревью, ADR или запрос на решение, именованный одобряющий"
+  },
+  "rules": [
+    {"id": "data-migration", "tier": 3, "reason": "Миграции схем данных: необратимость, порядок развёртывания",
+     "globs": ["**/migrations/**", "**/migration/**", "**/*.sql", "**/db/changelog/**", "**/alembic/versions/**"]},
+    {"id": "authn-authz", "tier": 3, "reason": "Аутентификация, авторизация, секреты",
+     "globs": ["**/auth/**", "**/security/**", "**/*permission*", "**/*rbac*", "**/*secret*", "**/iam/**"]},
+    {"id": "money-domain", "tier": 3, "reason": "Пример доменного правила: деньги и расчёты (адаптируйте пути)",
+     "globs": ["**/payments/**", "**/billing/**", "**/ledger/**"]},
+    {"id": "dependencies", "tier": 2, "reason": "Новые или изменённые зависимости: неявные технологические решения",
+     "globs": ["**/package.json", "**/pom.xml", "**/build.gradle", "**/build.gradle.kts", "**/go.mod", "**/requirements*.txt", "**/pyproject.toml", "**/Cargo.toml", "**/*.csproj", "**/Gemfile"]},
+    {"id": "infrastructure", "tier": 2, "reason": "IaC и конфигурация развёртывания",
+     "globs": ["**/*.tf", "**/terraform/**", "**/helm/**", "**/k8s/**", "**/kubernetes/**", "**/Dockerfile", "**/docker-compose*.yml"]},
+    {"id": "ci-cd", "tier": 2, "reason": "Пайплайны CI/CD",
+     "globs": [".github/workflows/**", ".gitlab-ci.yml", "Jenkinsfile", "**/azure-pipelines*.yml"]},
+    {"id": "arch-checks", "tier": 2, "reason": "Архитектурные проверки, их исключения и базовые линии: защита от ослабления",
+     "globs": ["**/.dependency-cruiser*", "**/.importlinter", "**/.semgrep/**", "**/.semgrep.yml", "**/arch-baseline*.json", "**/ArchitectureTest*", "**/policy/**/*.rego", ".claude/settings*.json", ".claude/hooks/**"]},
+    {"id": "public-contracts", "tier": 2, "reason": "Публичные контракты API и событий",
+     "globs": ["**/openapi*.yaml", "**/openapi*.yml", "**/openapi*.json", "**/*.proto", "**/asyncapi*.yaml", "**/schemas/events/**", "**/api/**"]},
+    {"id": "agent-context", "tier": 1, "reason": "Контекст агентов и решения: влияет на все будущие изменения",
+     "globs": ["**/CLAUDE.md", "**/AGENTS.md", "docs/adr/**", "openspec/specs/**", "openspec/config.yaml", "openspec/project.md"]}
+  ],
+  "size": {"t1_changed_lines": 300, "t2_changed_lines": 1500},
+  "test_weakening": {"enabled": true, "tier": 2,
+    "test_globs": ["**/test/**", "**/tests/**", "**/*_test.*", "**/*.test.*", "**/*.spec.*", "**/test_*.py"]}
+}
