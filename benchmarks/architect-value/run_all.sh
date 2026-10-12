@@ -67,6 +67,10 @@ echo "## Предполёт: разбор входов (test_parsers)" | sanitiz
 "$PY" "$RUNNERS/test_parsers.py" 2>&1 | sanitize | tee -a "$LOG"
 echo | sanitize | tee -a "$LOG"
 
+echo "## Предполёт: механика реплея K4 (test_fp_replay)" | sanitize | tee -a "$LOG"
+"$PY" "$RUNNERS/test_fp_replay.py" 2>&1 | sanitize | tee -a "$LOG"
+echo | sanitize | tee -a "$LOG"
+
 # ── StdComply: стандарт + семена ────────────────────────────────────────────
 run "StdComply — стандарт Java-сервисы (метрики 7, 9, 10)" control_standard.py
 run "StdComply — семена buckpal (метрика 8, C.3)" seed_buckpal.py
@@ -87,8 +91,9 @@ run "ArchRecover — внешние системы as-built (метрика 5: p
 run "ArchRecover — шум карты обследования (метрика 6)" survey_noise.py
 
 # ── Kontur ──────────────────────────────────────────────────────────────────
-echo "## Kontur — измеримые кейсы и FP на реальном коде (метрики 11, 12, 20)" | sanitize | tee -a "$LOG"
+echo "## Kontur — измеримые кейсы и FP на реальном коде (метрики 11, 12, K4, 20)" | sanitize | tee -a "$LOG"
 run "Kontur — измеримость кейсов и FP на реальном коде (метрики 11, 12)" kontur_bench.py
+run "Kontur — FP на чистой истории (метрика K4)" fp_replay.py
 
 skip "metric 20 (квалификация судьи: различительная сила)" "рубрики/судья — вне Python-прогонщиков"
 echo | sanitize | tee -a "$LOG"
