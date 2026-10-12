@@ -271,6 +271,37 @@ fn git_show_text(repo: &Path, rev: &str, path: &str) -> Option<String> {
     String::from_utf8(out.stdout).ok()
 }
 
+/// Каталоги компонентов, существовавшие в базовой ревизии (`git ls-tree -r
+/// --name-only <rev>`, свёрнутые через [`component_dir`]).
+///
+/// Дефект 3 (0.4.7): условие `new_component` по `src/`-файлу срабатывало на
+/// ЛЮБОЙ добавленный `<service>/src/…`, даже когда `<service>` уже был в
+/// базе, — маршрут значимости завышался ложно (детекторы противоречили
+/// `arch-diff`). Теперь триггер требует, чтобы каталога компонента в базе НЕ
+/// было. `None` — ревизия/репозиторий недоступны (нет истории): детектор не
+/// падает и не уточняет, вызывающий сохраняет прежнее поведение.
+fn base_component_dirs(repo: &Path, rev: &str) -> Option<std::collections::BTreeSet<String>> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["ls-tree", "-r", "--name-only", rev])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(component_dir)
+            .collect(),
+    )
+}
+
 /// Стороны диапазона диффа для чтения содержимого (D3): `левая` — база
 /// (старая версия файла), `правая` — новая версия (`None` — рабочее дерево).
 /// `git_ref = None` — дифф рабочего дерева против HEAD: новая сторона —
@@ -825,6 +856,10 @@ pub fn detect_diff_triggers_with(
     // D3: стороны диффа для чтения содержимого (база манифеста для
     // new_vendor, старая/новая версия контракта для классификации).
     let (old_rev, new_rev) = range_sides(git_ref);
+    // Дефект 3: каталоги компонентов базовой ревизии — чтобы `new_component`
+    // не срабатывал на добавление файла в СУЩЕСТВУЮЩИЙ модуль. Читается
+    // один раз; None (нет истории) — прежнее поведение.
+    let base_components = base_component_dirs(repo, &old_rev);
     // Читатель новой версии: рабочее дерево (диск) или ревизия (git show).
     let new_text_of = |path: &str| -> Option<String> {
         match &new_rev {
@@ -847,10 +882,15 @@ pub fn detect_diff_triggers_with(
                 found.fire("new_component", &format!("добавлен манифест {path}"));
             }
             if segs.len() >= 2 && (segs[0] == "src" || (segs.len() >= 3 && segs[1] == "src")) {
-                found.fire(
-                    "new_component",
-                    &format!("добавлен компонент {}", component_dir(path)),
-                );
+                // Дефект 3: только если каталога компонента НЕ было в базе.
+                // Добавление файла в существующий модуль — не новый компонент.
+                let dir = component_dir(path);
+                let existed = base_components
+                    .as_ref()
+                    .is_some_and(|dirs| dirs.contains(&dir));
+                if !existed {
+                    found.fire("new_component", &format!("добавлен компонент {dir}"));
+                }
             }
             if globs
                 .components
@@ -1888,6 +1928,101 @@ mod tests {
         assert!(
             !ev.contains("FallbackController.java"),
             "файл — не основание: {ev}"
+        );
+    }
+
+    /// Дефект 3 (0.4.7): добавление файла в СУЩЕСТВУЮЩИЙ каталог модуля — не
+    /// новый компонент. Раньше `new_component` срабатывал на любой
+    /// `<service>/src/…`, даже когда `<service>` был в базе: маршрут завышался
+    /// ложно, а `arch-diff` на том же диапазоне молчал (детекторы противоречили).
+    #[test]
+    fn new_component_not_fired_for_file_in_existing_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = git_repo(dir.path());
+        write_file(&repo, "wallet-service/src/Main.java", "class Main {}\n");
+        git_in(&repo, &["add", "."]);
+        git_in(&repo, &["commit", "-q", "-m", "wallet-service"]);
+        // В существующий модуль добавляем ещё один исходник.
+        write_file(&repo, "wallet-service/src/Bonus.java", "class Bonus {}\n");
+        git_in(&repo, &["add", "."]);
+        git_in(&repo, &["commit", "-q", "-m", "add Bonus"]);
+
+        let found = detect_diff_triggers(&repo, Some("HEAD~1")).unwrap();
+        assert!(
+            !found.triggers.contains("new_component"),
+            "файл в существующем модуле — не новый компонент: {:?}",
+            found.triggers
+        );
+    }
+
+    /// Дефект 3 (0.4.7): добавление файла в НОВЫЙ каталог по-прежнему
+    /// срабатывает с основанием на каталоге компонента.
+    #[test]
+    fn new_component_fired_for_file_in_new_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = git_repo(dir.path());
+        write_file(&repo, "wallet-service/src/Main.java", "class Main {}\n");
+        git_in(&repo, &["add", "."]);
+        git_in(&repo, &["commit", "-q", "-m", "wallet-service"]);
+        write_file(&repo, "new-service/src/Main.java", "class Main {}\n");
+        git_in(&repo, &["add", "."]);
+        git_in(&repo, &["commit", "-q", "-m", "add new-service"]);
+
+        let found = detect_diff_triggers(&repo, Some("HEAD~1")).unwrap();
+        assert!(
+            found.triggers.contains("new_component"),
+            "новый каталог — компонент: {:?}",
+            found.triggers
+        );
+        assert!(
+            found.evidence.iter().any(|e| e.contains("new-service")),
+            "основание указывает на new-service: {:?}",
+            found.evidence
+        );
+    }
+
+    /// Дефект 3 (0.4.7): маршрут из диффа (`--from-diff`) не поднимается ложно
+    /// при добавлении файла в существующий модуль; при новом модуле — растёт.
+    #[test]
+    fn from_diff_route_not_inflated_by_file_in_existing_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = git_repo(dir.path());
+        write_file(&repo, "wallet-service/src/Main.java", "class Main {}\n");
+        git_in(&repo, &["add", "."]);
+        git_in(&repo, &["commit", "-q", "-m", "wallet-service"]);
+        write_file(&repo, "wallet-service/src/Bonus.java", "class Bonus {}\n");
+        git_in(&repo, &["add", "."]);
+        git_in(&repo, &["commit", "-q", "-m", "add Bonus"]);
+
+        let existing = detect_diff_triggers(&repo, Some("HEAD~1")).unwrap();
+        let scored_existing = score_with_sources(
+            &BTreeMap::new(),
+            &existing,
+            DEFAULT_FAST_MAX,
+            DEFAULT_STANDARD_MAX,
+        );
+        assert_eq!(scored_existing.significance.score, 0, "маршрут не завышен");
+        assert_eq!(scored_existing.significance.route, Route::Fast);
+
+        // Тем же диапазоном добавляем файл в новый модуль.
+        write_file(&repo, "new-service/src/Main.java", "class Main {}\n");
+        git_in(&repo, &["add", "."]);
+        git_in(&repo, &["commit", "-q", "-m", "add new-service"]);
+        let fresh = detect_diff_triggers(&repo, Some("HEAD~1")).unwrap();
+        assert!(
+            fresh.triggers.contains("new_component"),
+            "{:?}",
+            fresh.triggers
+        );
+        let scored_fresh = score_with_sources(
+            &BTreeMap::new(),
+            &fresh,
+            DEFAULT_FAST_MAX,
+            DEFAULT_STANDARD_MAX,
+        );
+        assert!(
+            scored_fresh.significance.score > 0,
+            "новый модуль поднимает"
         );
     }
 
