@@ -7,6 +7,18 @@
 
 ## [Unreleased]
 
+### Добавлено
+
+- **Библиотека скиллов +10 (68 → 78 ожидается, arch-core/arch-governance + новый плагин arch-ai-platform)** — перенос кураторски отобранных скиллов из библиотеки оператора (0710-ariadna/plugins), каждый дополнен секцией «Связка со Spine» (как инструменты харнесса реализуют метод):
+  - **arch-core**: `risk-tiered-review` (уровни риска T0–T3 и маршрутизация человеческого внимания на ревью — sibling significance_score; аудит дрейфа через model_drift/arch_diff), `architecture-as-context` (слои L0–L4 доставки архитектуры агентам: корп-слой CONSTRAINTS → доменные плагины → AGENTS.md → дельта изменения), `agent-fleet-design` (топологии флотов, песочницы, точки контроля —映射 handoff/harness_run/subagent_run), `spec-first` (мини-спека до работы: цель/не-цели/ограничения/критерий готовности — вход significance_score и handoff-пакета);
+  - **arch-governance**: `agent-threat-modeling` (OWASP LLM/Agentic, поверхность атаки агентов — наполняет docs/threat-model.md), `prompt-injection-defense` (непрямая инъекция, guardrails, egress — контрагент injection-гигиены Spine);
+  - **arch-ai-platform (новый плагин)**: `ai-platform-reference-architecture` (референс корпоративной LLM-платформы: шлюз/каталог/инференс/RAG/рантайм/guardrails/эвалы → CMP-карточки + nfr budget/cost), `llm-tco` (API vs self-hosted, точка безубыточности → nfr cost + ADR с датой пересмотра), `ai-gateway-finops` (маршрутизация/каскады/кэш → fitness-правила конфигурации шлюза), `harness-token-economics` (cache-aware промпт, компакция, субагент как context firewall, failure-spend — прямой ответ на церемонию ×8 из ArchBench).
+
+### Что может покраснеть после обновления
+
+- **`skills list`/init: 10 новых скиллов, новый плагин arch-ai-platform (плагинов 10)** — снапшоты библиотеки и счётчики в доке/тестах увидят рост; счётчик hosts-теста обновлён (68→78).
+- Скиллы несут знание из внешней библиотеки оператора (0710-ariadna, дистилляты сессий; harness-token-economics — MIT, author openclaw) — при расхождении с банковскими стандартами приоритет у доменных плагинов banking/ и corp-слоя.
+
 ## [0.4.9] — 2026-10-12
 
 0.4.9 «ложнозелёный — ноль терпимости»: два дефекта класса «тихий ложный
