@@ -16,6 +16,7 @@ use super::detect::detect_format;
 use super::jsonschema::diff_jsonschema;
 use super::openapi::diff_openapi;
 use super::proto::{diff_proto, parse_proto};
+use super::semantic;
 use super::types::{ContractFormat, ContractImpact, DiffReport, Finding};
 
 // ---------------------------------------------------------------------------
@@ -69,6 +70,34 @@ pub fn diff_report(
     format_override: Option<ContractFormat>,
     model_case: Option<&Path>,
 ) -> Result<DiffReport> {
+    diff_report_impl(old, new, format_override, model_case, false)
+}
+
+/// Полный дифф + семантические зонды (`--semantic`, AB-12): к структурным
+/// находкам добавляется список `semantic_changes` (enum/единица/default/
+/// партиционирование) и подсказка о потребителях поля (скан корня кейса
+/// `model_case`, метка `[inferred]`). Без флага зонд не запускается — вывод
+/// побайтно совместим с `contract-diff/v1`.
+///
+/// # Errors
+/// Как у [`diff_report`].
+pub fn diff_report_semantic(
+    old: &Path,
+    new: &Path,
+    format_override: Option<ContractFormat>,
+    model_case: Option<&Path>,
+) -> Result<DiffReport> {
+    diff_report_impl(old, new, format_override, model_case, true)
+}
+
+/// Общая реализация: `semantic` включает зонды семантического диффа.
+fn diff_report_impl(
+    old: &Path,
+    new: &Path,
+    format_override: Option<ContractFormat>,
+    model_case: Option<&Path>,
+    semantic: bool,
+) -> Result<DiffReport> {
     let old_text = read_text(old)?;
     let new_text = read_text(new)?;
     let format = if let Some(f) = format_override {
@@ -99,10 +128,24 @@ pub fn diff_report(
         Some(case) => Some(build_impact(case, old, new)?),
         None => None,
     };
+    // Семантические зонды — только для OpenAPI (основной формат AB-12) и
+    // только по флагу: иначе вывод не меняется.
+    let (semantic_changes, semantic_consumers) = if semantic && format == ContractFormat::OpenApi {
+        let (changes, fields) = semantic::diff_openapi_semantic(&old_text, &new_text, old, new)?;
+        let consumers = match model_case {
+            Some(case) => semantic::scan_consumers(case, &fields),
+            None => Vec::new(),
+        };
+        (changes, consumers)
+    } else {
+        (Vec::new(), Vec::new())
+    };
     Ok(DiffReport {
         format,
         findings,
         impact,
+        semantic_changes,
+        semantic_consumers,
     })
 }
 
@@ -147,6 +190,8 @@ pub fn diff_report_str(
         format,
         findings,
         impact: None,
+        semantic_changes: Vec::new(),
+        semantic_consumers: Vec::new(),
     })
 }
 

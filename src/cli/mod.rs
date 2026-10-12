@@ -454,6 +454,8 @@ enum Cmd {
     /// model/) ломающий дифф сразу возвращает потребителей и владельцев
     /// по полю `contract` у INT (ADR-035). Форматы вывода для CI —
     /// `--format sarif|junit|gitlab-codequality|markdown` (волна 2, п.8).
+    /// `--semantic` (AB-12, ADR-079) добавляет семантические зонды:
+    /// enum/единица измерения в имени поля/default/ключ партиционирования.
     #[command(name = "contract-diff", visible_alias = "contract_diff")]
     ContractDiff {
         /// Старая версия контракта (yaml/yml/json/proto/avsc/sql).
@@ -478,6 +480,11 @@ enum Cmd {
         /// ломаемого контракта, ADR-035).
         #[arg(long)]
         model: Option<PathBuf>,
+        /// Семантические зонды (AB-12, ADR-079): enum/единица измерения в
+        /// имени поля/default/ключ партиционирования — отдельный список
+        /// `semantic_changes`; без флага вывод не меняется.
+        #[arg(long)]
+        semantic: bool,
         /// Машиночитаемый вывод: JSON-отчёт (passed + findings + impact).
         #[arg(long)]
         json: bool,
@@ -1714,6 +1721,7 @@ pub(crate) async fn run() -> Result<()> {
             contract_format,
             format,
             model,
+            semantic,
             json,
         }) => {
             let lang = match contract_format.trim() {
@@ -1729,8 +1737,16 @@ pub(crate) async fn run() -> Result<()> {
             };
             let out_format = arch_harness::report_fmt::ReportFormat::parse(&format)
                 .map_err(anyhow::Error::msg)?;
-            let report =
-                arch_harness::contract_diff::diff_report(&old, &new, lang, model.as_deref())?;
+            let report = if semantic {
+                arch_harness::contract_diff::diff_report_semantic(
+                    &old,
+                    &new,
+                    lang,
+                    model.as_deref(),
+                )?
+            } else {
+                arch_harness::contract_diff::diff_report(&old, &new, lang, model.as_deref())?
+            };
             if json {
                 let verdict = arch_harness::contract_diff::report_json(&report);
                 println!(
@@ -1743,13 +1759,15 @@ pub(crate) async fn run() -> Result<()> {
                         print!("{}", arch_harness::contract_diff::render_report(&report));
                     }
                     machine => {
+                        // Машинные форматы видят и семантические находки
+                        // (пусто без --semantic — вывод не меняется).
+                        let mut all = report.findings.clone();
+                        all.extend(report.semantic_changes.iter().cloned());
                         print!(
                             "{}",
                             arch_harness::report_fmt::render(
                                 machine,
-                                &arch_harness::report_fmt::FmtReport::from_contract_diff(
-                                    &report.findings,
-                                ),
+                                &arch_harness::report_fmt::FmtReport::from_contract_diff(&all),
                             )
                         );
                     }

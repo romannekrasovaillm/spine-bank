@@ -10,7 +10,7 @@ use crate::error::Result;
 use crate::llm::ToolSpec;
 use crate::tool::{Tool, ToolContext, ToolOutput};
 
-use super::diffbase::diff_report;
+use super::diffbase::{diff_report, diff_report_semantic};
 use super::report::{render_report, report_json};
 use super::types::ContractFormat;
 
@@ -38,6 +38,9 @@ struct ContractDiffArgs {
     /// Корень кейса с `model/` — связка с моделью (ADR-035): по полю
     /// `contract` INT находятся потребители и владельцы (impact-секция).
     model: Option<String>,
+    /// Семантические зонды (AB-12): enum/единица/default/партиционирование
+    /// в отдельном списке `semantic_changes`. По умолчанию выключены.
+    semantic: Option<bool>,
 }
 
 #[async_trait]
@@ -53,7 +56,9 @@ impl Tool for ContractDiffTool {
                           DDL-миграции .sql (DROP/ALTER/NOT NULL без DEFAULT). format=auto — \
                           детектор по расширению/содержимому. model — корень кейса с model/: \
                           ломающий дифф сразу возвращает потребителей и владельцев по полю \
-                          contract у INT (ADR-035)"
+                          contract у INT (ADR-035). semantic=true — семантические зонды AB-12 \
+                          (enum, единица измерения в имени поля, default, ключ \
+                          партиционирования) в списке semantic_changes"
                 .into(),
             parameters: json!({
                 "type": "object",
@@ -74,6 +79,10 @@ impl Tool for ContractDiffTool {
                     "model": {
                         "type": "string",
                         "description": "Корень кейса с model/ — секция impact: потребители/владельцы ломаемого контракта (ADR-035)"
+                    },
+                    "semantic": {
+                        "type": "boolean",
+                        "description": "Семантические зонды (AB-12): enum (удаление/добавление значений), единица измерения в имени поля, default, ключ партиционирования — отдельный список semantic_changes; при заданном model ещё и потребители полей [inferred]. По умолчанию false"
                     }
                 },
                 "required": ["old", "new"]
@@ -104,7 +113,12 @@ impl Tool for ContractDiffTool {
         let old = ctx.resolve(&args.old);
         let new = ctx.resolve(&args.new);
         let model = args.model.as_deref().map(|m| ctx.resolve(m));
-        let report = match diff_report(&old, &new, format, model.as_deref()) {
+        let diff = if args.semantic.unwrap_or(false) {
+            diff_report_semantic(&old, &new, format, model.as_deref())
+        } else {
+            diff_report(&old, &new, format, model.as_deref())
+        };
+        let report = match diff {
             Ok(r) => r,
             Err(e) => return Ok(ToolOutput::err(format!("contract_diff: {e}"))),
         };
@@ -122,7 +136,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::contract_diff::testkit::{BASE, PROTO_V1, diff_text};
+    use crate::contract_diff::testkit::{BASE, PROTO_V1, diff_text, diff_text_semantic};
     use crate::tool::ToolContext;
 
     #[test]
@@ -203,5 +217,71 @@ mod tests {
             .expect("вызов");
         assert!(!out.is_error, "{}", out.content);
         assert!(out.content.contains("Формат: proto"), "{}", out.content);
+    }
+
+    /// Мини-`OpenAPI` с одним свойством-`enum` схемы `Payment`.
+    fn enum_doc(values: &str) -> String {
+        format!(
+            "openapi: 3.0.3\ninfo:\n  title: T\n  version: 1.0.0\npaths: {{}}\n\
+             components:\n  schemas:\n    Payment:\n      type: object\n      properties:\n\
+             \x20       status:\n          type: string\n          enum: [{values}]\n"
+        )
+    }
+
+    /// `--semantic` добавляет блок `semantic_changes` в `data` и делает отчёт
+    /// breaking при удалении значения `enum` (AB-12, ADR-079).
+    #[tokio::test]
+    async fn semantic_flag_reports_enum_narrowing() {
+        let old = enum_doc("ok, failed");
+        let new = enum_doc("ok");
+        let out = diff_text_semantic(&old, &new, "old.yaml", "new.yaml").await;
+        assert!(!out.is_error, "{}", out.content);
+        assert!(
+            out.content.contains("Семантические изменения"),
+            "{}",
+            out.content
+        );
+        let data = out.data.expect("data");
+        assert_eq!(data["passed"], json!(false));
+        let changes = data["semantic_changes"]
+            .as_array()
+            .expect("semantic_changes");
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0]["rule"], json!("semantic_enum_narrowed"));
+    }
+
+    /// Без `--semantic` вывод не приобретает ключа `semantic_changes`
+    /// (обратная совместимость `contract-diff/v1`).
+    #[tokio::test]
+    async fn no_semantic_flag_omits_semantic_block() {
+        let old = enum_doc("ok, failed");
+        let new = enum_doc("ok");
+        let out = diff_text(&old, &new, "old.yaml", "new.yaml").await;
+        assert!(!out.is_error, "{}", out.content);
+        assert!(
+            !out.content.contains("Семантические изменения"),
+            "{}",
+            out.content
+        );
+        let data = out.data.expect("data");
+        assert!(data.get("semantic_changes").is_none(), "{data}");
+    }
+
+    /// Benign-дифф под `--semantic`: `semantic_changes` пуст/отсутствует,
+    /// отчёт не breaking (защита от FP).
+    #[tokio::test]
+    async fn semantic_flag_benign_diff_is_clean() {
+        let old = "openapi: 3.0.3\ninfo:\n  title: T\n  version: 1.0.0\npaths: {}\n\
+                   components:\n  schemas:\n    Payment:\n      type: object\n      properties:\n\
+                   \x20       status:\n          type: string\n          description: old\n";
+        let new = "openapi: 3.0.3\ninfo:\n  title: T\n  version: 1.0.0\npaths: {}\n\
+                   components:\n  schemas:\n    Payment:\n      type: object\n      properties:\n\
+                   \x20       state:\n          type: string\n          title: status\n          \
+                   description: new\n";
+        let out = diff_text_semantic(old, new, "old.yaml", "new.yaml").await;
+        assert!(!out.is_error, "{}", out.content);
+        let data = out.data.expect("data");
+        assert_eq!(data["passed"], json!(true));
+        assert!(data.get("semantic_changes").is_none(), "{data}");
     }
 }

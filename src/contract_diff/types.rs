@@ -58,23 +58,35 @@ impl ContractFormat {
     }
 }
 
-/// Отчёт диффа: формат, находки, опциональная связка с моделью.
+/// Отчёт диффа: формат, находки, опциональная связка с моделью,
+/// семантические зонды (`--semantic`).
 #[derive(Debug)]
 pub struct DiffReport {
     /// Формат, по которому прогнан дифф (после детекции/override).
     pub format: ContractFormat,
-    /// Находки.
+    /// Находки структурного диффа (CD-001..CD-010 и аналоги форматов).
     pub findings: Vec<Finding>,
     /// Связка с моделью (`--model`): INT, чей `contract` совпал с путями
     /// диффа, и радиус изменения от них. `None` — модель не задана.
     pub impact: Option<ContractImpact>,
+    /// Семантические изменения (зонд `--semantic`, AB-12): смысловые сдвиги,
+    /// невидимые структурному диффу (enum/unit/default/partitioning). Пусто
+    /// без `--semantic` — обратная совместимость `contract-diff/v1`.
+    pub semantic_changes: Vec<Finding>,
+    /// Подсказка о потребителях поля (`[inferred]`): файлы кейса, упоминающие
+    /// имена семантически изменённых полей. Пусто без `--semantic`/`--model`.
+    pub semantic_consumers: Vec<String>,
 }
 
 impl DiffReport {
-    /// Есть ли breaking-находки (exit code 1 у CLI).
+    /// Есть ли breaking-находки (exit code 1 у CLI). Считаются и структурные
+    /// (`findings`), и семантические (`semantic_changes`) ошибки.
     #[must_use]
     pub fn has_breaking(&self) -> bool {
-        self.findings.iter().any(|f| f.severity == "error")
+        self.findings
+            .iter()
+            .chain(self.semantic_changes.iter())
+            .any(|f| f.severity == "error")
     }
 }
 
@@ -164,10 +176,31 @@ mod tests {
             format: ContractFormat::OpenApi,
             findings,
             impact: None,
+            semantic_changes: Vec::new(),
+            semantic_consumers: Vec::new(),
         };
         assert!(!report(vec![]).has_breaking());
         assert!(!report(vec![finding("warn")]).has_breaking());
         assert!(report(vec![finding("warn"), finding("error")]).has_breaking());
+    }
+
+    /// Семантическая ошибка (`--semantic`) тоже делает отчёт breaking, хотя
+    /// структурных ошибок нет.
+    #[test]
+    fn semantic_error_counts_as_breaking() {
+        let report = DiffReport {
+            format: ContractFormat::OpenApi,
+            findings: Vec::new(),
+            impact: None,
+            semantic_changes: vec![Finding {
+                severity: "error".to_string(),
+                rule: "semantic_unit_changed".to_string(),
+                location: "#/components/schemas/Payment/properties/amount".to_string(),
+                message: "единица измерения изменилась".to_string(),
+            }],
+            semantic_consumers: Vec::new(),
+        };
+        assert!(report.has_breaking());
     }
 
     /// JSON Pointer-локация экранирует `~` и `/` и склеивает сегменты.

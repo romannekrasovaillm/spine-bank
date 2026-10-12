@@ -82,13 +82,14 @@ mod jsonschema;
 mod openapi;
 mod proto;
 mod report;
+mod semantic;
 #[cfg(test)]
 mod testkit;
 mod tools;
 mod types;
 
 pub use detect::detect_format;
-pub use diffbase::{diff_contracts, diff_report, diff_report_str};
+pub use diffbase::{diff_contracts, diff_report, diff_report_semantic, diff_report_str};
 pub use report::{render_report, report_json};
 pub use tools::{ContractDiffTool, tools};
 pub use types::{ContractFormat, ContractImpact, DiffReport, Finding};
