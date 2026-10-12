@@ -20,6 +20,35 @@
             "command": "echo '[arch-core] Файлы изменены — сверьте решение со spine-инвариантами (arch-be control spine <file>) и статусами ADR'"
           }
         ]
+      },
+      {
+        "matcher": "write_file|edit_file",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "case \"$ARCH_HOOK_CONTEXT\" in *docs/adr/*) echo '[arch-core] ADR изменён — до коммита нативно: adr_registry (расхождения) + rubric_evaluate (adr_quality)' ;; esac; exit 0"
+          }
+        ]
+      },
+      {
+        "matcher": "read_file",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "case \"$ARCH_HOOK_CONTEXT\" in *TASK*) echo '[arch-core] Прочитана задача — маршрутизация: significance_score; после правок ADR — adr_registry' ;; esac; exit 0"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "case \"$ARCH_HOOK_CONTEXT\" in *задач*|*доработ*|*продолжай*|*улучш*) echo '[arch-core] Новая тема? Сначала kb_search по локальной базе — до веба и до флота' ;; esac; exit 0"
+          }
+        ]
       }
     ],
     "SessionStart": [

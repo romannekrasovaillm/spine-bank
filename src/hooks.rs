@@ -474,4 +474,43 @@ mod tests {
         let out = set.fire(HookEvent::PreToolUse, Some("bash"), "{}");
         assert_eq!(out[0].stdout, "PreToolUse|bash");
     }
+
+    #[test]
+    fn arch_core_hooks_json_is_valid_and_non_blocking() {
+        // Контур само-использования (self-usage guard): реальный hooks.json
+        // плагина arch-core должен парситься, ссылаться только на известные
+        // события, а блокировать (exit 2) — лишь force-push-страж на
+        // PreToolUse/bash; все напоминания о нативных инструментах наблюдатели.
+        let specs = specs_from_plugin_json(crate::assets::PLUGIN_ARCH_CORE_HOOKS_HOOKS_JSON);
+        assert!(!specs.is_empty(), "hooks.json arch-core пуст");
+        for s in &specs {
+            assert!(
+                HookEvent::from_name(&s.event).is_some(),
+                "неизвестное событие в hooks.json: {}",
+                s.event
+            );
+            if s.command.contains("exit 2") {
+                assert_eq!(
+                    (s.event.as_str(), s.tool.as_deref()),
+                    ("PreToolUse", Some("bash")),
+                    "exit 2 допустим только у force-push-стража: {s:?}"
+                );
+            }
+        }
+        // Слои контура на месте: маршрутизация прочитанной задачи, ADR-условный
+        // напоминатель после правки и kb_search-подсказка на вводе промпта.
+        assert!(
+            specs.iter().any(|s| s.event == "UserPromptSubmit"),
+            "нет UserPromptSubmit-напоминания"
+        );
+        assert!(
+            specs.iter().any(|s| s.tool.as_deref() == Some("read_file")),
+            "нет read_file-напоминания о маршрутизации"
+        );
+        assert!(
+            specs.iter().any(|s| s.tool.as_deref() == Some("write_file")
+                && s.command.contains("docs/adr/")),
+            "нет ADR-условного напоминателя после правки"
+        );
+    }
 }
