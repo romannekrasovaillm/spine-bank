@@ -2445,6 +2445,30 @@ fn review_broken_model_exits_1() {
         .stdout(contains("Итог: FAIL"));
 }
 
+/// Диагностика 7 (0.4.7): слова-«подкоманды» `pack`/`decide` без такого пути
+/// отвергаются явной подсказкой — это не подкоманды, а позиционный аргумент
+/// (путь к репозиторию). Существующий каталог с таким именем — обычный
+/// репозиторий (подсказки нет).
+#[test]
+fn review_pack_and_decide_words_are_not_subcommands() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    for word in ["pack", "decide"] {
+        let mut cmd = arch_cmd(tmp.path());
+        cmd.arg("review").arg(word);
+        cmd.assert()
+            .failure()
+            .stderr(contains(format!("подкоманды review '{word}' нет")))
+            .stderr(contains("позиционный аргумент review — путь к репозиторию"));
+    }
+    // Существующий каталог `decide` — реальный репозиторий: подсказки нет.
+    std::fs::create_dir_all(tmp.path().join("decide")).expect("mkdir decide");
+    let mut cmd = arch_cmd(tmp.path());
+    cmd.arg("review").arg("decide");
+    cmd.assert()
+        .failure()
+        .stderr(contains("подкоманды review").not());
+}
+
 /// Минимальный артефакт `arch-be/arch-diff/v1` для ящика ревью (K7).
 fn arch_diff_artifact(route: &str, with_edge: bool) -> String {
     let edges = if with_edge {
