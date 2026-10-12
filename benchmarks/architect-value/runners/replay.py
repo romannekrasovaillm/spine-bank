@@ -120,20 +120,41 @@ def _tok_match(surf_tok, exp_tok):
 
 
 def f1(surf, exp):
-    """F1 множеств с матчингом «ожидание ⊆ всплывший» (эндпоинты рёбер
-    сопоставляются по отдельности — составные имена не контекстны)."""
-    matched_exp = set()
+    """F1 множеств с матчингом «ожидание ⊆ всплывший» ВЗАИМНО ОДНОЗНАЧНО.
+
+    D15 (судейская находка Грока, 2026-10-12): ранняя версия итерировала
+    множества в хэш-порядке и матчила жадно без исключения пары — F1
+    дрейфовал 1.00↔0.67 на {openai, azure-openai} от PYTHONHASHSEED
+    (azure-openai «съедал» ожидание openai). Теперь: (1) порядок обхода
+    детерминирован (sorted); (2) каждый surf- и exp-токен участвует в паре
+    один раз; (3) точные совпадения связываются первыми, затем покрывающие
+    (ожидание — подстрока всплывшего). Рёбра сопоставляются по эндпоинтам.
+    """
+    surf_sorted = sorted(surf)
+    exp_sorted = sorted(exp)
+    used_exp = set()
     tp = 0
-    for s in surf:
-        for e in exp:
+    # Проход 1: точные совпадения (строже — приоритет).
+    for s in surf_sorted:
+        if s in exp_sorted and s not in used_exp:
+            used_exp.add(s)
+            tp += 1
+    matched_surf_exact = set(s for s in surf_sorted if s in exp_sorted)
+    # Проход 2: покрывающие (ожидание ⊆ всплывшего), одно-к-одному.
+    for s in surf_sorted:
+        if s in matched_surf_exact:
+            continue
+        for e in exp_sorted:
+            if e in used_exp:
+                continue
             if _tok_match(s, e):
-                matched_exp.add(e)
+                used_exp.add(e)
                 tp += 1
                 break
     if not surf or not exp:
-        return 0.0, len(matched_exp)
-    p, r = tp / len(surf), len(matched_exp) / len(exp)
-    return (2 * p * r / (p + r) if p + r else 0.0), len(matched_exp)
+        return 0.0, len(used_exp)
+    p, r = tp / len(surf), len(used_exp) / len(exp)
+    return (2 * p * r / (p + r) if p + r else 0.0), len(used_exp)
 
 
 def run_diff(clone, sha):
@@ -179,10 +200,12 @@ def metric13(repos_root):
             avlib.emit_skip(f"metric 13 [{repo}:{sha[:7]}]", err)
             continue
         sig_measured += 1
-        _comps, ext, edges = surfaced(doc)
+        comps, ext, edges = surfaced(doc)
         ecomp, eext, eedges = expected(s)
-        surf_comp = ext | edges
-        exp_comp = eext | eedges
+        # D15: компоненты входят в состав (B.3/D2: «+CMP genai-service» —
+        # часть эталонного состава; ранее ecomp читался, но не считался).
+        surf_comp = comps | ext | edges
+        exp_comp = ecomp | eext | eedges
         score, inter = f1(surf_comp, exp_comp)
         hit = inter >= 1
         hits += 1 if hit else 0
