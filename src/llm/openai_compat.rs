@@ -1387,6 +1387,17 @@ fn error_text(err: &HarnessError) -> String {
 /// Ошибка фазы отправки запроса («error sending request for url») с
 /// человеческой причиной из цепочки источников — вместо сырого текста reqwest.
 fn send_phase_error(provider: &str, err: &HarnessError) -> HarnessError {
+    // UX-6 (0.4.9): отсутствие API-ключа — ошибка локальной конфигурации, а
+    // не сетевой сбой. Раньше она проваливалась в финальную ветку-заглушку
+    // «сетевой сбой» и уводила пользователя в «проверьте сеть/VPN», хотя
+    // запрос даже не уходил (`bearer_auth` падает до `send`). Возвращаем
+    // определяющую причину как есть — первой строкой; «сетевой сбой»
+    // остаётся только для настоящих транспортных отказов.
+    if let HarnessError::Llm(msg) = err {
+        if msg.to_lowercase().contains("нет api-ключа") {
+            return HarnessError::Llm(msg.clone());
+        }
+    }
     let chain = error_text(err);
     let lower = chain.to_lowercase();
     let reason = if lower.contains("timed out")
@@ -1463,6 +1474,34 @@ mod tests {
         );
         assert!(msg.contains("os error"), "os error в тексте: {msg}");
         assert!(!msg.contains("sk-"), "содержимое ключа не светится: {msg}");
+    }
+
+    /// UX-6 (0.4.9): отсутствие API-ключа — не «сетевой сбой». Ошибка фазы
+    /// отправки обязана начинаться с определяющей причины (нет ключа), а
+    /// «сетевой сбой»/«проверьте сеть» — только для транспортных отказов.
+    #[test]
+    fn missing_api_key_is_not_reported_as_network_failure() {
+        let key_err = HarnessError::Llm(
+            "провайдер 'deepseek': нет API-ключа — установите DEEPSEEK_API_KEY".to_string(),
+        );
+        let out = send_phase_error("deepseek", &key_err).to_string();
+        assert!(
+            out.contains("нет API-ключа"),
+            "причина первой строкой: {out}"
+        );
+        assert!(out.contains("DEEPSEEK_API_KEY"), "{out}");
+        assert!(
+            !out.contains("сетевой сбой"),
+            "локальная причина не выдаётся за сетевой сбой: {out}"
+        );
+        assert!(
+            !out.contains("Проверьте сеть/VPN"),
+            "для отсутствия ключа совет про сеть неуместен: {out}"
+        );
+        // Настоящий транспортный отказ по-прежнему классифицируется как сеть.
+        let net_err = HarnessError::Llm("error sending request: connection refused".to_string());
+        let net = send_phase_error("deepseek", &net_err).to_string();
+        assert!(net.contains("соединение отклонено"), "{net}");
     }
 
     #[test]
