@@ -720,7 +720,7 @@ fn tool_specs() -> Vec<Value> {
             "description": "Запрос к типизированной модели архитектуры (каталог model/): \
                             карточка сущности по id со связями и обратными ссылками, либо \
                             список сущностей (фильтр по типу: cap, sys, cmp, int, nfr, req, \
-                            ad, adr, risk, owner)",
+                            ad, adr, risk, owner, qas, flow)",
             "inputSchema": {
                 "type": "object",
                 "properties": {

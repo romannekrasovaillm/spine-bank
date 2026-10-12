@@ -278,6 +278,9 @@ pub fn build_landscape_with_aliases(
 
     // Реестр систем: только SYS/INT, дедуп по каноническому имени
     // (алиасы склеивают известные варианты написания до дедупликации).
+    // FLOW (ADR-081) — исключён осознанно: это цепочка ИВ, а не система/
+    // интерфейс; канонического имени системы у неё нет и в рёбра SYS/INT
+    // ландшафта она не входит (не участвует в depends_on-графе).
     let mut by_canonical: BTreeMap<String, Vec<Occurrence>> = BTreeMap::new();
     for (project, model) in &projects {
         for e in &model.entities {

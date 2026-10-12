@@ -97,8 +97,9 @@ fn is_exportable(kind: EntityKind) -> bool {
 }
 
 /// Экспортируемый ли тип сущности для `ArchiMate` (ADR-032): подмножество
-/// шире C4 — к SYS/CMP/INT добавляются CAP/REQ/NFR/AD; ADR/RISK/OWNER
-/// (и прочие типы) аналога в `ArchiMate`-маппинге не имеют.
+/// шире C4 — к SYS/CMP/INT добавляются CAP/REQ/NFR/AD; ADR/RISK/OWNER,
+/// FLOW (ADR-081: цепочка ИВ, а не узел диаграммы) и прочие типы аналога в
+/// `ArchiMate`-маппинге не имеют.
 fn is_exportable_archimate(kind: EntityKind) -> bool {
     matches!(
         kind,
