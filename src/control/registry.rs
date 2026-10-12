@@ -491,17 +491,29 @@ fn adr_rejection(
 
 /// Оценивает overrides против итогового набора правил: статусы для отчёта,
 /// находки (неполный override — error; просроченный или на несуществующее
-/// правило — warn; не узаконенный ADR/горизонт — error, A2) и множество
-/// отключённых активными overrides имён правил.
+/// правило — warn; не узаконенный ADR/горизонт — error, A2), множество
+/// отключённых активными overrides имён правил (полный override) и карту
+/// узких override `имя правила → глобы` (0.4.8+: правило гасится только на
+/// матчащихся файлах).
+pub(super) type OverrideOutcome = (
+    Vec<OverrideInfo>,
+    Vec<LintIssue>,
+    BTreeSet<String>,
+    BTreeMap<String, Vec<String>>,
+);
+
 pub(super) fn evaluate_overrides(
     overrides: &[OverrideEntry],
     rules: &[FitnessRule],
     file: &Path,
     adr_policy: &AdrPolicy,
-) -> (Vec<OverrideInfo>, Vec<LintIssue>, BTreeSet<String>) {
+) -> OverrideOutcome {
     let mut infos = Vec::new();
     let mut findings = Vec::new();
     let mut disabled = BTreeSet::new();
+    // 0.4.8: узкие override — правило гасится не на всех файлах, а лишь на
+    // матчащихся глобам; исполнение раскрывает их в `exclude_glob` правила.
+    let mut scoped: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let finding = |severity: &str, code: &str, message: String| LintIssue {
         file: file.to_path_buf(),
         line: 0,
@@ -518,6 +530,7 @@ pub(super) fn evaluate_overrides(
             rule: rule.to_string(),
             adr: adr.to_string(),
             until: until.to_string(),
+            exclude_glob: entry.exclude_glob.clone(),
             status: "invalid".to_string(),
             note: String::new(),
         };
@@ -610,13 +623,29 @@ pub(super) fn evaluate_overrides(
             continue;
         }
         info.status = "active".to_string();
-        info.note = format!("правило отключено до {until} (adr {adr})");
-        for target in targets {
-            disabled.insert(target.name.clone());
+        if entry.exclude_glob.is_empty() {
+            info.note = format!("правило отключено до {until} (adr {adr})");
+            for target in targets {
+                disabled.insert(target.name.clone());
+            }
+        } else {
+            // 0.4.8: узкий override — правило не отключается целиком, а гасится
+            // только на матчащихся файлах; глобы доливаются в `exclude_glob`
+            // правила при исполнении (exec). В `disabled` НЕ попадает.
+            info.note = format!(
+                "правило ослаблено до {until} (adr {adr}) на: {}",
+                entry.exclude_glob.join(", ")
+            );
+            for target in &targets {
+                scoped
+                    .entry(target.name.clone())
+                    .or_default()
+                    .extend(entry.exclude_glob.iter().cloned());
+            }
         }
         infos.push(info);
     }
-    (infos, findings, disabled)
+    (infos, findings, disabled, scoped)
 }
 
 /// Итог сверки состава правил с git-базой (П5).
@@ -1992,6 +2021,149 @@ mod tests {
         let info = &report.overrides[0];
         assert_eq!(info.status, "active");
         assert_eq!(info.rule, "C-CORP-001");
+    }
+
+    /// (а) 0.4.8: узкий override (`exclude_glob`) гасит правило ТОЛЬКО на
+    /// матчащихся файлах; нарушение вне глоба по-прежнему ловится, гейт красный.
+    #[test]
+    fn override_scoped_exclude_glob_gates_only_matching_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        write_file(&repo, "src/a.rs", "let pan = \"PAN=4111\";\n");
+        write_file(&repo, "src/legacy/b.rs", "let pan = \"PAN=4222\";\n");
+        let constraints = write_file(
+            &repo,
+            "CONSTRAINTS.yaml",
+            &format!(
+                "rules:\n  - id: X-1\n    name: no_pan\n    type: must_not_contain\n    \
+                 glob: \"src/**\"\n    pattern: \"PAN=\"\n    severity: error\n\
+                 overrides:\n  - rule: X-1\n    adr: ADR-042\n    until: \"{}\"\n    \
+                 exclude_glob: [\"src/legacy/**\"]\n",
+                within_horizon()
+            ),
+        );
+        write_adr(&repo, "ADR-042", "Accepted");
+        let report = check(&repo, &constraints).unwrap();
+        // Файл вне глоба (src/a.rs) не исключён → гейт красный.
+        assert!(!report.passed, "{}", report.summary);
+        let hits: Vec<&LintIssue> = report
+            .issues
+            .iter()
+            .filter(|i| i.rule == "no_pan")
+            .collect();
+        assert_eq!(
+            hits.len(),
+            1,
+            "ровно один хит вне глоба: {:?}",
+            report.issues
+        );
+        assert!(
+            hits[0].file.to_string_lossy().ends_with("a.rs"),
+            "хит обязан быть на src/a.rs: {:?}",
+            hits[0].file
+        );
+        // Файл внутри глоба (src/legacy/b.rs) погашен — находки по нему нет.
+        assert!(
+            !report
+                .issues
+                .iter()
+                .any(|i| i.file.to_string_lossy().ends_with("b.rs")),
+            "нарушение внутри глоба не должно ловиться: {:?}",
+            report.issues
+        );
+        assert_eq!(report.overrides[0].status, "active");
+        assert_eq!(
+            report.overrides[0].exclude_glob,
+            vec!["src/legacy/**".to_string()]
+        );
+    }
+
+    /// (б) Override БЕЗ `exclude_glob` — прежнее поведение: правило отключено
+    /// целиком, нарушение не ловится ни в одном файле.
+    #[test]
+    fn override_without_exclude_glob_disables_everywhere() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        write_file(&repo, "src/a.rs", "let pan = \"PAN=4111\";\n");
+        write_file(&repo, "src/legacy/b.rs", "let pan = \"PAN=4222\";\n");
+        let constraints = write_file(
+            &repo,
+            "CONSTRAINTS.yaml",
+            &format!(
+                "rules:\n  - id: X-1\n    name: no_pan\n    type: must_not_contain\n    \
+                 glob: \"src/**\"\n    pattern: \"PAN=\"\n    severity: error\n\
+                 overrides:\n  - rule: X-1\n    adr: ADR-042\n    until: \"{}\"\n",
+                within_horizon()
+            ),
+        );
+        write_adr(&repo, "ADR-042", "Accepted");
+        let report = check(&repo, &constraints).unwrap();
+        assert!(report.passed, "{}", report.summary);
+        assert!(!report.issues.iter().any(|i| i.rule == "no_pan"));
+        assert_eq!(report.overrides[0].status, "active");
+        assert_eq!(report.overrides[0].exclude_glob, Vec::<String>::new());
+    }
+
+    /// (в) Реестр без `exclude_glob` парсится как раньше: поле пустое и не
+    /// появляется при обратной сериализации (байт-в-байт прежний формат).
+    #[test]
+    fn override_entry_without_exclude_glob_serializes_unchanged() {
+        let entry: OverrideEntry =
+            serde_yaml_ng::from_str("rule: X-1\nadr: ADR-042\nuntil: \"2999-01\"\n").unwrap();
+        assert_eq!(entry.exclude_glob, Vec::<String>::new());
+        let out = serde_yaml_ng::to_string(&entry).unwrap();
+        assert!(
+            !out.contains("exclude_glob"),
+            "пустое поле не сериализуется: {out}"
+        );
+    }
+
+    /// (г) Отсутствие обязательного поля `adr` — override invalid, даже если
+    /// задан `exclude_glob` (три обязательных поля остаются обязательными).
+    #[test]
+    fn override_scoped_incomplete_is_still_invalid() {
+        let (dir, product) = override_fixture(
+            "  - rule: C-CORP-001\n    until: \"2999-01\"\n    exclude_glob: [\"src/**\"]\n",
+        );
+        write_file(
+            dir.path(),
+            "product/Cargo.toml",
+            "[dependencies]\nleft-pad = \"0.1\"\n",
+        );
+        let report = check(&dir.path().join("product"), &product).unwrap();
+        assert!(!report.passed);
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|i| i.rule == "override" && i.severity == "error"),
+            "неполный override — error: {:?}",
+            report.issues
+        );
+        assert!(report.issues.iter().any(|i| i.rule == "no_hold_crates"));
+        assert_eq!(report.overrides[0].status, "invalid");
+    }
+
+    /// Анти-ослабление НЕ отслеживает `exclude_glob` у OVERRIDE (в отличие от
+    /// `exclude_glob` у ПРАВИЛА — см. `rule_weakened_flags_new_exclude_glob`):
+    /// снимок правила (`RuleSnapshot.excludes`) строится только из
+    /// `rule.exclude_glob`, overrides служат лишь ключами узаконивания
+    /// (`legalization`). По ТЗ 0.4.8 фиксируем текущее поведение, гейт не
+    /// расширяем (см. `open_questions`).
+    #[test]
+    fn rule_weakened_ignores_override_exclude_glob() {
+        let current = format!(
+            "{WEAK_BASE}overrides:\n  - rule: no-pan\n    adr: ADR-042\n    \
+             until: \"2999-01\"\n    exclude_glob: [\"src/legacy/**\"]\n"
+        );
+        assert_ne!(current, WEAK_BASE, "override добавлен");
+        let issues =
+            rule_weakened(&current, WEAK_BASE, Path::new("CONSTRAINTS.yaml")).expect("сравнение");
+        assert!(
+            issues.is_empty(),
+            "override side не считается ослаблением: {issues:?}"
+        );
+        assert!(!issues.iter().any(|i| i.message.contains("exclude_glob")));
     }
 
     #[test]
