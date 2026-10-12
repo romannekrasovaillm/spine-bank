@@ -244,7 +244,7 @@ fn major_rule(format: ContractFormat, old: &str, new: &str, out: &mut Vec<Findin
     };
     if old_m == new_m {
         let (rule, location, what) = match format {
-            ContractFormat::OpenApi => ("CD-007", "#/info/version", "info.version"),
+            ContractFormat::OpenApi => ("CD-007", "#/info/version", "major версии"),
             ContractFormat::Proto => ("CD-P06", "#/proto/package", "major-суффикс пакета (.vN)"),
             _ => unreachable!("major_rule вызывается только для openapi/proto"),
         };
@@ -252,9 +252,13 @@ fn major_rule(format: ContractFormat, old: &str, new: &str, out: &mut Vec<Findin
             severity: "error".into(),
             rule: rule.into(),
             location: location.into(),
+            // UX-7 (0.4.9): условие — неизменность именно МАЙОРА, а не версии.
+            // Прежняя формулировка «info.version не изменился» лгала, когда
+            // версия менялась минорно (1.0.0 → 1.1.0): она менялась, но майор
+            // стоял — и это требовалось назвать прямо.
             message: format!(
-                "ломающих изменений: {breaking}, а {what} не изменился ({old_v} → {new_v}) — \
-                 ломающий дифф требует смены major"
+                "ломающих изменений: {breaking}, а {what} не изменился ({old_v} → {new_v}; \
+                 ломающий дифф требует смены major)"
             ),
         });
     }
