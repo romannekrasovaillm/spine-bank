@@ -99,6 +99,7 @@ pub mod publish;
 pub mod ralph;
 pub mod redteam;
 pub mod rehearsal;
+pub mod report;
 pub mod report_fmt;
 pub mod retry;
 pub mod review;

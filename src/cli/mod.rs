@@ -17,6 +17,7 @@ mod mcp;
 mod misc;
 mod model;
 mod recover;
+mod report;
 mod rubric;
 mod rules;
 mod specs;
@@ -54,6 +55,7 @@ use mcp::{McpCmd, cmd_mcp};
 use misc::{PolicyCmd, cmd_policy, cmd_policy_export, cmd_survey, cmd_survey_audit};
 use model::{ModelCmd, NfrCmd, TraceCmd, cmd_model, cmd_nfr, cmd_trace};
 use recover::cmd_recover;
+use report::cmd_report;
 use rubric::{RubricCmd, cmd_rubric};
 use rules::{RulesCmd, cmd_rules};
 use specs::{
@@ -659,6 +661,24 @@ enum Cmd {
         /// Каталог черновика модели (`status: inferred`, `source: recover@<sha>`).
         #[arg(long = "model-out")]
         model_out: Option<PathBuf>,
+    },
+    /// Отчёт о восстановленной архитектуре одной ревизии (ADR-080, этап 1):
+    /// 14 разделов, стабильные ID (CTX/CNT/CMP/INT/RISK/ADR), уверенность
+    /// A/B/C, основания `файл:строка`. Форматы md | json (arch-be/report/v1)
+    /// | check (только автопроверка). Fail-closed: находка `error` блокирует
+    /// выдачу (exit 1), байпас-флага нет.
+    Report {
+        /// Корень репозитория.
+        repo: PathBuf,
+        /// Ревизия (ветка/тег/sha; по умолчанию HEAD).
+        #[arg(long)]
+        rev: Option<String>,
+        /// Формат: md | json (arch-be/report/v1) | check (только автопроверка).
+        #[arg(long, default_value = "md")]
+        format: String,
+        /// Записать отчёт в файл (иначе — stdout).
+        #[arg(long)]
+        out: Option<PathBuf>,
     },
     /// Сверка ландшафта с выгрузкой CMDB (волна LANDSCAPE, AB-02, ADR-077):
     /// три класса расхождений — не заведено в CMDB, запись CMDB без модели/кода,
@@ -1905,6 +1925,12 @@ pub(crate) async fn run() -> Result<()> {
             format,
             model_out,
         }) => cmd_recover(&cfg, &repo, rev.as_deref(), &format, model_out.as_deref())?,
+        Some(Cmd::Report {
+            repo,
+            rev,
+            format,
+            out,
+        }) => cmd_report(&repo, rev.as_deref(), &format, out.as_deref())?,
         Some(Cmd::Landscape { cmd }) => cmd_landscape(&cfg, cmd)?,
         Some(Cmd::ConstraintsHarvest { repo, format, out }) => {
             cmd_constraints_harvest(&repo, &format, out.as_deref())?;
