@@ -175,6 +175,36 @@ impl ToolContext {
             allowed.join(", ")
         )))
     }
+
+    /// Резолвит путь и проверяет зону ЗАПИСИ (профиль `reverse`, ADR-083 п.3):
+    /// когда `[tools].fs_write_dir` задан, пишущие файловые инструменты могут
+    /// писать только внутрь `<cwd>/<fs_write_dir>` — исходники репозитория
+    /// доступны на чтение, но не на правку. `fs_write_dir = None` (дефолт) —
+    /// запись по общей зоне ([`Self::resolve_checked`], read = write).
+    ///
+    /// # Errors
+    /// Путь вне зоны записи: `HarnessError::Tool` с маркером
+    /// [`FS_ZONE_DENIAL_MARKER`] (журнал сессии распознаёт отказ через
+    /// [`is_fs_zone_denial`]).
+    pub fn resolve_write_checked(&self, path: impl AsRef<Path>) -> Result<PathBuf> {
+        let Some(write_dir) = &self.config.tools.fs_write_dir else {
+            return self.resolve_checked(path);
+        };
+        if !self.config.tools.fs_sandbox {
+            return Ok(self.resolve(path));
+        }
+        let requested = self.resolve(path);
+        let root = self.cwd.join(write_dir);
+        let target = canonicalize_lenient(&requested);
+        if target.starts_with(canonicalize_lenient(&root)) {
+            return Ok(requested);
+        }
+        Err(HarnessError::Tool(format!(
+            "{FS_ZONE_DENIAL_MARKER} {}; в профиле записи разрешено только внутри {}",
+            requested.display(),
+            root.display()
+        )))
+    }
 }
 
 /// Маркер отказа файловой песочницы (ADR-083 п.1) в [`ToolOutput::content`].

@@ -239,6 +239,23 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "harness")]
+    fn reverse_profile_omits_web_tools() {
+        // Профиль reverse (ADR-083 п.3): исходящий веб-канал выключен, веб-
+        // инструменты не попадают в реестр сессии.
+        let mut cfg = Config::default();
+        cfg.apply_reverse_profile();
+        assert!(!cfg.web.enabled, "профиль reverse выключает веб-канал");
+        let names = full_registry(&cfg).names();
+        for banned in ["web_search", "web_fetch", "web_arch_sites"] {
+            assert!(
+                !names.iter().any(|n| n == banned),
+                "инструмент {banned} не должен регистрироваться в профиле reverse"
+            );
+        }
+    }
+
+    #[test]
     fn full_registry_omits_archify_tools_when_archify_disabled() {
         // Гейт регистрации (как у web): при `[archify].enabled = false`
         // archify-инструменты отсутствуют в инструментарии сессии.

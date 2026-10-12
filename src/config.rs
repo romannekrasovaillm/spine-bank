@@ -699,6 +699,12 @@ pub struct PluginsConfig {
     /// установленных плагинов — включайте только для доверенных библиотек.
     /// Дефолт `true` (как у `include_mcp`).
     pub include_hooks: bool,
+    /// Резервный встроенный набор скиллов восстановления (профиль `reverse`,
+    /// ADR-083 п.3): когда пользовательская библиотека пуста, `skill_search`/
+    /// `skill_load` подхватывают `reverse-discovery`/`recover-review` из ассетов
+    /// бинаря с предупреждением в журнал (не молчанием). Дефолт `false` —
+    /// обычный прогон видит только поставленную библиотеку.
+    pub reverse_fallback: bool,
 }
 
 impl Default for PluginsConfig {
@@ -709,6 +715,7 @@ impl Default for PluginsConfig {
             dirs: vec![Config::home_dir().join("plugins")],
             include_mcp: true,
             include_hooks: true,
+            reverse_fallback: false,
         }
     }
 }
@@ -798,6 +805,12 @@ pub struct ToolsConfig {
     /// ADR-083 (любой путь без проверки зоны): осознанный обход на случай,
     /// если реальный прогон упрётся в ложное срабатывание. Дефолт `true`.
     pub fs_sandbox: bool,
+    /// Каталог записи (профиль `reverse`, ADR-083 п.3): когда задан, пишущие
+    /// файловые инструменты (`write_file`/`edit_file`) могут писать только внутрь
+    /// `<cwd>/<fs_write_dir>` — исходники доступны на чтение, но не на правку.
+    /// `None` (дефолт) — запись в пределах общей зоны `read = write`. Путь
+    /// относительный — от рабочего каталога сессии.
+    pub fs_write_dir: Option<PathBuf>,
 }
 
 impl Default for ToolsConfig {
@@ -809,6 +822,7 @@ impl Default for ToolsConfig {
         Self {
             fs_allow: vec![PathBuf::from("~/.arch-harness")],
             fs_sandbox: true,
+            fs_write_dir: None,
         }
     }
 }
@@ -2121,6 +2135,22 @@ impl Config {
             mc.api_key_env,
             mc.api_key_file.as_deref().unwrap_or("(не задан)")
         )))
+    }
+
+    /// Включает профиль `reverse` (ADR-083 п.3) на этой конфигурации:
+    /// восстанавливающий прогон по чужому репозиторию — только чтение кода,
+    /// запись в выходной каталог, без веб-канала. Идемпотентно.
+    ///
+    /// Состав: `[web].enabled = false` (веб-инструменты исключаются из реестра
+    /// сессии на уровне регистрации, см. [`crate::tools::full_registry`]);
+    /// `[tools].fs_write_dir = out` (пишущие файловые инструменты — только
+    /// внутрь `out/`, чтение исходников остаётся); `[plugins].reverse_fallback`
+    /// (встроенный набор `reverse-discovery`/`recover-review` при пустой
+    /// библиотеке, с предупреждением в журнал).
+    pub fn apply_reverse_profile(&mut self) {
+        self.web.enabled = false;
+        self.tools.fs_write_dir = Some(PathBuf::from("out"));
+        self.plugins.reverse_fallback = true;
     }
 
     /// Загружает конфиг: `--config` → `./arch-harness.toml` →

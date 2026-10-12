@@ -114,6 +114,12 @@ enum Cmd {
         /// из конфига модели; без флага — дефолт провайдера).
         #[arg(long, value_name = "on|off")]
         think: Option<String>,
+        /// Профиль прогона (ADR-083 п.3): `reverse` — восстановление
+        /// архитектуры по чужому репозиторию. Веб-инструменты выключены,
+        /// исходники только на чтение (запись — в `out/`), встроенные скиллы
+        /// reverse-discovery/recover-review при пустой библиотеке.
+        #[arg(long, value_name = "reverse")]
+        profile: Option<String>,
     },
     /// Список настроенных моделей.
     Models,
@@ -889,6 +895,7 @@ pub(crate) async fn run() -> Result<()> {
             timeout,
             max_turns,
             think,
+            profile,
         }) => {
             cmd_run(
                 &cfg,
@@ -899,6 +906,7 @@ pub(crate) async fn run() -> Result<()> {
                 RunOptions {
                     timeout_secs: timeout,
                     max_turns,
+                    profile,
                 },
             )
             .await?;

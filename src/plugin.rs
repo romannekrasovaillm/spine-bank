@@ -482,11 +482,17 @@ pub fn search(plugins: &[Plugin], query: &str, limit: usize) -> Vec<SkillHit> {
             }
             // Тело читаем, только если метаданные дали мало или нужен сниппет.
             let body = body_cache.entry(s.path.clone()).or_insert_with(|| {
-                let meta = std::fs::metadata(&s.path).ok()?;
-                if meta.len() > 1_048_576 {
-                    return None;
+                if let Ok(meta) = std::fs::metadata(&s.path) {
+                    if meta.len() > 1_048_576 {
+                        return None;
+                    }
+                    if let Ok(text) = std::fs::read_to_string(&s.path) {
+                        return Some(text);
+                    }
                 }
-                std::fs::read_to_string(&s.path).ok()
+                // Диск не дал тела (в т.ч. синтетический путь встроенного
+                // скилла профиля `reverse`) — пробуем встроенный ассет по имени.
+                embedded_skill_body(&s.name).map(str::to_string)
             });
             let mut snippet = String::new();
             if let Some(body) = body {
@@ -548,11 +554,19 @@ pub fn skill_by_name<'a>(plugins: &'a [Plugin], name: &str) -> Option<&'a SkillM
 
 /// Полный текст скилла + постскриптум со списком `references/`.
 ///
+/// Тело берётся с диска; если файла нет (синтетический путь встроенного
+/// скилла профиля `reverse`, ADR-083 п.3) — из встроенного ассета по имени.
+///
 /// # Errors
-/// Файл не читается.
+/// Файл не читается и встроенного ассета с таким именем нет.
 pub fn load_skill(meta: &SkillMeta) -> Result<String> {
-    let mut text =
-        std::fs::read_to_string(&meta.path).map_err(|e| HarnessError::io(&meta.path, e))?;
+    let mut text = match std::fs::read_to_string(&meta.path) {
+        Ok(t) => t,
+        Err(e) => match embedded_skill_body(&meta.name) {
+            Some(body) => body.to_string(),
+            None => return Err(HarnessError::io(&meta.path, e)),
+        },
+    };
     let refs_dir = meta
         .path
         .parent()
@@ -577,6 +591,84 @@ pub fn load_skill(meta: &SkillMeta) -> Result<String> {
         }
     }
     Ok(text)
+}
+
+/// Имена встроенных скиллов восстановления (профиль `reverse`, ADR-083 п.3).
+/// Источник — ассеты бинаря `plugins/arch-core/skills/<имя>/SKILL.md`.
+pub const REVERSE_SKILL_NAMES: [&str; 2] = ["reverse-discovery", "recover-review"];
+
+/// Тело встроенного скилла по имени: ищет ассет бинаря, чей относительный
+/// путь оканчивается на `/skills/<name>/SKILL.md`. `None` — ассета нет.
+#[must_use]
+pub fn embedded_skill_body(name: &str) -> Option<&'static str> {
+    let suffix = format!("/skills/{name}/SKILL.md");
+    crate::assets::embedded_plugin_files()
+        .iter()
+        .find(|(rel, _)| rel.ends_with(&suffix))
+        .map(|(_, body)| *body)
+}
+
+/// Синтетический плагин `arch-core` со встроенными скиллами восстановления
+/// (профиль `reverse`, ADR-083 п.3). Пути скиллов — маркерные (`<embedded>/…`):
+/// на диске их нет, тело [`search`]/[`load_skill`] берут из ассетов по имени.
+/// `None` — в сборке нет ни одного из [`REVERSE_SKILL_NAMES`].
+#[must_use]
+pub fn embedded_reverse_plugin() -> Option<Plugin> {
+    let mut skills = Vec::new();
+    for name in REVERSE_SKILL_NAMES {
+        let Some(body) = embedded_skill_body(name) else {
+            continue;
+        };
+        let (skill_name, description) =
+            parse_frontmatter_text(body).unwrap_or_else(|| (name.to_string(), String::new()));
+        skills.push(SkillMeta {
+            name: skill_name,
+            description,
+            plugin: "arch-core".to_string(),
+            path: PathBuf::from(format!("<embedded>/skills/{name}/SKILL.md")),
+        });
+    }
+    if skills.is_empty() {
+        return None;
+    }
+    Some(Plugin {
+        dir: PathBuf::from("<embedded>/arch-core"),
+        manifest: PluginManifest {
+            name: "arch-core".to_string(),
+            version: String::new(),
+            description: "Встроенный набор скиллов восстановления (профиль reverse)".to_string(),
+            keywords: vec!["reverse".to_string(), "recovery".to_string()],
+        },
+        skills,
+    })
+}
+
+/// Помета в ответе, когда сработала подстановка встроенного набора.
+pub const REVERSE_FALLBACK_NOTE: &str = "профиль reverse: пользовательская библиотека скиллов \
+     пуста — используются встроенные скиллы восстановления (reverse-discovery, recover-review)";
+
+/// Подстановка встроенного резервного набора скиллов (профиль `reverse`,
+/// ADR-083 п.3): когда включён `[plugins].reverse_fallback` и в индексе нет ни
+/// одного пользовательского скилла, добавляет синтетический плагин `arch-core`
+/// и пишет warn в журнал (не молчание). Возвращает `true`, если подстановка
+/// произошла.
+fn with_reverse_fallback(plugins: &mut Vec<Plugin>, cfg: &Config) -> bool {
+    if !cfg.plugins.reverse_fallback {
+        return false;
+    }
+    let total: usize = plugins.iter().map(|p| p.skills.len()).sum();
+    if total > 0 {
+        return false;
+    }
+    let Some(plugin) = embedded_reverse_plugin() else {
+        return false;
+    };
+    tracing::warn!(
+        "{} (источник — встроенные ассеты бинаря)",
+        REVERSE_FALLBACK_NOTE
+    );
+    plugins.push(plugin);
+    true
 }
 
 /// MCP-серверы, объявленные плагинами: `mcpServers` в plugin.json,
@@ -693,15 +785,23 @@ impl Tool for SkillSearchTool {
         // разложенные харнессом в проекте (`connect`): без этого поиск пуст в
         // свежем проекте, хотя скиллы на диске есть.
         let dirs = skill_search_dirs(&self.dirs, &ctx.cwd);
-        let plugins = discover_dirs(&dirs);
+        let mut plugins = discover_dirs(&dirs);
+        // Профиль reverse (ADR-083 п.3): пустая библиотека → встроенный набор.
+        let fallback = with_reverse_fallback(&mut plugins, &ctx.config);
         let total: usize = plugins.iter().map(|p| p.skills.len()).sum();
         let hits = search(&plugins, query, limit);
         if hits.is_empty() {
-            return Ok(crate::tool::ToolOutput::ok(empty_index_answer(
-                query, total, &dirs,
-            )));
+            let mut answer = empty_index_answer(query, total, &dirs);
+            if fallback {
+                answer = format!("{REVERSE_FALLBACK_NOTE}\n{answer}");
+            }
+            return Ok(crate::tool::ToolOutput::ok(answer));
         }
         let mut out = String::new();
+        if fallback {
+            out.push_str(REVERSE_FALLBACK_NOTE);
+            out.push('\n');
+        }
         for h in &hits {
             let _ = write!(
                 out,
@@ -775,7 +875,9 @@ impl Tool for SkillLoadTool {
             .and_then(|q| q.as_str())
             .ok_or_else(|| HarnessError::Tool("skill_load: нет аргумента name".into()))?;
         let dirs = skill_search_dirs(&self.dirs, &ctx.cwd);
-        let plugins = discover_dirs(&dirs);
+        let mut plugins = discover_dirs(&dirs);
+        // Профиль reverse (ADR-083 п.3): пустая библиотека → встроенный набор.
+        with_reverse_fallback(&mut plugins, &ctx.config);
         let Some(meta) = skill_by_name(&plugins, name) else {
             return Ok(crate::tool::ToolOutput::err(format!(
                 "скилл '{name}' не найден; сначала skill_search"
@@ -1105,6 +1207,48 @@ mod tests {
         let mut names: Vec<String> = list.iter().map(|t| t.spec().name).collect();
         names.sort();
         assert_eq!(names, ["plugin_list", "skill_load", "skill_search"]);
+    }
+
+    /// Профиль reverse (ADR-083 п.3): при пустой пользовательской библиотеке
+    /// `skill_search`/`skill_load` обязаны находить встроенные скиллы восстановления
+    /// (reverse-discovery, recover-review), а не отдавать пустой ответ — с
+    /// честной пометкой источника в выводе.
+    #[test]
+    fn reverse_fallback_finds_embedded_skills_in_empty_library() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let mut cfg = Config::default();
+        cfg.plugins.reverse_fallback = true;
+        cfg.plugins.dirs = Vec::new();
+        let ctx = crate::tool::ToolContext::new(tmp.path().to_path_buf(), std::sync::Arc::new(cfg));
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        let out = rt
+            .block_on(SkillSearchTool { dirs: Vec::new() }.call(
+                serde_json::json!({"query": "reverse discovery", "limit": 8}),
+                &ctx,
+            ))
+            .expect("вызов");
+        assert!(!out.is_error, "output: {}", out.content);
+        assert!(
+            out.content.contains(REVERSE_FALLBACK_NOTE),
+            "ожидалась пометка встроенного источника: {}",
+            out.content
+        );
+        assert!(
+            out.content.contains("reverse-discovery"),
+            "встроенный скилл обязан находиться: {}",
+            out.content
+        );
+        let load = rt
+            .block_on(
+                SkillLoadTool { dirs: Vec::new() }
+                    .call(serde_json::json!({"name": "recover-review"}), &ctx),
+            )
+            .expect("вызов");
+        assert!(!load.is_error, "output: {}", load.content);
+        assert!(
+            !load.content.trim().is_empty(),
+            "тело встроенного скилла непусто"
+        );
     }
 }
 

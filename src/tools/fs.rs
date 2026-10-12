@@ -315,7 +315,7 @@ impl Tool for WriteFileTool {
     /// `Err` при нарушении контракта аргументов и при выходе пути за
     /// файловую зону (ADR-083 п.1). Ошибки записи — `Ok(ToolOutput::err(..))`.
     async fn call(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput> {
-        let path = ctx.resolve_checked(req_str(&args, "write_file", "path")?)?;
+        let path = ctx.resolve_write_checked(req_str(&args, "write_file", "path")?)?;
         let content = req_str_allow_empty(&args, "write_file", "content")?;
         let append = opt_str(&args, "mode").is_some_and(|m| m == "append");
 
@@ -423,7 +423,7 @@ impl Tool for EditFileTool {
     /// файловую зону (ADR-083 п.1). «Не найден»/«неуникален»/ошибки записи —
     /// `Ok(ToolOutput::err(..))`.
     async fn call(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput> {
-        let path = ctx.resolve_checked(req_str(&args, "edit_file", "path")?)?;
+        let path = ctx.resolve_write_checked(req_str(&args, "edit_file", "path")?)?;
         let old = req_str(&args, "edit_file", "old_string")?;
         let new = req_str_allow_empty(&args, "edit_file", "new_string")?;
         let replace_all = args
@@ -1127,6 +1127,61 @@ mod tests {
         let r = ReadFileTool.call(json!({"path": target}), &ctx).await?;
         assert!(!r.is_error, "output: {}", r.content);
         assert!(r.content.contains("данные"), "output: {}", r.content);
+        Ok(())
+    }
+
+    /// Профиль reverse (ADR-083 п.3): при `[tools].fs_write_dir = out` запись
+    /// идёт только в выходной каталог, исходники cwd остаются read-only.
+    #[tokio::test]
+    async fn reverse_write_zone_allows_out_and_refuses_cwd() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let mut cfg = Config::default();
+        cfg.tools.fs_write_dir = Some(std::path::PathBuf::from("out"));
+        let ctx = ToolContext::new(dir.path().to_path_buf(), Arc::new(cfg));
+        // В выходной каталог — можно.
+        let ok = WriteFileTool
+            .call(
+                json!({"path": "out/report.md", "content": "# отчёт\n"}),
+                &ctx,
+            )
+            .await?;
+        assert!(!ok.is_error, "output: {}", ok.content);
+        assert!(dir.path().join("out/report.md").is_file(), "out/ пишется");
+        // В исходники cwd — отказ зоны записи, файл не создаётся.
+        let err = WriteFileTool
+            .call(json!({"path": "src/lib.rs", "content": "нет\n"}), &ctx)
+            .await
+            .expect_err("Err-контракт: отказ зоны записи");
+        assert!(err.to_string().contains("вне рабочей зоны:"), "err: {err}");
+        assert!(
+            !dir.path().join("src/lib.rs").exists(),
+            "отказ зоны записи не создаёт файл в исходниках"
+        );
+        Ok(())
+    }
+
+    /// Профиль reverse: `edit_file` исходника cwd отклоняется (read-only),
+    /// файл не изменяется.
+    #[tokio::test]
+    async fn reverse_write_zone_refuses_edit_of_source() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        std::fs::write(dir.path().join("src.rs"), "old\n")?;
+        let mut cfg = Config::default();
+        cfg.tools.fs_write_dir = Some(std::path::PathBuf::from("out"));
+        let ctx = ToolContext::new(dir.path().to_path_buf(), Arc::new(cfg));
+        let err = EditFileTool
+            .call(
+                json!({"path": "src.rs", "old_string": "old", "new_string": "new"}),
+                &ctx,
+            )
+            .await
+            .expect_err("Err-контракт: отказ зоны записи");
+        assert!(err.to_string().contains("вне рабочей зоны:"), "err: {err}");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("src.rs"))?,
+            "old\n",
+            "исходник не изменён"
+        );
         Ok(())
     }
 }

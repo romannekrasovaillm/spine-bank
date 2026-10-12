@@ -20,6 +20,8 @@ pub(crate) struct RunOptions {
     pub(crate) timeout_secs: Option<u64>,
     /// Переопределение `agent.max_tool_turns` на прогон.
     pub(crate) max_turns: Option<u64>,
+    /// Профиль прогона (ADR-083 п.3): `reverse` — восстановление архитектуры.
+    pub(crate) profile: Option<String>,
 }
 
 /// `arch-be run`: headless агент.
@@ -65,15 +67,19 @@ pub(crate) async fn cmd_run(
         None => None,
     };
 
-    // Переопределение бюджета итераций — на клоне конфига, глобальный не трогаем.
-    let cfg = match opts.max_turns {
-        Some(n) => {
-            let mut owned = (**cfg).clone();
+    // Бюджет итераций и профиль прогона — на клоне конфига, глобальный не трогаем.
+    let cfg = if opts.max_turns.is_some() || opts.profile.is_some() {
+        let mut owned = (**cfg).clone();
+        if let Some(n) = opts.max_turns {
             owned.agent.max_tool_turns =
                 usize::try_from(n).context("--max-turns: значение не помещается в usize")?;
-            Arc::new(owned)
         }
-        None => cfg.clone(),
+        if let Some(p) = opts.profile.as_deref() {
+            apply_profile(&mut owned, p)?;
+        }
+        Arc::new(owned)
+    } else {
+        cfg.clone()
     };
 
     // Fail-closed (ADR-083 п.2): цикл не стартует молча с дефолтным
@@ -170,6 +176,24 @@ pub(crate) async fn cmd_run(
         let _ = out.flush();
     }
     Ok(())
+}
+
+/// Применяет профиль прогона к клону конфигурации (ADR-083 п.3):
+/// `reverse` — восстановление архитектуры по чужому репозиторию (веб
+/// выключен, исходники read-only, запись — только в `out/`, встроенные
+/// скиллы при пустой библиотеке). Логика профиля — в [`Config`], здесь
+/// только маршрутизация имени с честным отказом на неизвестное.
+#[cfg(feature = "harness")]
+fn apply_profile(cfg: &mut Config, profile: &str) -> Result<()> {
+    match profile {
+        "reverse" => {
+            cfg.apply_reverse_profile();
+            Ok(())
+        }
+        other => {
+            anyhow::bail!("--profile: неизвестный профиль '{other}' (допустимо: reverse)")
+        }
+    }
 }
 
 /// Системный промпт по умолчанию: из библиотеки промптов или встроенный,
