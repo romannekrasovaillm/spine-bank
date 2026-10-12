@@ -114,6 +114,9 @@ fn domain_tools(cfg: &Config) -> Vec<Arc<dyn Tool>> {
     out.push(Arc::new(crate::fleet::FleetAuditTool));
     out.extend(crate::survey::tools());
     out.extend(crate::arch_diff::tools());
+    // Отчёт о восстановленной архитектуре (ADR-080 + ADR-083): read-only мост
+    // к `src/report/`, отдаётся MCP по белому списку `BRIDGE_READ_ONLY`.
+    out.extend(crate::report::tools());
     #[cfg(feature = "harness")]
     out.extend(crate::distill::tools(cfg));
     out
@@ -136,6 +139,7 @@ mod tests {
             "reverse_survey",
             "recover",
             "arch_diff",
+            "report",
             "skill_search",
             "mermaid_render",
             "archify_validate",
@@ -230,6 +234,23 @@ mod tests {
             assert!(
                 names.iter().any(|n| n == expected),
                 "нет веб-инструмента {expected} при дефолтном конфиге"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "harness")]
+    fn reverse_profile_omits_web_tools() {
+        // Профиль reverse (ADR-083 п.3): исходящий веб-канал выключен, веб-
+        // инструменты не попадают в реестр сессии.
+        let mut cfg = Config::default();
+        cfg.apply_reverse_profile();
+        assert!(!cfg.web.enabled, "профиль reverse выключает веб-канал");
+        let names = full_registry(&cfg).names();
+        for banned in ["web_search", "web_fetch", "web_arch_sites"] {
+            assert!(
+                !names.iter().any(|n| n == banned),
+                "инструмент {banned} не должен регистрироваться в профиле reverse"
             );
         }
     }

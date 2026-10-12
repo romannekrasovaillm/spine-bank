@@ -14,7 +14,9 @@ use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
 use crate::error::Result;
-use crate::report::model::{Family, ReportModel, ReportRelation, ReportSection, SectionKind};
+use crate::report::model::{
+    CheckSeverity, Family, ReportModel, ReportRelation, ReportSection, SectionKind,
+};
 
 /// Тире для пустых ячеек таблиц.
 const DASH: &str = "—";
@@ -25,6 +27,32 @@ const DASH: &str = "—";
 /// Ошибка сериализации JSON (практически недостижима для плоских структур).
 pub fn render_json(model: &ReportModel) -> Result<String> {
     Ok(serde_json::to_string_pretty(model)?)
+}
+
+/// Текстовый отчёт автопроверки: сводка + построчный список находок.
+///
+/// Единственная точка рендера `check`-формата (AD-11): CLI (`report --format
+/// check`) и MCP-мост (`report`) вызывают её — вывод обязан совпадать
+/// байт-в-байт.
+#[must_use]
+pub fn render_check(model: &ReportModel) -> String {
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "report/check: {} error, {} warn (schema {})",
+        model.error_count(),
+        model.warn_count(),
+        model.schema
+    );
+    for c in &model.checks {
+        let sev = match c.severity {
+            CheckSeverity::Error => "error",
+            CheckSeverity::Warn => "warn",
+        };
+        let who = c.element_id.as_deref().unwrap_or("-");
+        let _ = writeln!(out, "[{sev}] {}/{}: {}", c.invariant, who, c.message);
+    }
+    out
 }
 
 /// Markdown-скелет отчёта: шапка, §1–§14, приложения и лист эксперта.

@@ -234,10 +234,11 @@ impl Tool for ReadFileTool {
     /// Читает файл и нумерует строки.
     ///
     /// # Errors
-    /// Возвращает `Err` только при нарушении контракта аргументов (нет
-    /// `path`). Ошибки чтения и бинарные файлы — `Ok(ToolOutput::err(..))`.
+    /// `Err` при нарушении контракта аргументов (нет `path`) и при выходе
+    /// пути за файловую зону (ADR-083 п.1, [`ToolContext::resolve_checked`]).
+    /// Ошибки чтения и бинарные файлы — `Ok(ToolOutput::err(..))`.
     async fn call(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput> {
-        let path = ctx.resolve(req_str(&args, "read_file", "path")?);
+        let path = ctx.resolve_checked(req_str(&args, "read_file", "path")?)?;
         let offset = opt_usize(&args, "offset").unwrap_or(1).max(1);
         let limit = opt_usize(&args, "limit");
 
@@ -311,10 +312,10 @@ impl Tool for WriteFileTool {
     /// Пишет файл, создавая родительские каталоги.
     ///
     /// # Errors
-    /// Возвращает `Err` только при нарушении контракта аргументов.
-    /// Ошибки записи — `Ok(ToolOutput::err(..))`.
+    /// `Err` при нарушении контракта аргументов и при выходе пути за
+    /// файловую зону (ADR-083 п.1). Ошибки записи — `Ok(ToolOutput::err(..))`.
     async fn call(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput> {
-        let path = ctx.resolve(req_str(&args, "write_file", "path")?);
+        let path = ctx.resolve_write_checked(req_str(&args, "write_file", "path")?)?;
         let content = req_str_allow_empty(&args, "write_file", "content")?;
         let append = opt_str(&args, "mode").is_some_and(|m| m == "append");
 
@@ -418,10 +419,11 @@ impl Tool for EditFileTool {
     /// Выполняет замену с проверками уникальности.
     ///
     /// # Errors
-    /// Возвращает `Err` только при нарушении контракта аргументов.
-    /// «Не найден»/«неуникален»/ошибки записи — `Ok(ToolOutput::err(..))`.
+    /// `Err` при нарушении контракта аргументов и при выходе пути за
+    /// файловую зону (ADR-083 п.1). «Не найден»/«неуникален»/ошибки записи —
+    /// `Ok(ToolOutput::err(..))`.
     async fn call(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput> {
-        let path = ctx.resolve(req_str(&args, "edit_file", "path")?);
+        let path = ctx.resolve_write_checked(req_str(&args, "edit_file", "path")?)?;
         let old = req_str(&args, "edit_file", "old_string")?;
         let new = req_str_allow_empty(&args, "edit_file", "new_string")?;
         let replace_all = args
@@ -505,11 +507,16 @@ impl Tool for GlobTool {
     /// Обходит каталог в `spawn_blocking` и фильтрует пути матчером.
     ///
     /// # Errors
-    /// Возвращает `Err` при нарушении контракта аргументов или срыве
-    /// блокирующей задачи. Отсутствие каталога — `Ok(ToolOutput::err(..))`.
+    /// `Err` при нарушении контракта аргументов, выходе пути за файловую
+    /// зону (ADR-083 п.1) или срыве блокирующей задачи. Отсутствие каталога —
+    /// `Ok(ToolOutput::err(..))`.
     async fn call(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput> {
         let pattern = req_str(&args, "glob", "pattern")?.to_owned();
-        let start = opt_str(&args, "path").map_or_else(|| ctx.cwd.clone(), |p| ctx.resolve(p));
+        // Дефолт без `path` — рабочий каталог (в зоне by construction).
+        let start = match opt_str(&args, "path") {
+            Some(p) => ctx.resolve_checked(p)?,
+            None => ctx.cwd.clone(),
+        };
 
         let out = tokio::task::spawn_blocking(move || glob_run(&start, &pattern))
             .await
@@ -620,9 +627,9 @@ impl Tool for GrepTool {
     /// Ищет совпадения в `spawn_blocking`.
     ///
     /// # Errors
-    /// Возвращает `Err` при нарушении контракта аргументов или срыве
-    /// блокирующей задачи. Невалидный regex и отсутствие пути —
-    /// `Ok(ToolOutput::err(..))`.
+    /// Возвращает `Err` при нарушении контракта аргументов, выходе пути за
+    /// файловую зону (ADR-083 п.1) или срыве блокирующей задачи. Невалидный
+    /// regex и отсутствие пути — `Ok(ToolOutput::err(..))`.
     async fn call(&self, args: Value, ctx: &ToolContext) -> Result<ToolOutput> {
         let pattern = req_str(&args, "grep", "pattern")?;
         let re = match Regex::new(pattern) {
@@ -633,7 +640,11 @@ impl Tool for GrepTool {
                 )));
             }
         };
-        let root = opt_str(&args, "path").map_or_else(|| ctx.cwd.clone(), |p| ctx.resolve(p));
+        // Дефолт без `path` — рабочий каталог (в зоне by construction).
+        let root = match opt_str(&args, "path") {
+            Some(p) => ctx.resolve_checked(p)?,
+            None => ctx.cwd.clone(),
+        };
         let name_filter = opt_str(&args, "glob").map(str::to_owned);
         let context = args
             .get("context")
@@ -1018,6 +1029,158 @@ mod tests {
             w.content.contains("записано 6 байт"),
             "output: {}",
             w.content
+        );
+        Ok(())
+    }
+
+    /// Песочница путей (ADR-083 п.1): файловые инструменты не выходят за cwd.
+    /// Абсолютный путь наружу / побег `..` — ошибка `вне рабочей зоны`,
+    /// файл даже не трогается.
+    #[tokio::test]
+    async fn read_file_outside_zone_is_refused() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let ctx = test_ctx(&dir);
+        let err = ReadFileTool
+            .call(json!({"path": "/etc/passwd"}), &ctx)
+            .await
+            .expect_err("Err-контракт: отказ зоны");
+        assert!(err.to_string().contains("вне рабочей зоны:"), "err: {err}");
+        // Побег через `..` из cwd — тоже отказ.
+        let esc = ReadFileTool
+            .call(json!({"path": "../escape.txt"}), &ctx)
+            .await
+            .expect_err("Err-контракт: отказ зоны");
+        assert!(esc.to_string().contains("вне рабочей зоны:"), "err: {esc}");
+        Ok(())
+    }
+
+    /// Запись вне зоны отклоняется ДО создания файла (периметр не дырявый).
+    #[tokio::test]
+    async fn write_file_outside_zone_is_refused_without_touching_fs() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let outside = tempfile::tempdir()?;
+        let ctx = test_ctx(&dir);
+        let target = outside.path().join("leak.txt");
+        let err = WriteFileTool
+            .call(
+                json!({"path": target.to_string_lossy(), "content": "нет\n"}),
+                &ctx,
+            )
+            .await
+            .expect_err("Err-контракт: отказ зоны");
+        assert!(err.to_string().contains("вне рабочей зоны:"), "err: {err}");
+        assert!(
+            !target.exists(),
+            "отказ зоны не создаёт файл вовне: {}",
+            target.display()
+        );
+        Ok(())
+    }
+
+    /// `fs_allow` открывает явно перечисленный каталог вне cwd.
+    #[tokio::test]
+    async fn fs_allow_opens_listed_dir() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let extra = tempfile::tempdir()?;
+        let mut cfg = Config::default();
+        cfg.tools.fs_allow = vec![extra.path().to_path_buf()];
+        let ctx = ToolContext::new(dir.path().to_path_buf(), Arc::new(cfg));
+        let target = abs(&extra, "ok.md");
+        let w = WriteFileTool
+            .call(json!({"path": target, "content": "# ok\n"}), &ctx)
+            .await?;
+        assert!(!w.is_error, "output: {}", w.content);
+        assert!(
+            extra.path().join("ok.md").is_file(),
+            "файл записан в allowlist"
+        );
+        Ok(())
+    }
+
+    /// Симлинк внутри cwd, ведущий наружу, не обманывает зону (канонизация).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn symlink_out_of_zone_is_refused() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let outside = tempfile::tempdir()?;
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("link"))?;
+        let ctx = test_ctx(&dir);
+        let err = ReadFileTool
+            .call(json!({"path": "link/secret.txt"}), &ctx)
+            .await
+            .expect_err("Err-контракт: отказ зоны");
+        assert!(err.to_string().contains("вне рабочей зоны:"), "err: {err}");
+        Ok(())
+    }
+
+    /// `fs_sandbox = false` — аварийный откат: инструмент доходит до ФС
+    /// (здесь — успешное чтение файла вовне cwd).
+    #[tokio::test]
+    async fn sandbox_rollback_allows_outside_read() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let outside = tempfile::tempdir()?;
+        std::fs::write(outside.path().join("f.txt"), "данные\n")?;
+        let mut cfg = Config::default();
+        cfg.tools.fs_sandbox = false;
+        let ctx = ToolContext::new(dir.path().to_path_buf(), Arc::new(cfg));
+        let target = abs(&outside, "f.txt");
+        let r = ReadFileTool.call(json!({"path": target}), &ctx).await?;
+        assert!(!r.is_error, "output: {}", r.content);
+        assert!(r.content.contains("данные"), "output: {}", r.content);
+        Ok(())
+    }
+
+    /// Профиль reverse (ADR-083 п.3): при `[tools].fs_write_dir = out` запись
+    /// идёт только в выходной каталог, исходники cwd остаются read-only.
+    #[tokio::test]
+    async fn reverse_write_zone_allows_out_and_refuses_cwd() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let mut cfg = Config::default();
+        cfg.tools.fs_write_dir = Some(std::path::PathBuf::from("out"));
+        let ctx = ToolContext::new(dir.path().to_path_buf(), Arc::new(cfg));
+        // В выходной каталог — можно.
+        let ok = WriteFileTool
+            .call(
+                json!({"path": "out/report.md", "content": "# отчёт\n"}),
+                &ctx,
+            )
+            .await?;
+        assert!(!ok.is_error, "output: {}", ok.content);
+        assert!(dir.path().join("out/report.md").is_file(), "out/ пишется");
+        // В исходники cwd — отказ зоны записи, файл не создаётся.
+        let err = WriteFileTool
+            .call(json!({"path": "src/lib.rs", "content": "нет\n"}), &ctx)
+            .await
+            .expect_err("Err-контракт: отказ зоны записи");
+        assert!(err.to_string().contains("вне рабочей зоны:"), "err: {err}");
+        assert!(
+            !dir.path().join("src/lib.rs").exists(),
+            "отказ зоны записи не создаёт файл в исходниках"
+        );
+        Ok(())
+    }
+
+    /// Профиль reverse: `edit_file` исходника cwd отклоняется (read-only),
+    /// файл не изменяется.
+    #[tokio::test]
+    async fn reverse_write_zone_refuses_edit_of_source() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        std::fs::write(dir.path().join("src.rs"), "old\n")?;
+        let mut cfg = Config::default();
+        cfg.tools.fs_write_dir = Some(std::path::PathBuf::from("out"));
+        let ctx = ToolContext::new(dir.path().to_path_buf(), Arc::new(cfg));
+        let err = EditFileTool
+            .call(
+                json!({"path": "src.rs", "old_string": "old", "new_string": "new"}),
+                &ctx,
+            )
+            .await
+            .expect_err("Err-контракт: отказ зоны записи");
+        assert!(err.to_string().contains("вне рабочей зоны:"), "err: {err}");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("src.rs"))?,
+            "old\n",
+            "исходник не изменён"
         );
         Ok(())
     }

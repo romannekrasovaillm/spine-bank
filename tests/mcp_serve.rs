@@ -234,16 +234,20 @@ fn handshake_then_tools_list_over_stdio() {
         // Граф «как построено» и его сравнение (волна R, ADR-069).
         "recover",
         "arch_diff",
+        // Отчёт о восстановленной архитектуре (ADR-080 + ADR-083): read-only
+        // мост к `src/report/` в белом списке `BRIDGE_READ_ONLY`.
+        "report",
     ] {
         assert!(names.contains(&want), "нет инструмента {want}: {names:?}");
     }
     assert_eq!(
         tools.len(),
-        42,
-        "ровно 42 инструмента в ro-режиме (16 ручных + 26 read-only моста; \
+        43,
+        "ровно 43 инструмента в ro-режиме (16 ручных + 27 read-only моста; \
          verdict_explain и trust_report — волна W, rule_template_* — ADR-050, \
          rubric_handover и rubric_accept — передача судейства, ADR-048, \
-         recover и arch_diff — граф «как построено», ADR-069)"
+         recover и arch_diff — граф «как построено», ADR-069, \
+         report — отчёт о восстановлении, ADR-080/ADR-083)"
     );
     // rw-контур и write/exec-принадлежность хоста закрыты в ro-режиме.
     for banned in [

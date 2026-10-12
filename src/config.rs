@@ -39,6 +39,9 @@ pub struct Config {
     pub hooks: HooksConfig,
     /// Изоляция окружения bash-команд (scrub секретоподобных переменных).
     pub bash: BashConfig,
+    /// Периметр файловых инструментов (песочница путей, ADR-083): зона
+    /// чтения/записи = рабочий каталог + `fs_allow`.
+    pub tools: ToolsConfig,
     /// Настройки планировщика.
     pub cron: CronSettings,
     /// Настройки LLM-судьи рубрик (калибровка, ADR-004).
@@ -219,6 +222,27 @@ impl ModelConfig {
                 "переменная окружения {} не установлена (нужен API-ключ для {})",
                 self.api_key_env, self.base_url
             ))
+        })
+    }
+
+    /// Доступен ли API-ключ: env `api_key_env` непустая после `trim` ИЛИ файл
+    /// `api_key_file` (`~` раскрывается) читается и непуст. Семантика та же,
+    /// что у резолва ключа в провайдерах; содержимое ключа никуда не выводится.
+    /// Предполётная проверка агентного цикла (ADR-083 п.2) не должна ходить в
+    /// сеть — достаточно факта наличия ключа.
+    #[must_use]
+    pub fn api_key_available(&self) -> bool {
+        if std::env::var(&self.api_key_env).is_ok_and(|raw| !raw.trim().is_empty()) {
+            return true;
+        }
+        self.api_key_file.as_deref().is_some_and(|path| {
+            let expanded = match path.strip_prefix("~/") {
+                Some(rest) => {
+                    dirs::home_dir().map_or_else(|| PathBuf::from(path), |h| h.join(rest))
+                }
+                None => PathBuf::from(path),
+            };
+            std::fs::read_to_string(&expanded).is_ok_and(|raw| !raw.trim().is_empty())
         })
     }
 }
@@ -675,6 +699,12 @@ pub struct PluginsConfig {
     /// установленных плагинов — включайте только для доверенных библиотек.
     /// Дефолт `true` (как у `include_mcp`).
     pub include_hooks: bool,
+    /// Резервный встроенный набор скиллов восстановления (профиль `reverse`,
+    /// ADR-083 п.3): когда пользовательская библиотека пуста, `skill_search`/
+    /// `skill_load` подхватывают `reverse-discovery`/`recover-review` из ассетов
+    /// бинаря с предупреждением в журнал (не молчанием). Дефолт `false` —
+    /// обычный прогон видит только поставленную библиотеку.
+    pub reverse_fallback: bool,
 }
 
 impl Default for PluginsConfig {
@@ -685,6 +715,7 @@ impl Default for PluginsConfig {
             dirs: vec![Config::home_dir().join("plugins")],
             include_mcp: true,
             include_hooks: true,
+            reverse_fallback: false,
         }
     }
 }
@@ -750,6 +781,48 @@ impl BashConfig {
                 "[bash] sandbox: неизвестное значение \"{other}\" \
                  (допустимы: \"none\", \"bwrap\")"
             ))),
+        }
+    }
+}
+
+/// Периметр файловых инструментов (песочница путей, ADR-083 п.1).
+///
+/// Файловые инструменты (`read_file`/`write_file`/`edit_file`/`glob`/`grep`)
+/// не выходят за рабочую зону: рабочий каталог сессии ([`crate::tool::ToolContext::cwd`])
+/// плюс каталоги из `fs_allow`. Побег через `..`, абсолютный путь или symlink
+/// наружу — отказ (`is_error`) без исполнения. Это НЕ замена bash-песочнице
+/// (bwrap, ADR-038): та про дочерние процессы, эта — про путь, который
+/// инструмент открывает сам.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ToolsConfig {
+    /// Дополнительные каталоги вне `cwd`, куда файловым инструментам
+    /// разрешено (абсолютные пути; `~` раскрывается при загрузке). Дефолт —
+    /// `~/.arch-harness` (дом ассетов харнесса: скиллы, отчёты, сессии —
+    /// инструменты их читают из любой рабочей директории).
+    pub fs_allow: Vec<PathBuf>,
+    /// Песочница путей включена. `false` — аварийный откат к поведению до
+    /// ADR-083 (любой путь без проверки зоны): осознанный обход на случай,
+    /// если реальный прогон упрётся в ложное срабатывание. Дефолт `true`.
+    pub fs_sandbox: bool,
+    /// Каталог записи (профиль `reverse`, ADR-083 п.3): когда задан, пишущие
+    /// файловые инструменты (`write_file`/`edit_file`) могут писать только внутрь
+    /// `<cwd>/<fs_write_dir>` — исходники доступны на чтение, но не на правку.
+    /// `None` (дефолт) — запись в пределах общей зоны `read = write`. Путь
+    /// относительный — от рабочего каталога сессии.
+    pub fs_write_dir: Option<PathBuf>,
+}
+
+impl Default for ToolsConfig {
+    fn default() -> Self {
+        // Литерал `~/.arch-harness`, а не `Config::home_dir()`: `init`
+        // сериализует дефолт в файл, и пользователь должен увидеть ровно
+        // `~/.arch-harness` (портабельно, раскрывается `expand_tildes` при
+        // загрузке), а не абсолютный путь конкретной машины.
+        Self {
+            fs_allow: vec![PathBuf::from("~/.arch-harness")],
+            fs_sandbox: true,
+            fs_write_dir: None,
         }
     }
 }
@@ -1983,6 +2056,7 @@ impl Default for Config {
             policy: PolicyConfig::default(),
             hooks: HooksConfig::default(),
             bash: BashConfig::default(),
+            tools: ToolsConfig::default(),
             cron: CronSettings::default(),
             judge: JudgeConfig::default(),
             trust: TrustConfig::default(),
@@ -2017,33 +2091,130 @@ impl Config {
             .join("arch-harness")
     }
 
+    /// Предполёт агентного цикла: провайдер должен быть ЯВНО работоспособен
+    /// (усиление UX-6 0.4.9 до уровня запуска, ADR-083 п.2). Без настроенного
+    /// провайдера цикл не стартует молча с дефолтом `DeepSeek` — возвращается
+    /// отказ с перечнем вариантов конфигурации.
+    ///
+    /// «Работоспособен» = запись есть в `[models]` и либо `kind = "cli"`
+    /// (внешний CLI-харнесс, собственный ключ Spine не нужен), либо доступен
+    /// API-ключ ([`ModelConfig::api_key_available`]).
+    ///
+    /// # Errors
+    /// `[models]` пуст; модель `requested`/`default_model` не настроена; у
+    /// провайдера нет ни `kind = "cli"`, ни доступного API-ключа.
+    pub fn ensure_agent_provider(&self, requested: Option<&str>) -> Result<()> {
+        let name = requested.unwrap_or(&self.default_model);
+        if self.models.is_empty() {
+            return Err(HarnessError::Config(
+                "агентный цикл без провайдера: в [models] нет ни одной записи. \
+                 Варианты: 1) добавьте [models.<имя>] в config.toml \
+                 (см. README «API keys»); 2) задайте kind = \"cli\" — внешний \
+                 CLI-харнесс (Claude Code, Codex) как LLM, без API-ключа; \
+                 3) проверьте путь к конфигу (--config)."
+                    .into(),
+            ));
+        }
+        let Some(mc) = self.models.get(name) else {
+            let mut names: Vec<&str> = self.models.keys().map(String::as_str).collect();
+            names.sort_unstable();
+            return Err(HarnessError::Config(format!(
+                "агентный цикл: модель '{name}' не настроена в [models]. \
+                 Настроены: {}. Укажите --model <имя> или default_model в config.toml.",
+                names.join(", ")
+            )));
+        };
+        if mc.kind.as_deref() == Some("cli") || mc.api_key_available() {
+            return Ok(());
+        }
+        Err(HarnessError::Config(format!(
+            "агентный цикл: провайдер '{name}' не готов — нет API-ключа и kind ≠ \"cli\". \
+             Варианты: 1) задайте переменную окружения '{}' или положите ключ в файл '{}' \
+             (см. README «API keys»); 2) настройте kind = \"cli\" — внешний CLI-харнесс \
+             (Claude Code, Codex) как LLM, без API-ключа.",
+            mc.api_key_env,
+            mc.api_key_file.as_deref().unwrap_or("(не задан)")
+        )))
+    }
+
+    /// Включает профиль `reverse` (ADR-083 п.3) на этой конфигурации:
+    /// восстанавливающий прогон по чужому репозиторию — только чтение кода,
+    /// запись в выходной каталог, без веб-канала. Идемпотентно.
+    ///
+    /// Состав: `[web].enabled = false` (веб-инструменты исключаются из реестра
+    /// сессии на уровне регистрации, см. [`crate::tools::full_registry`]);
+    /// `[tools].fs_write_dir = out` (пишущие файловые инструменты — только
+    /// внутрь `out/`, чтение исходников остаётся); `[plugins].reverse_fallback`
+    /// (встроенный набор `reverse-discovery`/`recover-review` при пустой
+    /// библиотеке, с предупреждением в журнал).
+    pub fn apply_reverse_profile(&mut self) {
+        self.web.enabled = false;
+        self.tools.fs_write_dir = Some(PathBuf::from("out"));
+        self.plugins.reverse_fallback = true;
+    }
+
     /// Загружает конфиг: `--config` → `./arch-harness.toml` →
     /// `~/.config/arch-harness/config.toml` → дефолты.
     ///
+    /// Явный путь (`--config`) — **fail-closed** (ADR-083 п.2): если файл не
+    /// существует, не читается или не разбирается — ошибка с путём и
+    /// причиной, БЕЗ отката в дефолты. Иначе опечатка в `--config` молча
+    /// подменяла бы конфиг дефолтами. Неявная цепочка (`cli_path == None`)
+    /// сохраняет прежнее поведение: первый существующий файл, иначе дефолты.
+    ///
     /// # Errors
-    /// Ошибка чтения/разбора файла, если явный путь задан и недоступен.
+    /// `HarnessError::Config` с путём и причиной, если явный путь задан, но
+    /// недоступен/не разбирается/содержит невалидные значения.
     pub fn load(cli_path: Option<&Path>) -> Result<Self> {
-        let candidates: Vec<PathBuf> = match cli_path {
-            Some(p) => vec![p.to_path_buf()],
-            None => vec![
-                PathBuf::from("arch-harness.toml"),
-                Self::config_dir().join("config.toml"),
-            ],
-        };
-        for path in &candidates {
+        if let Some(p) = cli_path {
+            let text = std::fs::read_to_string(p).map_err(|e| {
+                HarnessError::Config(format!(
+                    "{}: не прочитать конфиг (--config): {e}",
+                    p.display()
+                ))
+            })?;
+            return Self::from_toml(p, &text);
+        }
+        Self::load_first_existing(vec![
+            PathBuf::from("arch-harness.toml"),
+            Self::config_dir().join("config.toml"),
+        ])
+    }
+
+    /// Неявная цепочка: первый существующий файл, иначе дефолты (расширенные
+    /// `~`). Отсутствие всех кандидатов — НЕ ошибка (обычный старт без
+    /// конфига); явный путь обрабатывается в [`Config::load`] отдельно.
+    fn load_first_existing(candidates: Vec<PathBuf>) -> Result<Self> {
+        for path in candidates {
             if path.is_file() {
-                let text = std::fs::read_to_string(path).map_err(|e| HarnessError::io(path, e))?;
-                let mut cfg: Config = toml::from_str(&text)?;
-                // Fail-fast валидация значений, которые serde не проверяет
-                // (поле-строка с ограниченным набором значений).
-                cfg.bash.sandbox_mode()?;
-                cfg.expand_tildes();
-                cfg.loaded_from = Some(path.clone());
-                return Ok(cfg);
+                let text =
+                    std::fs::read_to_string(&path).map_err(|e| HarnessError::io(&path, e))?;
+                return Self::from_toml(&path, &text);
             }
         }
         let mut cfg = Config::default();
         cfg.expand_tildes();
+        Ok(cfg)
+    }
+
+    /// Разбирает текст конфига из файла `path` с fail-fast валидацией полей,
+    /// которые serde не проверяет (например, `[bash] sandbox`). Ошибки несут
+    /// путь к файлу-виновнику.
+    fn from_toml(path: &Path, text: &str) -> Result<Self> {
+        let mut cfg: Config = toml::from_str(text).map_err(|e| {
+            HarnessError::Config(format!("{}: не разобрать конфиг: {e}", path.display()))
+        })?;
+        cfg.bash.sandbox_mode().map_err(|e| {
+            // Внутренняя ошибка уже помечена `config:`; не дублируем префикс,
+            // но добавляем путь к файлу-виновнику.
+            let msg = match e {
+                HarnessError::Config(m) => m,
+                other => other.to_string(),
+            };
+            HarnessError::Config(format!("{}: {msg}", path.display()))
+        })?;
+        cfg.expand_tildes();
+        cfg.loaded_from = Some(path.to_path_buf());
         Ok(cfg)
     }
 
@@ -2078,6 +2249,9 @@ impl Config {
         }
         expand(&mut self.mcp.servers_file);
         for d in &mut self.plugins.dirs {
+            expand(d);
+        }
+        for d in &mut self.tools.fs_allow {
             expand(d);
         }
         expand(&mut self.cron.file);
@@ -2210,6 +2384,30 @@ mod tests {
         let back: Config = toml::from_str(&text).expect("deserialize");
         assert_eq!(back.default_model, cfg.default_model);
         assert_eq!(back.models.len(), cfg.models.len());
+    }
+
+    /// Периметр файловых инструментов в дефолтах (ADR-083 п.1): песочница
+    /// включена, allowlist — литерал `~/.arch-harness` (init сериализует его
+    /// как есть; `expand_tildes` раскрывает при загрузке).
+    #[test]
+    fn tools_default_sandbox_and_allowlist() {
+        let cfg = Config::default();
+        assert!(cfg.tools.fs_sandbox, "песочница включена по умолчанию");
+        assert_eq!(cfg.tools.fs_allow, vec![PathBuf::from("~/.arch-harness")]);
+        // init-файл несёт литерал (портабельно), а не путь конкретной машины.
+        let text = toml::to_string_pretty(&cfg).expect("serialize");
+        assert!(text.contains("[tools]"), "{text}");
+        assert!(text.contains("~/.arch-harness"), "{text}");
+        // Загрузка раскрывает `~` в абсолютный путь (если дом известен).
+        let mut loaded = Config::default();
+        loaded.expand_tildes();
+        if dirs::home_dir().is_some() {
+            assert!(
+                loaded.tools.fs_allow[0].is_absolute(),
+                "expand_tildes раскрывает fs_allow: {:?}",
+                loaded.tools.fs_allow
+            );
+        }
     }
 
     #[test]
@@ -2460,6 +2658,165 @@ mod tests {
         std::fs::write(&path, "[bash]\nsandbox = \"nsjail\"\n").expect("write");
         let err = Config::load(Some(&path)).expect_err("загрузка должна упасть");
         assert!(err.to_string().contains("nsjail"), "{err}");
+        // Путь файла-виновника присутствует (ADR-083 п.2).
+        assert!(err.to_string().contains("config.toml"), "{err}");
+    }
+
+    /// ADR-083 п.2: явный `--config` — fail-closed. Отсутствие файла НЕ
+    /// откатывается в дефолты (опечатка в пути должна падать, а не молча
+    /// подменяться дефолтным конфигом).
+    #[test]
+    fn load_explicit_missing_path_is_fail_closed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("нет-такого-конфига.toml");
+        let err = Config::load(Some(&path)).expect_err("нет файла → ошибка, не дефолт");
+        let text = err.to_string();
+        assert!(
+            text.contains("нет-такого-конфига.toml"),
+            "путь в ошибке: {text}"
+        );
+        assert!(text.contains("--config"), "речь о явном пути: {text}");
+    }
+
+    /// Разбираемый, но битый TOML по явному пути — ошибка с путём (а не
+    /// «transparent»-ошибка serde без указания файла).
+    #[test]
+    fn load_explicit_broken_toml_names_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("битый.toml");
+        std::fs::write(&path, "default_model = \n").expect("write");
+        let err = Config::load(Some(&path)).expect_err("битый toml → ошибка");
+        assert!(err.to_string().contains("битый.toml"), "{err}");
+    }
+
+    /// Каталог вместо файла по явному пути — тоже fail-closed.
+    #[test]
+    fn load_explicit_directory_is_fail_closed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let err = Config::load(Some(dir.path())).expect_err("каталог не файл → ошибка");
+        assert!(err.to_string().contains("не прочитать"), "{err}");
+    }
+
+    /// Неявная цепочка без файлов-кандидатов → дефолты (не ошибка); прежнее
+    /// поведение обычного старта без конфига сохранено.
+    #[test]
+    fn load_implicit_chain_defaults_when_no_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg = Config::load_first_existing(vec![
+            dir.path().join("nope-1.toml"),
+            dir.path().join("nope-2.toml"),
+        ])
+        .expect("дефолты без файлов");
+        assert!(cfg.loaded_from.is_none(), "горячего источника нет");
+        assert!(cfg.tools.fs_sandbox, "дефолты на месте");
+    }
+
+    /// `api_key_available`: env-ветку не трогаем (`set_var` unsafe в 2024),
+    /// проверяем файловую ветку — непустой файл даёт `true`, пустой/пробельный
+    /// и несуществующий — `false`.
+    #[test]
+    fn api_key_available_uses_env_or_file() {
+        // Имя env уникально и не задаётся — ветка env гарантированно промах.
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        // Файла нет → ключа нет.
+        let mut mc = ModelConfig {
+            api_key_env: "ARCH_HARNESS_TEST_KEY_ABSENT_UNIQUE".into(),
+            api_key_file: Some(dir.path().join("нет-такого").display().to_string()),
+            ..Default::default()
+        };
+        assert!(!mc.api_key_available(), "отсутствующий файл → нет ключа");
+
+        // Пустой/пробельный файл → нет ключа (как и env после trim).
+        let blank = dir.path().join("blank");
+        std::fs::write(&blank, "   \n\t").expect("write");
+        mc.api_key_file = Some(blank.display().to_string());
+        assert!(!mc.api_key_available(), "пробельный файл → нет ключа");
+
+        // Непустой файл → ключ есть.
+        let key = dir.path().join("key");
+        std::fs::write(&key, "секрет\n").expect("write");
+        mc.api_key_file = Some(key.display().to_string());
+        assert!(mc.api_key_available(), "непустой файл → ключ есть");
+
+        // Файл не задан и env пуст → нет ключа.
+        mc.api_key_file = None;
+        assert!(!mc.api_key_available(), "ни env, ни файла → нет ключа");
+    }
+
+    /// ADR-083 п.2: предполёт провайдера агентного цикла — цикл не стартует
+    /// молча с дефолтом. `kind = "cli"` и доступный ключ проходят; иначе —
+    /// отказ с вариантами; пустой `[models]` и неизвестное имя — свои отказы.
+    #[test]
+    fn ensure_agent_provider_fail_closed_variants() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let mut cfg = Config::default();
+
+        // 1) kind="cli" — проходит без API-ключа (внешний CLI-харнесс).
+        cfg.models.insert(
+            "cli-модель".into(),
+            ModelConfig {
+                kind: Some("cli".into()),
+                ..Default::default()
+            },
+        );
+        cfg.ensure_agent_provider(Some("cli-модель"))
+            .expect("kind=cli без ключа ок");
+
+        // 2) ключ через api_key_file — проходит.
+        let key = dir.path().join("kimi.key");
+        std::fs::write(&key, "секрет\n").expect("write");
+        cfg.models.insert(
+            "с-ключом".into(),
+            ModelConfig {
+                api_key_env: "ARCH_HARNESS_TEST_KEY_FILE_UNIQUE".into(),
+                api_key_file: Some(key.display().to_string()),
+                ..Default::default()
+            },
+        );
+        cfg.ensure_agent_provider(Some("с-ключом"))
+            .expect("ключ из файла ок");
+
+        // 3) ни ключа, ни cli → отказ с перечнем вариантов.
+        cfg.models.insert(
+            "без-ключа".into(),
+            ModelConfig {
+                api_key_env: "ARCH_HARNESS_TEST_KEY_MISSING_UNIQUE".into(),
+                ..Default::default()
+            },
+        );
+        let err = cfg
+            .ensure_agent_provider(Some("без-ключа"))
+            .expect_err("без ключа → отказ");
+        let text = err.to_string();
+        assert!(text.contains("агентный цикл"), "{text}");
+        assert!(
+            text.contains("ARCH_HARNESS_TEST_KEY_MISSING_UNIQUE"),
+            "{text}"
+        );
+        assert!(
+            text.contains("kind = \"cli\""),
+            "вариант cli предложен: {text}"
+        );
+
+        // 4) неизвестная модель → перечень настроенных имён.
+        let err = cfg
+            .ensure_agent_provider(Some("нет-такой"))
+            .expect_err("нет модели → отказ");
+        let text = err.to_string();
+        assert!(text.contains("нет-такой"), "{text}");
+        assert!(text.contains("cli-модель"), "перечень настроенных: {text}");
+
+        // 5) пустой [models] → отказ с вариантами.
+        let empty = Config {
+            models: BTreeMap::new(),
+            ..Config::default()
+        };
+        let err = empty
+            .ensure_agent_provider(None)
+            .expect_err("нет моделей → отказ");
+        assert!(err.to_string().contains("[models]"), "{err}");
     }
 
     #[test]

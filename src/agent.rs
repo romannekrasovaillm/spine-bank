@@ -32,9 +32,13 @@ use crate::error::{HarnessError, Result};
 use crate::llm::{ChatMessage, ChatRequest, LlmEvent, LlmProvider, Role, Usage};
 use crate::tool::{ToolContext, ToolOutput, ToolRegistry};
 
+mod journal;
 mod network;
 pub mod prompts;
 pub mod slash;
+
+pub use journal::{SessionLogInfo, list_session_logs};
+use journal::{now_iso, open_journal, summarize};
 
 /// Таймаут интерактивного вопроса пользователю (`propose_options`): человеку
 /// на архитектурное решение нужно больше пяти минут — час, не 300 секунд.
@@ -216,6 +220,32 @@ impl AgentSession {
         session
     }
 
+    /// Honest-refusal (ADR-083 §5): провайдер `kind = "cli"` не умеет
+    /// tool-calls (контракт [`crate::llm::harness_cli`] — ответ всегда без
+    /// вызовов), поэтому агентный цикл с инструментами на нём ломался бы на
+    /// полпути. Вместо этого — честный отказ ДО первого запроса к модели.
+    /// CLI-транспорт без инструментов (`tools` пуст) работает штатно, поэтому
+    /// отказ возникает лишь когда инструменты действительно нужны.
+    ///
+    /// # Errors
+    /// Провайдер сессии — `kind = "cli"`, а реестр инструментов непуст.
+    fn ensure_tool_capable(&self) -> Result<()> {
+        let is_cli = self
+            .config
+            .models
+            .get(self.provider.name())
+            .is_some_and(|mc| mc.kind.as_deref() == Some("cli"));
+        if is_cli && !self.tools.specs().is_empty() {
+            return Err(HarnessError::Agent(format!(
+                "провайдер '{}' (kind=cli) не поддерживает tool-calls: агентный цикл с \
+                 инструментами недоступен — выберите API-провайдера или запустите задачу \
+                 без инструментов",
+                self.provider.name()
+            )));
+        }
+        Ok(())
+    }
+
     /// Полный ход: пользовательский ввод → ответ ассистента (с инструментами).
     /// `events` — опциональный канал стриминга (None — тихий режим).
     /// При исчерпании лимита итераций ход не падает: добирается финальный
@@ -229,6 +259,9 @@ impl AgentSession {
         input: &str,
         events: Option<mpsc::Sender<AgentEvent>>,
     ) -> Result<String> {
+        // Fail-closed до любого побочного эффекта: kind=cli + инструменты —
+        // честный отказ (ADR-083 §5), а не поломка на середине цикла.
+        self.ensure_tool_capable()?;
         // UserPromptSubmit: exit 2 хука отклоняет промпт целиком.
         let prompt_ctx = serde_json::json!({
             "prompt": input.chars().take(2000).collect::<String>(),
@@ -503,6 +536,20 @@ impl AgentSession {
                 // случай подписи порождает урок по режиму конфига.
                 if out.is_error {
                     self.note_tool_failure(&call.name, &redacted, &events);
+                }
+                // Аудит периметра файловых инструментов (ADR-083 п.1): отказ
+                // «вне рабочей зоны» пишется отдельным событием журнала сессии
+                // — видно, что модель пыталась выйти за cwd, каким инструментом
+                // и куда (без содержимого аргументов; секреты уже вычищены).
+                if crate::tool::is_fs_zone_denial(&out) {
+                    self.log_event(
+                        "event",
+                        serde_json::json!({
+                            "event": "fs_zone_denied",
+                            "tool": call.name,
+                            "reason": redacted.chars().take(300).collect::<String>(),
+                        }),
+                    );
                 }
                 // Аудит интерактивных выборов: метрика «approval theater»
                 // (обзоры _24_августа: >90–95% авто-согласий = театр) в arch-be metrics.
@@ -1358,71 +1405,6 @@ impl Drop for AgentSession {
     }
 }
 
-/// Открывает append-only журнал `session-<yyyymmdd-hhmmss>-<pid>[-n].jsonl` в
-/// `dir`. Суффикс pid защищает от коллизии двух процессов, а счётчик `-n` —
-/// от повторного открытия в ту же секунду внутри одного процесса
-/// (`/new` ротирует журнал): журналы сессий никогда не перемешиваются.
-/// Новый файл начинается с «#»-шапки — ASCII-логотип `ArchSpine`
-/// (banking edition) и версия; читатели JSONL «#»-строки пропускают.
-fn open_journal(dir: &Path) -> Result<(PathBuf, std::fs::File)> {
-    std::fs::create_dir_all(dir).map_err(|e| HarnessError::io(dir, e))?;
-    let base = format!(
-        "session-{}-{}",
-        chrono::Local::now().format("%Y%m%d-%H%M%S"),
-        std::process::id()
-    );
-    for seq in 0..100u32 {
-        let name = if seq == 0 {
-            format!("{base}.jsonl")
-        } else {
-            format!("{base}-{seq}.jsonl")
-        };
-        let path = dir.join(&name);
-        match std::fs::OpenOptions::new()
-            .create_new(true)
-            .append(true)
-            .open(&path)
-        {
-            Ok(mut file) => {
-                // Шапка с ASCII-логотипом ArchSpine: «#»-строки в начале
-                // файла — логотип виден первой строкой лога, а читатели
-                // JSONL такие строки пропускают. Best effort: журнал
-                // валиден и без шапки, поэтому ошибка записи — только
-                // предупреждение.
-                let mut header = String::new();
-                for line in crate::assets::BANNER.lines() {
-                    let _ = writeln!(header, "# {line}");
-                }
-                let _ = writeln!(
-                    header,
-                    "# ArchSpine (banking edition) v{} · журнал сессии (append-only JSONL)",
-                    env!("CARGO_PKG_VERSION")
-                );
-                if let Err(e) = std::io::Write::write_all(&mut file, header.as_bytes())
-                    .and_then(|()| std::io::Write::flush(&mut file))
-                {
-                    tracing::warn!("шапка журнала не записана: {e}");
-                }
-                return Ok((path, file));
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(e) => return Err(HarnessError::io(&path, e)),
-        }
-    }
-    Err(HarnessError::io(
-        dir,
-        std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            "слишком много журналов за одну секунду",
-        ),
-    ))
-}
-
-/// Текущее время в ISO 8601 с миллисекундами (для журнала).
-fn now_iso() -> String {
-    chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
-}
-
 /// Гонка «работа против токена отмены»: `None` — отмена победила и работа
 /// дропнута (HTTP-запрос оборвётся; ребёнок `harness_run` убит через
 /// `kill_on_drop`). Без токена (CLI, субагенты) — просто `.await`.
@@ -1479,82 +1461,6 @@ fn broken_arguments_verdict(reply: &ChatMessage, call: &crate::llm::ToolCall) ->
          собери файл по шагам и продолжай.",
         call.name
     ))
-}
-
-/// Краткий итог вывода инструмента: первая строка, не более 120 символов.
-fn summarize(content: &str) -> String {
-    let first = content.lines().next().unwrap_or("").trim();
-    let mut out: String = first.chars().take(120).collect();
-    if out.len() < first.len() {
-        out.push('…');
-    }
-    out
-}
-
-/// Сводка о журнале сессии (для `/sessions`).
-#[derive(Debug, Clone)]
-pub struct SessionLogInfo {
-    /// Путь к JSONL-журналу.
-    pub path: PathBuf,
-    /// Время модификации (строка для показа).
-    pub modified: String,
-    /// Первая пользовательская реплика (превью).
-    pub first_user_line: String,
-    /// Число сообщений user/assistant в журнале.
-    pub messages: usize,
-}
-
-/// Список журналов сессий каталога (новые первыми).
-#[must_use]
-pub fn list_session_logs(dir: &Path) -> Vec<SessionLogInfo> {
-    let mut out = Vec::new();
-    let Ok(rd) = std::fs::read_dir(dir) else {
-        return out;
-    };
-    for entry in rd.flatten() {
-        let path = entry.path();
-        let is_log = path.file_name().is_some_and(|n| {
-            let n = n.to_string_lossy();
-            n.starts_with("session-") && n.ends_with(".jsonl")
-        });
-        if !is_log {
-            continue;
-        }
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        let mut first_user_line = String::new();
-        let mut messages = 0usize;
-        for line in text.lines() {
-            let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
-                continue;
-            };
-            let kind = v.get("kind").and_then(|k| k.as_str()).unwrap_or("");
-            if matches!(kind, "user" | "assistant") {
-                messages += 1;
-                if kind == "user" && first_user_line.is_empty() {
-                    let content = v.get("content").and_then(|c| c.as_str()).unwrap_or("");
-                    first_user_line = summarize(content);
-                }
-            }
-        }
-        let modified = entry
-            .metadata()
-            .and_then(|m| m.modified())
-            .map(|t| {
-                let dt: chrono::DateTime<chrono::Local> = t.into();
-                dt.format("%Y-%m-%d %H:%M:%S").to_string()
-            })
-            .unwrap_or_default();
-        out.push(SessionLogInfo {
-            path,
-            modified,
-            first_user_line,
-            messages,
-        });
-    }
-    out.sort_by(|a, b| b.modified.cmp(&a.modified));
-    out
 }
 
 #[cfg(test)]
@@ -1745,6 +1651,53 @@ mod tests {
         assert_eq!(s.messages()[2].tool_call_id.as_deref(), Some("call-1"));
         assert!(s.messages()[2].content.contains("echo: привет"));
         assert_eq!(s.model_name(), "fake-1");
+    }
+
+    /// ADR-083 §5: провайдер `kind = "cli"` в агентном цикле с инструментами —
+    /// честный отказ ДО первого запроса к модели (не поломка на полпути).
+    #[tokio::test]
+    async fn cli_provider_with_tools_is_refused_before_any_call() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut s = make_session(tmp.path(), Arc::new(FakeLlm::new()), |cfg| {
+            cfg.models.insert(
+                "fake".into(),
+                crate::config::ModelConfig {
+                    kind: Some("cli".into()),
+                    ..Default::default()
+                },
+            );
+        });
+        let err = s.send("задача", None).await.expect_err("честный отказ");
+        assert!(err.to_string().contains("kind=cli"), "err: {err}");
+        assert!(err.to_string().contains("tool-calls"), "err: {err}");
+        // Отказ случился до побочных эффектов — история не тронута.
+        assert!(s.messages().is_empty(), "отказ не пишет в историю");
+    }
+
+    /// Провайдер `kind = "cli"` без инструментов — штатный режим, не отказ:
+    /// guard срабатывает лишь когда tool-calls действительно нужны.
+    #[tokio::test]
+    async fn cli_provider_without_tools_is_allowed() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut s = make_session_with_tools(
+            tmp.path(),
+            Arc::new(LoopThenAnswerLlm),
+            ToolRegistry::new(),
+            |cfg| {
+                cfg.models.insert(
+                    "loop-answer".into(),
+                    crate::config::ModelConfig {
+                        kind: Some("cli".into()),
+                        ..Default::default()
+                    },
+                );
+            },
+        );
+        let reply = s
+            .send("просто вопрос", None)
+            .await
+            .expect("без инструментов — ок");
+        assert_eq!(reply, "финал по собранному");
     }
 
     /// Провайдер, зовущий «вечный» инструмент `pend` (тест отмены во время

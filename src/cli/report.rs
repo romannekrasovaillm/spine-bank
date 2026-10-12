@@ -8,12 +8,11 @@
 //! выдача блокируется — находки печатаются в stderr, exit 1. Байпас-флага нет.
 //! Формат `check` — только автопроверка без рендера отчёта.
 
-use std::fmt::Write as _;
 use std::path::Path;
 
 use anyhow::{Context, Result};
 
-use arch_harness::report::{ReportModel, build, render_json, render_md};
+use arch_harness::report::{build, render_check, render_json, render_md};
 
 /// Прогон `report`: отчёт о восстановленной архитектуре в формате md | json | check.
 pub(crate) fn cmd_report(
@@ -55,25 +54,4 @@ pub(crate) fn cmd_report(
         None => print!("{rendered}"),
     }
     Ok(())
-}
-
-/// Текстовый отчёт автопроверки: сводка + построчный список находок.
-fn render_check(model: &ReportModel) -> String {
-    let mut out = String::new();
-    let _ = writeln!(
-        out,
-        "report/check: {} error, {} warn (schema {})",
-        model.error_count(),
-        model.warn_count(),
-        model.schema
-    );
-    for c in &model.checks {
-        let sev = match c.severity {
-            arch_harness::report::CheckSeverity::Error => "error",
-            arch_harness::report::CheckSeverity::Warn => "warn",
-        };
-        let who = c.element_id.as_deref().unwrap_or("-");
-        let _ = writeln!(out, "[{sev}] {}/{}: {}", c.invariant, who, c.message);
-    }
-    out
 }

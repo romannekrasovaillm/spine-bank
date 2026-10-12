@@ -194,6 +194,7 @@ pub const BRIDGE_READ_ONLY: &[&str] = &[
     "openspec_coverage",
     "plugin_list",
     "recover",
+    "report",
     "rubric_accept",
     "rubric_handover",
     "rubric_list",
