@@ -5014,6 +5014,84 @@ fn openspec_gate_change_red_then_green() {
         .stderr(contains("change-id"));
 }
 
+/// Дефект 4 (0.4.7): `openspec gate` не привязывает позиционные `<repo>` и
+/// `<change-id>` к флагам — перепутанный порядок молча уходил в гейт с
+/// идентификатором-путём (ложный PASS). Слои: (1) id, похожий на путь, →
+/// ошибка «перепутаны»; (2) несуществующий root → понятная ошибка;
+/// (3) несуществующий change — не PASS (exit ≠ 0), а не зелёный вердикт.
+#[test]
+fn openspec_gate_rejects_swapped_positional_args() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let home = tmp.path();
+    let repo = home.join("repo");
+    let write = |rel: &str, text: &str| {
+        let p = repo.join(rel);
+        std::fs::create_dir_all(p.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&p, text).expect("write");
+    };
+    write(
+        "CONSTRAINTS.yaml",
+        "rules:\n  - name: spine_present\n    type: file_exists\n    path: \"ARCHITECTURE-SPINE.md\"\n    severity: error\n",
+    );
+    write("ARCHITECTURE-SPINE.md", "# Spine\n");
+    write("src/lib.rs", "pub fn charge() -> u64 { 1 }\n");
+    write(
+        "openspec/changes/add-limits/specs/payments/spec.md",
+        "## ADDED Requirements\n\n### Requirement: Лимиты\nПовторный вызов MUST NOT менять лимит.\n",
+    );
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .expect("git");
+        assert!(out.status.success(), "git {args:?}");
+    };
+    git(&["init", "-q"]);
+    git(&["add", "."]);
+    git(&["commit", "-q", "-m", "init"]);
+
+    // (1a) --archive с перепутанным порядком: root=<change-id>, change_id=<repo>.
+    arch_cmd(home)
+        .args(["openspec", "gate", "--archive", "add-limits"])
+        .arg(repo.as_os_str())
+        .assert()
+        .failure()
+        .stderr(contains("перепутаны"));
+
+    // (1b) --change, где значением флага стал путь репозитория вместо id.
+    arch_cmd(home)
+        .args(["openspec", "gate", "--change"])
+        .arg(repo.as_os_str())
+        .arg("add-limits")
+        .assert()
+        .failure()
+        .stderr(contains("перепутаны"));
+
+    // (2) root не существует (id валиден) — понятная ошибка, не дальнее падение.
+    arch_cmd(home)
+        .args(["openspec", "gate", "--archive"])
+        .arg(home.join("no-such-repo"))
+        .arg("add-limits")
+        .assert()
+        .failure()
+        .stderr(contains("не найден"));
+
+    // (3) несуществующий change при верном порядке — не PASS, а exit ≠ 0.
+    arch_cmd(home)
+        .args(["openspec", "gate", "--archive"])
+        .arg(repo.as_os_str())
+        .arg("no-such-change")
+        .assert()
+        .failure()
+        .stderr(contains("не найден"));
+}
+
 /// B1 (волна 0.4.0): регрессия обхода корня. `WalkDir::new(".")` отдаёт
 /// корневой entry с `file_name() == "."`; фильтр dot-каталогов срезал весь
 /// обход, и `survey .` показывал пустую карту — при абсолютном пути всё
