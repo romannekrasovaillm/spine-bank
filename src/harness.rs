@@ -1585,7 +1585,11 @@ impl Tool for HarnessRunTool {
                 контракту arch-be/gate-verdict/v1. Вердикт идёт ПЕРВОЙ строкой результата и \
                 пишется событием gate_verdict в журнал сессии; FAIL/INCOMPLETE/TIMEOUT делают \
                 прогон ошибкой, а каждый FAIL-код становится уроком реестра (источник gate; \
-                ADR-085, включено при [lessons] enabled = true). Пустая строка выключает приёмку."
+                ADR-085, включено при [lessons] enabled = true). Пустая строка выключает приёмку. \
+                АВТОПАКЕТ (L5): при отсутствии .arch-handoff/ или пакете старше HEAD харнесс \
+                сам собирает лёгкий пакет (TASK.md с секцией «Правила репозитория (выучено)» + \
+                приёмка accept_cmd + JSON-контракт, LESSONS.md, CONSTRAINTS.yaml); явный \
+                handoff_create приоритетнее."
                 .into(),
             parameters: json!({
                 "type": "object",
@@ -1615,6 +1619,10 @@ impl Tool for HarnessRunTool {
                     "background": {
                         "type": "boolean",
                         "description": "true — прогон в фоне (немедленный возврат, задача hr-* в реестре фоновых задач; результат забирается через subagent_result). false/отсутствует — синхронно: ход агента ждёт завершения прогона"
+                    },
+                    "share": {
+                        "type": "boolean",
+                        "description": "true — разрешить запись уроков уровня user/org в пакет .arch-handoff/ (LESSONS.md и чек-лист TASK.md). Без флага в репозиторий пишутся только уроки области репозитория (ADR-085, риск утечки личного знания)"
                     }
                 },
                 "required": ["harness", "path"]
@@ -1710,6 +1718,42 @@ impl Tool for HarnessRunTool {
             hcfg.accept_cmd = Some(command.to_string());
         }
         let mut note = gate_note;
+        // L5 (ADR-085, B4): автопакет handoff — лёгкий пакет собирается, когда
+        // явного handoff_create нет или пакет старше HEAD. Приёмка — из
+        // финализированной копии адаптера (аргумент `accept` уже применён);
+        // сбой сборки прогон не роняет (задача уже сформирована).
+        let accept_cmd = resolve_accept(&hcfg, &repo);
+        let share = args.get("share").and_then(Value::as_bool).unwrap_or(false);
+        let pack_state = crate::handoff::auto::state(&repo);
+        if pack_state.needs_build() {
+            match crate::handoff::auto::build(
+                &repo,
+                &task,
+                &run_task.matched,
+                accept_cmd.as_deref(),
+                share,
+            ) {
+                Ok(packet) => {
+                    let _ = writeln!(
+                        note,
+                        "Автопакет handoff (L5, ADR-085): {} — собран {}; уроков в LESSONS.md: {}{}; приёмка: {}.",
+                        pack_state.label(),
+                        packet.dir.display(),
+                        packet.lessons,
+                        if packet.shared_excluded > 0 {
+                            format!(
+                                " (отсечено user/org без --share: {})",
+                                packet.shared_excluded
+                            )
+                        } else {
+                            String::new()
+                        },
+                        accept_cmd.as_deref().unwrap_or("выключена"),
+                    );
+                }
+                Err(e) => tracing::warn!("автопакет handoff {}: {e}", repo.display()),
+            }
+        }
         if let Some(t) = args.get("timeout_secs").and_then(Value::as_u64) {
             if t < MIN_HARNESS_TIMEOUT_SECS {
                 let _ = writeln!(
@@ -1798,14 +1842,17 @@ async fn execute_run(
                     .with_task(key.as_deref());
                 crate::gate_loop::close_loop(cfg, repo, verdict, &reference, matched);
             }
-            let mut content = note;
+            let mut content = String::new();
             // Вердикт приёмки — ПЕРВОЙ строкой результата (ADR-086 п.4):
             // «код 0 у исполнителя» и вердикт гейта — разные вещи, и именно
-            // вердикт решает, принят ли результат.
+            // вердикт решает, принят ли результат. Заметки прогона (изоляция,
+            // автопакет L5, блок уроков) идут ПОСЛЕ вердикта — иначе вердикт
+            // перестал бы быть первой строкой.
             if let Some(verdict) = &run.accept {
                 content.push_str(&verdict.first_line());
                 content.push('\n');
             }
+            content.push_str(&note);
             match &run.termination {
                 Termination::Completed => {
                     let _ = write!(
