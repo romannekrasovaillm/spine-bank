@@ -212,8 +212,11 @@ fn default_system_prompt(cfg: &Config) -> String {
     let memory = arch_harness::memory::load(&cfg.paths.memory_file)
         .ok()
         .flatten();
-    let with_memory =
-        arch_harness::memory::augment_system_prompt(&base, memory.as_deref(), &cfg.paths.memory_file);
+    let with_memory = arch_harness::memory::augment_system_prompt(
+        &base,
+        memory.as_deref(),
+        &cfg.paths.memory_file,
+    );
     // Уроки прошлых сбоев — в системный промпт (живёт вне истории, L1/L3
     // компактификация его не сжимает).
     arch_harness::failure_memory::augment_prompt_with_lessons(&with_memory, &cfg.paths.state_dir)

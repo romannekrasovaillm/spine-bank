@@ -1956,7 +1956,10 @@ fn conventions_registry_caps_to_keep_last_entries() {
     }
     let conv = std::fs::read_to_string(conventions_path(repo)).expect("реестр");
     let entries = conv.matches("\n- ").count() + usize::from(conv.starts_with("- "));
-    assert_eq!(entries, CONVENTIONS_KEEP, "реестр урезан до KEEP: {entries}");
+    assert_eq!(
+        entries, CONVENTIONS_KEEP,
+        "реестр урезан до KEEP: {entries}"
+    );
     assert!(conv.contains("причина номер 55"), "свежая запись: {conv}");
     // Записи 1..=5 сжаты (сравнение с переводом строки — «номер 2» является
     // префиксом «номер 21», без границы ассерт ловил бы фантома).
@@ -1973,8 +1976,14 @@ fn inject_conventions_appends_registry_to_task() {
     record_convention(repo, "G6: строка в docs/CATALOG.md обязательна");
     let out = inject_conventions(repo, "ЗАДАЧА".into(), &cfg);
     assert!(out.starts_with("ЗАДАЧА"), "задание первым: {out}");
-    assert!(out.contains("G6: строка в docs/CATALOG.md обязательна"), "реестр: {out}");
-    assert!(out.contains("Конвенции репозитория"), "маркер секции: {out}");
+    assert!(
+        out.contains("G6: строка в docs/CATALOG.md обязательна"),
+        "реестр: {out}"
+    );
+    assert!(
+        out.contains("Конвенции репозитория"),
+        "маркер секции: {out}"
+    );
     // conventions = false — байт-точное задание (эталонные прогоны).
     let off = CodingHarnessConfig {
         conventions: false,
@@ -1988,8 +1997,16 @@ async fn accept_fail_makes_tool_output_error() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let cfg = cfg_with_accept("echo 'G6: нет строки в CATALOG'; exit 1");
     let out = execute_run("test-cat", &cfg, tmp.path(), "задача", String::new()).await;
-    assert!(out.is_error, "красная приёмка = красный прогон: {}", out.content);
-    assert!(out.content.contains("Приёмка: FAIL"), "первая строка: {}", &out.content[..400]);
+    assert!(
+        out.is_error,
+        "красная приёмка = красный прогон: {}",
+        out.content
+    );
+    assert!(
+        out.content.contains("Приёмка: FAIL"),
+        "первая строка: {}",
+        &out.content[..400]
+    );
     // и PASS — не ошибка
     let ok = cfg_with_accept("true");
     let out2 = execute_run("test-cat", &ok, tmp.path(), "задача", String::new()).await;

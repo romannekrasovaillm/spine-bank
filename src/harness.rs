@@ -1143,7 +1143,10 @@ fn record_convention_impl(repo: &Path, entry: &str) -> Result<()> {
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
     // Дедупликация по тексту без даты: та же причина FAIL не плодит записи.
     let key = entry.trim();
-    if existing.lines().any(|l| l.ends_with(key) && l.starts_with("- ")) {
+    if existing
+        .lines()
+        .any(|l| l.ends_with(key) && l.starts_with("- "))
+    {
         return Ok(());
     }
     let mut lines: Vec<&str> = existing.lines().collect();
@@ -1174,10 +1177,7 @@ fn record_convention_impl(repo: &Path, entry: &str) -> Result<()> {
 /// или он пуст.
 fn conventions_for_task(repo: &Path) -> Option<String> {
     let text = std::fs::read_to_string(conventions_path(repo)).ok()?;
-    let entries: Vec<&str> = text
-        .lines()
-        .filter(|l| l.starts_with("- "))
-        .collect();
+    let entries: Vec<&str> = text.lines().filter(|l| l.starts_with("- ")).collect();
     if entries.is_empty() {
         return None;
     }

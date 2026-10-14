@@ -382,8 +382,11 @@ impl AgentSession {
                                     .await
                             }
                             _ => {
-                                race_cancel(self.cancel.clone(), self.complete_capture_usage(request))
-                                    .await
+                                race_cancel(
+                                    self.cancel.clone(),
+                                    self.complete_capture_usage(request),
+                                )
+                                .await
                             }
                         };
                         let Some(retried) = retry else {

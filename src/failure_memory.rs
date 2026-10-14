@@ -552,18 +552,27 @@ mod tests {
         let path = tmp.path().join("failure_lessons.md");
         let mut body = String::new();
         for i in 1..=5 {
-            body.push_str(&format!("## 2026-10-1{i} · `tool{i}` · класс{i}\n\n- детали {i}\n\n"));
+            body.push_str(&format!(
+                "## 2026-10-1{i} · `tool{i}` · класс{i}\n\n- детали {i}\n\n"
+            ));
         }
         std::fs::write(&path, &body).expect("write");
         // Бюджет на две последние записи (запись ≈ 53 байта + 5 служебных;
         // кириллица считается байтами — 130 вмещает ровно две).
         let section = lessons_prompt_section(&path, 130).expect("секция");
-        assert!(section.starts_with("# Уроки прошлых сбоев"), "шапка: {section}");
+        assert!(
+            section.starts_with("# Уроки прошлых сбоев"),
+            "шапка: {section}"
+        );
         assert!(section.contains("tool5"), "свежая запись: {section}");
         assert!(section.contains("tool4"), "вторая свежая: {section}");
         assert!(!section.contains("tool3"), "старая не влезла: {section}");
         // Границы записей целы: каждая «## » начинает запись.
-        assert_eq!(section.matches("## 2026").count(), 2, "две записи: {section}");
+        assert_eq!(
+            section.matches("## 2026").count(),
+            2,
+            "две записи: {section}"
+        );
     }
 
     #[test]
@@ -572,7 +581,10 @@ mod tests {
         let path = tmp.path().join("failure_lessons.md");
         std::fs::write(&path, "## урок\n\n- длинные детали, превышающие бюджет\n").expect("write");
         let section = lessons_prompt_section(&path, 10).expect("хотя бы одна запись");
-        assert!(section.contains("## урок"), "единственная запись видна: {section}");
+        assert!(
+            section.contains("## урок"),
+            "единственная запись видна: {section}"
+        );
     }
 
     #[test]
@@ -583,7 +595,10 @@ mod tests {
         assert_eq!(augment_prompt_with_lessons("БАЗА", state), "БАЗА");
         append_lesson(&state.join(LESSONS_FILE), "## урок · `bash` · io\n").expect("append");
         let out = augment_prompt_with_lessons("БАЗА", state);
-        assert!(out.starts_with("БАЗА\n\n# Уроки прошлых сбоев"), "секция: {out}");
+        assert!(
+            out.starts_with("БАЗА\n\n# Уроки прошлых сбоев"),
+            "секция: {out}"
+        );
         assert!(out.contains("## урок · `bash` · io"), "запись: {out}");
     }
 
