@@ -1,0 +1,1018 @@
+{
+ "C1": {
+  "arm": "C",
+  "rows": [
+   {
+    "task": "T1",
+    "attempted": true,
+    "first_codes": [
+     "G5",
+     "G6"
+    ],
+    "first_pass": false,
+    "first_hidden_fail": true,
+    "final_pass": false,
+    "gate_calls": 5,
+    "dispatches": 1,
+    "first_prompt_has_conventions": null
+   },
+   {
+    "task": "T2",
+    "attempted": true,
+    "first_codes": [
+     "G5",
+     "G6"
+    ],
+    "first_pass": false,
+    "first_hidden_fail": true,
+    "final_pass": false,
+    "gate_calls": 4,
+    "dispatches": 1,
+    "first_prompt_has_conventions": null
+   },
+   {
+    "task": "T3",
+    "attempted": true,
+    "first_codes": [
+     "G5",
+     "G6"
+    ],
+    "first_pass": false,
+    "first_hidden_fail": true,
+    "final_pass": false,
+    "gate_calls": 3,
+    "dispatches": 1,
+    "first_prompt_has_conventions": null
+   },
+   {
+    "task": "T4",
+    "attempted": true,
+    "first_codes": [
+     "G3",
+     "G5",
+     "G6"
+    ],
+    "first_pass": false,
+    "first_hidden_fail": true,
+    "final_pass": false,
+    "gate_calls": 2,
+    "dispatches": 1,
+    "first_prompt_has_conventions": null
+   },
+   {
+    "task": "T5",
+    "attempted": true,
+    "first_codes": [
+     "G5",
+     "G6"
+    ],
+    "first_pass": false,
+    "first_hidden_fail": true,
+    "final_pass": false,
+    "gate_calls": 1,
+    "dispatches": 1,
+    "first_prompt_has_conventions": null
+   }
+  ]
+ },
+ "C2": {
+  "arm": "C",
+  "rows": [
+   {
+    "task": "T1",
+    "attempted": true,
+    "first_codes": [
+     "G5",
+     "G6"
+    ],
+    "first_pass": false,
+    "first_hidden_fail": true,
+    "final_pass": false,
+    "gate_calls": 5,
+    "dispatches": 1,
+    "first_prompt_has_conventions": null
+   },
+   {
+    "task": "T2",
+    "attempted": true,
+    "first_codes": [
+     "G5",
+     "G6"
+    ],
+    "first_pass": false,
+    "first_hidden_fail": true,
+    "final_pass": false,
+    "gate_calls": 4,
+    "dispatches": 1,
+    "first_prompt_has_conventions": null
+   },
+   {
+    "task": "T3",
+    "attempted": true,
+    "first_codes": [
+     "G5",
+     "G6"
+    ],
+    "first_pass": false,
+    "first_hidden_fail": true,
+    "final_pass": false,
+    "gate_calls": 3,
+    "dispatches": 1,
+    "first_prompt_has_conventions": null
+   },
+   {
+    "task": "T4",
+    "attempted": true,
+    "first_codes": [
+     "G3",
+     "G5",
+     "G6"
+    ],
+    "first_pass": false,
+    "first_hidden_fail": true,
+    "final_pass": false,
+    "gate_calls": 2,
+    "dispatches": 1,
+    "first_prompt_has_conventions": null
+   },
+   {
+    "task": "T5",
+    "attempted": true,
+    "first_codes": [
+     "G5",
+     "G6"
+    ],
+    "first_pass": false,
+    "first_hidden_fail": true,
+    "final_pass": false,
+    "gate_calls": 1,
+    "dispatches": 1,
+    "first_prompt_has_conventions": null
+   }
+  ]
+ },
+ "F1": {
+  "arm": "F",
+  "rows": [
+   {
+    "task": "T1",
+    "attempted": true,
+    "first_codes": [
+     "G5",
+     "G6"
+    ],
+    "first_pass": false,
+    "first_hidden_fail": true,
+    "final_pass": true,
+    "gate_calls": 8,
+    "dispatches": 2,
+    "first_prompt_has_conventions": false
+   },
+   {
+    "task": "T2",
+    "attempted": true,
+    "first_codes": [],
+    "first_pass": true,
+    "first_hidden_fail": false,
+    "final_pass": true,
+    "gate_calls": 5,
+    "dispatches": 1,
+    "first_prompt_has_conventions": true
+   },
+   {
+    "task": "T3",
+    "attempted": true,
+    "first_codes": [],
+    "first_pass": true,
+    "first_hidden_fail": false,
+    "final_pass": true,
+    "gate_calls": 4,
+    "dispatches": 1,
+    "first_prompt_has_conventions": true
+   },
+   {
+    "task": "T4",
+    "attempted": true,
+    "first_codes": [],
+    "first_pass": true,
+    "first_hidden_fail": false,
+    "final_pass": true,
+    "gate_calls": 3,
+    "dispatches": 1,
+    "first_prompt_has_conventions": false
+   },
+   {
+    "task": "T5",
+    "attempted": true,
+    "first_codes": [],
+    "first_pass": true,
+    "first_hidden_fail": false,
+    "final_pass": true,
+    "gate_calls": 2,
+    "dispatches": 1,
+    "first_prompt_has_conventions": true
+   }
+  ]
+ },
+ "F2": {
+  "arm": "F",
+  "rows": [
+   {
+    "task": "T1",
+    "attempted": true,
+    "first_codes": [
+     "G5",
+     "G6"
+    ],
+    "first_pass": false,
+    "first_hidden_fail": true,
+    "final_pass": true,
+    "gate_calls": 8,
+    "dispatches": 3,
+    "first_prompt_has_conventions": false
+   },
+   {
+    "task": "T2",
+    "attempted": true,
+    "first_codes": [],
+    "first_pass": true,
+    "first_hidden_fail": false,
+    "final_pass": true,
+    "gate_calls": 4,
+    "dispatches": 1,
+    "first_prompt_has_conventions": true
+   },
+   {
+    "task": "T3",
+    "attempted": true,
+    "first_codes": [],
+    "first_pass": true,
+    "first_hidden_fail": false,
+    "final_pass": true,
+    "gate_calls": 3,
+    "dispatches": 1,
+    "first_prompt_has_conventions": true
+   },
+   {
+    "task": "T4",
+    "attempted": true,
+    "first_codes": [],
+    "first_pass": true,
+    "first_hidden_fail": false,
+    "final_pass": true,
+    "gate_calls": 2,
+    "dispatches": 1,
+    "first_prompt_has_conventions": false
+   },
+   {
+    "task": "T5",
+    "attempted": true,
+    "first_codes": [],
+    "first_pass": true,
+    "first_hidden_fail": false,
+    "final_pass": true,
+    "gate_calls": 1,
+    "dispatches": 1,
+    "first_prompt_has_conventions": true
+   }
+  ]
+ },
+ "FI1": {
+  "arm": "FI",
+  "rows": [
+   {
+    "task": "T1",
+    "attempted": true,
+    "first_codes": [
+     "G4",
+     "G5",
+     "G6"
+    ],
+    "first_pass": false,
+    "first_hidden_fail": true,
+    "final_pass": true,
+    "gate_calls": 2,
+    "dispatches": 3,
+    "first_prompt_has_conventions": false
+   },
+   {
+    "task": "T2",
+    "attempted": true,
+    "first_codes": [
+     "G3",
+     "G5",
+     "G6"
+    ],
+    "first_pass": false,
+    "first_hidden_fail": true,
+    "final_pass": true,
+    "gate_calls": 3,
+    "dispatches": 2,
+    "first_prompt_has_conventions": false
+   },
+   {
+    "task": "T3",
+    "attempted": true,
+    "first_codes": [
+     "G5",
+     "G6"
+    ],
+    "first_pass": false,
+    "first_hidden_fail": true,
+    "final_pass": true,
+    "gate_calls": 2,
+    "dispatches": 2,
+    "first_prompt_has_conventions": false
+   },
+   {
+    "task": "T4",
+    "attempted": true,
+    "first_codes": [
+     "G3",
+     "G5",
+     "G6"
+    ],
+    "first_pass": false,
+    "first_hidden_fail": true,
+    "final_pass": true,
+    "gate_calls": 3,
+    "dispatches": 3,
+    "first_prompt_has_conventions": false
+   },
+   {
+    "task": "T5",
+    "attempted": true,
+    "first_codes": [
+     "G4",
+     "G5",
+     "G6"
+    ],
+    "first_pass": false,
+    "first_hidden_fail": true,
+    "final_pass": true,
+    "gate_calls": 2,
+    "dispatches": 2,
+    "first_prompt_has_conventions": false
+   }
+  ]
+ },
+ "FI2": {
+  "arm": "FI",
+  "rows": [
+   {
+    "task": "T1",
+    "attempted": true,
+    "first_codes": [
+     "G5",
+     "G6"
+    ],
+    "first_pass": false,
+    "first_hidden_fail": true,
+    "final_pass": true,
+    "gate_calls": 2,
+    "dispatches": 2,
+    "first_prompt_has_conventions": false
+   },
+   {
+    "task": "T2",
+    "attempted": true,
+    "first_codes": [
+     "G5",
+     "G6"
+    ],
+    "first_pass": false,
+    "first_hidden_fail": true,
+    "final_pass": true,
+    "gate_calls": 3,
+    "dispatches": 3,
+    "first_prompt_has_conventions": false
+   },
+   {
+    "task": "T3",
+    "attempted": true,
+    "first_codes": [
+     "G5",
+     "G6"
+    ],
+    "first_pass": false,
+    "first_hidden_fail": true,
+    "final_pass": true,
+    "gate_calls": 2,
+    "dispatches": 2,
+    "first_prompt_has_conventions": false
+   },
+   {
+    "task": "T4",
+    "attempted": true,
+    "first_codes": [
+     "G4",
+     "G5",
+     "G6"
+    ],
+    "first_pass": false,
+    "first_hidden_fail": true,
+    "final_pass": true,
+    "gate_calls": 2,
+    "dispatches": 2,
+    "first_prompt_has_conventions": false
+   },
+   {
+    "task": "T5",
+    "attempted": true,
+    "first_codes": [
+     "G5",
+     "G6"
+    ],
+    "first_pass": false,
+    "first_hidden_fail": true,
+    "final_pass": true,
+    "gate_calls": 3,
+    "dispatches": 2,
+    "first_prompt_has_conventions": false
+   }
+  ]
+ },
+ "S1": {
+  "arm": "S",
+  "rows": [
+   {
+    "task": "T1",
+    "attempted": true,
+    "first_codes": [
+     "G4",
+     "G5",
+     "G6"
+    ],
+    "first_pass": false,
+    "first_hidden_fail": true,
+    "final_pass": true,
+    "gate_calls": 5,
+    "dispatches": 2,
+    "first_prompt_has_conventions": false
+   },
+   {
+    "task": "T2",
+    "attempted": true,
+    "first_codes": [],
+    "first_pass": true,
+    "first_hidden_fail": false,
+    "final_pass": true,
+    "gate_calls": 3,
+    "dispatches": 1,
+    "first_prompt_has_conventions": true
+   },
+   {
+    "task": "T3",
+    "attempted": true,
+    "first_codes": [],
+    "first_pass": true,
+    "first_hidden_fail": false,
+    "final_pass": true,
+    "gate_calls": 2,
+    "dispatches": 1,
+    "first_prompt_has_conventions": true
+   },
+   {
+    "task": "T4",
+    "attempted": true,
+    "first_codes": [
+     "G3"
+    ],
+    "first_pass": false,
+    "first_hidden_fail": false,
+    "final_pass": false,
+    "gate_calls": 1,
+    "dispatches": 2,
+    "first_prompt_has_conventions": true
+   },
+   {
+    "task": "T5",
+    "attempted": false
+   }
+  ]
+ },
+ "S2": {
+  "arm": "S",
+  "rows": [
+   {
+    "task": "T1",
+    "attempted": true,
+    "first_codes": [
+     "G5",
+     "G6"
+    ],
+    "first_pass": false,
+    "first_hidden_fail": true,
+    "final_pass": true,
+    "gate_calls": 7,
+    "dispatches": 3,
+    "first_prompt_has_conventions": false
+   },
+   {
+    "task": "T2",
+    "attempted": true,
+    "first_codes": [],
+    "first_pass": true,
+    "first_hidden_fail": false,
+    "final_pass": true,
+    "gate_calls": 4,
+    "dispatches": 1,
+    "first_prompt_has_conventions": true
+   },
+   {
+    "task": "T3",
+    "attempted": true,
+    "first_codes": [],
+    "first_pass": true,
+    "first_hidden_fail": false,
+    "final_pass": true,
+    "gate_calls": 3,
+    "dispatches": 1,
+    "first_prompt_has_conventions": true
+   },
+   {
+    "task": "T4",
+    "attempted": true,
+    "first_codes": [],
+    "first_pass": true,
+    "first_hidden_fail": false,
+    "final_pass": true,
+    "gate_calls": 2,
+    "dispatches": 1,
+    "first_prompt_has_conventions": true
+   },
+   {
+    "task": "T5",
+    "attempted": true,
+    "first_codes": [],
+    "first_pass": true,
+    "first_hidden_fail": false,
+    "final_pass": true,
+    "gate_calls": 1,
+    "dispatches": 1,
+    "first_prompt_has_conventions": true
+   }
+  ]
+ },
+ "S3": {
+  "arm": "S",
+  "rows": [
+   {
+    "task": "T1",
+    "attempted": true,
+    "first_codes": [
+     "G3",
+     "G5",
+     "G6"
+    ],
+    "first_pass": false,
+    "first_hidden_fail": true,
+    "final_pass": true,
+    "gate_calls": 11,
+    "dispatches": 2,
+    "first_prompt_has_conventions": false
+   },
+   {
+    "task": "T2",
+    "attempted": true,
+    "first_codes": [],
+    "first_pass": true,
+    "first_hidden_fail": false,
+    "final_pass": true,
+    "gate_calls": 9,
+    "dispatches": 1,
+    "first_prompt_has_conventions": true
+   },
+   {
+    "task": "T3",
+    "attempted": true,
+    "first_codes": [],
+    "first_pass": true,
+    "first_hidden_fail": false,
+    "final_pass": true,
+    "gate_calls": 8,
+    "dispatches": 1,
+    "first_prompt_has_conventions": true
+   },
+   {
+    "task": "T4",
+    "attempted": true,
+    "first_codes": [],
+    "first_pass": true,
+    "first_hidden_fail": false,
+    "final_pass": true,
+    "gate_calls": 2,
+    "dispatches": 1,
+    "first_prompt_has_conventions": true
+   },
+   {
+    "task": "T5",
+    "attempted": true,
+    "first_codes": [],
+    "first_pass": true,
+    "first_hidden_fail": false,
+    "final_pass": true,
+    "gate_calls": 1,
+    "dispatches": 1,
+    "first_prompt_has_conventions": true
+   }
+  ]
+ },
+ "S4": {
+  "arm": "S",
+  "rows": [
+   {
+    "task": "T1",
+    "attempted": true,
+    "first_codes": [
+     "G4",
+     "G5",
+     "G6"
+    ],
+    "first_pass": false,
+    "first_hidden_fail": true,
+    "final_pass": true,
+    "gate_calls": 8,
+    "dispatches": 3,
+    "first_prompt_has_conventions": false
+   },
+   {
+    "task": "T2",
+    "attempted": true,
+    "first_codes": [],
+    "first_pass": true,
+    "first_hidden_fail": false,
+    "final_pass": true,
+    "gate_calls": 4,
+    "dispatches": 1,
+    "first_prompt_has_conventions": true
+   },
+   {
+    "task": "T3",
+    "attempted": true,
+    "first_codes": [],
+    "first_pass": true,
+    "first_hidden_fail": false,
+    "final_pass": true,
+    "gate_calls": 3,
+    "dispatches": 1,
+    "first_prompt_has_conventions": true
+   },
+   {
+    "task": "T4",
+    "attempted": true,
+    "first_codes": [],
+    "first_pass": true,
+    "first_hidden_fail": false,
+    "final_pass": true,
+    "gate_calls": 2,
+    "dispatches": 1,
+    "first_prompt_has_conventions": true
+   },
+   {
+    "task": "T5",
+    "attempted": true,
+    "first_codes": [],
+    "first_pass": true,
+    "first_hidden_fail": false,
+    "final_pass": true,
+    "gate_calls": 1,
+    "dispatches": 1,
+    "first_prompt_has_conventions": true
+   }
+  ]
+ },
+ "SI1": {
+  "arm": "SI",
+  "rows": [
+   {
+    "task": "T1",
+    "attempted": true,
+    "first_codes": [
+     "G5",
+     "G6"
+    ],
+    "first_pass": false,
+    "first_hidden_fail": true,
+    "final_pass": true,
+    "gate_calls": 2,
+    "dispatches": 2,
+    "first_prompt_has_conventions": false
+   },
+   {
+    "task": "T2",
+    "attempted": true,
+    "first_codes": [],
+    "first_pass": true,
+    "first_hidden_fail": false,
+    "final_pass": true,
+    "gate_calls": 1,
+    "dispatches": 1,
+    "first_prompt_has_conventions": true
+   },
+   {
+    "task": "T3",
+    "attempted": true,
+    "first_codes": [],
+    "first_pass": true,
+    "first_hidden_fail": false,
+    "final_pass": true,
+    "gate_calls": 1,
+    "dispatches": 1,
+    "first_prompt_has_conventions": true
+   },
+   {
+    "task": "T4",
+    "attempted": false
+   },
+   {
+    "task": "T5",
+    "attempted": false
+   }
+  ]
+ },
+ "SI2": {
+  "arm": "SI",
+  "rows": [
+   {
+    "task": "T1",
+    "attempted": true,
+    "first_codes": [
+     "G5",
+     "G6"
+    ],
+    "first_pass": false,
+    "first_hidden_fail": true,
+    "final_pass": true,
+    "gate_calls": 3,
+    "dispatches": 3,
+    "first_prompt_has_conventions": false
+   },
+   {
+    "task": "T2",
+    "attempted": true,
+    "first_codes": [],
+    "first_pass": true,
+    "first_hidden_fail": false,
+    "final_pass": true,
+    "gate_calls": 1,
+    "dispatches": 1,
+    "first_prompt_has_conventions": true
+   },
+   {
+    "task": "T3",
+    "attempted": true,
+    "first_codes": [],
+    "first_pass": true,
+    "first_hidden_fail": false,
+    "final_pass": true,
+    "gate_calls": 1,
+    "dispatches": 1,
+    "first_prompt_has_conventions": true
+   },
+   {
+    "task": "T4",
+    "attempted": true,
+    "first_codes": [
+     "G3"
+    ],
+    "first_pass": false,
+    "first_hidden_fail": false,
+    "final_pass": false,
+    "gate_calls": 1,
+    "dispatches": 1,
+    "first_prompt_has_conventions": true
+   },
+   {
+    "task": "T5",
+    "attempted": false
+   }
+  ]
+ },
+ "SI3": {
+  "arm": "SI",
+  "rows": [
+   {
+    "task": "T1",
+    "attempted": true,
+    "first_codes": [
+     "G5",
+     "G6"
+    ],
+    "first_pass": false,
+    "first_hidden_fail": true,
+    "final_pass": true,
+    "gate_calls": 2,
+    "dispatches": 2,
+    "first_prompt_has_conventions": false
+   },
+   {
+    "task": "T2",
+    "attempted": true,
+    "first_codes": [],
+    "first_pass": true,
+    "first_hidden_fail": false,
+    "final_pass": true,
+    "gate_calls": 1,
+    "dispatches": 1,
+    "first_prompt_has_conventions": true
+   },
+   {
+    "task": "T3",
+    "attempted": true,
+    "first_codes": [],
+    "first_pass": true,
+    "first_hidden_fail": false,
+    "final_pass": true,
+    "gate_calls": 1,
+    "dispatches": 1,
+    "first_prompt_has_conventions": true
+   },
+   {
+    "task": "T4",
+    "attempted": true,
+    "first_codes": [],
+    "first_pass": true,
+    "first_hidden_fail": false,
+    "final_pass": true,
+    "gate_calls": 1,
+    "dispatches": 1,
+    "first_prompt_has_conventions": true
+   },
+   {
+    "task": "T5",
+    "attempted": true,
+    "first_codes": [],
+    "first_pass": true,
+    "first_hidden_fail": false,
+    "final_pass": true,
+    "gate_calls": 1,
+    "dispatches": 1,
+    "first_prompt_has_conventions": true
+   }
+  ]
+ },
+ "SI4": {
+  "arm": "SI",
+  "rows": [
+   {
+    "task": "T1",
+    "attempted": true,
+    "first_codes": [
+     "G5",
+     "G6"
+    ],
+    "first_pass": false,
+    "first_hidden_fail": true,
+    "final_pass": true,
+    "gate_calls": 2,
+    "dispatches": 2,
+    "first_prompt_has_conventions": false
+   },
+   {
+    "task": "T2",
+    "attempted": false
+   },
+   {
+    "task": "T3",
+    "attempted": false
+   },
+   {
+    "task": "T4",
+    "attempted": false
+   },
+   {
+    "task": "T5",
+    "attempted": false
+   }
+  ]
+ },
+ "SI5": {
+  "arm": "SI",
+  "rows": [
+   {
+    "task": "T1",
+    "attempted": true,
+    "first_codes": [
+     "G5",
+     "G6"
+    ],
+    "first_pass": false,
+    "first_hidden_fail": true,
+    "final_pass": true,
+    "gate_calls": 3,
+    "dispatches": 3,
+    "first_prompt_has_conventions": false
+   },
+   {
+    "task": "T2",
+    "attempted": true,
+    "first_codes": [],
+    "first_pass": true,
+    "first_hidden_fail": false,
+    "final_pass": true,
+    "gate_calls": 1,
+    "dispatches": 1,
+    "first_prompt_has_conventions": true
+   },
+   {
+    "task": "T3",
+    "attempted": true,
+    "first_codes": [],
+    "first_pass": true,
+    "first_hidden_fail": false,
+    "final_pass": true,
+    "gate_calls": 1,
+    "dispatches": 1,
+    "first_prompt_has_conventions": true
+   },
+   {
+    "task": "T4",
+    "attempted": true,
+    "first_codes": [
+     "G3"
+    ],
+    "first_pass": false,
+    "first_hidden_fail": false,
+    "final_pass": true,
+    "gate_calls": 2,
+    "dispatches": 2,
+    "first_prompt_has_conventions": true
+   },
+   {
+    "task": "T5",
+    "attempted": true,
+    "first_codes": [],
+    "first_pass": true,
+    "first_hidden_fail": false,
+    "final_pass": true,
+    "gate_calls": 1,
+    "dispatches": 1,
+    "first_prompt_has_conventions": true
+   }
+  ]
+ },
+ "SI6": {
+  "arm": "SI",
+  "rows": [
+   {
+    "task": "T1",
+    "attempted": true,
+    "first_codes": [
+     "G5",
+     "G6"
+    ],
+    "first_pass": false,
+    "first_hidden_fail": true,
+    "final_pass": true,
+    "gate_calls": 2,
+    "dispatches": 2,
+    "first_prompt_has_conventions": false
+   },
+   {
+    "task": "T2",
+    "attempted": true,
+    "first_codes": [],
+    "first_pass": true,
+    "first_hidden_fail": false,
+    "final_pass": true,
+    "gate_calls": 1,
+    "dispatches": 1,
+    "first_prompt_has_conventions": true
+   },
+   {
+    "task": "T3",
+    "attempted": true,
+    "first_codes": [],
+    "first_pass": true,
+    "first_hidden_fail": false,
+    "final_pass": true,
+    "gate_calls": 1,
+    "dispatches": 1,
+    "first_prompt_has_conventions": true
+   },
+   {
+    "task": "T4",
+    "attempted": true,
+    "first_codes": [],
+    "first_pass": true,
+    "first_hidden_fail": false,
+    "final_pass": true,
+    "gate_calls": 1,
+    "dispatches": 1,
+    "first_prompt_has_conventions": true
+   },
+   {
+    "task": "T5",
+    "attempted": true,
+    "first_codes": [],
+    "first_pass": true,
+    "first_hidden_fail": false,
+    "final_pass": true,
+    "gate_calls": 1,
+    "dispatches": 1,
+    "first_prompt_has_conventions": true
+   }
+  ]
+ }
+}

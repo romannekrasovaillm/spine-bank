@@ -1,0 +1,27 @@
+default_model = "shim"
+
+[models.shim]
+base_url = "http://127.0.0.1:18080/v1"
+model = "claude-sonnet-via-cli"
+api_key_env = "SHIM_KEY"
+max_tokens = 8192
+timeout_secs = 900
+context_limit = 200000
+
+[agent]
+max_tool_turns = 120
+stream = false
+failure_memory = "propose"
+
+[fleet]
+require_worktree = false
+
+[harnesses.claude-code]
+binary = "claude"
+mode = "prompt"
+args = ["-p", "--model", "sonnet", "--permission-mode", "acceptEdits", "--allowedTools", "Read", "Write", "Edit", "Glob", "Grep", "Bash(python3:*)", "Bash(pytest:*)", "Bash(git add:*)", "Bash(git commit:*)", "Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)", "Bash(ls:*)", "Bash(cat:*)", "Bash(mkdir:*)"]
+prompt_mode = "stdin"
+timeout_secs = 1200
+idle_timeout_secs = 600
+auto_commit = true
+post_gate = false

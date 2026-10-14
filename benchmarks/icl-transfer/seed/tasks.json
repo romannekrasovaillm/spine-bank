@@ -1,0 +1,7 @@
+[
+ {"id": "T1", "module": "fees", "text": "Добавь в paylib модуль fees с функцией card_fee(amount, rate_pct, min_fee): комиссия за операцию по карте = amount * rate_pct / 100, но не меньше min_fee; результат округлён до копеек. Покрой тестами."},
+ {"id": "T2", "module": "fx", "text": "Добавь в paylib модуль fx с функцией convert(amount, rate): конвертация суммы по курсу rate (сколько единиц целевой валюты за 1 единицу исходной), результат округлён до копеек; отрицательный или нулевой курс — ValueError. Покрой тестами."},
+ {"id": "T3", "module": "interest", "text": "Добавь в paylib модуль interest с функцией simple_interest(principal, annual_rate_pct, days): простые проценты на базе 365 дней, результат округлён до копеек. Покрой тестами."},
+ {"id": "T4", "module": "installments", "text": "Добавь в paylib модуль installments с функцией split(amount, n): разбивка суммы на n платежей по копейкам, сумма платежей строго равна amount, остаток копеек уходит в последний платёж. Покрой тестами."},
+ {"id": "T5", "module": "vat", "text": "Добавь в paylib модуль vat с функцией vat_from_gross(gross, rate_pct): выделение НДС из суммы с НДС (gross * rate / (100 + rate)), результат округлён до копеек. Покрой тестами."}
+]
