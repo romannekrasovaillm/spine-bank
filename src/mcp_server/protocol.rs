@@ -549,6 +549,11 @@ impl McpServe {
                 .tool_lessons_query(args)
                 .await
                 .map(DispatchOutcome::Structured),
+            // Префлайт-подбор уроков под задачу (L4): read-only, без LLM.
+            "lessons_match" => self
+                .tool_lessons_match(args)
+                .await
+                .map(DispatchOutcome::Structured),
             // Запись урока — только под `--rw` (пишет в каталог клиента).
             "lessons_record" if self.mode == ServeMode::ReadWrite => self
                 .tool_lessons_record(args)
@@ -1018,6 +1023,29 @@ fn tool_specs() -> Vec<Value> {
                     "scope": {"type": "string", "description": "Фильтр по уровню области: file | module | package | repo | user | org"},
                     "cwd": {"type": "string", "description": "Рабочий каталог клиента: относительный `path` резолвится от него"},
                 },
+            },
+            "annotations": read_only,
+        }),
+        json!({
+            "name": "lessons_match",
+            "description": "Префлайт-подбор уроков реестра (Lesson Ledger, ADR-085) под \
+                            задачу (L4): детерминированный отбор без LLM — по области \
+                            действия (глобы путей задачи и путей из текста), BM25 текста \
+                            задачи против формулировки и сигнатуры урока, приоритет \
+                            статусов confirmed > candidate > observed. Возвращает top-K \
+                            уроков (K — из [lessons] k) и рендер в Markdown. Read-only: \
+                            файлов не создаёт. Используй перед упаковкой handoff или \
+                            запуском исполнителя, чтобы отобрать релевантные правила",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task": {"type": "string", "description": "Текст задачи: подбор против statement и signature, пути извлекаются из текста"},
+                    "paths": {"type": "array", "items": {"type": "string"}, "description": "Явные пути задачи (глобы или файлы); объединяются с путями из текста"},
+                    "path": {"type": "string", "description": "Каталог с реестром (по умолчанию — каталог вызова)"},
+                    "k": {"type": "integer", "description": "Максимум уроков в выдаче (по умолчанию — [lessons] k)"},
+                    "cwd": {"type": "string", "description": "Рабочий каталог клиента: относительный `path` резолвится от него"},
+                },
+                "required": ["task"],
             },
             "annotations": read_only,
         }),

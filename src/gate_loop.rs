@@ -45,7 +45,7 @@ use serde_json::{Value, json};
 use crate::config::Config;
 use crate::gate::{GateOutcome, GateReport};
 use crate::lessons::{
-    self, Evidence, Ledger, LessonSource, Outcome, RecordInput, Signature, Thresholds,
+    self, Evidence, Ledger, Lesson, LessonSource, Outcome, RecordInput, Signature, Thresholds,
 };
 
 /// Схема вердикта приёмки — та же, что у `arch-be gate` (контракт `*/v1` не
@@ -54,6 +54,10 @@ pub const VERDICT_SCHEMA: &str = "arch-be/gate-verdict/v1";
 
 /// Имя события журнала сессии (ADR-086 п.4).
 pub const EVENT: &str = "gate_verdict";
+
+/// Имя события журнала «урок предотвратил повтор ошибки» (L4): задача, в
+/// задании которой был урок с сигнатурой S, прошла гейт без FAIL по S.
+pub const PREVENTED_EVENT: &str = "prevented";
 
 /// Потолок кодов находок, извлекаемых из одного вердикта: один прогон не
 /// должен порождать сотни уроков (гейт печатает находки с потолком на
@@ -896,11 +900,15 @@ fn newest_session_log(dir: &Path) -> Option<PathBuf> {
 /// Хвост петли L2 (ADR-086 п.4–5): событие `gate_verdict` в журнал сессии и
 /// автозапись уроков из FAIL-кодов. Возвращает путь журнала, если событие
 /// записано. `verdict.lessons` заполняется идентификаторами уроков.
+///
+/// `matched` — уроки, отобранные префлайтом L4 и попавшие в задание задачи;
+/// при зелёном вердикте по ним пишется событие [`PREVENTED_EVENT`] (L4).
 pub fn close_loop(
     cfg: &Config,
     repo: &Path,
     verdict: &mut GateVerdict,
     run: &RunRef<'_>,
+    matched: &[Lesson],
 ) -> Option<PathBuf> {
     let ids = record_verdict_lessons(cfg, repo, verdict, run);
     verdict.lessons = ids;
@@ -910,7 +918,48 @@ pub fn close_loop(
     if let Some(harness) = run.harness {
         payload["harness"] = json!(harness);
     }
-    append_session_event(cfg, &payload)
+    let path = append_session_event(cfg, &payload);
+    // События `prevented` — хвост L4: их считает `metrics --learning` из
+    // журнала, вердикту и выводу число не нужно — отбрасываем осознанно.
+    let _ = record_prevented(cfg, verdict, matched, run);
+    path
+}
+
+/// Запись события [`PREVENTED_EVENT`] (L4): задача прошла гейт (`PASS`) без
+/// FAIL по сигнатурам уроков, которые были в её задании. Один урок — одно
+/// событие журнала; читается `arch-be metrics --learning` (L11). Возвращает
+/// число записанных событий.
+///
+/// Пишется только для зелёного вердикта: красный вердикт означает, что гейт
+/// НЕ прошёл, — «предотвращено» тогда не утверждается ни для одной сигнатуры.
+#[must_use]
+pub fn record_prevented(
+    cfg: &Config,
+    verdict: &GateVerdict,
+    matched: &[Lesson],
+    run: &RunRef<'_>,
+) -> usize {
+    if !cfg.lessons.enabled || matched.is_empty() || verdict.status != VerdictStatus::Pass {
+        return 0;
+    }
+    let mut written = 0;
+    for lesson in matched {
+        let payload = json!({
+            "event": PREVENTED_EVENT,
+            "run_id": run.id,
+            "task": run.task,
+            "harness": run.harness,
+            "lesson": lesson.id,
+            "signature": lesson.signature.describe(),
+            "source": lesson.signature.source.as_str(),
+            "code": lesson.signature.code,
+            "verdict": "PASS",
+        });
+        if append_session_event(cfg, &payload).is_some() {
+            written += 1;
+        }
+    }
+    written
 }
 
 #[cfg(test)]
@@ -1202,5 +1251,75 @@ mod tests {
                 .ends_with("# старый\n"),
             "старый журнал не тронут"
         );
+    }
+
+    /// Урок по подписи (для события `prevented` достаточно сигнатуры).
+    fn matched_lesson(code: &str) -> Lesson {
+        Lesson::from_input(&RecordInput::new(
+            Signature::new(LessonSource::Gate, code),
+            Evidence {
+                run_id: "run-0".to_string(),
+                harness: None,
+                verdict_excerpt: String::new(),
+                file: None,
+                line: None,
+                ts: "2026-10-14T10:00:00.000Z".to_string(),
+                outcome: Outcome::Fail,
+                task: None,
+            },
+        ))
+    }
+
+    /// Событие `prevented` пишется по каждому уроку задания только для
+    /// ЗЕЛЁНОГО вердикта и включённого флага; красный вердикт и пустой список
+    /// событий не дают.
+    #[test]
+    fn prevented_event_fires_only_on_green_verdict() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let mut cfg = Config::default();
+        cfg.lessons.enabled = true;
+        cfg.paths.sessions_dir = tmp.path().join("sessions");
+        std::fs::create_dir_all(&cfg.paths.sessions_dir).expect("sessions");
+        std::fs::write(
+            cfg.paths
+                .sessions_dir
+                .join("session-20261014-100000-1.jsonl"),
+            "# журнал\n",
+        )
+        .expect("журнал");
+
+        let matched = vec![matched_lesson("G5"), matched_lesson("G6")];
+        let run = RunRef::new("run-1")
+            .with_harness(Some("fake"))
+            .with_task(Some("задача"));
+
+        // PASS — по событию на урок.
+        let pass = verdict_of("ok", 0);
+        assert_eq!(record_prevented(&cfg, &pass, &matched, &run), 2);
+        let text = std::fs::read_to_string(
+            cfg.paths
+                .sessions_dir
+                .join("session-20261014-100000-1.jsonl"),
+        )
+        .expect("лог");
+        assert_eq!(
+            text.matches("\"event\":\"prevented\"").count(),
+            2,
+            "два события prevented: {text}"
+        );
+        assert!(text.contains("\"code\":\"G5\""), "{text}");
+        assert!(text.contains("\"lesson\":"), "{text}");
+
+        // FAIL — не «предотвращено» (гейт не прошёл).
+        let fail = verdict_of("[G5] нарушение", 1);
+        assert_eq!(record_prevented(&cfg, &fail, &matched, &run), 0);
+
+        // Пустой список отобранных уроков — событий нет.
+        assert_eq!(record_prevented(&cfg, &pass, &[], &run), 0);
+
+        // Флаг выключен — событий нет даже на зелёном вердикте.
+        let mut off = Config::default();
+        off.paths.sessions_dir = tmp.path().join("sessions");
+        assert_eq!(record_prevented(&off, &pass, &matched, &run), 0);
     }
 }

@@ -59,6 +59,7 @@
 | `nfr_check` | Количественные NFR: бюджет latency, доступность, ёмкость, стоимость — JSON-вердикт |
 | `delta_guard` / `delta_propose` | Гейт прямых правок спайна мимо дельты / скелет новой дельты |
 | `lessons_query` / `lessons_record` (MCP, ADR-085) | Реестр уроков Lesson Ledger: запрос уроков по scope/статусу / запись урока с evidence (запись — под `arch-be mcp serve --rw`; CLI `arch-be lessons list\|show\|record\|retire\|export\|import\|migrate`) |
+| `lessons_match` (L4) | Префлайт-подбор уроков под задачу: отбор по области (глобы путей) + BM25 текста против формулировки и сигнатуры + приоритет статусов — детерминированно, без LLM. И MCP (`lessons_match`, read-only) |
 | `evidence_verify` / `evidence_pack` | Проверка / сборка Evidence Bundle (полнота + хэши) |
 | `trace_check` | Покрытие трассируемости REQ → NFR → AD/ADR → CMP → правило |
 | `rubric_list` / `rubric_evaluate` / `rubric_generate` | Якорные/динамические рубрики с evidence-судьёй |

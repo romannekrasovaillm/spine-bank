@@ -1370,7 +1370,7 @@ impl HarnessRunTool {
         name: &str,
         hcfg: CodingHarnessConfig,
         repo: PathBuf,
-        task: String,
+        task: RunTask,
         note: &str,
         ctx: &ToolContext,
     ) -> ToolOutput {
@@ -1386,11 +1386,12 @@ impl HarnessRunTool {
                 registry.capacity()
             ));
         }
+        let RunTask { text, matched } = task;
         let id = registry.next_id("hr");
         registry.insert(crate::subagent::SubagentTask {
             id: id.clone(),
             agent: format!("harness:{name}"),
-            task: task.chars().take(2000).collect(),
+            task: text.chars().take(2000).collect(),
             status: crate::subagent::TaskStatus::Running,
             report: String::new(),
             started_at: crate::subagent::now_iso(),
@@ -1412,7 +1413,16 @@ impl HarnessRunTool {
         // run_id, но те же уроки и то же событие `gate_verdict`.
         let loop_cfg = Arc::clone(&ctx.config);
         tokio::spawn(async move {
-            let out = execute_run(&run_name, &hcfg, &repo, &task, note_run, Some(&loop_cfg)).await;
+            let out = execute_run(
+                &run_name,
+                &hcfg,
+                &repo,
+                &text,
+                note_run,
+                Some(&loop_cfg),
+                &matched,
+            )
+            .await;
             let status = if out.is_error {
                 crate::subagent::TaskStatus::Failed
             } else {
@@ -1513,18 +1523,17 @@ fn copy_dir(src: &Path, dst: &Path) -> Result<()> {
 
 impl HarnessRunTool {
     /// Задача исполнителю с закреплённым блоком уроков реестра впереди
-    /// (ADR-087): отбор — по путям из её текста, K и лимит токенов — из
-    /// `[lessons]`. Возвращает текст задачи и число уроков блока (0 — блок
-    /// пуст: флаг выключен, реестр пуст или уроки не в области задачи).
-    fn task_with_lessons(&self, live: &Config, repo: &Path, task: &str) -> (String, usize) {
-        let report = crate::lesson_block::build_report(
-            live,
-            repo,
-            &crate::lesson_block::paths_from_text(task),
-            None,
-        );
+    /// (ADR-087): префлайт-подбор L4 по тексту задачи, K и лимит токенов — из
+    /// `[lessons]`. Возвращает задачу с отобранными уроками и число уроков
+    /// блока (0 — блок пуст: флаг выключен, реестр пуст или уроки не в области).
+    fn task_with_lessons(&self, live: &Config, repo: &Path, task: &str) -> (RunTask, usize) {
+        let report = crate::lesson_block::build_report_for_task(live, repo, task);
+        let text = crate::lesson_block::augment_task(task, &report.block);
         (
-            crate::lesson_block::augment_task(task, &report.block),
+            RunTask {
+                text,
+                matched: report.lessons,
+            },
             report.selected,
         )
     }
@@ -1687,9 +1696,9 @@ impl Tool for HarnessRunTool {
             }
         };
         // Закреплённый блок уроков перед КАЖДОЙ задачей исполнителю (ADR-087):
-        // отбор — по путям из текста задачи (scope), K и лимит токенов — из
+        // префлайт-подбор L4 по тексту задачи, K и лимит токенов — из
         // `[lessons]`. Флаг выключен — блок пуст, задача байт-в-байт прежняя.
-        let (task, lessons_count) = self.task_with_lessons(&live, &repo, &task);
+        let (run_task, selected) = self.task_with_lessons(&live, &repo, &task);
         // Переопределение таймаута — копией конфига адаптера. Минимум 600 с:
         // модели склонны занижать таймаут («успеет за 5 минут»), а кодовый
         // харнесс на реальной задаче работает дольше — ранний таймаут
@@ -1720,22 +1729,39 @@ impl Tool for HarnessRunTool {
                 hcfg.timeout_secs
             );
         }
-        if lessons_count > 0 {
+        if selected > 0 {
             // Версия задачи, ушедшая исполнителю, отличается от исходной —
             // это факт прогона, и он обязан быть виден (ADR-087).
             let _ = writeln!(
                 note,
-                "Блок уроков реестра: {lessons_count} (ADR-087) передан исполнителю \
+                "Блок уроков реестра: {selected} (ADR-087) передан исполнителю \
                  в тексте задачи."
             );
         }
         // Фоновый прогон: инструмент возвращается немедленно, агент остаётся
         // доступным пользователю (длинные handoff-прогоны не блокируют диалог).
         if args.get("background").and_then(Value::as_bool) == Some(true) {
-            return Ok(self.launch_background(name, hcfg, repo, task, &note, ctx));
+            return Ok(self.launch_background(name, hcfg, repo, run_task, &note, ctx));
         }
-        Ok(execute_run(name, &hcfg, &repo, &task, note, Some(&live)).await)
+        Ok(execute_run(
+            name,
+            &hcfg,
+            &repo,
+            &run_task.text,
+            note,
+            Some(&live),
+            &run_task.matched,
+        )
+        .await)
     }
+}
+
+/// Задача исполнителю вместе с отобранными префлайтом уроками (L4).
+struct RunTask {
+    /// Текст задачи (с закреплённым блоком уроков впереди).
+    text: String,
+    /// Уроки, отобранные префлайтом и попавшие в задание (для `prevented`).
+    matched: Vec<crate::lessons::Lesson>,
 }
 
 /// Синхронный прогон харнесса и форматирование результата: итог (код
@@ -1755,6 +1781,7 @@ async fn execute_run(
     task: &str,
     note: String,
     loop_cfg: Option<&Config>,
+    matched: &[crate::lessons::Lesson],
 ) -> ToolOutput {
     match run_harness(name, hcfg, repo, task).await {
         Ok(mut run) => {
@@ -1769,7 +1796,7 @@ async fn execute_run(
                 let reference = RunRef::new(&run_id)
                     .with_harness(Some(harness.as_str()))
                     .with_task(key.as_deref());
-                crate::gate_loop::close_loop(cfg, repo, verdict, &reference);
+                crate::gate_loop::close_loop(cfg, repo, verdict, &reference, matched);
             }
             let mut content = note;
             // Вердикт приёмки — ПЕРВОЙ строкой результата (ADR-086 п.4):
