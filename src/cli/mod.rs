@@ -871,17 +871,80 @@ enum ReviewCmd {
     },
 }
 
-pub(crate) async fn run() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
-        )
-        .with_writer(std::io::stderr)
-        .init();
+/// Лог-файл TUI-сеанса в `<state_dir>`: tracing в интерактивном режиме
+/// пишется сюда, а не в stderr — иначе каждая warn-строка ломает кадр
+/// ratatui (alternate screen + diff-рендер не лечат чужие записи).
+const TUI_LOG_FILE: &str = "arch-be.log";
 
+/// TUI-режим (команда по умолчанию или явный `tui`) — маршрут логов в файл.
+/// В core-сборке TUI нет: ветка одна, stderr.
+fn is_tui_cmd(cmd: &Option<Cmd>) -> bool {
+    #[cfg(feature = "harness")]
+    {
+        matches!(cmd, None | Some(Cmd::Tui))
+    }
+    #[cfg(not(feature = "harness"))]
+    {
+        let _ = cmd;
+        false
+    }
+}
+
+/// Инициализация tracing по режиму: TUI — лог-файл сеанса (экран
+/// неприкосновенен), прочие команды — stderr, как раньше. Файл недоступен
+/// (диск переполнен и т.п.) — логи гаснут (`sink`), а не ломают кадр.
+fn init_tracing(cmd: &Option<Cmd>, cfg: &Config) {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"));
+    let fmt = tracing_subscriber::fmt().with_env_filter(filter);
+    if is_tui_cmd(cmd) {
+        match open_tui_log(&cfg.paths.state_dir) {
+            Some(writer) => {
+                // try_init: ошибка значит лишь «глобальный subscriber уже
+                // установлен» (внешнее встраивание) — повтор не нужен.
+                let _ = fmt.with_writer(move || writer.clone()).try_init();
+            }
+            None => {
+                let _ = fmt.with_writer(std::io::sink).try_init();
+            }
+        }
+    } else {
+        let _ = fmt.with_writer(std::io::stderr).try_init();
+    }
+}
+
+/// Открывает (создаёт) лог-файл TUI `<state_dir>/arch-be.log`; каталог
+/// состояния создаётся при необходимости. `None` — файл недоступен (диск
+/// переполнен и т.п.): вызывающий гасит логи, чтобы не ломать экран.
+fn open_tui_log(state_dir: &Path) -> Option<TuiLogWriter> {
+    std::fs::create_dir_all(state_dir).ok()?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(state_dir.join(TUI_LOG_FILE))
+        .ok()?;
+    Some(TuiLogWriter(std::sync::Arc::new(file)))
+}
+
+/// Писатель лог-файла TUI: `with_writer` требует клонируемую фабрику
+/// `Write`; запись идёт через `&File`, поэтому Arc-дескриптора достаточно.
+#[derive(Clone)]
+struct TuiLogWriter(std::sync::Arc<std::fs::File>);
+
+impl std::io::Write for TuiLogWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        (&*self.0).write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        (&*self.0).flush()
+    }
+}
+
+pub(crate) async fn run() -> Result<()> {
     let cli = Cli::parse();
     let cfg = Arc::new(Config::load(cli.config.as_deref()).context("загрузка конфигурации")?);
+    init_tracing(&cli.cmd, &cfg);
 
     match cli.cmd {
         #[cfg(feature = "harness")]
@@ -2207,6 +2270,18 @@ mod tests {
     use clap::CommandFactory;
 
     use super::Cli;
+
+    #[test]
+    fn tui_log_opens_and_creates_state_dir() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = dir.path().join("state");
+        let writer = super::open_tui_log(&state).expect("лог-файл открывается");
+        drop(writer);
+        assert!(
+            state.join(super::TUI_LOG_FILE).is_file(),
+            "лог TUI создан в state_dir"
+        );
+    }
 
     /// Рендерит long-help подкоманды по пути (например, `["mcp", "serve"]`).
     fn long_help(path: &[&str]) -> String {

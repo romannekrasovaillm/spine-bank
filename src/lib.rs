@@ -47,6 +47,8 @@ pub(crate) mod control_plane;
 pub mod cron;
 pub mod delta;
 pub mod detectors;
+#[cfg(feature = "harness")]
+pub mod diag;
 pub mod digest;
 #[cfg(feature = "harness")]
 pub mod distill;
