@@ -52,6 +52,9 @@ pub struct Config {
     pub redteam: RedteamConfig,
     /// Настройки флота прогонов кодовых харнессов (изоляция и гейт мерджа).
     pub fleet: FleetConfig,
+    /// Реестр уроков (Lesson Ledger, ADR-085): пороги жизненного цикла по
+    /// счётчикам доказательств и бюджет блока инъекции (L3, ADR-087).
+    pub lessons: LessonsConfig,
     /// Пороги маршрутизации значимости (Architecture Significance Score).
     pub significance: SignificanceConfig,
     /// Матрица обязательных составляющих гейта по маршруту (П1 ДКА, ADR-039):
@@ -1016,6 +1019,68 @@ impl Default for FleetConfig {
             require_worktree: false,
             merge_gate: "owner".into(),
         }
+    }
+}
+
+/// Реестр уроков (Lesson Ledger, ADR-085): пороги детерминированного
+/// жизненного цикла урока и бюджет блока уроков в контексте.
+///
+/// Пороги — **единственный** источник переходов статуса (AD-2: LLM статус не
+/// меняет). Дефолты воспроизводят задачу 0.5.0: `confirmed` — `hits ≥ 2` при
+/// `misses = 0` на ≥ 2 разных задачах, `retired` — серия `misses ≥ 2` подряд.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LessonsConfig {
+    /// Включить реестр в автоматических путях (запись из вердикта гейта, L2, и
+    /// блок уроков в контексте, L3). Дефолт `false` — поведение 0.4.11; явные
+    /// вызовы CLI/MCP работают независимо от флага.
+    pub enabled: bool,
+    /// Наблюдённых FAIL по сигнатуре до перехода в `candidate`.
+    pub candidate_fails: u32,
+    /// `hits`, необходимые для статуса `confirmed`.
+    pub confirm_hits: u32,
+    /// Потолок `misses` для статуса `confirmed` (0 — «ни одного промаха»).
+    pub confirm_max_misses: u32,
+    /// Число разных задач (`task`/`run_id`) для статуса `confirmed`.
+    pub confirm_tasks: u32,
+    /// Серия `misses` подряд, выводящая урок в `retired` (TASK §7.2: урок,
+    /// который начал мешать, выводится из оборота автоматически).
+    pub retire_misses: u32,
+    /// Срок жизни урока в днях от даты записи (0 — без срока): истечение
+    /// выводит урок в `retired` событием.
+    pub expiry_days: u32,
+    /// Сколько уроков отбирается в блок инъекции L3 (ADR-087).
+    pub k: usize,
+    /// Лимит токенов блока уроков L3 (ADR-087, оценка — символы / 4).
+    pub token_limit: usize,
+}
+
+impl Default for LessonsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            candidate_fails: 2,
+            confirm_hits: 2,
+            confirm_max_misses: 0,
+            confirm_tasks: 2,
+            retire_misses: 2,
+            expiry_days: 0,
+            k: 5,
+            token_limit: 900,
+        }
+    }
+}
+
+impl LessonsConfig {
+    /// Дата истечения урока (`YYYY-MM-DD` + `expiry_days`); `None` — без срока.
+    #[must_use]
+    pub fn expiry_from(&self, recorded: &str) -> Option<String> {
+        if self.expiry_days == 0 {
+            return None;
+        }
+        let date = chrono::NaiveDate::parse_from_str(recorded.trim(), "%Y-%m-%d").ok()?;
+        let days = i64::from(self.expiry_days);
+        Some((date + chrono::Duration::days(days)).to_string())
     }
 }
 
@@ -2068,6 +2133,7 @@ impl Default for Config {
             trust: TrustConfig::default(),
             redteam: RedteamConfig::default(),
             fleet: FleetConfig::default(),
+            lessons: LessonsConfig::default(),
             significance: SignificanceConfig::default(),
             gate: GateConfig::default(),
             evidence: EvidenceConfig::default(),

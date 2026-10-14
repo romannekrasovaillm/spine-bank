@@ -9,5 +9,6 @@
 mod fitness;
 mod insight;
 mod knowledge;
+mod lessons;
 mod model;
 mod rubric;
