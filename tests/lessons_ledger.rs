@@ -329,11 +329,11 @@ fn import_of_lesson_without_evidence_is_rejected() {
 }
 
 #[test]
-fn import_with_evidence_records_and_rederives_status() {
+fn import_with_evidence_records_and_downgrades_to_candidate() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let repo = tmp.path();
-    // В файле заявлен статус `confirmed` — он НЕ принимается: статус выводится
-    // из счётчиков (AD-2), а счётчики у одного доказательства дают observed.
+    // В файле заявлен статус `confirmed` — он НЕ принимается: чужой урок
+    // понижается до `candidate` и обязан подтвердиться своим гейтом (ADR-091).
     let evidence = serde_json::json!([{"run_id": "r1", "ts": "2026-10-14T10:00:00.000Z",
                                        "outcome": "fail"}]);
     let mut lesson = lesson_json("G5", &evidence);
@@ -362,12 +362,12 @@ fn import_with_evidence_records_and_rederives_status() {
     );
     let text = String::from_utf8_lossy(&listing.stdout);
     assert!(
-        text.contains("observed"),
-        "заявленный статус не принят: {text}"
+        text.contains("candidate"),
+        "чужой статус не принят, понижен до candidate: {text}"
     );
     assert!(
         !text.contains("confirmed"),
-        "счётчики важнее заявления: {text}"
+        "свой гейт ещё не подтвердил урок: {text}"
     );
     assert!(text.contains("gate · G5"), "{text}");
 
@@ -426,6 +426,153 @@ fn import_rejects_id_that_does_not_match_signature() {
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("не соответствует сигнатуре"), "{stderr}");
+}
+
+/// Экспорт подтверждённого урока и импорт в ДРУГОЙ репозиторий: чужой статус
+/// не переносится — урок понижается до `candidate` (ADR-091, L10).
+#[test]
+fn export_then_import_to_another_repo_gives_candidate() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let src = tmp.path().join("src");
+    let dst = tmp.path().join("dst");
+    std::fs::create_dir_all(&src).expect("src");
+    std::fs::create_dir_all(&dst).expect("dst");
+
+    record(&src, "G5", "run-1", "T1", "fail");
+    record(&src, "G5", "run-2", "T2", "pass_after_apply");
+    record(&src, "G5", "run-3", "T3", "pass_after_apply");
+
+    // Экспорт подписанного бандла lessons-bundle/v1.
+    let exported = run_ok(
+        &src,
+        &[
+            "lessons",
+            "export",
+            "--repo",
+            &src.display().to_string(),
+            "--min-status",
+            "confirmed",
+        ],
+    );
+    let bundle_json: serde_json::Value = serde_json::from_slice(&exported.stdout).expect("json");
+    assert_eq!(bundle_json["format"], "lessons-bundle/v1");
+    assert_eq!(bundle_json["v"], 1);
+    assert_eq!(bundle_json["count"], 1);
+    assert_eq!(bundle_json["lessons"][0]["status"], "confirmed");
+    assert_eq!(
+        bundle_json["signature"].as_str().expect("подпись").len(),
+        64,
+        "подпись — полный SHA-256"
+    );
+
+    // Импорт в другой репозиторий понижает статус.
+    let file = dst.join("bundle.json");
+    std::fs::write(&file, &exported.stdout).expect("посылка");
+    run_ok(
+        &dst,
+        &[
+            "lessons",
+            "import",
+            &file.display().to_string(),
+            "--repo",
+            &dst.display().to_string(),
+        ],
+    );
+
+    let listed = run_ok(
+        &dst,
+        &["lessons", "list", "--repo", &dst.display().to_string()],
+    );
+    let text = String::from_utf8_lossy(&listed.stdout);
+    assert!(
+        text.contains("candidate"),
+        "импорт понизил до candidate: {text}"
+    );
+    assert!(
+        !text.contains("confirmed"),
+        "чужой статус не перенесён: {text}"
+    );
+    assert!(text.contains("gate · G5"), "{text}");
+}
+
+/// Урок с битым хэшем доказательства отклоняется целиком (ничего не записано).
+#[test]
+fn import_rejects_tampered_evidence_hash() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let src = tmp.path().join("src");
+    let dst = tmp.path().join("dst");
+    std::fs::create_dir_all(&src).expect("src");
+    std::fs::create_dir_all(&dst).expect("dst");
+    record(&src, "G5", "run-1", "T1", "fail");
+
+    let exported = run_ok(
+        &src,
+        &["lessons", "export", "--repo", &src.display().to_string()],
+    );
+    let mut bundle_json: serde_json::Value =
+        serde_json::from_slice(&exported.stdout).expect("json");
+    // Портим хэш доказательства (не трогая ни evidence, ни подпись).
+    let hash = bundle_json["lessons"][0]["evidence_sha256"][0]
+        .as_str()
+        .expect("хэш")
+        .to_string();
+    let mut chars: Vec<char> = hash.chars().collect();
+    chars[0] = if chars[0] == '0' { '1' } else { '0' };
+    let tampered: String = chars.into_iter().collect();
+    bundle_json["lessons"][0]["evidence_sha256"][0] = serde_json::json!(tampered);
+
+    let file = dst.join("bundle.json");
+    std::fs::write(&file, bundle_json.to_string()).expect("посылка");
+    let out = run(
+        &dst,
+        &[
+            "lessons",
+            "import",
+            &file.display().to_string(),
+            "--repo",
+            &dst.display().to_string(),
+        ],
+    );
+    assert!(!out.status.success(), "битый хэш отклонён");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("хэш доказательства"), "{stderr}");
+    assert!(!ledger_path(&dst).exists(), "ничего не записано при отказе");
+}
+
+/// Подпись бандла проверяется: подмена тела урока ломает подпись → отказ.
+#[test]
+fn import_verifies_bundle_signature() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let src = tmp.path().join("src");
+    let dst = tmp.path().join("dst");
+    std::fs::create_dir_all(&src).expect("src");
+    std::fs::create_dir_all(&dst).expect("dst");
+    record(&src, "G5", "run-1", "T1", "fail");
+
+    let exported = run_ok(
+        &src,
+        &["lessons", "export", "--repo", &src.display().to_string()],
+    );
+    let mut bundle_json: serde_json::Value =
+        serde_json::from_slice(&exported.stdout).expect("json");
+    bundle_json["lessons"][0]["statement"] = serde_json::json!("чужое правило");
+
+    let file = dst.join("bundle.json");
+    std::fs::write(&file, bundle_json.to_string()).expect("посылка");
+    let out = run(
+        &dst,
+        &[
+            "lessons",
+            "import",
+            &file.display().to_string(),
+            "--repo",
+            &dst.display().to_string(),
+        ],
+    );
+    assert!(!out.status.success(), "подмена тела отклонена");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("подпись"), "{stderr}");
+    assert!(!ledger_path(&dst).exists(), "ничего не записано при отказе");
 }
 
 #[test]

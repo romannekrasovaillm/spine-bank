@@ -487,6 +487,12 @@ pub struct Lesson {
     /// Причина вывода из реестра.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retired_reason: Option<String>,
+    /// Урок импортирован из чужого реестра (L10, ADR-091): его статус не
+    /// поднимается выше `candidate`, пока локальный гейт не применит урок
+    /// (событие `hit`/`miss`); чужие подтверждения (`pass_after_apply`) в
+    /// доказательную базу своего реестра не входят.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub imported: bool,
 }
 
 impl Lesson {
@@ -515,6 +521,7 @@ impl Lesson {
             expiry: input.expiry.clone(),
             promoted_rule: None,
             retired_reason: None,
+            imported: false,
         }
     }
 
@@ -649,6 +656,16 @@ pub fn clamp_chars(text: &str, limit: usize) -> String {
         return text.to_string();
     }
     text.chars().take(limit).collect()
+}
+
+/// Предикат пропуска сериализации булева поля (`skip_serializing_if`): поле
+/// `false` в JSON не пишется — контракт `v1` реестра остаётся аддитивным.
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde `skip_serializing_if` требует fn(&T) -> bool — сигнатура навязана атрибутом"
+)]
+fn is_false(flag: &bool) -> bool {
+    !*flag
 }
 
 /// Событие журнала реестра: вид + служебные поля версии и времени.
@@ -818,6 +835,13 @@ impl Ledger {
         Self::at(user_ledger_path())
     }
 
+    /// Организационный реестр: `<org_dir>/ledger.jsonl` (ADR-091). Каталог —
+    /// общий git-репозиторий или каталог, путь задаётся `[lessons] org_dir`.
+    #[must_use]
+    pub fn org(dir: &Path) -> Self {
+        Self::at(dir.join(LEDGER_FILE))
+    }
+
     /// Путь к журналу событий.
     #[must_use]
     pub fn path(&self) -> &Path {
@@ -916,15 +940,36 @@ impl Ledger {
     /// Принимает готовый урок извне (импорт бандла): дописывает событие
     /// `record` с его доказательствами.
     ///
-    /// Статус из бандла **не принимается** — проекция выводит его из счётчиков
-    /// (AD-2): чужой урок начинается с того, что подтвердили своим реестром.
-    /// Урок без доказательств отклоняется ([`validate_imported`]).
+    /// Статус из бандла **не принимается**, и урок помечается как импортированный
+    /// (`imported = true`): проекция держит его статус не выше `candidate`, пока
+    /// локальный гейт не применит урок событием `hit`/`miss` (ADR-091 — чужой
+    /// урок обязан подтвердиться своим гейтом). Чужие подтверждения
+    /// (`pass_after_apply`) в доказательную базу не входят — их сила остаётся в
+    /// бандле и провенансе, а счётчики своего реестра начинаются с наблюдений
+    /// провалов. Урок без доказательств отклоняется ([`validate_imported`]).
     ///
     /// # Errors
     /// Урок без доказательств, несоответствие id и подписи либо ошибка журнала.
     pub fn adopt(&self, lesson: &Lesson, th: &Thresholds, today: &str) -> Result<Mutation> {
         validate_imported(lesson)?;
-        let id = lesson.id.clone();
+        let mut adopted = lesson.clone();
+        adopted.imported = true;
+        // Чужие PASS не считаются: оставляем наблюдения провалов (контекст).
+        let fails_only: Vec<Evidence> = adopted
+            .evidence
+            .iter()
+            .filter(|e| e.outcome == Outcome::Fail)
+            .cloned()
+            .collect();
+        // Вырожденный случай (урок только из чужих PASS) в норме не встречается —
+        // урок рождается из FAIL, но защитно оставляем доказательства как есть,
+        // чтобы не завести в реестр урок с пустой доказательной базой.
+        adopted.evidence = if fails_only.is_empty() {
+            adopted.evidence
+        } else {
+            fails_only
+        };
+        let id = adopted.id.clone();
         let mut created = false;
         let mut previous = None;
         let outcome = self.mutate(th, |lessons| {
@@ -932,7 +977,7 @@ impl Ledger {
             previous = lessons.iter().find(|l| l.id == id).map(|l| l.status);
             created = previous.is_none();
             events.push(LedgerEvent::now(EventKind::Record {
-                lesson: lesson.clone(),
+                lesson: adopted.clone(),
             }));
             Ok(events)
         })?;
@@ -1167,6 +1212,9 @@ pub fn fold(events: &[LedgerEvent], th: &Thresholds) -> Vec<Lesson> {
                 if let Some(lesson) = index.get_mut(id) {
                     push_unique(&mut lesson.evidence, evidence.clamped());
                     lesson.consecutive_misses = 0;
+                    // Локальное применение (PASS) снимает чужую метку: свой гейт
+                    // начал судить урок сам (ADR-091).
+                    lesson.imported = false;
                 }
             }
             EventKind::Miss { id, evidence } => {
@@ -1179,6 +1227,8 @@ pub fn fold(events: &[LedgerEvent], th: &Thresholds) -> Vec<Lesson> {
                     }
                     lesson.misses = lesson.misses.saturating_add(1);
                     lesson.consecutive_misses = lesson.consecutive_misses.saturating_add(1);
+                    // Локальное применение (FAIL) тоже снимает чужую метку.
+                    lesson.imported = false;
                     if lesson.consecutive_misses >= th.retire_misses && !lesson.status.is_sticky() {
                         lesson.status = LessonStatus::Retired;
                         lesson.retired_reason =
@@ -1215,7 +1265,13 @@ pub fn fold(events: &[LedgerEvent], th: &Thresholds) -> Vec<Lesson> {
         lesson.fails = u32::try_from(fails).unwrap_or(u32::MAX);
         lesson.hits = u32::try_from(hits).unwrap_or(u32::MAX);
         if !lesson.status.is_sticky() {
-            lesson.status = lesson.derived_status(th);
+            lesson.status = if lesson.imported {
+                // Импортированный урок: чужой статус не принимается, а свой
+                // гейт его ещё не применил — потолок `candidate` (ADR-091).
+                LessonStatus::Candidate
+            } else {
+                lesson.derived_status(th)
+            };
         }
     }
     lessons.sort_by(|a, b| a.id.cmp(&b.id));

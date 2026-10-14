@@ -53,6 +53,7 @@
 //! контура контроля, а не разбора конфигурации; ошибки разбора значений
 //! (уровень, источник, исход, статус) — [`crate::HarnessError::Config`].
 
+pub mod bundle;
 pub mod compose;
 pub mod generalize;
 pub mod ledger;
@@ -63,6 +64,7 @@ pub mod render;
 pub mod scope;
 pub mod subject;
 
+pub use bundle::{BUNDLE_FORMAT, BUNDLE_VERSION, BundledLesson, LessonsBundle};
 pub use compose::{COMPOSITE_MIN_FAILS, COMPOSITE_PREFIX, Composite, compose, composite_id};
 pub use generalize::{GeneralizeThresholds, generalize_scope, module_of, package_of, widen_scope};
 pub use ledger::{
