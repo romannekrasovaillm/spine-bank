@@ -1025,7 +1025,7 @@ async fn post_gate_red_on_toxic_run_ra6() {
     assert!(joined.contains("control_plane_tampered"), "{joined}");
     assert!(joined.contains("no_pan_in_logs"), "{joined}");
     // Итог для оркестратора — ошибка, хотя исполнитель «успешен».
-    let out = execute_run("stub", &cfg, &repo, "задача", String::new(), None).await;
+    let out = execute_run("stub", &cfg, &repo, "задача", String::new(), None, &[]).await;
     assert!(out.is_error, "{}", out.content);
     assert!(out.content.contains("Пост-гейт: FAIL"), "{}", out.content);
     assert!(
@@ -1051,7 +1051,7 @@ async fn post_gate_passes_on_clean_run() {
     assert_eq!(pg.exit_code, Some(0), "{pg:?}");
     assert!(pg.findings.is_empty(), "{:?}", pg.findings);
     assert!(!pg.verdict.is_red());
-    let out = execute_run("stub", &cfg, &repo, "задача", String::new(), None).await;
+    let out = execute_run("stub", &cfg, &repo, "задача", String::new(), None, &[]).await;
     assert!(!out.is_error, "{}", out.content);
     assert!(out.content.contains("Пост-гейт: PASS"), "{}", out.content);
 }
@@ -1089,7 +1089,7 @@ async fn post_gate_red_on_manifest_tampering() {
     // отличалась бы от снимка.
     let repo2 = tmp.path().join("repo2");
     a4_sandbox(&repo2, true);
-    let out = execute_run("stub", &cfg, &repo2, "задача", String::new(), None).await;
+    let out = execute_run("stub", &cfg, &repo2, "задача", String::new(), None, &[]).await;
     assert!(out.is_error, "{}", out.content);
     assert!(out.content.contains("Пост-гейт: FAIL"), "{}", out.content);
     assert!(out.content.contains("manifest_tampered"), "{}", out.content);
@@ -1145,7 +1145,7 @@ async fn post_gate_skips_when_manifest_appears_mid_run() {
     let repo2 = tmp.path().join("repo2");
     a4_sandbox(&repo2, true);
     std::fs::remove_file(repo2.join(".arch-handoff/MANIFEST.json")).expect("rm manifest");
-    let out = execute_run("stub", &cfg, &repo2, "задача", String::new(), None).await;
+    let out = execute_run("stub", &cfg, &repo2, "задача", String::new(), None, &[]).await;
     assert!(!out.is_error, "{}", out.content);
 }
 
@@ -1163,7 +1163,7 @@ async fn post_gate_disabled_by_adapter_warns() {
         .await
         .expect("run");
     assert!(run.post_gate.is_none(), "отключён — вердикта нет");
-    let out = execute_run("stub", &cfg, &repo, "задача", String::new(), None).await;
+    let out = execute_run("stub", &cfg, &repo, "задача", String::new(), None, &[]).await;
     assert!(!out.is_error, "{}", out.content);
     assert!(
         out.content
@@ -1188,7 +1188,7 @@ async fn post_gate_skips_without_package() {
     assert_eq!(pg.verdict, PostGateVerdict::Skipped, "{pg:?}");
     assert!(pg.summary.contains("нет handoff-пакета"), "{}", pg.summary);
     assert!(!pg.verdict.is_red());
-    let out = execute_run("stub", &cfg, &repo, "задача", String::new(), None).await;
+    let out = execute_run("stub", &cfg, &repo, "задача", String::new(), None, &[]).await;
     assert!(!out.is_error, "{}", out.content);
 }
 
@@ -1227,7 +1227,7 @@ async fn post_gate_red_when_spine_removed_incomplete() {
     assert_eq!(pg.verdict, PostGateVerdict::Incomplete, "{pg:?}");
     assert!(pg.summary.contains("spine_lint"), "{}", pg.summary);
     assert!(pg.verdict.is_red());
-    let out = execute_run("stub", &cfg, &repo, "задача", String::new(), None).await;
+    let out = execute_run("stub", &cfg, &repo, "задача", String::new(), None, &[]).await;
     assert!(out.is_error, "{}", out.content);
 }
 
@@ -1255,7 +1255,7 @@ async fn post_gate_timeout_is_red() {
     let pg = run.post_gate.expect("пост-гейт отработал");
     assert_eq!(pg.verdict, PostGateVerdict::Timeout, "{pg:?}");
     assert!(pg.verdict.is_red());
-    let out = execute_run("stub", &cfg, &repo, "задача", String::new(), None).await;
+    let out = execute_run("stub", &cfg, &repo, "задача", String::new(), None, &[]).await;
     assert!(out.is_error, "{}", out.content);
     assert!(
         out.content.contains("Пост-гейт: TIMEOUT"),
@@ -1418,7 +1418,7 @@ async fn post_gate_self_approved_on_real_adr_and_override_ra7() {
     let joined = pg.findings.join("\n");
     assert!(joined.contains("self_approved"), "{joined}");
     assert!(joined.contains("rule_weakened"), "{joined}");
-    let out = execute_run("stub", &cfg, &repo, "задача", String::new(), None).await;
+    let out = execute_run("stub", &cfg, &repo, "задача", String::new(), None, &[]).await;
     assert!(out.is_error, "{}", out.content);
     assert!(out.content.contains("self_approved"), "{}", out.content);
     println!("RA-7 после фикса:\n{}", out.content);
@@ -1790,7 +1790,7 @@ async fn acp_turn_limit_keeps_partial_contract_and_runs_post_gate() {
         .post_gate
         .expect("пост-гейт обязан отработать (пакет есть)");
     assert_eq!(pg.verdict, PostGateVerdict::Pass, "{pg:?}");
-    let out = execute_run("fake", &cfg, &repo, "задача", String::new(), None).await;
+    let out = execute_run("fake", &cfg, &repo, "задача", String::new(), None, &[]).await;
     assert!(
         !out.is_error,
         "TurnLimit — не ошибка исполнения: {}",
@@ -1827,7 +1827,7 @@ async fn acp_cancelled_after_cancel_is_soft_not_error() {
         .await
         .expect("run");
     assert_eq!(run.termination, Termination::Cancelled);
-    let out = execute_run("fake", &cfg, tmp.path(), "задача", String::new(), None).await;
+    let out = execute_run("fake", &cfg, tmp.path(), "задача", String::new(), None, &[]).await;
     assert!(!out.is_error, "мягкая отмена — не ошибка: {}", out.content);
     assert!(out.content.contains("ПРЕРВАН МЯГКО"), "{}", out.content);
 }
@@ -1853,7 +1853,7 @@ async fn acp_refusal_is_run_error() {
         .await
         .expect("run");
     assert_eq!(run.termination, Termination::Refused);
-    let out = execute_run("fake", &cfg, tmp.path(), "задача", String::new(), None).await;
+    let out = execute_run("fake", &cfg, tmp.path(), "задача", String::new(), None, &[]).await;
     assert!(out.is_error, "отказ — ошибка прогона: {}", out.content);
     assert!(out.content.contains("ОТКАЗАЛСЯ"), "{}", out.content);
     assert!(
@@ -1962,7 +1962,7 @@ async fn accept_absent_keeps_legacy_output() {
         .expect("run");
     assert!(run.accept.is_none(), "accept не задан — вердикта нет");
 
-    let out = execute_run("fake", &base, &repo, "задача", String::new(), None).await;
+    let out = execute_run("fake", &base, &repo, "задача", String::new(), None, &[]).await;
     assert!(!accepts_marker(&out.content), "{}", out.content);
     assert!(
         out.content
@@ -1970,7 +1970,7 @@ async fn accept_absent_keeps_legacy_output() {
         "историческая первая строка: {}",
         out.content
     );
-    let off = execute_run("fake", &disabled, &repo, "задача", String::new(), None).await;
+    let off = execute_run("fake", &disabled, &repo, "задача", String::new(), None, &[]).await;
     assert_eq!(
         without_duration(&out.content),
         without_duration(&off.content),

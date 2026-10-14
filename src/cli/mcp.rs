@@ -33,13 +33,13 @@ pub(crate) enum McpCmd {
         args: String,
     },
     /// MCP-сервер (stdio JSON-RPC, NDJSON): архитектурный контроль кодовым
-    /// агентам (Claude Code и др.), ADR-008. Read-only состав: 44 инструмента
-    /// + 10 промптов-плейбуков spine-* (capability prompts). Ручные (17):
+    /// агентам (Claude Code и др.), ADR-008. Read-only состав: 45 инструментов
+    /// + 10 промптов-плейбуков spine-* (capability prompts). Ручные (18):
     ///   `spine_lint`, `fitness_check`, `significance_score`,
     ///   `significance_from_diff`, `trace_check`, `model_query`, `rubric_run`,
     ///   `rubric_prompt`, `rubric_verify`, `kb_search`, `skill_search`,
     ///   `skill_load`, `mermaid_render`, `rules_suggest`, `trust_report`,
-    ///   `verdict_explain`, `lessons_query`. Мостовые read-only
+    ///   `verdict_explain`, `lessons_query`, `lessons_match`. Мостовые read-only
     ///   (27): `adr_registry`, `agentsmd_lint`, `arch_diff`, `archify_validate`,
     ///   `architect_review`, `asyncapi_lint`, `change_impact`, `contract_diff`,
     ///   `delta_guard`, `evidence_verify`, `fleet_audit`, `landscape_report`,

@@ -229,6 +229,66 @@ impl McpServe {
             "lesson_count": lesson_count,
         }))
     }
+
+    /// `lessons_match`: префлайт-подбор уроков реестра под задачу (L4) —
+    /// отбор по области (пути задачи и пути из текста) + BM25 против
+    /// `statement` и `signature` + приоритет статусов, без LLM. Read-only:
+    /// файлов не создаёт. Возвращает top-K уроков и рендер в Markdown.
+    pub(in crate::mcp_server) async fn tool_lessons_match(
+        &self,
+        args: Value,
+    ) -> std::result::Result<Value, CallError> {
+        #[derive(Deserialize)]
+        struct Args {
+            /// Текст задачи: подбор против `statement` и `signature`, пути — из текста.
+            task: String,
+            /// Явные пути задачи (объединяются с путями из текста).
+            #[serde(default)]
+            paths: Vec<String>,
+            /// Каталог с реестром (по умолчанию — каталог вызова). Каноничное
+            /// имя аргумента пути — `path`; `repo` принимается синонимом (Н8).
+            #[serde(alias = "repo")]
+            path: Option<String>,
+            /// Максимум уроков в выдаче (по умолчанию — `[lessons] k`).
+            k: Option<usize>,
+            /// Рабочий каталог клиента: относительный `path` резолвится от него.
+            cwd: Option<String>,
+        }
+        let args: Args = parse_args(args, "lessons_match")?;
+        let root = resolve_repo(args.path.as_deref(), args.cwd.as_deref());
+        let k = args.k.unwrap_or(self.cfg.lessons.k);
+        let task = args.task;
+        let paths = args.paths;
+        let cfg = std::sync::Arc::clone(&self.cfg);
+        let registry = crate::lessons::repo_ledger_path(&root)
+            .display()
+            .to_string();
+        let matched = blocking("lessons_match", move || {
+            let lessons = crate::lessons::matching::load_lessons(&cfg, &root);
+            let matched = crate::lessons::matching::lessons_match(lessons, &task, Some(&paths), k);
+            Ok(matched)
+        })
+        .await?;
+        let report = lessons::render::render(&matched);
+        let count = matched.len();
+        Ok(json!({
+            "registry": registry,
+            "count": count,
+            "lessons": matched,
+            "report_markdown": report,
+            "summary": format!("подобрано уроков: {count}"),
+        }))
+    }
+}
+
+/// Корень репозитория по аргументам инструмента (относительный путь — от
+/// `cwd` клиента).
+fn resolve_repo(repo: Option<&str>, cwd: Option<&str>) -> PathBuf {
+    let raw = repo.map_or_else(|| PathBuf::from("."), PathBuf::from);
+    match cwd {
+        Some(cwd) if !raw.is_absolute() => PathBuf::from(cwd).join(raw),
+        _ => raw,
+    }
 }
 
 /// Реестр по аргументам инструмента: `user` → `$ARCH_HOME/lessons`, иначе
@@ -237,12 +297,7 @@ fn resolve_ledger(repo: Option<&str>, user: bool, cwd: Option<&str>) -> Ledger {
     if user {
         return Ledger::user();
     }
-    let raw = repo.map_or_else(|| PathBuf::from("."), PathBuf::from);
-    let root = match cwd {
-        Some(cwd) if !raw.is_absolute() => PathBuf::from(cwd).join(raw),
-        _ => raw,
-    };
-    Ledger::repo(&root)
+    Ledger::repo(&resolve_repo(repo, cwd))
 }
 
 /// Пороги переходов из секции `[lessons]` конфига сервера.

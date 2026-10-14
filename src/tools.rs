@@ -76,6 +76,9 @@ fn domain_tools(cfg: &Config) -> Vec<Arc<dyn Tool>> {
         out.extend(crate::web::tools());
     }
     out.extend(crate::kb::tools());
+    // Префлайт-подбор уроков под задачу (L4): read-only, детерминированный
+    // отбор из реестра — ядро без LLM (AD-2).
+    out.extend(crate::lessons::matching::tools());
     out.extend(crate::control::tools());
     out.extend(crate::openapi::tools());
     out.extend(crate::asyncapi::tools());
@@ -166,6 +169,7 @@ mod tests {
             "architect_review",
             "change_impact",
             "handoff_create",
+            "lessons_match",
         ] {
             assert!(
                 names.iter().any(|n| n == expected),

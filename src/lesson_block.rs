@@ -43,7 +43,9 @@ use std::path::{Path, PathBuf};
 
 use crate::config::{Config, LessonsConfig};
 use crate::error::{HarnessError, Result};
-use crate::lessons::{LEDGER_DIR, Ledger, Lesson, LessonStatus, Thresholds};
+use crate::lessons::{LEDGER_DIR, Lesson, LessonStatus};
+
+pub use crate::lessons::matching::{load_lessons, paths_from_text};
 
 /// Заголовок закреплённого блока (байт-в-байт контракт рендера, ADR-087).
 pub const HEADER: &str = "## Уроки контура (выучено, проверено гейтом)";
@@ -68,12 +70,6 @@ const TOKENS_PER_CHAR: usize = 4;
 
 /// Максимум символов формулировки урока в одной строке блока.
 const MAX_STATEMENT_CHARS: usize = 240;
-
-/// Максимум путей, извлечённых из текста (защита от раздувания отбора).
-const MAX_PATHS: usize = 32;
-
-/// Обрезка длинного пути-токена на входе (длиннее — не путь репозитория).
-const MAX_PATH_CHARS: usize = 200;
 
 /// Лимиты отбора блока (секция `[lessons]` конфига: `k`, `token_limit`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -141,6 +137,10 @@ pub struct Report {
     pub selected: usize,
     /// Отсеянные карантином уроки.
     pub quarantined: Vec<Quarantined>,
+    /// Отобранные уроки (в порядке ранга, после карантина) — основа события
+    /// `prevented` (L4) и пакета handoff (L5). Пусто, если блок не собирался
+    /// префлайт-подбором.
+    pub lessons: Vec<Lesson>,
 }
 
 /// Оценка токенов по символам (символы / 4, округление вверх).
@@ -203,13 +203,8 @@ pub fn rank(lessons: Vec<Lesson>, paths: &[String], query: Option<&str>, k: usiz
         }
         // Карантин — только для уроков, попадающих в блок: чинить судьбу
         // «нерелевантного» урока незачем.
-        if let Some(hit) = crate::injection::first_hit(&lesson.statement) {
-            selection.quarantined.push(Quarantined {
-                id: lesson.id.clone(),
-                signature: lesson.signature.describe(),
-                pattern: hit.pattern.to_string(),
-                line: hit.line,
-            });
+        if let Some(hit) = quarantine_hit(&lesson) {
+            selection.quarantined.push(hit);
             continue;
         }
         ranked.push((status_rank(lesson.status), score, lesson.hits, lesson));
@@ -223,6 +218,31 @@ pub fn rank(lessons: Vec<Lesson>, paths: &[String], query: Option<&str>, k: usiz
     });
     ranked.truncate(k);
     selection.lessons = ranked.into_iter().map(|(_, _, _, lesson)| lesson).collect();
+    selection
+}
+
+/// Факт карантина одного урока: текст с признаками prompt-инъекции
+/// ([`crate::injection`]) — отсечение, иначе `None`.
+fn quarantine_hit(lesson: &Lesson) -> Option<Quarantined> {
+    crate::injection::first_hit(&lesson.statement).map(|hit| Quarantined {
+        id: lesson.id.clone(),
+        signature: lesson.signature.describe(),
+        pattern: hit.pattern.to_string(),
+        line: hit.line,
+    })
+}
+
+/// Карантин списка уже отобранных уроков (префлайт-подбор L4): урок с
+/// признаками инъекции уходит в [`Selection::quarantined`], остальные —
+/// в блок, порядок входа сохраняется.
+fn quarantine(lessons: Vec<Lesson>) -> Selection {
+    let mut selection = Selection::default();
+    for lesson in lessons {
+        match quarantine_hit(&lesson) {
+            Some(hit) => selection.quarantined.push(hit),
+            None => selection.lessons.push(lesson),
+        }
+    }
     selection
 }
 
@@ -291,36 +311,6 @@ pub fn render(selection: &Selection, token_limit: usize) -> String {
     )
 }
 
-/// Уроки обоих реестров (репозиторный и пользовательский), дедуплицированные
-/// по `id`: локальный урок приоритетнее пользовательского с тем же id.
-///
-/// Fail-soft: нет реестра, нет файла, битый журнал — предупреждение в tracing
-/// и пустая/частичная выдача. Реестр — вспомогательная память, он не должен
-/// ронять ход агента или хук хоста.
-#[must_use]
-pub fn load_lessons(cfg: &Config, repo: &Path) -> Vec<Lesson> {
-    let th = Thresholds::from(&cfg.lessons);
-    let sources = [
-        (crate::lessons::repo_ledger_path(repo), "репозиторный"),
-        (cfg.lessons.user_ledger_path(), "пользовательский"),
-    ];
-    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    let mut out: Vec<Lesson> = Vec::new();
-    for (path, label) in sources {
-        match Ledger::at(path.clone()).snapshot(&th) {
-            Ok(snapshot) => {
-                for lesson in snapshot.lessons {
-                    if seen.insert(lesson.id.clone()) {
-                        out.push(lesson);
-                    }
-                }
-            }
-            Err(e) => tracing::warn!("блок уроков: {label} реестр {}: {e}", path.display()),
-        }
-    }
-    out
-}
-
 /// Сборка блока: отбор из реестров плюс рендер с лимитом токенов.
 ///
 /// Пути (`paths`) задают область отбора, `query` — BM25-релевантность текста
@@ -339,10 +329,12 @@ pub fn build_report(cfg: &Config, repo: &Path, paths: &[String], query: Option<&
             tracing::warn!("карантин уроков: аудит не записан {}: {e}", path.display());
         }
     }
+    let selected = selection.lessons.len();
     let block = render(&selection, limits.token_limit);
     Report {
-        selected: selection.lessons.len(),
+        selected,
         quarantined: selection.quarantined,
+        lessons: selection.lessons,
         block,
     }
 }
@@ -354,57 +346,37 @@ pub fn block(cfg: &Config, repo: &Path, paths: &[String]) -> String {
     build_report(cfg, repo, paths, None).block
 }
 
-/// Пути, упомянутые в тексте: токены вида `src/a.rs`, `tests/**`, `docs/`.
+/// Префлайт-сборка блока под задачу (L4): отбор через
+/// [`crate::lessons::matching::lessons_match`] — scope (пути из текста) +
+/// BM25 против `statement` **и** `signature` + приоритет статусов — вместо
+/// «все уроки по области», затем карантин и рендер с лимитом токенов.
 ///
-/// Извлекаются только относительные пути репозитория (абсолютные пути и URL
-/// отбрасываются); дубликаты схлопываются, порядок — как в тексте, не более
-/// [`MAX_PATHS`]. Разбор детерминирован — LLM не участвует.
+/// Это точка подключения L4 к L5-пути: вызывается перед `harness_run`, когда
+/// известен текст задачи. [`Report::lessons`] — отобранные уроки (в порядке
+/// ранга, после карантина) для события `prevented` (L4) и пакета handoff (L5).
 #[must_use]
-pub fn paths_from_text(text: &str) -> Vec<String> {
-    let mut paths: Vec<String> = Vec::new();
-    for raw in text.split(|c: char| {
-        c.is_whitespace()
-            || matches!(
-                c,
-                '`' | '"' | '\'' | '(' | ')' | '[' | ']' | '{' | '}' | ',' | ';' | '<' | '>' | '='
-            )
-    }) {
-        let token = raw.trim_end_matches(['.', ':', ',', ';', ')', ']', '}', '"', '\'', '»']);
-        if !is_path_like(token) {
-            continue;
-        }
-        let normalized = token.trim_start_matches("./").replace('\\', "/");
-        if !paths.contains(&normalized) {
-            paths.push(normalized);
-        }
-        if paths.len() >= MAX_PATHS {
-            break;
+pub fn build_report_for_task(cfg: &Config, repo: &Path, task_text: &str) -> Report {
+    if !cfg.lessons.enabled {
+        return Report::default();
+    }
+    let limits = Limits::from(&cfg.lessons);
+    let matched =
+        crate::lessons::matching::lessons_match(load_lessons(cfg, repo), task_text, None, limits.k);
+    let selection = quarantine(matched);
+    if !selection.quarantined.is_empty() {
+        let path = repo.join(LEDGER_DIR).join(QUARANTINE_FILE);
+        if let Err(e) = write_quarantine_audit(&path, &selection.quarantined) {
+            tracing::warn!("карантин уроков: аудит не записан {}: {e}", path.display());
         }
     }
-    paths
-}
-
-/// Похож ли токен на относительный путь репозитория.
-fn is_path_like(token: &str) -> bool {
-    let len = token.chars().count();
-    if !(3..=MAX_PATH_CHARS).contains(&len) || token.starts_with('/') || token.contains("://") {
-        return false;
+    let selected = selection.lessons.len();
+    let block = render(&selection, limits.token_limit);
+    Report {
+        selected,
+        quarantined: selection.quarantined,
+        lessons: selection.lessons,
+        block,
     }
-    if !token
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | '*' | '?'))
-    {
-        return false;
-    }
-    // Путь — это слэш либо расширение файла (`TASK.md`); прозаические слова
-    // без того и другого (ADR-087, `gate`) путями не считаются.
-    token.contains('/')
-        || token.rsplit_once('.').is_some_and(|(stem, ext)| {
-            !stem.is_empty()
-                && !ext.is_empty()
-                && ext.len() <= 8
-                && ext.chars().all(|c| c.is_ascii_alphanumeric())
-        })
 }
 
 /// Дописывает задачу исполнителю, ставя блок уроков перед её текстом.
@@ -475,7 +447,9 @@ pub fn quarantine_path(repo: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lessons::{Evidence, LessonSource, Outcome, RecordInput, Signature};
+    use crate::lessons::{
+        Evidence, Ledger, LessonSource, Outcome, RecordInput, Signature, Thresholds,
+    };
 
     /// Урок реестра заданного статуса/счётчиков (конструктор тестов).
     fn lesson(
@@ -844,5 +818,51 @@ mod tests {
         let text = block(&cfg, tmp.path(), &["src/a.rs".to_string()]);
         let lines = text.lines().filter(|l| l.starts_with("- **")).count();
         assert_eq!(lines, 1, "K=1 — один урок: {text}");
+    }
+
+    /// Префлайт-подбор под задачу (L4): `build_report_for_task` отбирает уроки
+    /// BM25 по тексту задачи (statement+signature), наполняет `Report.lessons`
+    /// и собирает блок; при `enabled=false` — пусто.
+    #[test]
+    fn build_report_for_task_matches_by_text_and_fills_lessons() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut cfg = Config::default();
+        cfg.lessons.enabled = true;
+        cfg.lessons.user_dir = Some(tmp.path().join("user-lessons"));
+        let th = Thresholds::default();
+        let ledger = Ledger::repo(tmp.path());
+        let scoped = lesson(
+            "G5",
+            "новый публичный символ обязан попасть в __all__ пакета",
+            module_scope("src/**"),
+            1,
+            0,
+            0,
+        );
+        let input = RecordInput::new(scoped.signature.clone(), scoped.evidence[0].clone())
+            .with_statement(scoped.statement.clone())
+            .with_scope(scoped.scope.clone());
+        ledger.record(&input, &th, "2026-10-14").expect("record");
+
+        // Текст задачи лексически релевантен формулировке урока — урок в блоке,
+        // а список отобранных уроков (для prevented) заполнен.
+        let report = build_report_for_task(&cfg, tmp.path(), "добавь публичный символ в src/a.rs");
+        assert!(report.block.contains(HEADER), "{0}", report.block);
+        assert_eq!(report.selected, 1);
+        assert_eq!(report.lessons.len(), 1, "{:?}", report.lessons);
+        assert_eq!(report.lessons[0].signature.code, "G5");
+
+        // Нерелевантная задача С ПУТЯМИ вне области урока (`docs/readme.md`
+        // против `src/**`) и без лексического пересечения — блок пуст, список
+        // уроков пуст (без путей область читалась бы как «весь репозиторий»).
+        let off = build_report_for_task(&cfg, tmp.path(), "переведи docs/readme.md на английский");
+        assert_eq!(off.block, "", "нерелевантная задача: {0}", off.block);
+        assert_eq!(off.lessons, [], "нерелевантная задача: {:?}", off.lessons);
+
+        // Флаг выключен — реестр не читается вовсе.
+        let disabled = Config::default();
+        let off = build_report_for_task(&disabled, tmp.path(), "добавь публичный символ");
+        assert_eq!(off.block, "");
+        assert_eq!(off.lessons, []);
     }
 }

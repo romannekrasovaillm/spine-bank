@@ -300,6 +300,7 @@ pub const MANUAL_TOOLS: &[&str] = &[
     "trust_report",
     "verdict_explain",
     "lessons_query",
+    "lessons_match",
 ];
 
 /// Ручные инструменты, доступные ТОЛЬКО в режиме `--rw`

@@ -15,6 +15,8 @@
 //!   проекции, пороги переходов, файловая блокировка дозаписи;
 //! - [`scope`] — уровень области (`file|module|package|repo|user|org`) и
 //!   детерминированное сопоставление глобов;
+//! - [`matching`] — префлайт-подбор уроков под задачу (L4): scope + BM25
+//!   против `statement` и `signature` + приоритет статусов, без LLM;
 //! - [`render`] — байт-в-байт стабильный рендер `LESSONS.md` и атомарная
 //!   запись.
 //!
@@ -46,6 +48,8 @@
 //! (уровень, источник, исход, статус) — [`crate::HarnessError::Config`].
 
 pub mod ledger;
+#[path = "match.rs"]
+pub mod matching;
 pub mod render;
 pub mod scope;
 
@@ -55,6 +59,7 @@ pub use ledger::{
     Signature, Snapshot, Thresholds, now_iso, repo_ledger_path, today, user_dir, user_ledger_path,
     validate_imported,
 };
+pub use matching::lessons_match;
 pub use render::{render, render_lesson, write_atomic};
 pub use scope::{Scope, ScopeLevel};
 

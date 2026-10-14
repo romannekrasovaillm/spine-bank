@@ -1099,14 +1099,10 @@ pub(crate) async fn run() -> Result<()> {
             };
             // Закреплённый блок уроков перед задачей исполнителю (ADR-087):
             // CLI-край идёт мимо инструмента `harness_run`, поэтому вставка
-            // делается здесь тем же сборщиком блока (при enabled = false —
+            // делается здесь тем же префлайт-подбором L4 (при enabled = false —
             // пустой блок, задача байт-в-байт прежняя).
-            let lessons = arch_harness::lesson_block::build_report(
-                &cfg,
-                &repo,
-                &arch_harness::lesson_block::paths_from_text(&task_text),
-                None,
-            );
+            let lessons =
+                arch_harness::lesson_block::build_report_for_task(&cfg, &repo, &task_text);
             if !lessons.block.is_empty() {
                 println!(
                     "блок уроков реестра: {} урок(ов) передано исполнителю (ADR-087)",
@@ -1131,7 +1127,13 @@ pub(crate) async fn run() -> Result<()> {
                 let reference = arch_harness::gate_loop::RunRef::new(&run_id)
                     .with_harness(Some(harness.as_str()))
                     .with_task((!key.is_empty()).then_some(key.as_str()));
-                arch_harness::gate_loop::close_loop(&cfg, &repo, verdict, &reference);
+                arch_harness::gate_loop::close_loop(
+                    &cfg,
+                    &repo,
+                    verdict,
+                    &reference,
+                    &lessons.lessons,
+                );
             }
             // Вердикт приёмки — первой строкой результата прогона (ADR-086 п.4):
             // «код 0 у исполнителя» ≠ «результат принят гейтом».
