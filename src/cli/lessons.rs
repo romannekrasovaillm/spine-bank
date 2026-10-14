@@ -167,6 +167,22 @@ pub(crate) enum LessonsCmd {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Миграция предложенных уроков памяти сбоев (`failure_lessons.md`) в
+    /// реестр (ADR-087): файл, который до 0.5.0 не читал никто (B2), отдаёт
+    /// свои уроки реестру. Идемпотентна: повторный прогон не плодит
+    /// доказательств; отсутствие файла — «мигрировать нечего», не ошибка.
+    Migrate {
+        /// Каталог состояния харнесса с `failure_lessons.md`
+        /// (по умолчанию — `paths.state_dir` конфига).
+        #[arg(long, value_name = "PATH")]
+        state_dir: Option<PathBuf>,
+        /// Репозиторий с реестром.
+        #[arg(long, value_name = "PATH")]
+        repo: Option<PathBuf>,
+        /// Пользовательский реестр `$ARCH_HOME/lessons`.
+        #[arg(long)]
+        user: bool,
+    },
 }
 
 /// Обрабатывает `arch-be lessons …`.
@@ -390,6 +406,37 @@ pub(crate) fn cmd_lessons(cfg: &Config, cmd: LessonsCmd) -> Result<()> {
             }
             write_render(&ledger, &th)?;
             println!("Импортировано уроков: {}", imported.len());
+            Ok(())
+        }
+        LessonsCmd::Migrate {
+            state_dir,
+            repo,
+            user,
+        } => {
+            let ledger = select_ledger(repo.as_deref(), user)?;
+            let th = thresholds(cfg);
+            let dir = state_dir.unwrap_or_else(|| cfg.paths.state_dir.clone());
+            let file = dir.join(arch_harness::failure_memory::LESSONS_FILE);
+            let moved = arch_harness::failure_memory::migrate_to_ledger(
+                &file,
+                &ledger,
+                &th,
+                &lessons::today(),
+            )
+            .with_context(|| format!("миграция {}", file.display()))?;
+            if moved == 0 {
+                println!(
+                    "Мигрировать нечего: {} нет или уроков в нём нет",
+                    file.display()
+                );
+                return Ok(());
+            }
+            write_render(&ledger, &th)?;
+            println!(
+                "Мигрировано уроков из {}: {} (источник tool, статус — по счётчикам)",
+                file.display(),
+                moved
+            );
             Ok(())
         }
     }
