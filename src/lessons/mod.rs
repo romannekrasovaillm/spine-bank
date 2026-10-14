@@ -17,6 +17,12 @@
 //!   детерминированное сопоставление глобов;
 //! - [`matching`] — префлайт-подбор уроков под задачу (L4): scope + BM25
 //!   против `statement` и `signature` + приоритет статусов, без LLM;
+//! - [`generalize`] — обобщение области урока (L6): детерминированное
+//!   расширение `scope` по счётчикам и откат по контрпримеру (ADR-088);
+//! - [`compose`] — композиция уроков в составные чек-листы `LSN-C-*` (L6,
+//!   E4): производная сущность со ссылками на исходные (ADR-088);
+//! - [`subject`] — детерминированный классификатор `subject_kind` по диффу
+//!   исполнителя (L6, ADR-088), питающий композицию;
 //! - [`render`] — байт-в-байт стабильный рендер `LESSONS.md` и атомарная
 //!   запись.
 //!
@@ -47,13 +53,18 @@
 //! контура контроля, а не разбора конфигурации; ошибки разбора значений
 //! (уровень, источник, исход, статус) — [`crate::HarnessError::Config`].
 
+pub mod compose;
+pub mod generalize;
 pub mod ledger;
 #[path = "match.rs"]
 pub mod matching;
 pub mod promote;
 pub mod render;
 pub mod scope;
+pub mod subject;
 
+pub use compose::{COMPOSITE_MIN_FAILS, COMPOSITE_PREFIX, Composite, compose, composite_id};
+pub use generalize::{GeneralizeThresholds, generalize_scope, module_of, package_of, widen_scope};
 pub use ledger::{
     EventKind, Evidence, ID_PREFIX, LEDGER_DIR, LEDGER_FILE, LEDGER_VERSION, LESSONS_MD, Ledger,
     LedgerEvent, Lesson, LessonSource, LessonStatus, Mutation, Outcome, Provenance, RecordInput,
@@ -67,6 +78,7 @@ pub use promote::{
 };
 pub use render::{render, render_lesson, write_atomic};
 pub use scope::{Scope, ScopeLevel};
+pub use subject::{DiffFile, SubjectKind, classify, classify_path};
 
 /// Версия arch-be — в провенанс каждой записи реестра (аудит: каким
 /// бинарём урок записан).

@@ -467,6 +467,12 @@ pub struct Lesson {
     /// Серия `misses` подряд (сбрасывается `hit`).
     #[serde(default)]
     pub consecutive_misses: u32,
+    /// Файлы промахов (`miss`): локации контрпримеров для отката обобщения
+    /// области (L6, ADR-088). Производное от событий `miss`; в рендер не
+    /// попадает и при пустом значении не сериализуется (контракт `v1`
+    /// аддитивен).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub miss_files: Vec<String>,
     /// Статус жизненного цикла.
     #[serde(default)]
     pub status: LessonStatus,
@@ -499,6 +505,7 @@ impl Lesson {
             hits: 0,
             misses: 0,
             consecutive_misses: 0,
+            miss_files: Vec::new(),
             status: LessonStatus::Observed,
             provenance: Provenance::new(
                 input.recorder.clone(),
@@ -1129,6 +1136,9 @@ pub fn fold(events: &[LedgerEvent], th: &Thresholds) -> Vec<Lesson> {
                     let mut fresh = lesson.clone();
                     fresh.misses = 0;
                     fresh.consecutive_misses = 0;
+                    // Локации промахов — производное только от событий `miss`;
+                    // снимок записи (и импортированного бандла) их не задаёт.
+                    fresh.miss_files.clear();
                     fresh.promoted_rule = None;
                     fresh.retired_reason = None;
                     fresh.status = LessonStatus::Observed;
@@ -1162,6 +1172,11 @@ pub fn fold(events: &[LedgerEvent], th: &Thresholds) -> Vec<Lesson> {
             EventKind::Miss { id, evidence } => {
                 if let Some(lesson) = index.get_mut(id) {
                     push_unique(&mut lesson.evidence, evidence.clamped());
+                    if let Some(file) = evidence.file.as_deref() {
+                        if !lesson.miss_files.iter().any(|f| f == file) {
+                            lesson.miss_files.push(file.to_string());
+                        }
+                    }
                     lesson.misses = lesson.misses.saturating_add(1);
                     lesson.consecutive_misses = lesson.consecutive_misses.saturating_add(1);
                     if lesson.consecutive_misses >= th.retire_misses && !lesson.status.is_sticky() {
