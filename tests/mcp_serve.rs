@@ -242,12 +242,14 @@ fn handshake_then_tools_list_over_stdio() {
     }
     assert_eq!(
         tools.len(),
-        43,
-        "ровно 43 инструмента в ro-режиме (16 ручных + 27 read-only моста; \
+        44,
+        "ровно 44 инструмента в ro-режиме (17 ручных + 27 read-only моста; \
          verdict_explain и trust_report — волна W, rule_template_* — ADR-050, \
          rubric_handover и rubric_accept — передача судейства, ADR-048, \
          recover и arch_diff — граф «как построено», ADR-069, \
-         report — отчёт о восстановлении, ADR-080/ADR-083)"
+         report — отчёт о восстановлении, ADR-080/ADR-083, \
+         lessons_query — реестр уроков, ADR-085; запись уроков lessons_record \
+         открывается только под --rw)"
     );
     // rw-контур и write/exec-принадлежность хоста закрыты в ro-режиме.
     for banned in [

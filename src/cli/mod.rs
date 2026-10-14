@@ -12,6 +12,7 @@ mod constraints_harvest;
 mod control;
 mod fleet;
 mod landscape;
+mod lessons;
 mod library;
 mod mcp;
 mod misc;
@@ -48,6 +49,7 @@ use fleet::{FleetCmd, cmd_fleet};
 #[cfg(feature = "harness")]
 use fleet::{WorktreeCmd, cmd_worktree};
 use landscape::{LandscapeCmd, cmd_landscape};
+use lessons::{LessonsCmd, cmd_lessons};
 #[cfg(feature = "harness")]
 use library::cmd_prompts;
 use library::{MemoryCmd, PluginsCmd, SkillsCmd, cmd_init, cmd_memory, cmd_plugins, cmd_skills};
@@ -539,6 +541,13 @@ enum Cmd {
     Nfr {
         #[command(subcommand)]
         cmd: NfrCmd,
+    },
+    /// Реестр уроков Lesson Ledger (ADR-085): урок как сущность контура —
+    /// доказательства с `run_id`, детерминированный статус по счётчикам,
+    /// append-only журнал `.arch/lessons/ledger.jsonl` и рендер `LESSONS.md`.
+    Lessons {
+        #[command(subcommand)]
+        cmd: LessonsCmd,
     },
     /// Библиотека скиллов: список, поиск, показ.
     Skills {
@@ -1869,6 +1878,7 @@ pub(crate) async fn run() -> Result<()> {
         Some(Cmd::Model { cmd }) => cmd_model(&cfg, cmd)?,
         Some(Cmd::Trace { cmd }) => cmd_trace(&cfg, cmd)?,
         Some(Cmd::Nfr { cmd }) => cmd_nfr(cmd)?,
+        Some(Cmd::Lessons { cmd }) => cmd_lessons(&cfg, cmd)?,
         Some(Cmd::Skills { cmd }) => cmd_skills(&cfg, cmd)?,
         Some(Cmd::Plugins { cmd }) => cmd_plugins(&cfg, cmd)?,
         Some(Cmd::Policy { cmd, check }) => match cmd {

@@ -299,7 +299,17 @@ pub const MANUAL_TOOLS: &[&str] = &[
     "rules_suggest",
     "trust_report",
     "verdict_explain",
+    "lessons_query",
 ];
+
+/// Ручные инструменты, доступные ТОЛЬКО в режиме `--rw`
+/// ([`ServeMode::ReadWrite`]): они пишут в рабочий каталог клиента, а
+/// read-only состав сервера обязан оставаться без записи (тот же принцип,
+/// что у [`BRIDGE_READ_WRITE`]). `lessons_record` дозаписывает доказательство
+/// урока в `.arch/lessons/ledger.jsonl` и перерисовывает `LESSONS.md`
+/// (ADR-085); чтение (`lessons_query`) доступно всегда, включая core-сборку.
+/// (`pub`: справка CLI `mcp serve` сверяется с реестром тестом в `main.rs`.)
+pub const MANUAL_TOOLS_READ_WRITE: &[&str] = &["lessons_record"];
 
 /// Режим MCP-сервера: какой срез инструментов отдаётся хосту.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

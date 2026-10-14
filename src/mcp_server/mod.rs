@@ -34,7 +34,11 @@
 //!   сырых ответов хоста — медиана, `unstable`, `evidence_not_found`);
 //!   плюс `rules_suggest` — кандидатные fitness-правила из пробелов кейса
 //!   (EARS, таймауты контрактов, REQ→TASK, RTO/RPO→ADR, аудит операторских
-//!   действий; модуль [`crate::rules_suggest`]).
+//!   действий; модуль [`crate::rules_suggest`]);
+//!   плюс реестр уроков (ADR-085, Core — LLM не нужна): `lessons_query`
+//!   (чтение: id/статус/область, рендер в Markdown) и `lessons_record`
+//!   (дозапись доказательства по подписи; статус выводится из счётчиков —
+//!   модуль [`crate::lessons`]).
 //!   МОСТ: имена из белых списков [`BRIDGE_READ_ONLY`] (+ [`BRIDGE_READ_WRITE`]
 //!   под `--rw`), не пересекающиеся с ручными, маршрутизируются в
 //!   [`crate::tools::full_registry`] (`dispatch` — с политикой R-уровней;
@@ -91,5 +95,6 @@ mod types;
 
 pub use protocol::{serve, serve_with_mode};
 pub use types::{
-    BRIDGE_READ_ONLY, BRIDGE_READ_WRITE, MANUAL_TOOLS, McpServe, PATH_ARG_ALIASES, ServeMode,
+    BRIDGE_READ_ONLY, BRIDGE_READ_WRITE, MANUAL_TOOLS, MANUAL_TOOLS_READ_WRITE, McpServe,
+    PATH_ARG_ALIASES, ServeMode,
 };
