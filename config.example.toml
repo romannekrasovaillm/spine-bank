@@ -741,3 +741,18 @@ fast     = ["fitness", "spine_lint"]
 standard = ["fitness", "spine_lint", "trace_check", "rule_weakened", "nfr"]
 critical = ["fitness", "spine_lint", "trace_check", "rule_weakened",
             "delta_guard", "sensors", "nfr", "evidence_verify"]
+
+# Реестр уроков (Lesson Ledger, ADR-085): детерминированный жизненный цикл
+# урока по счётчикам доказательств (AD-2: LLM статус не меняет) и бюджет
+# блока уроков в контексте (L3, ADR-087). Дефолт enabled=false — поведение
+# 0.4.11; явные вызовы CLI/MCP работают независимо от флага.
+# [lessons]
+# enabled = false          # автозапись из вердикта гейта (L2) и блок уроков (L3)
+# candidate_fails = 2      # наблюдённых FAIL по сигнатуре до candidate
+# confirm_hits = 2         # hits для confirmed
+# confirm_max_misses = 0   # misses, допустимые для confirmed
+# confirm_tasks = 2        # разных задач для confirmed
+# retire_misses = 2        # серия misses подряд → retired
+# expiry_days = 0          # срок жизни урока в днях (0 — без срока)
+# k = 5                    # уроков в блоке инъекции L3
+# token_limit = 900        # лимит токенов блока (оценка — символы/4)
