@@ -41,6 +41,8 @@ use crate::llm::ToolSpec;
 use crate::model::{EntityKind, load_model};
 use crate::tool::{Tool, ToolContext, ToolOutput};
 
+pub mod auto;
+
 /// Имя каталога handoff-пакета в корне репозитория.
 pub(crate) const HANDOFF_DIR: &str = ".arch-handoff";
 

@@ -225,6 +225,10 @@ enum Cmd {
         /// Задача (иначе — из .arch-handoff/TASK.md).
         #[arg(long)]
         task: Option<String>,
+        /// Разрешить запись уроков уровня user/org в автопакет .arch-handoff/
+        /// (без флага — только уроки области репозитория, ADR-085).
+        #[arg(long)]
+        share: bool,
     },
     /// Список известных кодовых харнессов. Только сборка `harness`.
     #[cfg(feature = "harness")]
@@ -1067,6 +1071,7 @@ pub(crate) async fn run() -> Result<()> {
             harness,
             repo,
             task,
+            share,
         }) => {
             use arch_harness::harness::Termination;
             let hcfg = cfg
@@ -1108,6 +1113,28 @@ pub(crate) async fn run() -> Result<()> {
                     "блок уроков реестра: {} урок(ов) передано исполнителю (ADR-087)",
                     lessons.selected
                 );
+            }
+            // L5 (ADR-085, B4): автопакет handoff — лёгкий пакет собирается,
+            // когда явного handoff_create нет или пакет старше HEAD (тот же
+            // путь, что у инструмента harness_run); сбой сборки прогон не роняет.
+            let accept_cmd = arch_harness::harness::resolve_accept(hcfg, &repo);
+            let pack_state = arch_harness::handoff::auto::state(&repo);
+            if pack_state.needs_build() {
+                match arch_harness::handoff::auto::build(
+                    &repo,
+                    &task_text,
+                    &lessons.lessons,
+                    accept_cmd.as_deref(),
+                    share,
+                ) {
+                    Ok(packet) => println!(
+                        "автопакет handoff (L5): {} — собран {}; уроков в LESSONS.md: {}.",
+                        pack_state.label(),
+                        packet.dir.display(),
+                        packet.lessons
+                    ),
+                    Err(e) => tracing::warn!("автопакет handoff {}: {e}", repo.display()),
+                }
             }
             let task_text = arch_harness::lesson_block::augment_task(&task_text, &lessons.block);
             let mut hcfg_owned = hcfg.clone();
