@@ -116,7 +116,7 @@ const ORCHESTRATE_DROP: &[&str] = &[
 pub fn session_registry(cfg: &Config) -> ToolRegistry {
     let registry = full_registry(cfg);
     match cfg.agent.tools_profile.as_deref().map(str::trim) {
-        None | Some("") | Some("full" | "architect") => registry,
+        None | Some("" | "full" | "architect") => registry,
         Some("orchestrate") => registry.excluding(ORCHESTRATE_DROP),
         Some(other) => {
             // Опечатка в конфиге не должна ронять сессию — полный реестр
@@ -365,16 +365,17 @@ mod tests {
             "edit_file",
             "glob",
             "grep",
-            "harness_run",
             "handoff_create",
-            "subagent_run",
-            "ralph_run",
-            "worktree_new",
             "skill_search",
             "skill_load",
             "kb_search",
             "significance_score",
         ] {
+            assert!(names.iter().any(|n| n == kept), "{kept} обязан остаться");
+        }
+        // Оркестрационные инструменты — только сборки harness (в core их нет).
+        #[cfg(feature = "harness")]
+        for kept in ["harness_run", "subagent_run", "ralph_run", "worktree_new"] {
             assert!(names.iter().any(|n| n == kept), "{kept} обязан остаться");
         }
         for dropped in [

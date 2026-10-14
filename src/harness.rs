@@ -1049,59 +1049,57 @@ async fn run_accept_gate(repo: &Path, cfg: &CodingHarnessConfig) -> Option<Accep
     if cmd.is_empty() {
         return None;
     }
-    let spawned = Command::new("bash")
-        .args(["-c", &cmd])
-        .current_dir(repo)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn();
-    let child = match spawned {
-        Ok(child) => child,
-        Err(e) => {
-            return Some(AcceptGate {
-                cmd,
-                verdict: AcceptVerdict::Fail,
-                line: format!("accept_cmd не запустился: {e}"),
-            });
-        }
-    };
-    let wait = tokio::time::timeout(
-        Duration::from_secs(cfg.post_gate_timeout_secs.max(1)),
-        child.wait_with_output(),
-    )
+    let timeout = Duration::from_secs(cfg.post_gate_timeout_secs.max(1));
+    let repo_owned = repo.to_path_buf();
+    let cmd_for_run = cmd.clone();
+    // AD-9 (правило `no_direct_shell_spawn`): shell — только через
+    // crate::proc::run_shell: команда стартует в собственной процессной
+    // группе и таймаут убивает группу целиком — внуки приёмки (воркеры,
+    // `server &`) не остаются сиротами. stdio перехватывается (утечка в TUI
+    // исключена — инцидент 2026-10-14).
+    let outcome = tokio::task::spawn_blocking(move || {
+        crate::proc::run_shell(&repo_owned, "bash", &cmd_for_run, timeout)
+    })
     .await;
-    Some(match wait {
-        Ok(Ok(out)) => {
-            let verdict = if out.status.success() {
-                AcceptVerdict::Pass
-            } else {
-                AcceptVerdict::Fail
-            };
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            let line = stdout
-                .lines()
-                .map(str::trim)
-                .find(|l| !l.is_empty())
-                .unwrap_or("")
-                .chars()
-                .take(240)
-                .collect();
-            AcceptGate { cmd, verdict, line }
-        }
+    Some(match outcome {
+        Ok(Ok(out)) => match out.status {
+            Some(status) => {
+                let verdict = if status.success() {
+                    AcceptVerdict::Pass
+                } else {
+                    AcceptVerdict::Fail
+                };
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                let line = stdout
+                    .lines()
+                    .map(str::trim)
+                    .find(|l| !l.is_empty())
+                    .unwrap_or("")
+                    .chars()
+                    .take(240)
+                    .collect();
+                AcceptGate { cmd, verdict, line }
+            }
+            // status=None — убита по таймауту (группа завершена целиком):
+            // результат не проверен.
+            None => AcceptGate {
+                cmd,
+                verdict: AcceptVerdict::Timeout,
+                line: format!(
+                    "приёмка не завершилась за {} с — результат не проверен",
+                    timeout.as_secs()
+                ),
+            },
+        },
         Ok(Err(e)) => AcceptGate {
             cmd,
             verdict: AcceptVerdict::Fail,
-            line: format!("сбой ожидания accept_cmd: {e}"),
+            line: format!("accept_cmd не запустился: {e}"),
         },
-        Err(_) => AcceptGate {
+        Err(join) => AcceptGate {
             cmd,
-            verdict: AcceptVerdict::Timeout,
-            line: format!(
-                "приёмка не завершилась за {} с — результат не проверен",
-                cfg.post_gate_timeout_secs.max(1)
-            ),
+            verdict: AcceptVerdict::Fail,
+            line: format!("сбой потока приёмки: {join}"),
         },
     })
 }

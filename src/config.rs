@@ -277,7 +277,7 @@ pub struct AgentConfig {
     /// инструментов, реально зовутся 4 базовых): `full` (дефолт) и
     /// `architect` — полный реестр; `orchestrate` — ядро (fs/bash/веб),
     /// оркестрация (`harness_run`, субагенты, handoff), знания
-    /// (skill_search/skill_load/kb_search) и `significance_score` — доменный
+    /// (`skill_search` / `skill_load` / `kb_search`) и `significance_score` — доменный
     /// слой из схем каждого запроса убран. Неизвестное значение — `full`
     /// (предупреждение в лог): сессия не падает из-за опечатки в конфиге.
     /// Мост MCP (`mcp serve`) профиль НЕ применяет — у моста свои белые

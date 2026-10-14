@@ -630,8 +630,8 @@ async fn no_usage_record_without_stream_usage() {
     );
 }
 
-/// Провайдер, чей НЕстриминговый ответ несёт usage (как openai_compat
-/// `complete_with_usage` — статистика берётся из тела ответа API).
+/// Провайдер, чей нестриминговый ответ несёт usage (как у
+/// `openai_compat` — статистика берётся из тела ответа API).
 #[derive(Debug)]
 struct UsageLlmNonStream;
 

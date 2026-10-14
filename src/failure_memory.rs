@@ -305,7 +305,7 @@ pub const LESSONS_PROMPT_MAX_CHARS: usize = 3000;
 /// Блок живёт в СИСТЕМНОМ промпте, а не в истории: L1/L3-компактификация
 /// сжимает историю сообщений, системный промпт не трогает — уроки переживают
 /// компактификацию и смену модели (отчёт «две гипотезы», 2026-10-14:
-/// «failure_lessons.md никто не читает» — теперь читает сам агент).
+/// уроки из файла «никто не читал» — теперь читает сам агент).
 #[must_use]
 pub fn lessons_prompt_section(path: &Path, max_chars: usize) -> Option<String> {
     let text = std::fs::read_to_string(path).ok()?;
@@ -552,9 +552,11 @@ mod tests {
         let path = tmp.path().join("failure_lessons.md");
         let mut body = String::new();
         for i in 1..=5 {
-            body.push_str(&format!(
+            use std::fmt::Write as _;
+            let _ = write!(
+                body,
                 "## 2026-10-1{i} · `tool{i}` · класс{i}\n\n- детали {i}\n\n"
-            ));
+            );
         }
         std::fs::write(&path, &body).expect("write");
         // Бюджет на две последние записи (запись ≈ 53 байта + 5 служебных;
