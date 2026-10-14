@@ -63,3 +63,4 @@
 - Дог-фуд: 6 уроков confirmed в .arch/lessons/ (порог ≥3 — выполнен)
 - Отложено осознанно: flip [lessons] enabled=true и дефолтный профиль orchestrate — после live-доказательств; порт в spine-aiml (arch-ml) — после приёмки здесь
 - В работе: FIX-2 (регресс mcp_serve от L4)
+- TODO при выпуске 0.5.0: поднять счётчики MCP в GIGACODE.md/README (43/54 → 45/56: +lessons_query (L1, ro), +lessons_match (L4, ro), +lessons_record под --rw)
