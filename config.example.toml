@@ -770,3 +770,6 @@ critical = ["fitness", "spine_lint", "trace_check", "rule_weakened",
 # user_dir = "~/.arch-harness/lessons"  # каталог пользовательского реестра
 #                          # (по умолчанию $ARCH_HOME/lessons; переопределение
 #                          # нужно раздельным контурам и изоляции тестов)
+# org_dir = "/srv/lessons" # каталог организационного реестра уроков (ADR-091):
+#                          # общий git-репозиторий/каталог с ledger.jsonl;
+#                          # без него --org и MCP `org` возвращают ошибку

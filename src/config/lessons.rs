@@ -47,6 +47,11 @@ pub struct LessonsConfig {
     /// изоляции тестов от реального дома (AD-7).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_dir: Option<PathBuf>,
+    /// Каталог организационного реестра уроков (ADR-091): общий git-репозиторий
+    /// или каталог с `ledger.jsonl`. `None` — org-реестр не настроен, и
+    /// `--org`/`org` (CLI/MCP) возвращает понятную ошибку, а не молчит.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_dir: Option<PathBuf>,
 }
 
 impl Default for LessonsConfig {
@@ -62,6 +67,7 @@ impl Default for LessonsConfig {
             k: 5,
             token_limit: 900,
             user_dir: None,
+            org_dir: None,
         }
     }
 }

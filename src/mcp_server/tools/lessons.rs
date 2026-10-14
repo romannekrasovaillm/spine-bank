@@ -10,7 +10,7 @@
 //! от `[lessons] enabled` (флаг гасит автоматические записи гейта, L2, и блок
 //! инъекции, L3).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -37,6 +37,8 @@ impl McpServe {
             path: Option<String>,
             /// Пользовательский реестр `$ARCH_HOME/lessons` вместо репозиторного.
             user: Option<bool>,
+            /// Организационный реестр `[lessons] org_dir` (ADR-091).
+            org: Option<bool>,
             /// Идентификатор урока: вернуть карточку одного урока.
             id: Option<String>,
             /// Фильтр по статусу (observed|candidate|confirmed|promoted|retired).
@@ -50,8 +52,10 @@ impl McpServe {
         let ledger = resolve_ledger(
             args.path.as_deref(),
             args.user.unwrap_or(false),
+            args.org.unwrap_or(false),
+            self.cfg.lessons.org_dir.as_deref(),
             args.cwd.as_deref(),
-        );
+        )?;
         let status = args
             .status
             .as_deref()
@@ -144,6 +148,8 @@ impl McpServe {
             path: Option<String>,
             /// Пользовательский реестр `$ARCH_HOME/lessons`.
             user: Option<bool>,
+            /// Организационный реестр `[lessons] org_dir` (ADR-091).
+            org: Option<bool>,
             /// Рабочий каталог клиента.
             cwd: Option<String>,
         }
@@ -151,8 +157,10 @@ impl McpServe {
         let ledger = resolve_ledger(
             args.path.as_deref(),
             args.user.unwrap_or(false),
+            args.org.unwrap_or(false),
+            self.cfg.lessons.org_dir.as_deref(),
             args.cwd.as_deref(),
-        );
+        )?;
         // Обязательные по схеме аргументы отсутствуют — отказ с перечнем
         // (серде сообщение «missing field» не объясняет, что подставить).
         let source = args.source.ok_or_else(|| {
@@ -291,13 +299,34 @@ fn resolve_repo(repo: Option<&str>, cwd: Option<&str>) -> PathBuf {
     }
 }
 
-/// Реестр по аргументам инструмента: `user` → `$ARCH_HOME/lessons`, иначе
-/// `<repo>/.arch/lessons` (относительный путь — от `cwd` клиента).
-fn resolve_ledger(repo: Option<&str>, user: bool, cwd: Option<&str>) -> Ledger {
-    if user {
-        return Ledger::user();
+/// Реестр по аргументам инструмента: `org` → `[lessons] org_dir`, `user` →
+/// `$ARCH_HOME/lessons`, иначе `<repo>/.arch/lessons` (относительный путь — от
+/// `cwd` клиента). `org` без настроенного `org_dir` — понятная ошибка, а не
+/// молчание (ADR-091).
+fn resolve_ledger(
+    repo: Option<&str>,
+    user: bool,
+    org: bool,
+    org_dir: Option<&Path>,
+    cwd: Option<&str>,
+) -> std::result::Result<Ledger, CallError> {
+    if user && org {
+        return Err(CallError::invalid_params(
+            "реестр уроков: укажите одно — user или org".to_string(),
+        ));
     }
-    Ledger::repo(&resolve_repo(repo, cwd))
+    if org {
+        let dir = org_dir.ok_or_else(|| {
+            CallError::invalid_params(
+                "[lessons] org_dir не настроен — org-реестр недоступен".to_string(),
+            )
+        })?;
+        return Ok(Ledger::org(dir));
+    }
+    if user {
+        return Ok(Ledger::user());
+    }
+    Ok(Ledger::repo(&resolve_repo(repo, cwd)))
 }
 
 /// Пороги переходов из секции `[lessons]` конфига сервера.

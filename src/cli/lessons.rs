@@ -41,6 +41,9 @@ pub(crate) enum LessonsCmd {
         /// Пользовательский реестр `$ARCH_HOME/lessons` вместо репозиторного.
         #[arg(long)]
         user: bool,
+        /// Организационный реестр `[lessons] org_dir`.
+        #[arg(long)]
+        org: bool,
         /// Фильтр по статусу (observed|candidate|confirmed|promoted|retired).
         #[arg(long, value_name = "STATUS")]
         status: Option<String>,
@@ -61,6 +64,9 @@ pub(crate) enum LessonsCmd {
         /// Пользовательский реестр `$ARCH_HOME/lessons`.
         #[arg(long)]
         user: bool,
+        /// Организационный реестр `[lessons] org_dir`.
+        #[arg(long)]
+        org: bool,
         /// Машиночитаемый вывод: JSON урока целиком.
         #[arg(long)]
         json: bool,
@@ -120,6 +126,9 @@ pub(crate) enum LessonsCmd {
         /// Пользовательский реестр `$ARCH_HOME/lessons`.
         #[arg(long)]
         user: bool,
+        /// Организационный реестр `[lessons] org_dir`.
+        #[arg(long)]
+        org: bool,
     },
     /// Вывести урок из реестра (решение человека либо удаление правила).
     Retire {
@@ -134,9 +143,12 @@ pub(crate) enum LessonsCmd {
         /// Пользовательский реестр `$ARCH_HOME/lessons`.
         #[arg(long)]
         user: bool,
+        /// Организационный реестр `[lessons] org_dir`.
+        #[arg(long)]
+        org: bool,
     },
-    /// Экспорт реестра в JSON (базовая запись; подписанный `lessons-bundle/v1` —
-    /// волна L10).
+    /// Экспорт реестра в подписанный `lessons-bundle/v1` (SHA-256 + хэши
+    /// доказательств, ADR-091).
     Export {
         /// Куда писать JSON (по умолчанию — stdout).
         #[arg(long, value_name = "FILE")]
@@ -144,16 +156,23 @@ pub(crate) enum LessonsCmd {
         /// Минимальный статус отбора (observed|candidate|confirmed|promoted).
         #[arg(long, value_name = "STATUS")]
         min_status: Option<String>,
+        /// Фильтр по уровню области (file|module|package|repo|user|org).
+        #[arg(long = "scope", value_name = "LEVEL")]
+        scope: Option<String>,
         /// Репозиторий с реестром.
         #[arg(long, value_name = "PATH")]
         repo: Option<PathBuf>,
         /// Пользовательский реестр `$ARCH_HOME/lessons`.
         #[arg(long)]
         user: bool,
+        /// Организационный реестр `[lessons] org_dir`.
+        #[arg(long)]
+        org: bool,
     },
-    /// Импорт реестра из JSON: урок БЕЗ доказательств отклоняется целиком
+    /// Импорт реестра из JSON: `lessons-bundle/v1` проверяется по подписи и
+    /// хэшам доказательств; урок БЕЗ доказательств отклоняется целиком
     /// (сначала проверяются все, потом записывается что можно). Статус из
-    /// файла не принимается — он выводится из счётчиков (AD-2).
+    /// файла не принимается — чужой урок понижается до `candidate` (ADR-091).
     Import {
         /// Файл JSON (или `-` — stdin).
         file: String,
@@ -163,6 +182,13 @@ pub(crate) enum LessonsCmd {
         /// Пользовательский реестр `$ARCH_HOME/lessons`.
         #[arg(long)]
         user: bool,
+        /// Организационный реестр `[lessons] org_dir`.
+        #[arg(long)]
+        org: bool,
+        /// Разрешить запись уроков уровня user/org в репозиторный реестр
+        /// (без флага такие уроки отсекаются — анти-утечка, ADR-091).
+        #[arg(long)]
+        share: bool,
         /// Только показать, что было бы записано.
         #[arg(long)]
         dry_run: bool,
@@ -182,6 +208,9 @@ pub(crate) enum LessonsCmd {
         /// Пользовательский реестр `$ARCH_HOME/lessons`.
         #[arg(long)]
         user: bool,
+        /// Организационный реестр `[lessons] org_dir`.
+        #[arg(long)]
+        org: bool,
     },
     /// Промоушен урока в fitness-правило (L7, ADR-089): confirmed-урок,
     /// выразимый шаблоном `rule_templates`, проходит redteam-засев и пишется в
@@ -215,11 +244,12 @@ pub(crate) fn cmd_lessons(cfg: &Config, cmd: LessonsCmd) -> Result<()> {
         LessonsCmd::List {
             repo,
             user,
+            org,
             status,
             scope_level,
             format,
         } => {
-            let ledger = select_ledger(repo.as_deref(), user)?;
+            let ledger = select_ledger(cfg.lessons.org_dir.as_deref(), repo.as_deref(), user, org)?;
             let th = thresholds(cfg);
             let snapshot = ledger.snapshot(&th)?;
             let status_filter = status
@@ -275,9 +305,10 @@ pub(crate) fn cmd_lessons(cfg: &Config, cmd: LessonsCmd) -> Result<()> {
             id,
             repo,
             user,
+            org,
             json,
         } => {
-            let ledger = select_ledger(repo.as_deref(), user)?;
+            let ledger = select_ledger(cfg.lessons.org_dir.as_deref(), repo.as_deref(), user, org)?;
             let th = thresholds(cfg);
             let snapshot = ledger.snapshot(&th)?;
             let Some(lesson) = snapshot.get(&id) else {
@@ -313,8 +344,9 @@ pub(crate) fn cmd_lessons(cfg: &Config, cmd: LessonsCmd) -> Result<()> {
             expiry_days,
             repo,
             user,
+            org,
         } => {
-            let ledger = select_ledger(repo.as_deref(), user)?;
+            let ledger = select_ledger(cfg.lessons.org_dir.as_deref(), repo.as_deref(), user, org)?;
             let th = thresholds(cfg);
             let today = lessons::today();
             let mut signature = Signature::new(source.parse::<LessonSource>()?, code);
@@ -355,8 +387,9 @@ pub(crate) fn cmd_lessons(cfg: &Config, cmd: LessonsCmd) -> Result<()> {
             reason,
             repo,
             user,
+            org,
         } => {
-            let ledger = select_ledger(repo.as_deref(), user)?;
+            let ledger = select_ledger(cfg.lessons.org_dir.as_deref(), repo.as_deref(), user, org)?;
             let th = thresholds(cfg);
             let mutation = ledger.retire(&id, &reason, &th)?;
             write_render(&ledger, &th)?;
@@ -370,10 +403,12 @@ pub(crate) fn cmd_lessons(cfg: &Config, cmd: LessonsCmd) -> Result<()> {
         LessonsCmd::Export {
             out,
             min_status,
+            scope,
             repo,
             user,
+            org,
         } => {
-            let ledger = select_ledger(repo.as_deref(), user)?;
+            let ledger = select_ledger(cfg.lessons.org_dir.as_deref(), repo.as_deref(), user, org)?;
             let th = thresholds(cfg);
             let snapshot = ledger.snapshot(&th)?;
             let min = min_status
@@ -381,7 +416,15 @@ pub(crate) fn cmd_lessons(cfg: &Config, cmd: LessonsCmd) -> Result<()> {
                 .map(str::parse::<LessonStatus>)
                 .transpose()?
                 .map(status_rank);
-            let bundle = export_bundle(&snapshot.lessons, min);
+            let scope_filter = scope.as_deref().map(str::parse::<ScopeLevel>).transpose()?;
+            let selected: Vec<Lesson> = snapshot
+                .lessons
+                .iter()
+                .filter(|l| min.is_none_or(|m| status_rank(l.status) >= m))
+                .filter(|l| scope_filter.is_none_or(|level| l.scope.level == level))
+                .cloned()
+                .collect();
+            let bundle = lessons::bundle::build(&selected, lessons::arch_be_version())?;
             let text = serde_json::to_string_pretty(&bundle)?;
             match out {
                 Some(path) => {
@@ -397,12 +440,14 @@ pub(crate) fn cmd_lessons(cfg: &Config, cmd: LessonsCmd) -> Result<()> {
             file,
             repo,
             user,
+            org,
+            share,
             dry_run,
         } => {
-            let ledger = select_ledger(repo.as_deref(), user)?;
+            let ledger = select_ledger(cfg.lessons.org_dir.as_deref(), repo.as_deref(), user, org)?;
             let th = thresholds(cfg);
             let text = read_text(&file)?;
-            let imported = parse_bundle(&text)?;
+            let imported = parse_import(&text)?;
             if imported.is_empty() {
                 println!("В файле нет уроков — импортировать нечего");
                 return Ok(());
@@ -413,31 +458,40 @@ pub(crate) fn cmd_lessons(cfg: &Config, cmd: LessonsCmd) -> Result<()> {
                 lessons::validate_imported(lesson)
                     .with_context(|| format!("импорт отклонён (урок {})", lesson.id))?;
             }
+            // Анти-утечка (ADR-091): в репозиторный реестр без --share не пишем
+            // уроки уровня user/org — личное знание не становится свойством
+            // чужого репозитория.
+            let target_repo = !user && !org;
+            let (kept, excluded) = import_scoped(&imported, share, target_repo);
             if dry_run {
                 println!("Проверено уроков: {}", imported.len());
-                for lesson in &imported {
-                    println!(
-                        "  {} (будет заведён как observed/candidate по счётчикам)",
-                        lesson.id
-                    );
+                for lesson in &kept {
+                    println!("  {} (будет заведён как candidate — чужой урок)", lesson.id);
+                }
+                if excluded > 0 {
+                    println!("Отсечено user/org без --share: {excluded}");
                 }
                 return Ok(());
             }
             let today = lessons::today();
-            for lesson in &imported {
+            for lesson in &kept {
                 let mutation = ledger.adopt(lesson, &th, &today)?;
                 report_mutation(&ledger, &mutation, false);
             }
             write_render(&ledger, &th)?;
-            println!("Импортировано уроков: {}", imported.len());
+            println!("Импортировано уроков: {}", kept.len());
+            if excluded > 0 {
+                println!("Отсечено user/org без --share: {excluded}");
+            }
             Ok(())
         }
         LessonsCmd::Migrate {
             state_dir,
             repo,
             user,
+            org,
         } => {
-            let ledger = select_ledger(repo.as_deref(), user)?;
+            let ledger = select_ledger(cfg.lessons.org_dir.as_deref(), repo.as_deref(), user, org)?;
             let th = thresholds(cfg);
             let dir = state_dir.unwrap_or_else(|| cfg.paths.state_dir.clone());
             let file = dir.join(arch_harness::failure_memory::LESSONS_FILE);
@@ -493,16 +547,29 @@ pub(crate) fn cmd_lessons(cfg: &Config, cmd: LessonsCmd) -> Result<()> {
     }
 }
 
-/// Выбор реестра: `--repo` либо `--user` (ровно одно осмысленно).
-fn select_ledger(repo: Option<&Path>, user: bool) -> Result<Ledger> {
-    match (repo, user) {
-        (Some(_), true) => bail!(
-            "укажите одно: --repo <PATH> (реестр репозитория) или --user \
-             ($ARCH_HOME/lessons)"
+/// Выбор реестра: `--repo` либо `--user` либо `--org` (ровно одно осмысленно).
+/// Org-реестр без `[lessons] org_dir` — понятная ошибка, а не молчание.
+fn select_ledger(
+    org_dir: Option<&Path>,
+    repo: Option<&Path>,
+    user: bool,
+    org: bool,
+) -> Result<Ledger> {
+    match (repo, user, org) {
+        (_, true, true) => bail!("укажите одно: --user или --org"),
+        (Some(_), true, _) | (Some(_), _, true) => bail!(
+            "укажите одно: --repo <PATH> (реестр репозитория), --user \
+             ($ARCH_HOME/lessons) или --org ([lessons] org_dir)"
         ),
-        (_, true) => Ok(Ledger::user()),
-        (Some(path), false) => Ok(Ledger::repo(path)),
-        (None, false) => Ok(Ledger::repo(Path::new("."))),
+        (_, false, true) => {
+            let dir = org_dir.ok_or_else(|| {
+                anyhow::anyhow!("[lessons] org_dir не настроен — org-реестр недоступен")
+            })?;
+            Ok(Ledger::org(dir))
+        }
+        (_, true, false) => Ok(Ledger::user()),
+        (Some(path), false, false) => Ok(Ledger::repo(path)),
+        (None, false, false) => Ok(Ledger::repo(Path::new("."))),
     }
 }
 
@@ -575,26 +642,25 @@ fn status_rank(status: LessonStatus) -> u8 {
     }
 }
 
-/// Экспортный бандл (базовая форма L1; подпись и `lessons-bundle/v1` — L10).
-fn export_bundle(lessons_all: &[Lesson], min_rank: Option<u8>) -> serde_json::Value {
-    let selected: Vec<&Lesson> = lessons_all
-        .iter()
-        .filter(|l| min_rank.is_none_or(|min| status_rank(l.status) >= min))
-        .collect();
-    serde_json::json!({
-        "format": "lessons-bundle/v0",
-        "version": lessons::LEDGER_VERSION,
-        "arch_be": lessons::arch_be_version(),
-        "count": selected.len(),
-        "lessons": selected,
-    })
-}
-
-/// Разбор импортируемого JSON: бандл `{lessons: [...]}`, голый массив или
+/// Разбор импортируемого JSON: подписанный `lessons-bundle/v1` (проверяется
+/// подпись и хэши доказательств), бандл `{lessons: [...]}`, голый массив или
 /// один урок. Битый JSON — понятная ошибка.
-fn parse_bundle(text: &str) -> Result<Vec<Lesson>> {
+fn parse_import(text: &str) -> Result<Vec<Lesson>> {
     let value: serde_json::Value =
         serde_json::from_str(text).context("импорт: файл не является JSON")?;
+    // Подписанный бандл v1: уроки возвращаются только после проверки подписи
+    // и хэшей — подменённые данные отклоняются до записи (ADR-091).
+    if value
+        .get("format")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|format| format == lessons::BUNDLE_FORMAT)
+    {
+        let bundle: lessons::LessonsBundle =
+            serde_json::from_value(value).context("импорт: бандл lessons-bundle/v1 не разобран")?;
+        lessons::bundle::verify(&bundle)
+            .context("импорт отклонён: подпись/хэши бандла не прошли проверку")?;
+        return Ok(lessons::bundle::lessons_of(&bundle));
+    }
     let items = match value {
         serde_json::Value::Array(items) => items,
         // Бандл: `lessons` (массив) плюс метаданные формата. Бандл без уроков —
@@ -619,6 +685,26 @@ fn parse_bundle(text: &str) -> Result<Vec<Lesson>> {
         .collect()
 }
 
+/// Уроки, пригодные для записи в целевой реестр: без `--share` при записи в
+/// репозиторий отсекаются уроки уровня шире репозитория (`user`/`org`) —
+/// личное/организационное знание не становится свойством чужого репозитория
+/// (ADR-091, риск 6). Возвращает `(оставленные, число отсечённых)`.
+fn import_scoped(lessons: &[Lesson], share: bool, target_repo: bool) -> (Vec<Lesson>, usize) {
+    if share || !target_repo {
+        return (lessons.to_vec(), 0);
+    }
+    let mut kept = Vec::new();
+    let mut excluded = 0;
+    for lesson in lessons {
+        if lesson.scope.level.rank() > ScopeLevel::Repo.rank() {
+            excluded += 1;
+        } else {
+            kept.push(lesson.clone());
+        }
+    }
+    (kept, excluded)
+}
+
 /// Чтение файла или stdin (`-`).
 fn read_text(file: &str) -> Result<String> {
     if file == "-" {
@@ -637,7 +723,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bundle_parsing_accepts_bundle_array_and_single_lesson() {
+    fn import_parsing_accepts_bundle_array_and_single_lesson() {
         let lesson = serde_json::json!({
             "id": "LSN-12345678",
             "signature": {"source": "gate", "code": "G5"},
@@ -652,16 +738,16 @@ mod tests {
             "provenance": {"recorder": "cli", "verdict_sha256": "ab", "arch_be": "0.4.11"}
         });
         let bundle = serde_json::json!({"format": "lessons-bundle/v0", "lessons": [lesson]});
-        assert_eq!(parse_bundle(&bundle.to_string()).expect("бандл").len(), 1);
+        assert_eq!(parse_import(&bundle.to_string()).expect("бандл").len(), 1);
         let array = serde_json::Value::Array(vec![lesson.clone()]);
-        assert_eq!(parse_bundle(&array.to_string()).expect("массив").len(), 1);
+        assert_eq!(parse_import(&array.to_string()).expect("массив").len(), 1);
         assert_eq!(
-            parse_bundle(&lesson.to_string()).expect("один урок").len(),
+            parse_import(&lesson.to_string()).expect("один урок").len(),
             1
         );
-        assert!(parse_bundle("не json").is_err());
+        assert!(parse_import("не json").is_err());
         assert_eq!(
-            parse_bundle(r#"{"format":"lessons-bundle/v0"}"#)
+            parse_import(r#"{"format":"lessons-bundle/v0"}"#)
                 .expect("бандл без уроков")
                 .len(),
             0,
@@ -670,25 +756,59 @@ mod tests {
     }
 
     #[test]
-    fn export_bundle_filters_by_status_rank() {
-        let mut lessons = vec![
-            make_lesson(LessonStatus::Observed),
-            make_lesson(LessonStatus::Confirmed),
-        ];
-        lessons[1].id = "LSN-87654321".to_string();
-        let all = export_bundle(&lessons, None);
-        assert_eq!(all["count"], 2);
-        let confirmed = export_bundle(&lessons, Some(status_rank(LessonStatus::Confirmed)));
-        assert_eq!(confirmed["count"], 1);
-        assert_eq!(confirmed["lessons"][0]["status"], "confirmed");
-        assert_eq!(all["format"], "lessons-bundle/v0");
+    fn signed_bundle_parses_after_verification_and_rejects_tampering() {
+        let lesson = make_lesson(LessonStatus::Confirmed);
+        let bundle = lessons::bundle::build(std::slice::from_ref(&lesson), "0.5.0").expect("build");
+        let text = serde_json::to_string(&bundle).expect("serde");
+        let parsed = parse_import(&text).expect("свежий бандл");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].id, lesson.id);
+
+        // Подмена тела урока ломает подпись — импорт отклоняется.
+        let mut tampered = bundle;
+        tampered.lessons[0].lesson.statement = "чужое правило".to_string();
+        let text = serde_json::to_string(&tampered).expect("serde");
+        let err = parse_import(&text).expect_err("подмена отклонена");
+        assert!(err.to_string().contains("подпись"), "{err}");
     }
 
     #[test]
-    fn repo_and_user_flags_are_mutually_exclusive() {
-        assert!(select_ledger(Some(Path::new(".")), true).is_err());
-        assert!(select_ledger(None, true).is_ok());
-        assert!(select_ledger(Some(Path::new(".")), false).is_ok());
+    fn import_scoped_guards_repo_writes_from_user_org_leak() {
+        let repo_lesson = make_lesson(LessonStatus::Candidate);
+        let mut user_lesson = make_lesson(LessonStatus::Candidate);
+        user_lesson.scope = Scope::new(ScopeLevel::User, Vec::<String>::new());
+        let mut org_lesson = make_lesson(LessonStatus::Candidate);
+        org_lesson.scope = Scope::new(ScopeLevel::Org, Vec::<String>::new());
+        let lessons = vec![repo_lesson, user_lesson, org_lesson];
+
+        // Без --share в репозиторий: остаётся только repo-урок.
+        let (kept, excluded) = import_scoped(&lessons, false, true);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(excluded, 2);
+        // С --share — все три.
+        let (kept, excluded) = import_scoped(&lessons, true, true);
+        assert_eq!(kept.len(), 3);
+        assert_eq!(excluded, 0);
+        // В нерепозиторный реестр (user/org) фильтр не применяется.
+        let (kept, excluded) = import_scoped(&lessons, false, false);
+        assert_eq!(kept.len(), 3);
+        assert_eq!(excluded, 0);
+    }
+
+    #[test]
+    fn registry_flags_are_mutually_exclusive() {
+        assert!(select_ledger(None, Some(Path::new(".")), true, false).is_err());
+        assert!(select_ledger(None, None, true, false).is_ok());
+        assert!(select_ledger(None, Some(Path::new(".")), false, false).is_ok());
+        assert!(
+            select_ledger(None, None, false, true).is_err(),
+            "org без org_dir — ошибка"
+        );
+        assert!(select_ledger(Some(Path::new("/org")), None, false, true).is_ok());
+        assert!(
+            select_ledger(None, None, true, true).is_err(),
+            "--user и --org вместе — ошибка"
+        );
     }
 
     fn make_lesson(status: LessonStatus) -> Lesson {
