@@ -1921,6 +1921,12 @@ impl Default for Config {
                 model: "k3".into(),
                 api_key_env: "KIMI_API_KEY".into(),
                 api_key_file: Some("~/.kimi_api_key".into()),
+                // K3 ризонит всегда: цепочка рассуждений съедает бюджет до
+                // начала видимого ответа — дефолтные 8192 обрывали генерацию
+                // (finish_reason=length, кейс 2026-10-14). Стартуем с 32K;
+                // при length харнесс эскалирует max_tokens автоматически
+                // (llm::escalated_max_tokens, потолок 65536).
+                max_tokens: Some(32768),
                 context_limit: Some(1_000_000),
                 ..ModelConfig::default()
             },
@@ -2359,6 +2365,15 @@ mod tests {
         }
         // Бюджетные GLM остаются на своих окнах.
         assert_eq!(cfg.models["glm-air"].context_limit, Some(131_072));
+    }
+
+    #[test]
+    fn kimi_default_starts_with_roomy_max_tokens() {
+        // K3 ризонит всегда: цепочка рассуждений съедает бюджет до начала
+        // видимого ответа — дефолтные 8192 обрывали генерацию (кейс
+        // 2026-10-14). Старт с 32K + автоэскалация при length.
+        let cfg = Config::default();
+        assert_eq!(cfg.models["kimi"].max_tokens, Some(32768));
     }
 
     /// glm-5.3-flash в дефолтах: окно 1.3M; «off» ризонинга эмулируется

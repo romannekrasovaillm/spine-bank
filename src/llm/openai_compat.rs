@@ -113,18 +113,63 @@ pub(crate) trait AuthSource: Send + Sync + fmt::Debug {
 impl OpenAiCompat {
     /// Нестриминговый запрос с разбором ответа: сообщение + статистика
     /// токенов (None у провайдера → нули, «неизвестно» помечает потребитель).
+    ///
+    /// Автоэскалация бюджета при усечении (`finish_reason=length`):
+    /// thinking-модели (Kimi K3 ризонит всегда) съедают `max_tokens` цепочкой
+    /// рассуждений — видимый ответ пуст или оборван. Нестрим ничего не
+    /// показывает по ходу, поэтому повтор с удвоенным `max_tokens`
+    /// (до [`crate::llm::MAX_LENGTH_ESCALATIONS`] раз, потолок —
+    /// [`crate::llm::MAX_ESCALATED_COMPLETION_TOKENS`]) безопасен и невидим.
+    /// Ошибка эскалированного запроса (напр. 400 на слишком большой бюджет)
+    /// откатывается к первому усечённому ответу: обрубок лучше отказа.
     async fn complete_parsed(&self, req: ChatRequest) -> Result<(ChatMessage, Usage)> {
-        let body = self.build_body(&req, RequestMode::Complete);
-        let resp = self.send_with_retry(&body).await?;
-        let resp = self.ensure_success(resp).await?;
-        let parsed: CompletionResponse = resp.json().await?;
-        let usage = parsed.usage.as_ref().map(CompletionUsage::to_usage);
-        let choice = parsed.choices.into_iter().next().ok_or_else(|| {
-            HarnessError::Llm(format!("{}: пустой ответ API (нет choices)", self.name))
-        })?;
-        let mut msg = choice.message.into_chat_message();
-        msg.finish_reason = choice.finish_reason;
-        Ok((msg, usage.unwrap_or_default()))
+        let mut req = req;
+        let mut escalations = 0usize;
+        let mut first_truncated: Option<(ChatMessage, Usage)> = None;
+        loop {
+            let body = self.build_body(&req, RequestMode::Complete);
+            let attempt = async {
+                let resp = self.send_with_retry(&body).await?;
+                let resp = self.ensure_success(resp).await?;
+                resp.json::<CompletionResponse>()
+                    .await
+                    .map_err(HarnessError::Http)
+            };
+            let parsed = match attempt.await {
+                Ok(parsed) => parsed,
+                Err(e) => match first_truncated {
+                    Some(prev) => return Ok(prev),
+                    None => return Err(e),
+                },
+            };
+            let usage = parsed
+                .usage
+                .as_ref()
+                .map(CompletionUsage::to_usage)
+                .unwrap_or_default();
+            let choice = parsed.choices.into_iter().next().ok_or_else(|| {
+                HarnessError::Llm(format!("{}: пустой ответ API (нет choices)", self.name))
+            })?;
+            let msg = choice.message.into_chat_message(choice.finish_reason);
+            if msg.finish_reason.as_deref() == Some("length")
+                && escalations < crate::llm::MAX_LENGTH_ESCALATIONS
+            {
+                let budget = req.max_tokens.or(self.default_max_tokens);
+                if let Some(next) = crate::llm::escalated_max_tokens(budget) {
+                    tracing::info!(
+                        "{}: ответ усечён потолком max_tokens={budget:?} — повтор с max_tokens={next}",
+                        self.name
+                    );
+                    if first_truncated.is_none() {
+                        first_truncated = Some((msg, usage));
+                    }
+                    req.max_tokens = Some(next);
+                    escalations += 1;
+                    continue;
+                }
+            }
+            return Ok((msg, usage));
+        }
     }
 
     /// Создаёт клиента из конфигурации; `base_url` обязателен.
@@ -435,6 +480,52 @@ impl OpenAiCompat {
         }
         Ok(acc.finish())
     }
+
+    /// Одна стрим-попытка с ретраями обрывов тела (сеть/DPI/перегрузка,
+    /// молчание модели дольше `timeout_secs`) по политике
+    /// [`crate::retry::ErrorKind::Network`] — запрос идемпотентен: вызовы
+    /// инструментов исполняются только после полной сборки ответа, так что
+    /// повтор безопасен на любой фазе. Обрыв ДО первой дельты повторяется
+    /// молча; обрыв ПОСЛЕ контента — с заметкой [`LlmEvent::Note`] в UI
+    /// (фрагмент остаётся в чате, ответ придёт целиком заново). Бюджет
+    /// попыток общий на вызов; при исчерпании — ошибка с человеческой
+    /// причиной и счётчиком полученного.
+    async fn stream_once(
+        &self,
+        body: &ChatCompletionsBody<'_>,
+        tx: &mpsc::Sender<LlmEvent>,
+    ) -> Result<ChatMessage> {
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::from(d.subsec_nanos()));
+        let mut delays = crate::retry::RetryPolicy::for_kind(crate::retry::ErrorKind::Network)
+            .map(|p| p.delays(seed));
+        loop {
+            let resp = self.send_with_retry(body).await?;
+            let resp = self.ensure_success(resp).await?;
+            match self.pump_stream(resp, tx).await {
+                Ok(msg) => return Ok(msg),
+                Err(brk) => {
+                    let Some(pause) = delays.as_mut().and_then(Iterator::next) else {
+                        return Err(brk.source);
+                    };
+                    if brk.emitted {
+                        // Фрагмент уже в чате — честно предупреждаем: ответ
+                        // придёт целиком заново, показанный кусок не дублируется
+                        // в журнале (туда попадёт только финальное сообщение).
+                        let _ = tx
+                            .send(LlmEvent::Note(format!(
+                                "поток ответа оборвался (в чат успели уйти {} символов — \
+                                 фрагмент выше неполный); повторяю запрос…",
+                                brk.received_chars
+                            )))
+                            .await;
+                    }
+                    tokio::time::sleep(pause).await;
+                }
+            }
+        }
+    }
 }
 
 /// Раскрывает ведущий `~/` в домашний каталог (пути `api_key_file`,
@@ -681,45 +772,55 @@ impl LlmProvider for OpenAiCompat {
     /// Если приёмник `tx` закрыт, стрим тихо прерывается (без паники)
     /// и возвращается накопленная к этому моменту часть ответа.
     ///
-    /// Обрыв тела стрима (сеть/DPI/перегрузка, молчание модели дольше
-    /// `timeout_secs`) ретраится по политике [`crate::retry::ErrorKind::Network`]
-    /// — запрос идемпотентен: вызовы инструментов исполняются только после
-    /// полной сборки ответа, так что повтор безопасен на любой фазе. Обрыв
-    /// ДО первой дельты повторяется молча; обрыв ПОСЛЕ контента — с заметкой
-    /// [`LlmEvent::Note`] в UI (фрагмент остаётся в чате, ответ придёт
-    /// целиком заново). Бюджет попыток общий на вызов; при исчерпании —
-    /// ошибка с человеческой причиной и счётчиком полученного.
+    /// Автоэскалация `max_tokens` при `finish_reason=length` с ПУСТЫМ видимым
+    /// ответом (thinking-модель — Kimi K3 ризонит всегда — съела весь бюджет
+    /// размышлениями, не начав текст): повтор с удвоенным бюджетом не даёт
+    /// дублей в чате (ушли только reasoning-дельты), о нём сообщает
+    /// [`LlmEvent::Note`]. Усечение с НЕ-ПУСТЫМ текстом здесь не ретраится
+    /// (повтор показал бы текст заново) — его забирает авто-продолжение
+    /// агентного цикла (`AgentSession::continue_on_length`). Ошибка
+    /// эскалированного запроса откатывается к первому усечённому ответу.
     async fn stream(&self, req: ChatRequest, tx: mpsc::Sender<LlmEvent>) -> Result<ChatMessage> {
-        let body = self.build_body(&req, RequestMode::Stream);
-        let seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| u64::from(d.subsec_nanos()));
-        let mut delays = crate::retry::RetryPolicy::for_kind(crate::retry::ErrorKind::Network)
-            .map(|p| p.delays(seed));
+        let mut req = req;
+        let mut escalations = 0usize;
+        let mut first_truncated: Option<ChatMessage> = None;
         loop {
-            let resp = self.send_with_retry(&body).await?;
-            let resp = self.ensure_success(resp).await?;
-            match self.pump_stream(resp, &tx).await {
-                Ok(msg) => return Ok(msg),
-                Err(brk) => {
-                    let Some(pause) = delays.as_mut().and_then(Iterator::next) else {
-                        return Err(brk.source);
-                    };
-                    if brk.emitted {
-                        // Фрагмент уже в чате — честно предупреждаем: ответ
-                        // придёт целиком заново, показанный кусок не дублируется
-                        // в журнале (туда попадёт только финальное сообщение).
-                        let _ = tx
-                            .send(LlmEvent::Note(format!(
-                                "поток ответа оборвался (в чат успели уйти {} символов — \
-                                 фрагмент выше неполный); повторяю запрос…",
-                                brk.received_chars
-                            )))
-                            .await;
-                    }
-                    tokio::time::sleep(pause).await;
-                }
+            let body = self.build_body(&req, RequestMode::Stream);
+            let msg = match self.stream_once(&body, &tx).await {
+                Ok(msg) => msg,
+                Err(e) => match first_truncated {
+                    Some(prev) => return Ok(prev),
+                    None => return Err(e),
+                },
+            };
+            let empty_visible = msg.tool_calls.is_empty() && msg.content.trim().is_empty();
+            if msg.finish_reason.as_deref() != Some("length")
+                || !empty_visible
+                || escalations >= crate::llm::MAX_LENGTH_ESCALATIONS
+            {
+                return Ok(msg);
             }
+            let budget = req.max_tokens.or(self.default_max_tokens);
+            let Some(next) = crate::llm::escalated_max_tokens(budget) else {
+                return Ok(msg);
+            };
+            tracing::info!(
+                "{}: бюджет max_tokens={budget:?} съеден размышлениями (length, пустой ответ) — повтор с max_tokens={next}",
+                self.name
+            );
+            let _ = tx
+                .send(LlmEvent::Note(format!(
+                    "модель израсходовала бюджет max_tokens на размышления, не начав ответ \
+                     — повторяю с max_tokens={next} ({}/{})",
+                    escalations + 1,
+                    crate::llm::MAX_LENGTH_ESCALATIONS
+                )))
+                .await;
+            if first_truncated.is_none() {
+                first_truncated = Some(msg);
+            }
+            req.max_tokens = Some(next);
+            escalations += 1;
         }
     }
 }
@@ -946,7 +1047,9 @@ struct CompletionMessage {
 
 impl CompletionMessage {
     /// Конвертирует wire-ответ в доменное сообщение ассистента.
-    fn into_chat_message(self) -> ChatMessage {
+    /// `finish_reason` нужен уже здесь: от него зависит нормализация
+    /// (см. [`normalize_reply`]).
+    fn into_chat_message(self, finish_reason: Option<String>) -> ChatMessage {
         let tool_calls = self
             .tool_calls
             .into_iter()
@@ -958,6 +1061,7 @@ impl CompletionMessage {
             .collect();
         let mut msg = ChatMessage::assistant(self.content.unwrap_or_default(), tool_calls);
         msg.reasoning_content = self.reasoning_content.filter(|r| !r.is_empty());
+        msg.finish_reason = finish_reason;
         normalize_reply(msg)
     }
 }
@@ -969,12 +1073,18 @@ impl CompletionMessage {
 /// Без нормализации ход возвращал бы пустую строку — подменяем пустой ответ
 /// цепочкой рассуждений (там и есть ответ). Сообщения с `tool_calls` не
 /// трогаем: у них пустой content — норма.
+///
+/// При `finish_reason=length` подмена ОТКЛЮЧЕНА: обрубок цепочки рассуждений
+/// не должен маскироваться под ответ — сигнал усечения нужен автоэскалации
+/// `max_tokens` (Kimi K3 ризонит всегда: thinking съедает бюджет до начала
+/// видимого текста). Эскалации исчерпаны — честное «пусто», а не обрезок мыслей.
 fn normalize_reply(mut msg: ChatMessage) -> ChatMessage {
     // Let-chains стабилизированы в 1.88 — выше MSRV 1.85: условия разнесены
     // в плоские выражения (семантика та же, что у цепочки `&& let`).
     let empty_reply = msg.tool_calls.is_empty() && msg.content.trim().is_empty();
+    let truncated = msg.finish_reason.as_deref() == Some("length");
     let reasoning = msg.reasoning_content.as_deref().unwrap_or_default().trim();
-    if empty_reply && !reasoning.is_empty() {
+    if empty_reply && !truncated && !reasoning.is_empty() {
         msg.content = reasoning.to_string();
     }
     msg
@@ -1666,7 +1776,7 @@ mod tests {
             reasoning_content: Some("\n3".into()),
             tool_calls: Vec::new(),
         }
-        .into_chat_message();
+        .into_chat_message(None);
         assert_eq!(msg.content, "3", "ответ поднят из цепочки рассуждений");
         assert_eq!(
             msg.reasoning_content.as_deref(),
@@ -1685,7 +1795,7 @@ mod tests {
                 },
             }],
         }
-        .into_chat_message();
+        .into_chat_message(None);
         assert_eq!(with_call.content, "");
         // Непустой content никогда не подменяется.
         let plain = CompletionMessage {
@@ -1693,8 +1803,37 @@ mod tests {
             reasoning_content: Some("cot".into()),
             tool_calls: Vec::new(),
         }
-        .into_chat_message();
+        .into_chat_message(None);
         assert_eq!(plain.content, "ответ");
+    }
+
+    #[test]
+    fn truncated_reply_is_not_masked_by_reasoning_fallback() {
+        // finish_reason=length + пустой видимый ответ (Kimi K3: thinking съел
+        // весь max_tokens) — подмена цепочкой рассуждений ОТКЛЮЧЕНА: иначе
+        // обрубок мыслей маскируется под ответ и автоэскалация max_tokens
+        // не сработает. Контент остаётся пустым — сигнал усечения честный.
+        let msg = CompletionMessage {
+            content: Some(String::new()),
+            reasoning_content: Some("думаю о задаче…".into()),
+            tool_calls: Vec::new(),
+        }
+        .into_chat_message(Some("length".into()));
+        assert_eq!(msg.content, "", "обрыв не маскируется под ответ");
+        assert_eq!(msg.finish_reason.as_deref(), Some("length"));
+        assert_eq!(
+            msg.reasoning_content.as_deref(),
+            Some("думаю о задаче…"),
+            "reasoning сохранён"
+        );
+        // А stop (GLM-quirk) — подмена по-прежнему работает.
+        let stopped = CompletionMessage {
+            content: Some(String::new()),
+            reasoning_content: Some("ответ в мыслях".into()),
+            tool_calls: Vec::new(),
+        }
+        .into_chat_message(Some("stop".into()));
+        assert_eq!(stopped.content, "ответ в мыслях");
     }
 
     #[test]
@@ -2164,6 +2303,218 @@ data: [DONE]\n\n";
             }
         }
         assert_eq!(notes, 4, "по заметке на каждый повтор");
+    }
+
+    /// Нестриминговый ответ API с заголовками.
+    fn json_response(body: &str) -> String {
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    /// Сервер из очереди ответов, ЗАХВАТЫВАЮЩИЙ тела запросов (проверка
+    /// эскалации `max_tokens`: второй запрос обязан нести удвоенный бюджет).
+    async fn serve_sequence_capture(
+        responses: Vec<String>,
+    ) -> (
+        u16,
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("local_addr").port();
+        let bodies = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let sink = std::sync::Arc::clone(&bodies);
+        let handle = tokio::spawn(async move {
+            for response in responses {
+                let (mut socket, _) = listener.accept().await.expect("accept");
+                let mut request = Vec::new();
+                let mut buf = [0u8; 4096];
+                let header_end = loop {
+                    let n = socket.read(&mut buf).await.expect("read");
+                    if n == 0 {
+                        return;
+                    }
+                    request.extend_from_slice(&buf[..n]);
+                    if let Some(pos) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break pos + 4;
+                    }
+                };
+                // Тело запроса дочитываем по Content-Length (там JSON с
+                // max_tokens — предмет проверки эскалации).
+                let lower = String::from_utf8_lossy(&request[..header_end]).to_lowercase();
+                let len: usize = lower
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length:"))
+                    .and_then(|v| v.trim().parse().ok())
+                    .unwrap_or(0);
+                while request.len() < header_end + len {
+                    let n = socket.read(&mut buf).await.expect("read");
+                    if n == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buf[..n]);
+                }
+                sink.lock().expect("lock").push(
+                    String::from_utf8_lossy(
+                        &request[header_end..request.len().min(header_end + len)],
+                    )
+                    .into_owned(),
+                );
+                socket.write_all(response.as_bytes()).await.expect("write");
+                socket.shutdown().await.expect("shutdown");
+            }
+        });
+        (port, bodies, handle)
+    }
+
+    #[tokio::test]
+    async fn complete_length_escalates_max_tokens_and_recovers() {
+        // Kimi K3: thinking съел бюджет — пустой ответ с finish_reason=length;
+        // нестрим невидим для пользователя, повтор с удвоенным max_tokens
+        // безопасен. Тест-провайдер стартует с default_max_tokens=1024.
+        let first = r#"{"choices":[{"message":{"content":"","reasoning_content":"считаю…"},"finish_reason":"length"}],"usage":{"prompt_tokens":10,"completion_tokens":1024}}"#;
+        let second = r#"{"choices":[{"message":{"content":"полный ответ"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":40}}"#;
+        let (port, bodies, server) =
+            serve_sequence_capture(vec![json_response(first), json_response(second)]).await;
+        let provider = loopback_provider(port);
+        let msg = provider
+            .complete(ChatRequest::chat(vec![ChatMessage::user("hi")]))
+            .await
+            .expect("complete");
+        server.await.expect("join");
+        assert_eq!(msg.content, "полный ответ");
+        assert_eq!(msg.finish_reason.as_deref(), Some("stop"));
+        let bodies = bodies.lock().expect("lock");
+        assert_eq!(bodies.len(), 2, "запросы: {bodies:?}");
+        assert!(
+            bodies[0].contains("\"max_tokens\":1024"),
+            "исходный бюджет: {}",
+            bodies[0]
+        );
+        assert!(
+            bodies[1].contains("\"max_tokens\":2048"),
+            "эскалация ×2: {}",
+            bodies[1]
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_length_escalation_falls_back_to_first_truncated_on_error() {
+        // Эскалированный запрос отклонён (400, напр. «max_tokens too large») —
+        // возвращаем ПЕРВЫЙ усечённый ответ: обрубок лучше отказа.
+        let first =
+            r#"{"choices":[{"message":{"content":"обрубок текста"},"finish_reason":"length"}]}"#;
+        let bad = "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: 42\r\nConnection: close\r\n\r\n{\"error\":{\"message\":\"max_tokens too large\"}}";
+        let (port, _bodies, server) =
+            serve_sequence_capture(vec![json_response(first), bad.to_string()]).await;
+        let provider = loopback_provider(port);
+        let msg = provider
+            .complete(ChatRequest::chat(vec![ChatMessage::user("hi")]))
+            .await
+            .expect("fallback к усечённому ответу");
+        server.await.expect("join");
+        assert_eq!(msg.content, "обрубок текста");
+        assert_eq!(msg.finish_reason.as_deref(), Some("length"));
+    }
+
+    #[tokio::test]
+    async fn complete_length_escalation_exhaustion_returns_last_truncated() {
+        // Все попытки упираются в length: исходный запрос + 2 эскалации,
+        // отдаётся ПОСЛЕДНИЙ (самый длинный) усечённый ответ.
+        let mk = |content: &str| {
+            json_response(&format!(
+                r#"{{"choices":[{{"message":{{"content":"{content}"}},"finish_reason":"length"}}]}}"#
+            ))
+        };
+        let (port, bodies, server) =
+            serve_sequence_capture(vec![mk("а"), mk("аб"), mk("абв")]).await;
+        let provider = loopback_provider(port);
+        let msg = provider
+            .complete(ChatRequest::chat(vec![ChatMessage::user("hi")]))
+            .await
+            .expect("complete");
+        server.await.expect("join");
+        assert_eq!(msg.content, "абв");
+        assert_eq!(msg.finish_reason.as_deref(), Some("length"));
+        let bodies = bodies.lock().expect("lock");
+        assert_eq!(bodies.len(), 3, "исходный + 2 эскалации: {bodies:?}");
+        assert!(
+            bodies[2].contains("\"max_tokens\":4096"),
+            "1024→2048→4096: {}",
+            bodies[2]
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_length_with_empty_content_escalates_with_note() {
+        // SSE #1: только reasoning + finish_reason=length (K3 съел бюджет
+        // мыслями, видимого текста не было — повтор не даёт дублей в чате).
+        let first = "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"считаю\"}}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"length\"}]}\n\ndata: [DONE]\n\n";
+        let second = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"целый ответ\"}}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+        let (port, bodies, server) = serve_sequence_capture(vec![
+            sse_response(first, first.len()),
+            sse_response(second, second.len()),
+        ])
+        .await;
+        let provider = loopback_provider(port);
+        let (tx, mut rx) = mpsc::channel(16);
+        let msg = provider
+            .stream(ChatRequest::chat(vec![ChatMessage::user("hi")]), tx)
+            .await
+            .expect("stream");
+        server.await.expect("join");
+        assert_eq!(msg.content, "целый ответ");
+        assert_eq!(msg.finish_reason.as_deref(), Some("stop"));
+        let mut events = Vec::new();
+        while let Some(ev) = rx.recv().await {
+            events.push(ev);
+        }
+        let notes: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                LlmEvent::Note(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(notes.len(), 1, "заметка об эскалации: {events:?}");
+        assert!(
+            notes[0].contains("max_tokens=2048"),
+            "заметка с новым бюджетом: {}",
+            notes[0]
+        );
+        let bodies = bodies.lock().expect("lock");
+        assert_eq!(bodies.len(), 2, "запросы: {bodies:?}");
+        assert!(
+            bodies[1].contains("\"max_tokens\":2048"),
+            "эскалация ×2: {}",
+            bodies[1]
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_length_with_visible_content_is_not_retried() {
+        // Видимый текст уже ушёл в чат — повтор показал бы текст заново:
+        // усечение с НЕпустым контентом уходит наверх как есть (дальше —
+        // авто-продолжение агентного цикла `continue_on_length`).
+        let only = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"фрагмент\"}}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"length\"}]}\n\ndata: [DONE]\n\n";
+        let (port, bodies, server) =
+            serve_sequence_capture(vec![sse_response(only, only.len())]).await;
+        let provider = loopback_provider(port);
+        let (tx, _rx) = mpsc::channel(16);
+        let msg = provider
+            .stream(ChatRequest::chat(vec![ChatMessage::user("hi")]), tx)
+            .await
+            .expect("stream");
+        // Второго запроса нет: эскалация при видимом тексте запрещена.
+        // (Если бы повтор случился, он ушёл бы ДО возврата msg.)
+        assert_eq!(bodies.lock().expect("lock").len(), 1, "повтор не нужен");
+        server.abort();
+        assert_eq!(msg.content, "фрагмент");
+        assert_eq!(msg.finish_reason.as_deref(), Some("length"));
     }
 
     /// Live-прогон: `cargo test -- --ignored live_deepseek`.

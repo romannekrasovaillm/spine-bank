@@ -245,6 +245,29 @@ pub struct Usage {
     pub completion_tokens: u64,
 }
 
+/// Потолок автоэскалации `max_tokens` при усечении ответа
+/// (`finish_reason=length`): thinking-модели (Kimi K3 ризонит всегда) съедают
+/// бюджет цепочкой рассуждений, поэтому при `length` бюджет удваивается,
+/// но не выше этого значения (провайдер может и не принять больше — тогда
+/// эскалированный запрос откатывается к первому усечённому ответу).
+pub(crate) const MAX_ESCALATED_COMPLETION_TOKENS: u32 = 65536;
+
+/// Сколько раз подряд провайдер поднимает `max_tokens` при `length`
+/// (сверх исходного запроса).
+pub(crate) const MAX_LENGTH_ESCALATIONS: usize = 2;
+
+/// Следующий бюджет автоэскалации `max_tokens`: удвоение до потолка
+/// [`MAX_ESCALATED_COMPLETION_TOKENS`] (конфиг с бюджетом выше потолка не
+/// понижается). `None` на входе трактуется как 8192 — дефолт
+/// [`crate::config::ModelConfig::max_tokens`]. `None` в результате — расти
+/// некуда (уже на потолке): повтор с тем же бюджетом бессмыслен.
+pub(crate) fn escalated_max_tokens(current: Option<u32>) -> Option<u32> {
+    let cur = current.unwrap_or(8192);
+    let ceiling = cur.max(MAX_ESCALATED_COMPLETION_TOKENS);
+    let next = cur.saturating_mul(2).min(ceiling);
+    (next > cur).then_some(next)
+}
+
 impl Usage {
     /// Суммарные токены.
     #[must_use]
@@ -488,6 +511,18 @@ mod tests {
         let asst = ChatMessage::assistant("a", Vec::new());
         assert_eq!(asst.role, Role::Assistant);
         assert!(asst.reasoning_content.is_none());
+    }
+
+    #[test]
+    fn escalated_max_tokens_doubles_up_to_ceiling() {
+        // Не задан в запросе/конфиге — стартуем от дефолта 8192.
+        assert_eq!(escalated_max_tokens(None), Some(16384));
+        assert_eq!(escalated_max_tokens(Some(8192)), Some(16384));
+        assert_eq!(escalated_max_tokens(Some(32768)), Some(65536));
+        // Потолок: расти некуда — повторять с тем же бюджетом бессмысленно.
+        assert_eq!(escalated_max_tokens(Some(65536)), None);
+        // Пользовательский бюджет выше потолка не понижаем.
+        assert_eq!(escalated_max_tokens(Some(131_072)), None);
     }
 
     #[test]
