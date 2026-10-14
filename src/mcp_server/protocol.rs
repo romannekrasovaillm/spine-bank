@@ -1039,13 +1039,12 @@ fn tool_specs() -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "task": {"type": "string", "description": "Текст задачи: подбор против statement и signature, пути извлекаются из текста"},
+                    "task": {"type": "string", "description": "Текст задачи (опционально): подбор против statement и signature, пути извлекаются из текста; пусто — вся область репозитория"},
                     "paths": {"type": "array", "items": {"type": "string"}, "description": "Явные пути задачи (глобы или файлы); объединяются с путями из текста"},
                     "path": {"type": "string", "description": "Каталог с реестром (по умолчанию — каталог вызова)"},
                     "k": {"type": "integer", "description": "Максимум уроков в выдаче (по умолчанию — [lessons] k)"},
                     "cwd": {"type": "string", "description": "Рабочий каталог клиента: относительный `path` резолвится от него"},
                 },
-                "required": ["task"],
             },
             "annotations": read_only,
         }),

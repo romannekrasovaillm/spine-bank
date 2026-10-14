@@ -248,11 +248,12 @@ impl McpServe {
     ) -> std::result::Result<Value, CallError> {
         #[derive(Deserialize)]
         struct Args {
-            /// Текст задачи: подбор против `statement` и `signature`, пути — из текста.
-            task: String,
-            /// Явные пути задачи (объединяются с путями из текста).
-            #[serde(default)]
-            paths: Vec<String>,
+            /// Текст задачи: подбор против `statement` и `signature`, пути — из
+            /// текста. Пусто/отсутствует — пустой отбор (вся область репозитория).
+            task: Option<String>,
+            /// Явные пути задачи (объединяются с путями из текста). Отсутствует —
+            /// только пути, извлечённые из текста.
+            paths: Option<Vec<String>>,
             /// Каталог с реестром (по умолчанию — каталог вызова). Каноничное
             /// имя аргумента пути — `path`; `repo` принимается синонимом (Н8).
             #[serde(alias = "repo")]
@@ -265,7 +266,7 @@ impl McpServe {
         let args: Args = parse_args(args, "lessons_match")?;
         let root = resolve_repo(args.path.as_deref(), args.cwd.as_deref());
         let k = args.k.unwrap_or(self.cfg.lessons.k);
-        let task = args.task;
+        let task = args.task.unwrap_or_default();
         let paths = args.paths;
         let cfg = std::sync::Arc::clone(&self.cfg);
         let registry = crate::lessons::repo_ledger_path(&root)
@@ -273,7 +274,8 @@ impl McpServe {
             .to_string();
         let matched = blocking("lessons_match", move || {
             let lessons = crate::lessons::matching::load_lessons(&cfg, &root);
-            let matched = crate::lessons::matching::lessons_match(lessons, &task, Some(&paths), k);
+            let matched =
+                crate::lessons::matching::lessons_match(lessons, &task, paths.as_deref(), k);
             Ok(matched)
         })
         .await?;
