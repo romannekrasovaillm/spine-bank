@@ -12,10 +12,17 @@
 //!   `web::tools()`, `harness::tools()` (прогон `harness_run`), `subagent`,
 //!   `ralph`, `worktree`, `distill`).
 
+use std::collections::HashSet;
+use std::fmt::Write as _;
 use std::sync::Arc;
 
+use async_trait::async_trait;
+use serde_json::{Value, json};
+
 use crate::config::Config;
-use crate::tool::{Tool, ToolRegistry};
+use crate::error::{HarnessError, Result};
+use crate::llm::ToolSpec;
+use crate::tool::{Tool, ToolContext, ToolOutput, ToolRegistry};
 
 pub mod ask;
 pub mod bash;
@@ -125,9 +132,465 @@ fn domain_tools(cfg: &Config) -> Vec<Arc<dyn Tool>> {
     out
 }
 
+/// Имена ядра (ADR-090) — всегда в запросе для ленивых профилей. Отсутствующие
+/// в реестре имена (например, `harness_run` в core-сборке) отсекаются
+/// пересечением с фактическим реестром при сборке профиля.
+const CORE_EAGER: &[&str] = &[
+    "bash",
+    "read_file",
+    "write_file",
+    "edit_file",
+    "glob",
+    "grep",
+    "propose_options",
+    "harness_run",
+    "lessons_match",
+    "tool_search",
+];
+
+/// Имена контрольного контура (профиль `architect`, ADR-090): детерминированный
+/// слой контроля без LLM (AD-2) — всегда в запросе у архитектора.
+const ARCHITECT_EAGER: &[&str] = &[
+    "adr_new",
+    "spine_lint",
+    "fitness_check",
+    "significance_score",
+    "rules_report",
+];
+
+/// Ленивый tool-профиль сессии (ADR-090): какие схемы всегда в запросе,
+/// остальные доменные — по требованию через `tool_search`. Профиль `full`
+/// (как раньше) и `reverse` (ADR-083 п.3) ленивой загрузки не используют —
+/// там полный реестр.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolProfile {
+    /// Ядро + `significance_score` (оркестрация исполнителей).
+    Orchestrate,
+    /// Ядро + контрольный контур (AD-2).
+    Architect,
+}
+
+/// Разделяемое состояние ленивой загрузки доменных схем (ADR-090): каталог
+/// доменных инструментов для `tool_search` и кэш уже загруженных имён. Кэш
+/// живёт до конца сессии; его пишут `tool_search` (найденные) и агентный цикл
+/// (вызванный незагруженный доменный инструмент), читает — сборка запроса.
+#[derive(Clone, Default)]
+pub struct ToolLazy {
+    /// Каталог доменных инструментов (имя, описание, параметры).
+    catalog: Arc<Vec<ToolSpec>>,
+    /// Имена доменных инструментов, чьи схемы уже в запросе.
+    loaded: Arc<std::sync::Mutex<HashSet<String>>>,
+}
+
+impl ToolLazy {
+    /// Состояние с доменным каталогом; кэш загрузки пуст.
+    #[must_use]
+    pub fn new(catalog: Vec<ToolSpec>) -> Self {
+        Self {
+            catalog: Arc::new(catalog),
+            loaded: Arc::new(std::sync::Mutex::new(HashSet::new())),
+        }
+    }
+
+    /// Снимок загруженных имён (для сборки запроса).
+    #[must_use]
+    pub fn loaded_names(&self) -> HashSet<String> {
+        match self.loaded.lock() {
+            Ok(guard) => guard.clone(),
+            // Отравление мьютекса невозможно в штатном потоке (под замком нет
+            // паник); при нём отдаём всё, что успели загрузить.
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+
+    /// Помечает инструмент загруженным (идемпотентно).
+    pub fn mark_loaded(&self, name: &str) {
+        match self.loaded.lock() {
+            Ok(mut guard) => {
+                guard.insert(name.to_string());
+            }
+            Err(poisoned) => {
+                poisoned.into_inner().insert(name.to_string());
+            }
+        }
+    }
+
+    /// Детерминированный поиск доменных инструментов по имени/описанию
+    /// (без регистра; пустой запрос — пустой результат). Найденные схемы
+    /// помечаются загруженными. Результат отсортирован по имени.
+    #[must_use]
+    pub fn search(&self, query: &str) -> Vec<ToolSpec> {
+        let q = query.trim().to_lowercase();
+        if q.is_empty() {
+            return Vec::new();
+        }
+        let mut matched: Vec<ToolSpec> = self
+            .catalog
+            .iter()
+            .filter(|s| {
+                s.name.to_lowercase().contains(&q) || s.description.to_lowercase().contains(&q)
+            })
+            .cloned()
+            .collect();
+        matched.sort_by(|a, b| a.name.cmp(&b.name));
+        let mut loaded = match self.loaded.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        for spec in &matched {
+            loaded.insert(spec.name.clone());
+        }
+        matched
+    }
+}
+
+/// Инструмент `tool_search` (ADR-090): детерминированный поиск доменных
+/// инструментов. Найденные схемы подгружаются в запрос (кэш до конца сессии).
+struct ToolSearchTool {
+    lazy: ToolLazy,
+}
+
+#[async_trait]
+impl Tool for ToolSearchTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "tool_search".into(),
+            description: "Найти доменный инструмент архитектора по имени или описанию \
+                (например, «дифф контрактов», «модель», «рубрика»). Найденные схемы \
+                подгружаются в запрос и остаются доступными до конца сессии — после \
+                поиска вызывай их по имени. Ищи инструмент, только если нужного нет \
+                в уже доступном списке."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Имя или описание инструмента (подстрока, без регистра)"
+                    }
+                },
+                "required": ["query"]
+            }),
+        }
+    }
+
+    async fn call(&self, args: Value, _ctx: &ToolContext) -> Result<ToolOutput> {
+        let query = args
+            .get("query")
+            .and_then(|q| q.as_str())
+            .ok_or_else(|| HarnessError::Tool("tool_search: нет аргумента query".into()))?;
+        let matched = self.lazy.search(query);
+        if matched.is_empty() {
+            return Ok(ToolOutput::ok(
+                "Ничего не найдено. Уточните запрос: ищите по имени инструмента или \
+                 ключевому слову из его назначения (например, «контракт», «модель», \
+                 «рубрика»).",
+            ));
+        }
+        let mut out = String::new();
+        let _ = writeln!(
+            out,
+            "Найдено инструментов: {}. Их схемы подгружены в запрос (до конца сессии).",
+            matched.len()
+        );
+        for spec in &matched {
+            let _ = writeln!(out, "\n### {}\n{}", spec.name, spec.description);
+        }
+        Ok(ToolOutput::ok(out))
+    }
+}
+
+/// Собранный ленивый инструментарий (ADR-090): полный реестр для
+/// диспетчеризации, имена ядра/профиля (всегда в запросе) и разделяемое
+/// состояние загрузки доменных схем.
+#[derive(Clone)]
+pub struct LazyToolset {
+    registry: ToolRegistry,
+    eager: HashSet<String>,
+    lazy: ToolLazy,
+}
+
+impl LazyToolset {
+    /// Полный реестр (диспетчеризация всех инструментов, включая незагруженные).
+    #[must_use]
+    pub fn registry(&self) -> &ToolRegistry {
+        &self.registry
+    }
+
+    /// Имена, чьи схемы всегда в запросе (ядро + профиль).
+    #[must_use]
+    pub fn eager(&self) -> &HashSet<String> {
+        &self.eager
+    }
+
+    /// Разделяемое состояние ленивой загрузки.
+    #[must_use]
+    pub fn lazy(&self) -> &ToolLazy {
+        &self.lazy
+    }
+
+    /// Спеки, которые попадут в запрос сейчас: ядро + загруженные доменные.
+    #[must_use]
+    pub fn active_specs(&self) -> Vec<ToolSpec> {
+        let loaded = self.lazy.loaded_names();
+        self.registry
+            .specs()
+            .into_iter()
+            .filter(|s| self.eager.contains(&s.name) || loaded.contains(&s.name))
+            .collect()
+    }
+
+    /// Разбирает на части (для передачи в сессию: реестр, ядро, кэш).
+    #[must_use]
+    pub fn into_parts(self) -> (ToolRegistry, HashSet<String>, ToolLazy) {
+        (self.registry, self.eager, self.lazy)
+    }
+}
+
+/// Собирает ленивый инструментарий для профиля `orchestrate`/`architect`
+/// (ADR-090). Профили `full`/`reverse` сюда не передаются — они используют
+/// [`full_registry`] без ленивой загрузки.
+#[must_use]
+pub fn lazy_toolset(cfg: &Config, profile: ToolProfile) -> LazyToolset {
+    let mut registry = full_registry(cfg);
+    let mut eager = eager_names(profile, &registry);
+    // Каталог tool_search — всё, что не в ядре/профиле: доменные схемы и
+    // скриншоты подгружаются по требованию, а не раздувают каждый запрос.
+    let catalog: Vec<ToolSpec> = registry
+        .specs()
+        .into_iter()
+        .filter(|s| !eager.contains(&s.name))
+        .collect();
+    let lazy = ToolLazy::new(catalog);
+    // `tool_search` регистрируется после сборки каталога (сам не доменный) и
+    // входит в ядро каждого ленивого профиля.
+    registry.register(Arc::new(ToolSearchTool { lazy: lazy.clone() }));
+    eager.insert("tool_search".to_string());
+    LazyToolset {
+        registry,
+        eager,
+        lazy,
+    }
+}
+
+/// Имена, всегда входящие в запрос для профиля (пересечение с реестром: в
+/// core-сборке `harness_run` отсутствует и отсекается).
+fn eager_names(profile: ToolProfile, registry: &ToolRegistry) -> HashSet<String> {
+    let mut names: HashSet<String> = CORE_EAGER.iter().map(|s| (*s).to_string()).collect();
+    match profile {
+        ToolProfile::Orchestrate => {
+            names.insert("significance_score".to_string());
+        }
+        ToolProfile::Architect => {
+            names.extend(ARCHITECT_EAGER.iter().map(|s| (*s).to_string()));
+        }
+    }
+    names.retain(|n| registry.get(n).is_some());
+    names
+}
+
+/// Прокси размера первого запроса (символов): системный промпт плюс сумма
+/// длин схем (имя + описание + параметры). Нижняя граница честного замера —
+/// обёртка `{"type":"function",…}` и имена полей в неё не включены, но они
+/// короче самих описаний и не меняют порядок величины.
+#[must_use]
+pub fn first_request_chars(system_prompt: &str, specs: &[ToolSpec]) -> usize {
+    system_prompt.chars().count()
+        + specs
+            .iter()
+            .map(|s| {
+                s.name.chars().count()
+                    + s.description.chars().count()
+                    + s.parameters.to_string().chars().count()
+            })
+            .sum::<usize>()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Имена ядра, ожидаемые в harness-сборке (без учёта `tool_search`, который
+    /// `lazy_toolset` регистрирует отдельно, — но он входит в eager-набор).
+    const ORCHESTRATE_EAGER: &[&str] = &[
+        "bash",
+        "read_file",
+        "write_file",
+        "edit_file",
+        "glob",
+        "grep",
+        "propose_options",
+        "harness_run",
+        "lessons_match",
+        "tool_search",
+        "significance_score",
+    ];
+
+    fn names(specs: &[ToolSpec]) -> Vec<String> {
+        let mut out: Vec<String> = specs.iter().map(|s| s.name.clone()).collect();
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn lazy_orchestrate_specs_are_core_plus_significance() {
+        let cfg = Config::default();
+        let toolset = lazy_toolset(&cfg, ToolProfile::Orchestrate);
+        let specs = toolset.active_specs();
+        // `harness_run` есть только в полной сборке — ожидание пересекаем с
+        // фактическим реестром; `tool_search` регистрирует сам lazy_toolset,
+        // поэтому он всегда присутствует.
+        let full = full_registry(&cfg);
+        let mut expected: Vec<String> = ORCHESTRATE_EAGER
+            .iter()
+            .filter(|n| **n == "tool_search" || full.get(n).is_some())
+            .map(|s| (*s).to_string())
+            .collect();
+        expected.sort();
+        assert_eq!(
+            names(&specs),
+            expected,
+            "orchestrate: ядро + significance_score, ничего доменного"
+        );
+        // Доменные инструменты в orchestrate-запросе отсутствуют.
+        for banned in ["model_query", "fitness_check", "arch_diff", "contract_diff"] {
+            assert!(
+                !specs.iter().any(|s| s.name == banned),
+                "{banned} не должен входить в orchestrate-запрос"
+            );
+        }
+    }
+
+    #[test]
+    fn lazy_architect_specs_add_control_contour() {
+        let cfg = Config::default();
+        let toolset = lazy_toolset(&cfg, ToolProfile::Architect);
+        let specs = toolset.active_specs();
+        let got = names(&specs);
+        // Контрольный контур (AD-2) — всегда в запросе архитектора.
+        for expected in [
+            "adr_new",
+            "spine_lint",
+            "fitness_check",
+            "significance_score",
+            "rules_report",
+        ] {
+            assert!(
+                got.contains(&expected.to_string()),
+                "нет {expected} в architect"
+            );
+        }
+        // Ядро тоже на месте (harness_run — только в полной сборке).
+        for expected in ["bash", "read_file", "lessons_match", "tool_search"] {
+            assert!(
+                got.contains(&expected.to_string()),
+                "нет {expected} в architect"
+            );
+        }
+        #[cfg(feature = "harness")]
+        assert!(
+            got.contains(&"harness_run".to_string()),
+            "нет harness_run в architect"
+        );
+        // А доменные (не контрольный контур) — по-прежнему ленивы.
+        for banned in ["model_query", "mermaid_render", "openapi_lint", "arch_diff"] {
+            assert!(
+                !got.contains(&banned.to_string()),
+                "{banned} не должен входить в architect-запрос"
+            );
+        }
+    }
+
+    #[test]
+    fn full_registry_keeps_all_specs_without_lazy() {
+        // Профиль full (дефолт) ленивой загрузки не использует: реестр полный.
+        let cfg = Config::default();
+        let full = full_registry(&cfg);
+        let toolset = lazy_toolset(&cfg, ToolProfile::Orchestrate);
+        assert!(
+            full.specs().len() > toolset.active_specs().len(),
+            "full-реестр шире orchestrate-запроса"
+        );
+    }
+
+    #[test]
+    fn tool_search_is_deterministic_and_marks_loaded() {
+        let cfg = Config::default();
+        let toolset = lazy_toolset(&cfg, ToolProfile::Orchestrate);
+        let lazy = toolset.lazy().clone();
+        let first = lazy.search("модель");
+        let second = lazy.search("модель");
+        assert!(!first.is_empty(), "поиск «модель» что-то находит");
+        assert_eq!(
+            names(&first),
+            names(&second),
+            "tool_search детерминирован (одинаковый результат на одинаковый запрос)"
+        );
+        // Найденные схемы помечены загруженными и попали в активные спеки.
+        let loaded = lazy.loaded_names();
+        for spec in &first {
+            assert!(loaded.contains(&spec.name), "{} загружен", spec.name);
+        }
+        let active = toolset.active_specs();
+        let active_names = names(&active);
+        for spec in &first {
+            assert!(
+                active_names.contains(&spec.name),
+                "{} в активных спеках",
+                spec.name
+            );
+        }
+    }
+
+    #[test]
+    fn tool_search_returns_nothing_for_empty_or_unknown() {
+        let cfg = Config::default();
+        let toolset = lazy_toolset(&cfg, ToolProfile::Orchestrate);
+        let lazy = toolset.lazy();
+        assert!(
+            lazy.search("").is_empty(),
+            "пустой запрос — пустой результат"
+        );
+        assert!(
+            lazy.search("нет-такого-инструмента-xyzzy").is_empty(),
+            "неизвестный запрос — пустой результат"
+        );
+    }
+
+    #[test]
+    fn mark_loaded_adds_unloaded_domain_spec() {
+        let cfg = Config::default();
+        let toolset = lazy_toolset(&cfg, ToolProfile::Orchestrate);
+        assert!(
+            !toolset
+                .active_specs()
+                .iter()
+                .any(|s| s.name == "model_query"),
+            "model_query изначально не в запросе"
+        );
+        // Вызов незагруженного доменного инструмента подгружает его (ADR-090).
+        toolset.lazy().mark_loaded("model_query");
+        assert!(
+            toolset
+                .active_specs()
+                .iter()
+                .any(|s| s.name == "model_query"),
+            "после mark_loaded model_query в активных спеках"
+        );
+    }
+
+    #[test]
+    fn orchestrate_first_request_fits_25000_chars() {
+        // Цель B6/ADR-090: первый запрос ≤ 25 000 симв. вместе с системным
+        // промптом. База промпта — встроенный `architect.md` (ADR-090).
+        let cfg = Config::default();
+        let toolset = lazy_toolset(&cfg, ToolProfile::Orchestrate);
+        let size = first_request_chars(crate::assets::PROMPT_ARCHITECT, &toolset.active_specs());
+        assert!(
+            size <= 25_000,
+            "первый запрос orchestrate: {size} символов > 25 000"
+        );
+    }
 
     #[test]
     fn full_registry_contains_core_interaction_and_domain_tools() {
