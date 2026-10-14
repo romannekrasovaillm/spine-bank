@@ -326,7 +326,7 @@ impl AgentSession {
                     streamed = true;
                     race_cancel(self.cancel.clone(), self.stream_request(request, tx)).await
                 }
-                _ => race_cancel(self.cancel.clone(), self.provider.complete(request)).await,
+                _ => race_cancel(self.cancel.clone(), self.complete_and_capture(request)).await,
             };
             // Отмена во время запроса к модели: история консистентна
             // (висячих tool-вызовов нет) — просто завершаем ход.
@@ -375,7 +375,7 @@ impl AgentSession {
                                     _ => {
                                         race_cancel(
                                             self.cancel.clone(),
-                                            self.provider.complete(request),
+                                            self.complete_and_capture(request),
                                         )
                                         .await
                                     }
@@ -404,7 +404,7 @@ impl AgentSession {
                                     .await
                             }
                             _ => {
-                                race_cancel(self.cancel.clone(), self.provider.complete(request))
+                                race_cancel(self.cancel.clone(), self.complete_and_capture(request))
                                     .await
                             }
                         };
@@ -743,7 +743,7 @@ impl AgentSession {
                 final_streamed = true;
                 self.stream_request(request, tx).await
             }
-            _ => self.provider.complete(request).await,
+            _ => self.complete_and_capture(request).await,
         }?;
         if !final_streamed {
             self.emit_reasoning_full(&events, &reply).await;
@@ -1100,7 +1100,7 @@ impl AgentSession {
                     *streamed = true;
                     race_cancel(self.cancel.clone(), self.stream_request(cont_req, tx)).await
                 }
-                _ => race_cancel(self.cancel.clone(), self.provider.complete(cont_req)).await,
+                _ => race_cancel(self.cancel.clone(), self.complete_and_capture(cont_req)).await,
             };
             let part = match cont {
                 Some(Ok(part)) => part,
@@ -1275,6 +1275,21 @@ impl AgentSession {
                 }),
             );
         }
+    }
+
+    /// Нестриминговый запрос с захватом статистики токенов (B7, L11):
+    /// `complete` отдаёт только текст, поэтому usage нестримингового ответа
+    /// API терялся. `complete_with_usage` возвращает и счётчики — они
+    /// кладутся в `last_usage` и попадают в журнал записью `usage` при
+    /// логировании ответа (как в стриме). Провайдер usage не отдал (нули) —
+    /// записи в журнале не будет.
+    async fn complete_and_capture(&mut self, request: ChatRequest) -> Result<ChatMessage> {
+        self.last_usage = None;
+        let (msg, usage) = self.provider.complete_with_usage(request).await?;
+        if usage.total() > 0 {
+            self.last_usage = Some(usage);
+        }
+        Ok(msg)
     }
 
     /// Стриминговый запрос: дельты провайдера пересылаются как
