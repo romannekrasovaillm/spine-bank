@@ -31,4 +31,15 @@
 - evidence: отчёт hr-20261014-135849-04; фикс — ~/.config/arch-harness/config.toml
   (вне репозитория) + ~/.arch-harness/claude-harness-settings.json.
 
+## 2026-10-14 · LSN-черновик 4 · source: tool (прогон L3-завершения, hr-20261014-160020-07)
+- Факт: исполнитель запустил `cargo test` ФОНОМ (task-нотификации claude) и молча ждал;
+  CARGO_TARGET_DIR вне worktree → 30 мин без вывода и без изменений файлов репозитория →
+  убит по таймауту тишины 1800 с, хотя работал (4,2M входных токенов). Тот же механизм
+  убил первый L11.
+- Урок: watchdog тишины смотрит на stdout и файлы РЕПОЗИТОРИЯ. Исполнителю запрещать
+  фоновые длинные команды; приватный CARGO_TARGET_DIR класть ВНУТРЬ worktree
+  (сборка сама подтверждает живость изменениями файлов).
+- evidence: транскрипт сессии 058f74aa (entrypoint sdk-cli, background task
+  «Run full test suite» killed, totalDuration ≈ 1800 с).
+
 (продолжение — по мере прогонов L1/L2/L3: провалы clippy, control check, тестов)
