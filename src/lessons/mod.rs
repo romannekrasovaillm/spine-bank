@@ -50,6 +50,7 @@
 pub mod ledger;
 #[path = "match.rs"]
 pub mod matching;
+pub mod promote;
 pub mod render;
 pub mod scope;
 
@@ -60,6 +61,10 @@ pub use ledger::{
     validate_imported,
 };
 pub use matching::lessons_match;
+pub use promote::{
+    Clause, HUMAN_SIGN_OFF, PromoRuleKind, PromoteOptions, PromoteReport, RuleProposal,
+    SeedVerdict, express, promote, redteam_seed, requires_signature,
+};
 pub use render::{render, render_lesson, write_atomic};
 pub use scope::{Scope, ScopeLevel};
 
