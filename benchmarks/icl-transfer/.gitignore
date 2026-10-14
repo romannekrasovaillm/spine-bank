@@ -1,0 +1,4 @@
+# Сводки прогонов icl-transfer — детерминированно воспроизводятся run_all.sh.
+# В VCS — только results/README.md.
+results/*
+!results/README.md
