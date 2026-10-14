@@ -1057,6 +1057,207 @@ async fn compact_now_forces_fold_outside_thresholds() {
     assert!(s.messages()[0].content.contains("САММАРИ"));
 }
 
+/// Заводит урок реестра в каталоге-репозитории сессии; возвращает id (`LSN-…`).
+fn seed_lesson(dir: &Path, code: &str, statement: &str) -> String {
+    use crate::lessons::{Evidence, Ledger, LessonSource, Outcome, RecordInput, Signature};
+    let signature = Signature::new(LessonSource::Gate, code);
+    let id = signature.id();
+    let input = RecordInput::new(
+        signature,
+        Evidence {
+            run_id: format!("run-{code}"),
+            harness: Some("claude-code".into()),
+            verdict_excerpt: format!("[{code}] нарушение"),
+            file: Some("src/lib.rs".into()),
+            line: Some(1),
+            ts: "2026-10-14T10:00:00.000Z".into(),
+            outcome: Outcome::Fail,
+            task: Some(format!("T-{code}")),
+        },
+    )
+    .with_statement(statement);
+    Ledger::repo(dir)
+        .record(&input, &crate::lessons::Thresholds::default(), "2026-10-14")
+        .expect("запись урока");
+    id
+}
+
+/// Конфигурация тестов блока уроков: реестр включён, пользовательский реестр
+/// изолирован в tempdir (AD-7: реальный дом не читается).
+fn enable_lessons(cfg: &mut Config, dir: &Path) {
+    cfg.lessons.enabled = true;
+    cfg.lessons.user_dir = Some(dir.join("user-lessons"));
+}
+
+/// L3-путь компактификации: урок свободным текстом уходит в саммари, а блок в
+/// системном промпте цел — он берётся из реестра (ADR-087, B5/L3).
+#[tokio::test]
+async fn lessons_block_survives_l3_summarization() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let statement = "Новый публичный символ обязан попасть в __all__ пакета";
+    let id = seed_lesson(tmp.path(), "G5", statement);
+    let mut s = make_session(tmp.path(), Arc::new(SumLlm), |cfg| {
+        enable_lessons(cfg, tmp.path());
+    });
+    assert!(
+        s.effective_system_prompt()
+            .contains(crate::lesson_block::HEADER),
+        "блок собран на старте сессии: {}",
+        s.effective_system_prompt()
+    );
+    s.history
+        .push(ChatMessage::user(format!("Урок: {statement}")));
+    s.history
+        .push(ChatMessage::assistant("принято", Vec::new()));
+    s.history.push(ChatMessage::user("актуальная задача"));
+
+    let (_before, _after, folded, _trunc) = s.compact_now().await.expect("compact_now");
+    assert!(folded > 0, "L3-саммари свернул историю с уроком");
+    assert!(
+        s.messages().iter().any(|m| m.content.contains("САММАРИ")),
+        "история действительно свёрнута: {:?}",
+        s.messages()
+    );
+    let prompt = s.effective_system_prompt();
+    assert!(prompt.contains(crate::lesson_block::HEADER), "{prompt}");
+    assert!(
+        prompt.contains(&id),
+        "урок дошёл до модели из реестра: {prompt}"
+    );
+}
+
+/// L1-путь компактификации: маскирование tool-результатов прошло, блок уроков
+/// не тронут (ADR-087, B5/L1).
+#[tokio::test]
+async fn lessons_block_survives_l1_masking() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let id = seed_lesson(tmp.path(), "G5", "Правило про __all__ пакета");
+    let mut s = make_session(tmp.path(), Arc::new(FakeLlm::new()), |cfg| {
+        enable_lessons(cfg, tmp.path());
+        cfg.agent.context_budget_tokens = 1000;
+        // L3-порог недостижим: тест про L1-ветку.
+        cfg.agent.compact_l3_pct = 200;
+    });
+    s.history.push(ChatMessage::user("старт"));
+    for _ in 0..5 {
+        s.history
+            .push(ChatMessage::tool_result("c", "x".repeat(800)));
+    }
+    s.history.push(ChatMessage::user("хвост"));
+    s.compact_history(&None).await;
+
+    assert!(
+        s.messages()
+            .iter()
+            .any(|m| m.content.contains("[контекст усечён]")),
+        "L1-маскирование сработало: {:?}",
+        s.messages()
+    );
+    let prompt = s.effective_system_prompt();
+    assert!(prompt.contains(crate::lesson_block::HEADER), "{prompt}");
+    assert!(prompt.contains(&id), "{prompt}");
+}
+
+/// Синтетический B5: 50 ходов шума после урока → `compact_now` → блок цел и
+/// пересобирается из реестра (вывод урока из реестра убирает его из блока).
+#[tokio::test]
+async fn synthetic_b5_block_survives_fifty_noise_turns_and_follows_registry() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let statement = "Правило репозитория: публичный символ обязан попасть в __all__";
+    let id = seed_lesson(tmp.path(), "G5", statement);
+    let mut s = make_session(tmp.path(), Arc::new(SumLlm), |cfg| {
+        enable_lessons(cfg, tmp.path());
+        cfg.agent.context_budget_tokens = 1000;
+        cfg.agent.compact_l3_pct = 95;
+    });
+    // Урок приходит в сессию свободным текстом (как вердикт в выводе bash).
+    s.history
+        .push(ChatMessage::user(format!("Вердикт гейта: {statement}")));
+    for i in 0..50 {
+        s.history.push(ChatMessage::assistant(
+            format!("шум {i} {}", "y".repeat(200)),
+            Vec::new(),
+        ));
+        s.history.push(ChatMessage::user(format!("шум {i}")));
+    }
+    let (before, after, folded, _trunc) = s.compact_now().await.expect("compact_now");
+    assert!(folded > 0 && after < before, "компактификация прошла");
+    let prompt = s.effective_system_prompt();
+    assert!(prompt.contains(crate::lesson_block::HEADER), "{prompt}");
+    assert!(
+        prompt.contains(&id),
+        "блок цел после 50 ходов шума: {prompt}"
+    );
+
+    // Урок выведен из реестра (misses/expiry) — блок пересобран из реестра,
+    // а не пересказан из истории: урок исчез.
+    crate::lessons::Ledger::repo(tmp.path())
+        .retire(
+            &id,
+            "проверка пересборки",
+            &crate::lessons::Thresholds::default(),
+        )
+        .expect("retire");
+    s.compact_now().await.expect("compact_now 2");
+    let prompt = s.effective_system_prompt();
+    assert!(
+        !prompt.contains(&id),
+        "выведенный урок ушёл из блока: {prompt}"
+    );
+}
+
+/// B8: свежий контекст (субагент, ralph-раунд строят сессию тем же
+/// конструктором) получает блок уроков и не наследует историю родителя;
+/// отбор блока внутри хода уточняется путями из ввода.
+#[tokio::test]
+async fn fresh_context_gets_lessons_block_and_paths_retarget_it() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let src_id = seed_lesson(tmp.path(), "G5", "Правило про __all__ пакета");
+    // Второй урок — узкая область: для задачи про `src/` он в блок не попадает,
+    // а для задачи про docs — попадает.
+    {
+        use crate::lessons::{
+            Evidence, Ledger, LessonSource, Outcome, RecordInput, Scope, ScopeLevel, Signature,
+            Thresholds,
+        };
+        let input = RecordInput::new(
+            Signature::new(LessonSource::Gate, "G7"),
+            Evidence {
+                run_id: "run-G7".into(),
+                harness: None,
+                verdict_excerpt: "[G7] docs".into(),
+                file: None,
+                line: None,
+                ts: "2026-10-14T10:00:00.000Z".into(),
+                outcome: Outcome::Fail,
+                task: Some("T-7".into()),
+            },
+        )
+        .with_statement("Документация обязана ссылаться на ADR")
+        .with_scope(Scope::new(ScopeLevel::Module, vec!["docs/**".to_string()]));
+        Ledger::repo(tmp.path())
+            .record(&input, &Thresholds::default(), "2026-10-14")
+            .expect("второй урок");
+    }
+    let mut s = make_session(tmp.path(), Arc::new(FakeLlm::new()), |cfg| {
+        enable_lessons(cfg, tmp.path());
+    });
+    assert!(s.messages().is_empty(), "свежий контекст: истории нет");
+    assert!(
+        s.effective_system_prompt().contains(&src_id),
+        "блок уроков в свежем контексте: {}",
+        s.effective_system_prompt()
+    );
+
+    // Ввод про docs: блок уточняется путями задачи (документационный урок).
+    s.send("обнови docs/readme.md", None).await.expect("send");
+    let prompt = s.effective_system_prompt();
+    assert!(
+        prompt.contains("ADR"),
+        "урок области docs поднялся в блок: {prompt}"
+    );
+}
+
 #[tokio::test]
 async fn l3_summarize_folds_history_before_last_user() {
     let tmp = tempfile::tempdir().expect("tempdir");

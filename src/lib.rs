@@ -74,6 +74,7 @@ pub mod judge_cache;
 pub mod judge_rules;
 pub mod kb;
 pub mod landscape;
+pub mod lesson_block;
 pub mod lessons;
 pub mod llm;
 pub mod matchers;

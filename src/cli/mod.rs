@@ -1085,6 +1085,23 @@ pub(crate) async fn run() -> Result<()> {
                 None => std::fs::read_to_string(repo.join(".arch-handoff/TASK.md"))
                     .context("нет --task и не найден .arch-handoff/TASK.md")?,
             };
+            // Закреплённый блок уроков перед задачей исполнителю (ADR-087):
+            // CLI-край идёт мимо инструмента `harness_run`, поэтому вставка
+            // делается здесь тем же сборщиком блока (при enabled = false —
+            // пустой блок, задача байт-в-байт прежняя).
+            let lessons = arch_harness::lesson_block::build_report(
+                &cfg,
+                &repo,
+                &arch_harness::lesson_block::paths_from_text(&task_text),
+                None,
+            );
+            if !lessons.block.is_empty() {
+                println!(
+                    "блок уроков реестра: {} урок(ов) передано исполнителю (ADR-087)",
+                    lessons.selected
+                );
+            }
+            let task_text = arch_harness::lesson_block::augment_task(&task_text, &lessons.block);
             let mut hcfg_owned = hcfg.clone();
             if let Some(t) = arch_harness::handoff::recommended_timeout_secs(&repo) {
                 // Пакет несёт рекомендацию по маршруту значимости (Fast/Standard/Critical).
@@ -1372,8 +1389,9 @@ pub(crate) async fn run() -> Result<()> {
         }
         Some(Cmd::Hook { kind, repo }) => {
             let kind = arch_harness::hook::HookKind::parse(&kind).map_err(anyhow::Error::msg)?;
-            // pre-push читает строки git'а из stdin; на терминале — без блокировки.
-            let stdin_text = if kind == arch_harness::hook::HookKind::PrePush {
+            // pre-push читает строки git'а из stdin, хуки уроков — JSON хоста
+            // (`cwd`/`prompt`); на терминале — без блокировки.
+            let stdin_text = if kind.reads_stdin() {
                 arch_harness::hook::read_stdin_if_piped()
             } else {
                 String::new()
@@ -2128,6 +2146,10 @@ pub(crate) async fn run() -> Result<()> {
                 hooks: !no_hooks,
                 agents_md: !no_agents_md,
                 strict_hooks,
+                // Хуки инъекции уроков (ADR-087) — ровно при включённом реестре:
+                // при `enabled = false` они печатали бы пусто, но хост платил бы
+                // стартом процесса на каждый промпт.
+                lessons: cfg.lessons.enabled,
                 apply_global,
                 dry_run,
                 home: dirs::home_dir(),

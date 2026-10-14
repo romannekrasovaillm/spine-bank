@@ -1053,6 +1053,11 @@ pub struct LessonsConfig {
     pub k: usize,
     /// Лимит токенов блока уроков L3 (ADR-087, оценка — символы / 4).
     pub token_limit: usize,
+    /// Каталог пользовательского реестра уроков (уровни `user`/`org`).
+    /// `None` — `$ARCH_HOME/lessons`; явный путь нужен раздельным контурам и
+    /// изоляции тестов от реального дома (AD-7).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_dir: Option<PathBuf>,
 }
 
 impl Default for LessonsConfig {
@@ -1067,11 +1072,27 @@ impl Default for LessonsConfig {
             expiry_days: 0,
             k: 5,
             token_limit: 900,
+            user_dir: None,
         }
     }
 }
 
 impl LessonsConfig {
+    /// Каталог пользовательского реестра уроков (`$ARCH_HOME/lessons`, если
+    /// путь не переопределён явно).
+    #[must_use]
+    pub fn user_ledger_dir(&self) -> PathBuf {
+        self.user_dir
+            .clone()
+            .unwrap_or_else(crate::lessons::user_dir)
+    }
+
+    /// Путь журнала пользовательского реестра уроков.
+    #[must_use]
+    pub fn user_ledger_path(&self) -> PathBuf {
+        self.user_ledger_dir().join(crate::lessons::LEDGER_FILE)
+    }
+
     /// Дата истечения урока (`YYYY-MM-DD` + `expiry_days`); `None` — без срока.
     #[must_use]
     pub fn expiry_from(&self, recorded: &str) -> Option<String> {

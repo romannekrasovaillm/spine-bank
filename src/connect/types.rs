@@ -85,6 +85,11 @@ pub struct ConnectOptions {
     pub agents_md: bool,
     /// PostToolUse-гейт на каждую правку (только claude).
     pub strict_hooks: bool,
+    /// Ставить хуки инъекции уроков `SessionStart`/`UserPromptSubmit`
+    /// (ADR-087) — берётся из `[lessons] enabled` конфига: при выключенном
+    /// реестре хук всё равно печатал бы пусто, но платил бы стартом процесса
+    /// на каждый промпт хоста.
+    pub lessons: bool,
     /// Записывать пользовательский конфиг хоста (codex/kimi) вместо печати.
     pub apply_global: bool,
     /// Только план, без записи.
@@ -113,6 +118,7 @@ impl ConnectOptions {
             hooks: true,
             agents_md: true,
             strict_hooks: false,
+            lessons: false,
             apply_global: false,
             dry_run: false,
             home: None,

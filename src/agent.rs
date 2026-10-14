@@ -55,6 +55,9 @@ const COMPACT_TOOL_CHARS: usize = 500;
 const COMPACT_KEEP_TOOL: usize = 4;
 /// Сколько последних сообщений не удалять при жёсткой компактификации.
 const COMPACT_KEEP_TAIL: usize = 6;
+/// Сколько символов пользовательского ввода уходит в BM25-отбор блока уроков
+/// (ADR-087): длинный ввод — это вставленный контекст, а не запрос.
+const LESSONS_QUERY_MAX_CHARS: usize = 1000;
 /// Сколько раз подряд финальный ответ, оборванный потолком `max_tokens`
 /// (`finish_reason=length`), дозапрашивается «продолжи с места обрыва».
 const MAX_LENGTH_CONTINUATIONS: usize = 2;
@@ -109,6 +112,16 @@ pub struct AgentSession {
     tool_ctx: ToolContext,
     /// Системный промпт (первым сообщением каждого запроса).
     system_prompt: String,
+    /// Закреплённый блок уроков реестра (ADR-087): дописывается к системному
+    /// промпту каждого запроса и **пересобирается из реестра** после
+    /// компактификации — L1-маскирование и L3-саммари его не пересказывают,
+    /// потому что блока в истории нет вовсе (закрывает B5).
+    lessons_block: String,
+    /// Пути последнего отбора блока (из текста задачи) — пересборка
+    /// повторяет отбор, а не «прилипает» к самому первому.
+    lessons_paths: Vec<String>,
+    /// Текст последнего запроса для BM25-отбора блока (усечённый).
+    lessons_query: Option<String>,
     /// История хода (без системного сообщения).
     history: Vec<ChatMessage>,
     /// Путь к журналу сессии (None — журнал не удалось открыть).
@@ -189,12 +202,18 @@ impl AgentSession {
         tool_ctx.provider = Some(provider.clone());
         // Память сбоев грузится с диска до переноса config в структуру.
         let failure_memory = crate::failure_memory::FailureMemory::load(&config.paths.state_dir);
+        // Блок уроков собирается из реестра на старте сессии (ADR-087):
+        // область — рабочий каталог сессии, пути задачи уточнят его на ходу.
+        let lessons_block = crate::lesson_block::block(&config, &tool_ctx.cwd, &[]);
         let mut session = Self {
             config,
             provider,
             tools,
             tool_ctx,
             system_prompt,
+            lessons_block,
+            lessons_paths: Vec::new(),
+            lessons_query: None,
             history: Vec::new(),
             log_path,
             log_file,
@@ -281,6 +300,9 @@ impl AgentSession {
                 crate::hooks::block_reason(&outcomes)
             )));
         }
+        // Блок уроков уточняется под ввод (пути задачи, BM25) — до запроса
+        // к модели: «перед каждым ходом» (ADR-087).
+        self.retarget_lessons_block(input);
         self.history.push(ChatMessage::user(input));
         self.log_event("user", serde_json::json!({ "content": input }));
         self.emit_context_usage(&events);
@@ -903,6 +925,11 @@ impl AgentSession {
         self.history.clear();
         self.detectors.reset();
         self.l3_futile = false;
+        // Новая сессия — блок уроков пересобирается из реестра, отбор
+        // возвращается к области репозитория (ADR-087).
+        self.lessons_paths.clear();
+        self.lessons_query = None;
+        self.refresh_lessons_block();
         let prompt = self.system_prompt.clone();
         self.log_event("system", serde_json::json!({ "content": prompt }));
         self.fire_hook(crate::hooks::HookEvent::SessionStart, None, "{}");
@@ -1210,7 +1237,9 @@ impl AgentSession {
     /// [`sanitize_tool_pairs`]: crate::llm::sanitize_tool_pairs
     fn build_request(&self) -> (ChatRequest, ToolPairRepair) {
         let mut messages = Vec::with_capacity(self.history.len() + 1);
-        messages.push(ChatMessage::system(self.system_prompt.clone()));
+        // Закреплённый блок уроков — в системном промпте каждого запроса
+        // (ADR-087): история компактифицируется, блок — нет.
+        messages.push(ChatMessage::system(self.effective_system_prompt()));
         messages.extend(self.history.iter().cloned());
         let repair = crate::llm::sanitize_tool_pairs(&mut messages);
         if repair.repaired() {
@@ -1320,6 +1349,54 @@ impl AgentSession {
         );
     }
 
+    /// Блок уроков, закреплённый за сессией (ADR-087, L3): пусто при
+    /// `[lessons] enabled = false` или пустом реестре.
+    #[must_use]
+    pub fn lessons_block(&self) -> &str {
+        &self.lessons_block
+    }
+
+    /// Системный промпт запроса: база плюс закреплённый блок уроков.
+    ///
+    /// Блок живёт **вне** истории: компактификация (L1-маскирование,
+    /// прунинг, L3-саммари) физически не может его «пересказать» — она режет
+    /// историю, а блок приходит из реестра при каждой сборке запроса.
+    #[must_use]
+    pub fn effective_system_prompt(&self) -> String {
+        crate::lesson_block::augment_system_prompt(&self.system_prompt, &self.lessons_block)
+    }
+
+    /// Пересобирает блок уроков из реестра (ADR-087).
+    ///
+    /// Вызывается после каждой компактификации и на каждом пользовательском
+    /// вводе: урок, выведенный из реестра (`retired`, рост `misses`), исчезает
+    /// из блока, а новый — появляется, без перезапуска сессии. Ошибки чтения
+    /// реестра гасит сам сборщик (fail-soft), ход агента они не рвут.
+    fn refresh_lessons_block(&mut self) {
+        let block = crate::lesson_block::build_report(
+            &self.config,
+            &self.tool_ctx.cwd,
+            &self.lessons_paths,
+            self.lessons_query.as_deref(),
+        )
+        .block;
+        if block != self.lessons_block {
+            self.lessons_block = block;
+        }
+    }
+
+    /// Уточняет отбор блока по тексту пользовательского ввода: пути — для
+    /// scope-отбора, текст — для BM25 (та же логика, что у хука
+    /// `user-prompt-submit`, но внутри harness-сессии).
+    fn retarget_lessons_block(&mut self, input: &str) {
+        if !self.config.lessons.enabled {
+            return;
+        }
+        self.lessons_paths = crate::lesson_block::paths_from_text(input);
+        self.lessons_query = Some(input.chars().take(LESSONS_QUERY_MAX_CHARS).collect());
+        self.refresh_lessons_block();
+    }
+
     /// Эффективный бюджет контекста: min(`agent.context_budget_tokens`,
     /// окно модели из `ModelConfig.context_limit`). Пороги компактификации
     /// (70%/95%) таким образом привязаны к реальному пределу API активного
@@ -1373,6 +1450,11 @@ impl AgentSession {
         self.fire_hook(crate::hooks::HookEvent::PreCompact, None, "{}");
         let truncated = self.mask_old_tool_results();
         let folded = self.l3_summarize().await?;
+        // Блок уроков пересобирается из реестра ПОСЛЕ обеих ступеней
+        // компактификации (ADR-087): история могла содержать урок свободным
+        // текстом — он мог быть замаскирован (L1) или пересказан саммари (L3),
+        // поэтому авторитетный источник блока — реестр, а не история (B5).
+        self.refresh_lessons_block();
         let after: usize = self.history.iter().map(ChatMessage::rough_tokens).sum();
         self.log_event(
             "event",
@@ -1464,6 +1546,8 @@ impl AgentSession {
             }
         }
         if truncated > 0 || removed > 0 || l3_folded > 0 {
+            // Блок уроков — из реестра, а не из урезанной истории (B5).
+            self.refresh_lessons_block();
             self.fire_hook(crate::hooks::HookEvent::PostCompact, None, "{}");
         }
     }

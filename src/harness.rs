@@ -1390,6 +1390,25 @@ fn copy_dir(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
+impl HarnessRunTool {
+    /// Задача исполнителю с закреплённым блоком уроков реестра впереди
+    /// (ADR-087): отбор — по путям из её текста, K и лимит токенов — из
+    /// `[lessons]`. Возвращает текст задачи и число уроков блока (0 — блок
+    /// пуст: флаг выключен, реестр пуст или уроки не в области задачи).
+    fn task_with_lessons(&self, live: &Config, repo: &Path, task: &str) -> (String, usize) {
+        let report = crate::lesson_block::build_report(
+            live,
+            repo,
+            &crate::lesson_block::paths_from_text(task),
+            None,
+        );
+        (
+            crate::lesson_block::augment_task(task, &report.block),
+            report.selected,
+        )
+    }
+}
+
 #[async_trait]
 impl Tool for HarnessRunTool {
     fn spec(&self) -> ToolSpec {
@@ -1535,6 +1554,10 @@ impl Tool for HarnessRunTool {
                 }
             }
         };
+        // Закреплённый блок уроков перед КАЖДОЙ задачей исполнителю (ADR-087):
+        // отбор — по путям из текста задачи (scope), K и лимит токенов — из
+        // `[lessons]`. Флаг выключен — блок пуст, задача байт-в-байт прежняя.
+        let (task, lessons_count) = self.task_with_lessons(&live, &repo, &task);
         // Переопределение таймаута — копией конфига адаптера. Минимум 600 с:
         // модели склонны занижать таймаут («успеет за 5 минут»), а кодовый
         // харнесс на реальной задаче работает дольше — ранний таймаут
@@ -1558,6 +1581,15 @@ impl Tool for HarnessRunTool {
                 note,
                 "timeout_secs={} — рекомендация пакета (MANIFEST.json).",
                 hcfg.timeout_secs
+            );
+        }
+        if lessons_count > 0 {
+            // Версия задачи, ушедшая исполнителю, отличается от исходной —
+            // это факт прогона, и он обязан быть виден (ADR-087).
+            let _ = writeln!(
+                note,
+                "Блок уроков реестра: {lessons_count} (ADR-087) передан исполнителю \
+                 в тексте задачи."
             );
         }
         // Фоновый прогон: инструмент возвращается немедленно, агент остаётся
