@@ -1,7 +1,7 @@
 # ADR-089. Промоушен урока в fitness-правило: шаблоны rule_templates, redteam-засев, подпись человека на Standard/Critical, pre-commit у исполнителя
 
 - Date: 2026-10-14
-- Status: Proposed
+- Status: Accepted
 - Модель-автор: spine-arch (оркестратор), по TASK-Spine-0.5.0-learning-loop.md
 - Дельта: `changes/learning-loop-050/DELTA.md` (пункт L7) · критерий E5
 

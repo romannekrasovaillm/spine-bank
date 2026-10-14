@@ -1,7 +1,7 @@
 # ADR-086. Гейт в петле исполнителя: harness_run.accept и accept_cmd, приведение к gate-verdict/v1, событие gate_verdict, автозапись урока из FAIL
 
 - Date: 2026-10-14
-- Status: Proposed
+- Status: Accepted
 - Модель-автор: spine-arch (оркестратор), по TASK-Spine-0.5.0-learning-loop.md
 - Дельта: `changes/learning-loop-050/DELTA.md` (пункт L2)
 

@@ -1,7 +1,7 @@
 # ADR-091. Межрепозиторная и организационная память уроков: lessons-bundle/v1 с SHA-256, понижение статуса при импорте, org-реестр
 
 - Date: 2026-10-14
-- Status: Proposed
+- Status: Accepted
 - Модель-автор: spine-arch (оркестратор), по TASK-Spine-0.5.0-learning-loop.md
 - Дельта: `changes/learning-loop-050/DELTA.md` (пункт L10)
 

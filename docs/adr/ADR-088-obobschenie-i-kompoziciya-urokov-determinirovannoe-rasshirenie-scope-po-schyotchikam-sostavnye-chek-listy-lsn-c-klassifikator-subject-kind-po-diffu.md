@@ -1,7 +1,7 @@
 # ADR-088. Обобщение и композиция уроков: детерминированное расширение scope по счётчикам, составные чек-листы LSN-C, классификатор subject_kind по диффу
 
 - Date: 2026-10-14
-- Status: Proposed
+- Status: Accepted
 - Модель-автор: spine-arch (оркестратор), по TASK-Spine-0.5.0-learning-loop.md
 - Дельта: `changes/learning-loop-050/DELTA.md` (пункт L6) · критерии E3, E4
 

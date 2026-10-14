@@ -1,7 +1,7 @@
 # ADR-090. Ленивая загрузка инструментов и профили: ядро + tool_search, профили orchestrate/architect/reverse/full, бюджет первого запроса ≤ 25000 символов
 
 - Date: 2026-10-14
-- Status: Proposed
+- Status: Accepted
 - Модель-автор: spine-arch (оркестратор), по TASK-Spine-0.5.0-learning-loop.md
 - Дельта: `changes/learning-loop-050/DELTA.md` (пункт L9) · закрывает B6
 

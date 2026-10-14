@@ -1,7 +1,7 @@
 # ADR-092. Переносимый резолв бинаря в command_succeeds: ${CARGO_TARGET_DIR:-./target} вместо жёсткого ./target (правило rule_templates_have_teeth)
 
 - Date: 2026-10-14
-- Status: Proposed
+- Status: Accepted
 - Модель-автор: spine-arch (оркестратор), по дог-фуд уроку №2 волны 0.5.0
 
 ## Context

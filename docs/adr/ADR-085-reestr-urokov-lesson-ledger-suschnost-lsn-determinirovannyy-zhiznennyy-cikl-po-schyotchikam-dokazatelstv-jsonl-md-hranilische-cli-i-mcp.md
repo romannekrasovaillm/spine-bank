@@ -1,7 +1,7 @@
 # ADR-085. Реестр уроков Lesson Ledger: сущность LSN, детерминированный жизненный цикл по счётчикам доказательств, JSONL+MD хранилище, CLI и MCP
 
 - Date: 2026-10-14
-- Status: Proposed
+- Status: Accepted
 - Модель-автор: spine-arch (оркестратор), по TASK-Spine-0.5.0-learning-loop.md
 - Дельта: `changes/learning-loop-050/DELTA.md` (пункт L1)
 

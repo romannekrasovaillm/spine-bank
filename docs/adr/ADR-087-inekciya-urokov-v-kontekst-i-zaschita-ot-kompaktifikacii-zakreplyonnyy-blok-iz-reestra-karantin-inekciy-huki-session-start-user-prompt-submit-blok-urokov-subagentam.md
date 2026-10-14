@@ -1,7 +1,7 @@
 # ADR-087. Инъекция уроков в контекст и защита от компактификации: закреплённый блок из реестра, карантин инъекций, хуки session-start/user-prompt-submit, блок уроков субагентам
 
 - Date: 2026-10-14
-- Status: Proposed
+- Status: Accepted
 - Модель-автор: spine-arch (оркестратор), по TASK-Spine-0.5.0-learning-loop.md
 - Дельта: `changes/learning-loop-050/DELTA.md` (пункт L3)
 
