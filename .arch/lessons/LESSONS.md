@@ -4,7 +4,7 @@
 > правьте журнал событий, а не этот файл. Уроков в статусе `retired`
 > в блок инъекции не попадает. Сортировка — по `id`.
 
-Уроков: 5 (observed 0, candidate 0, confirmed 5, promoted 0, retired 0)
+Уроков: 6 (observed 0, candidate 1, confirmed 5, promoted 0, retired 0)
 
 ## LSN-1e36136a — tool · unrecognized-model · harness_launch · confirmed
 
@@ -16,6 +16,16 @@
   - 2026-10-15T00:03:20.851+03:00 · fail · l11-135849 · claude-code-ps · `unrecognized_model deepseek-flash (sdk) — тишина 1800с`
   - 2026-10-15T00:03:20.890+03:00 · pass_after_apply · l5-211904 · claude-code-ps
   - 2026-10-15T00:03:20.928+03:00 · pass_after_apply · l9-223414 · claude-code-ps
+
+## LSN-20878f67 — review · log-scan-first-match · verification · candidate
+
+- **Правило:** При разборе логов тестов искать ВСЕ вхождения FAILED/failures:/error[, а не первое: grep -E 'FAILED|failures:|error\[' по всему логу, затем сводка 'test result' по каждому сьюту
+- **Область:** repo
+- **Счётчики:** hits 1 · misses 0 (подряд 0) · fails 1 · задач 2
+- **Провенанс:** записал cli · arch-be 0.4.11 · sha256 вердикта 0acdcc31b13f
+- **Доказательства:**
+  - 2026-10-15T01:00:02.382+03:00 · fail · orchestrator-wave3 · orchestrator · `греп лога по паттерну первой находки (cli) — пропущен регресс mcp_serve; нашёлся пост-гейтом BENCH-1`
+  - 2026-10-15T01:00:02.403+03:00 · pass_after_apply · fix2-dispatch · orchestrator · `FIX-2 сформирован по полному списку failures из лога пост-гейта`
 
 ## LSN-4f62b693 — tool · shared-cargo-target · fleet_run · confirmed
 
