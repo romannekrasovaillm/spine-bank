@@ -18,6 +18,7 @@
 //!   урок по режиму `[agent] failure_memory` (см. [`crate::failure_memory`]);
 //! - [`slash`] — слэш-команды (см. файл); [`prompts`] — библиотека шаблонов.
 
+use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -108,6 +109,12 @@ pub struct AgentSession {
     provider: Arc<dyn LlmProvider>,
     /// Реестр инструментов.
     tools: ToolRegistry,
+    /// Ленивая загрузка доменных схем (ADR-090): `None` — полный профиль (все
+    /// схемы в каждом запросе, как до волны 3); `Some` — только ядро плюс
+    /// загруженные доменные (кэш живёт до конца сессии).
+    lazy: Option<crate::tools::ToolLazy>,
+    /// Имена, чьи схемы всегда в запросе при ленивом профиле (ядро + профиль).
+    eager: HashSet<String>,
     /// Контекст вызова инструментов.
     tool_ctx: ToolContext,
     /// Системный промпт (первым сообщением каждого запроса).
@@ -209,6 +216,8 @@ impl AgentSession {
             config,
             provider,
             tools,
+            lazy: None,
+            eager: HashSet::new(),
             tool_ctx,
             system_prompt,
             lessons_block,
@@ -244,6 +253,17 @@ impl AgentSession {
         }
         session.fire_hook(crate::hooks::HookEvent::SessionStart, None, "{}");
         session
+    }
+
+    /// Включает ленивую загрузку доменных схем (ADR-090): `eager` — имена,
+    /// чьи схемы всегда в запросе (ядро + профиль), `lazy` — разделяемое
+    /// состояние кэша/каталога. Без вызова — полный профиль (все схемы в
+    /// каждом запросе, как до волны 3).
+    #[must_use]
+    pub fn with_lazy_tools(mut self, eager: HashSet<String>, lazy: crate::tools::ToolLazy) -> Self {
+        self.eager = eager;
+        self.lazy = Some(lazy);
+        self
     }
 
     /// Honest-refusal (ADR-083 §5): провайдер `kind = "cli"` не умеет
@@ -558,6 +578,12 @@ impl AgentSession {
                         }
                     }
                 };
+                // Ленивая загрузка (ADR-090): вызов незагруженного доменного
+                // инструмента подгружает его схему (не падает) — следующий ход
+                // увидит её в списке доступных.
+                if let Some(lazy) = &self.lazy {
+                    lazy.mark_loaded(&call.name);
+                }
                 // Редакция секретов до событий/истории/журнала: вывод
                 // инструмента мог содержать ключи из .env, конфигов, PEM.
                 let mut redacted = self.redactor.redact(&out.content);
@@ -881,10 +907,27 @@ impl AgentSession {
         self.tools.names()
     }
 
-    /// Спецификации инструментов с описаниями (для `/tools`).
+    /// Спецификации инструментов с описаниями (для `/tools`). При ленивом
+    /// профиле (ADR-090) — только ядро плюс загруженные доменные схемы.
     #[must_use]
     pub fn tool_specs(&self) -> Vec<crate::llm::ToolSpec> {
-        self.tools.specs()
+        self.active_tool_specs()
+    }
+
+    /// Спеки, которые попадут в запрос к модели: при ленивом профиле — ядро
+    /// плюс загруженные доменные (ADR-090); иначе — полный реестр.
+    fn active_tool_specs(&self) -> Vec<crate::llm::ToolSpec> {
+        match &self.lazy {
+            Some(lazy) => {
+                let loaded = lazy.loaded_names();
+                self.tools
+                    .specs()
+                    .into_iter()
+                    .filter(|s| self.eager.contains(&s.name) || loaded.contains(&s.name))
+                    .collect()
+            }
+            None => self.tools.specs(),
+        }
     }
 
     /// Путь к журналу сессии (None — журнал не открыт).
@@ -1252,7 +1295,7 @@ impl AgentSession {
         let mc = self.config.models.get(self.provider.name());
         let request = ChatRequest {
             messages,
-            tools: self.tools.specs(),
+            tools: self.active_tool_specs(),
             temperature: mc.and_then(|m| m.temperature),
             max_tokens: mc.and_then(|m| m.max_tokens),
             thinking: self.thinking,

@@ -193,6 +193,28 @@ async fn send_dispatches_tool_and_builds_history() {
     assert_eq!(s.model_name(), "fake-1");
 }
 
+/// ADR-090: вызов незагруженного доменного инструмента подгружает его схему
+/// (не падает) — после хода она видна в списке доступных.
+#[tokio::test]
+async fn calling_unloaded_domain_tool_loads_its_spec() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let echo_spec = EchoTool.spec();
+    let mut s = make_session(tmp.path(), Arc::new(FakeLlm::new()), |_| {}).with_lazy_tools(
+        std::collections::HashSet::new(), // пустое ядро: `echo` — «незагруженный доменный»
+        crate::tools::ToolLazy::new(vec![echo_spec]),
+    );
+    assert!(
+        s.tool_specs().iter().all(|t| t.name != "echo"),
+        "до вызова echo-схема не в запросе"
+    );
+    let reply = s.send("привет", None).await.expect("send");
+    assert_eq!(reply, "финальный ответ");
+    assert!(
+        s.tool_specs().iter().any(|t| t.name == "echo"),
+        "вызов echo подгрузил его схему (ADR-090)"
+    );
+}
+
 /// ADR-083 §5: провайдер `kind = "cli"` в агентном цикле с инструментами —
 /// честный отказ ДО первого запроса к модели (не поломка на полпути).
 #[tokio::test]
