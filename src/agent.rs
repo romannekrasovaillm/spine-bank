@@ -29,13 +29,17 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::Config;
 use crate::error::{HarnessError, Result};
-use crate::llm::{ChatMessage, ChatRequest, LlmEvent, LlmProvider, Role, Usage};
+use crate::llm::{ChatMessage, ChatRequest, LlmEvent, LlmProvider, Role, ToolPairRepair, Usage};
 use crate::tool::{ToolContext, ToolOutput, ToolRegistry};
 
 mod journal;
 mod network;
 pub mod prompts;
 pub mod slash;
+// Интеграционные тесты контракта tool-пар (ADR-084) вынесены в отдельный
+// файл: agent.rs у порога лимита длины (C-33), а тесты не должны его пробить.
+#[cfg(test)]
+mod tool_pair_tests;
 
 pub use journal::{SessionLogInfo, list_session_logs};
 use journal::{now_iso, open_journal, summarize};
@@ -287,7 +291,8 @@ impl AgentSession {
             self.compact_history(&events).await;
             // Компактификация могла существенно срезать историю — обновим UI.
             self.emit_context_usage(&events);
-            let request = self.build_request();
+            let (request, repair) = self.build_request();
+            self.log_tool_pair_repair(repair);
             // Не-стрим пути («мысли» не приходят дельтами) — эмитим
             // reasoning_content целиком после ответа (см. ниже).
             let mut streamed = false;
@@ -322,7 +327,8 @@ impl AgentSession {
             let reply = match first {
                 Ok(r) => r,
                 Err(e) => {
-                    let overflow = crate::retry::is_context_overflow(None, &e.to_string());
+                    let err_text = e.to_string();
+                    let overflow = crate::retry::is_context_overflow(None, &err_text);
                     if overflow && !self.l3_futile {
                         self.emit_note(
                             &events,
@@ -330,7 +336,8 @@ impl AgentSession {
                         );
                         match self.l3_summarize().await {
                             Ok(_) => {
-                                let request = self.build_request();
+                                let (request, repair) = self.build_request();
+                                self.log_tool_pair_repair(repair);
                                 let retry = match (&events, self.config.agent.stream) {
                                     (Some(tx), true) => {
                                         streamed = true;
@@ -355,6 +362,31 @@ impl AgentSession {
                             }
                             Err(_) => return Err(e),
                         }
+                    } else if crate::retry::is_tool_pair_contract_error(None, &err_text) {
+                        // ADR-084: HTTP 400 «висячий tool_call_id» — санитайзер
+                        // собирает запрос заново и делает ровно один повтор хода
+                        // без L3-компактификации.
+                        self.emit_note(
+                            &events,
+                            "⚠ нарушен контракт tool-пар — санитайзер и повтор хода".into(),
+                        );
+                        let (request, repair) = self.build_request();
+                        self.log_tool_pair_repair(repair);
+                        let retry = match (&events, self.config.agent.stream) {
+                            (Some(tx), true) => {
+                                streamed = true;
+                                race_cancel(self.cancel.clone(), self.stream_request(request, tx))
+                                    .await
+                            }
+                            _ => {
+                                race_cancel(self.cancel.clone(), self.provider.complete(request))
+                                    .await
+                            }
+                        };
+                        let Some(retried) = retry else {
+                            return self.finish_cancelled(&events).await;
+                        };
+                        retried?
                     } else {
                         return Err(e);
                     }
@@ -665,7 +697,8 @@ impl AgentSession {
             "event",
             serde_json::json!({ "event": "tool_turn_limit", "limit": max_turns }),
         );
-        let mut request = self.build_request();
+        let (mut request, repair) = self.build_request();
+        self.log_tool_pair_repair(repair);
         request.tools.clear();
         // Служебная реплика — только в запрос, в историю не пишется.
         request.messages.push(ChatMessage::user(
@@ -1062,17 +1095,51 @@ impl AgentSession {
 
     /// Собирает запрос к модели: системный промпт + история, инструменты,
     /// `max_tokens/temperature` из `ModelConfig` активного провайдера.
-    fn build_request(&self) -> ChatRequest {
+    ///
+    /// На границе сборки прогоняется [`sanitize_tool_pairs`] (ADR-084):
+    /// провайдеры падают HTTP 400, если у ассистентского `tool_calls` остался
+    /// `id` без tool-ответа. Санитайзер чинит КОПИЮ истории запроса (журнал и
+    /// история сессии не трогаются, AD-5); возвращённый [`ToolPairRepair`]
+    /// вызывающая сторона фиксирует в журнале событием `tool_pairs_repaired`.
+    ///
+    /// [`sanitize_tool_pairs`]: crate::llm::sanitize_tool_pairs
+    fn build_request(&self) -> (ChatRequest, ToolPairRepair) {
         let mut messages = Vec::with_capacity(self.history.len() + 1);
         messages.push(ChatMessage::system(self.system_prompt.clone()));
         messages.extend(self.history.iter().cloned());
+        let repair = crate::llm::sanitize_tool_pairs(&mut messages);
+        if repair.repaired() {
+            tracing::warn!(
+                synthesized = repair.synthesized,
+                dropped_orphans = repair.dropped_orphans,
+                "контракт tool-пар нарушен при сборке запроса — история отремонтирована"
+            );
+        }
         let mc = self.config.models.get(self.provider.name());
-        ChatRequest {
+        let request = ChatRequest {
             messages,
             tools: self.tools.specs(),
             temperature: mc.and_then(|m| m.temperature),
             max_tokens: mc.and_then(|m| m.max_tokens),
             thinking: self.thinking,
+        };
+        (request, repair)
+    }
+
+    /// Фиксирует ремонт контракта tool-пар в журнале сессии (ADR-084).
+    ///
+    /// Ненулевой [`ToolPairRepair`] — сигнал, что история запроса расходилась
+    /// с контрактом на границе сборки; без записи в журнал класс деградации
+    /// остался бы невидимым (AD-5: журнал — источник аудита).
+    fn log_tool_pair_repair(&mut self, repair: ToolPairRepair) {
+        if repair.repaired() {
+            self.log_event(
+                "tool_pairs_repaired",
+                serde_json::json!({
+                    "synthesized": repair.synthesized,
+                    "dropped_orphans": repair.dropped_orphans,
+                }),
+            );
         }
     }
 
@@ -1474,12 +1541,12 @@ mod tests {
     /// Тестовый провайдер: первый вызов просит инструмент `echo`,
     /// второй — отвечает финальным текстом.
     #[derive(Debug)]
-    struct FakeLlm {
+    pub(super) struct FakeLlm {
         calls: AtomicUsize,
     }
 
     impl FakeLlm {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             Self {
                 calls: AtomicUsize::new(0),
             }
