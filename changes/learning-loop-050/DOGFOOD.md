@@ -45,6 +45,18 @@
 - evidence: транскрипт сессии 058f74aa (entrypoint sdk-cli, background task
   «Run full test suite» killed, totalDuration ≈ 1800 с).
 
+## 2026-10-14 · LSN-черновик 6 · source: tool (прогон L11-финализации, hr-20261014-171517-09)
+- Факт: финализатор дошёл до дог-фуд `control check` → правило tests_pass
+  (`cargo test --quiet`, таймаут 900 с) → redteam-цепочка (26 мутаторов × pytest,
+  pytest-процесс по 5 ГБ RSS / 284% CPU) → exit 137 (SIGKILL) под нагрузкой флота
+  (load 12–14) → молчание → убит. Полный сьют в CI зелёный — проблема только
+  локальная, под флотом.
+- Урок: верификационная цепь исполнителя — ТОЛЬКО targeted (lib + профильные тесты
+  фичи). Полный cargo test и дог-фуд control check локально гоняет оркестратор
+  в тихом окне (один прогон на машине). CI остаётся источником истины по redteam.
+- evidence: транскрипт 65720719 (последняя команда — control check, Exit 137);
+  `ps`: pytest net/tests 5 ГБ RSS; free: 46 ГБ total.
+
 ## 2026-10-14 · LSN-черновик 5 · source: tool (из прогона L2)
 - Факт: общий `CARGO_TARGET_DIR=/home/roman/spine-bank/target` у параллельных
   worktree флота даёт одинаковые имена артефактов. Сборка соседнего исполнителя
