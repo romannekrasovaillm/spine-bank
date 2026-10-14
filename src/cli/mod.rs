@@ -1090,11 +1090,33 @@ pub(crate) async fn run() -> Result<()> {
                 // Пакет несёт рекомендацию по маршруту значимости (Fast/Standard/Critical).
                 hcfg_owned.timeout_secs = t.clamp(600, 7200);
             }
-            let run = arch_harness::harness::run_harness(&harness, &hcfg_owned, &repo, &task_text)
-                .await?;
+            let mut run =
+                arch_harness::harness::run_harness(&harness, &hcfg_owned, &repo, &task_text)
+                    .await?;
+            // L2 (ADR-086): хвост петли — событие `gate_verdict` в журнал
+            // активной сессии и автозапись уроков из FAIL-кодов приёмки
+            // (реестр — `<repo>/.arch/lessons`, ADR-085).
+            if let Some(verdict) = run.accept.as_mut() {
+                let run_id = run.run_id.clone();
+                let key = task_text.lines().next().unwrap_or("").trim().to_string();
+                let reference = arch_harness::gate_loop::RunRef::new(&run_id)
+                    .with_harness(Some(harness.as_str()))
+                    .with_task((!key.is_empty()).then_some(key.as_str()));
+                arch_harness::gate_loop::close_loop(&cfg, &repo, verdict, &reference);
+            }
+            // Вердикт приёмки — первой строкой результата прогона (ADR-086 п.4):
+            // «код 0 у исполнителя» ≠ «результат принят гейтом».
+            if let Some(verdict) = &run.accept {
+                println!("{}", verdict.first_line());
+            }
             // C5 (ADR-057): режим прогона виден в выводе — включая откат
             // ACP → headless (иначе деградация ACP осталась бы незамеченной).
             println!("режим: {}", run.mode.label());
+            // L2: блок приёмки — вердикт, источник, коды, находки, уроки и
+            // сырой вывод команды (детали к первой строке выше).
+            if let Some(verdict) = &run.accept {
+                println!("{}", verdict.block());
+            }
             if let Some(info) = &run.acp {
                 println!(
                     "ACP-адаптер: {}; request_permission (авто-allow, эквивалент \

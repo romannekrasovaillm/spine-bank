@@ -16,6 +16,7 @@ use std::process::{Command, Stdio};
 
 use crate::config::Config;
 use crate::error::{HarnessError, Result};
+use crate::gate::GateReport;
 
 /// Вид хука — совпадает с именами подкоманд `arch-be hook`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,9 +74,28 @@ pub fn run_hook(kind: HookKind, cfg: &Config, repo: &Path, stdin_text: &str) -> 
         HookKind::PrePush => pre_push_base(repo, stdin_text),
         _ => crate::control::default_anchor_base(repo),
     };
-    let code = run_gate(cfg, repo, base.as_deref())?;
+    let (code, report) = run_gate(cfg, repo, base.as_deref())?;
     if code == 0 {
         return Ok(0);
+    }
+    // L2 (ADR-086 п.7): FAIL-коды гейта становятся уроками реестра у ХОСТОВЫХ
+    // хуков (Stop/PostToolUse) — у хост-агента без своей памяти копятся уроки,
+    // проверенные гейтом. `pre-push` — git-хук рабочей машины, не сессия
+    // агента: реестр он не пополняет. Запись fail-soft и только при
+    // `[lessons] enabled` (ADR-085).
+    if matches!(kind, HookKind::Stop | HookKind::PostToolUse) {
+        let verdict = crate::gate_loop::GateVerdict::from_report("arch-be gate", &report);
+        let run_id = format!("hook-{}-{}", hook_subcommand_name(kind), now_stamp());
+        let reference = crate::gate_loop::RunRef::new(&run_id);
+        let ids = crate::gate_loop::record_verdict_lessons(cfg, repo, &verdict, &reference);
+        if !ids.is_empty() {
+            eprintln!(
+                "spine-connect: уроков записано в реестр: {} (источник gate, {}: {})",
+                ids.len(),
+                crate::lessons::LEDGER_DIR,
+                ids.join(", ")
+            );
+        }
     }
     let note = match kind {
         HookKind::Stop => {
@@ -95,9 +115,10 @@ pub fn run_hook(kind: HookKind, cfg: &Config, repo: &Path, stdin_text: &str) -> 
 
 /// Прогон единого гейта для хука (маршрут auto): опции и требования — как у
 /// CLI-края `arch-be gate` (дефолтная политика доверия exec, составляющие
-/// из конфига). Возвращает exit-код гейта (0/1/2/3); отчёт печатается в
-/// stderr только при ненулевом коде — зелёный хук молчит.
-fn run_gate(cfg: &Config, repo: &Path, base: Option<&str>) -> Result<i32> {
+/// из конфига). Возвращает exit-код гейта (0/1/2/3) и сам отчёт — из него
+/// берутся FAIL-коды для реестра уроков (L2, ADR-086 п.7); отчёт печатается
+/// в stderr только при ненулевом коде — зелёный хук молчит.
+fn run_gate(cfg: &Config, repo: &Path, base: Option<&str>) -> Result<(i32, GateReport)> {
     let limits = cfg.significance.limits()?;
     let options = crate::gate::GateOptions {
         exec: crate::cmd_trust::ExecPolicy::cli(false),
@@ -109,7 +130,13 @@ fn run_gate(cfg: &Config, repo: &Path, base: Option<&str>) -> Result<i32> {
     if code != 0 {
         eprint!("{}", crate::gate::render(&report));
     }
-    Ok(code)
+    Ok((code, report))
+}
+
+/// Метка времени для идентификатора прогона урока (`hook-<имя>-<ISO UTC>`):
+/// различает прогоны одной и той же сигнатуры («FAIL повторился»).
+fn now_stamp() -> String {
+    chrono::Utc::now().format("%Y%m%dT%H%M%S").to_string()
 }
 
 /// pre-commit: быстрый fitness-гейт (`control check`). Расположение реестра
@@ -386,6 +413,66 @@ mod tests {
             run_hook(HookKind::PreCommit, &cfg, &repo, "").expect("hook"),
             1
         );
+    }
+
+    /// L2 (ADR-086 п.7): хук хоста после FAIL гейта пишет FAIL-коды находок
+    /// в реестр уроков (источник `gate`) — хост-агент без своей памяти копит
+    /// уроки, проверенные гейтом. Без `[lessons] enabled` автоматической
+    /// записи нет (флаг гасит автозапись, ADR-085).
+    #[test]
+    fn gate_hook_records_fail_codes_as_lessons() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(
+            repo.join("CONSTRAINTS.yaml"),
+            "rules:\n  - id: X-1\n    name: no_pan\n    type: must_not_contain\n    glob: \"**/*.py\"\n    pattern: \"PAN=\"\n    severity: critical\n",
+        )
+        .unwrap();
+        std::fs::write(repo.join("a.py"), "print('PAN=4111')\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-q", "-m", "base"]);
+
+        // Флаг реестра выключен (дефолт 0.4.11): гейт красный, реестра нет.
+        let off = Config::default();
+        assert_eq!(
+            run_hook(HookKind::PostToolUse, &off, &repo, "").expect("hook"),
+            2
+        );
+        assert!(
+            !repo.join(".arch/lessons/ledger.jsonl").exists(),
+            "без [lessons] enabled автозаписи нет"
+        );
+
+        // Флаг включён — код находки становится уроком реестра.
+        let mut cfg = Config::default();
+        cfg.lessons.enabled = true;
+        assert_eq!(
+            run_hook(HookKind::PostToolUse, &cfg, &repo, "").expect("hook"),
+            2
+        );
+        let text =
+            std::fs::read_to_string(repo.join(".arch/lessons/ledger.jsonl")).expect("реестр");
+        assert!(text.contains("\"source\":\"gate\""), "{text}");
+        assert!(text.contains("\"code\":\"no_pan\""), "{text}");
+        assert!(
+            repo.join(".arch/lessons/LESSONS.md").is_file(),
+            "рендер реестра"
+        );
+
+        // Stop-хук — тот же путь (ADR-086 п.7).
+        assert_eq!(run_hook(HookKind::Stop, &cfg, &repo, "").expect("hook"), 2);
+        // pre-push гейт не трогаем: реестр пишет только хост-хук.
+        let before =
+            std::fs::read_to_string(repo.join(".arch/lessons/ledger.jsonl")).expect("ledger");
+        assert_eq!(
+            run_hook(HookKind::PrePush, &cfg, &repo, "").expect("hook"),
+            1
+        );
+        let after =
+            std::fs::read_to_string(repo.join(".arch/lessons/ledger.jsonl")).expect("ledger");
+        assert_eq!(before, after, "pre-push в реестр не пишет");
     }
 
     /// pre-commit без реестра — понятная ошибка и блок, а не молчаливый

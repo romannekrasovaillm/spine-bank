@@ -449,6 +449,17 @@ idle_timeout_secs = 600
 auto_commit = true
 post_gate = true
 post_gate_timeout_secs = 600
+# accept_cmd — команда приёмки результата (L2, ADR-086): запускается после
+# финализации прогона ВНЕ песочницы исполнителя (bash -c в каталоге прогона,
+# таймаут post_gate_timeout_secs), вывод приводится к контракту
+# arch-be/gate-verdict/v1, вердикт идёт ПЕРВОЙ строкой результата и событием
+# gate_verdict в журнал сессии, FAIL-коды становятся уроками реестра
+# (.arch/lessons, источник gate — при [lessons] enabled = true).
+# Не задано — дефолт `arch-be gate .`, если в КОРНЕ репозитория есть
+# CONSTRAINTS.yaml (пакетный .arch-handoff/CONSTRAINTS.yaml дефолт НЕ включает).
+# Пустая строка — приёмка выключена. Аргумент accept инструмента harness_run
+# сильнее этого поля.
+# accept_cmd = "arch-be gate ."
 # Whitelist наследуемого окружения (по умолчанию наследуется всё; непустой
 # список — чистое окружение + перечисленное + env адаптера):
 # env_allow = ["PATH", "HOME", "LANG", "TERM", "TMPDIR",

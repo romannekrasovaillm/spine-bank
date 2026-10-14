@@ -906,6 +906,66 @@ fn harness_run_complete_exits_0() {
         .stdout(contains("status=complete"));
 }
 
+/// L2 (ADR-086): гейт в петле исполнителя. Приёмочная команда адаптера
+/// (`accept_cmd`) отработала FAIL с кодом находки — вердикт идёт ПЕРВОЙ
+/// строкой вывода, код записан уроком в реестр репозитория; exit-код CLI
+/// (0/1/2/3 по контракту) не меняется.
+#[test]
+#[cfg(feature = "harness")]
+fn harness_run_accept_gate_fail_is_first_line_and_records_lesson() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let home = tmp.path();
+    let script = write_fake_harness(home, r#"{"status": "complete"}"#);
+    // Приёмочный гейт-заглушка: FAIL с кодом находки.
+    let gate = home.join("fake-gate.sh");
+    std::fs::write(
+        &gate,
+        "#!/bin/sh\necho '[G5] находка приёмочного гейта'\nexit 1\n",
+    )
+    .expect("запись fake-гейта");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mut perms = std::fs::metadata(&gate).expect("stat").permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&gate, perms).expect("chmod +x");
+    }
+    let config = home.join("config.toml");
+    let text = format!(
+        "[harnesses.fake]\nbinary = '{}'\nprompt_mode = 'stdin'\n\
+         timeout_secs = 30\nidle_timeout_secs = 0\nauto_commit = false\n\
+         accept_cmd = '{}'\n\n[lessons]\nenabled = true\n",
+        script.display(),
+        gate.display()
+    );
+    std::fs::write(&config, text).expect("запись config.toml");
+    let repo = home.join("repo");
+    std::fs::create_dir_all(&repo).expect("mkdir repo");
+
+    let assert = arch_cmd(home)
+        .arg("--config")
+        .arg(config.as_os_str())
+        .arg("harness-run")
+        .arg("fake")
+        .arg("--repo")
+        .arg(repo.as_os_str())
+        .arg("--task")
+        .arg("тестовая задача")
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+    let first = stdout.lines().next().unwrap_or_default();
+    assert!(
+        first.starts_with("Приёмка (accept): FAIL"),
+        "вердикт первой строкой: {stdout}"
+    );
+    assert!(first.contains("G5"), "код находки в вердикте: {first}");
+    let ledger = std::fs::read_to_string(repo.join(".arch/lessons/ledger.jsonl"))
+        .expect("реестр уроков репозитория");
+    assert!(ledger.contains("\"code\":\"G5\""), "{ledger}");
+    assert!(ledger.contains("\"source\":\"gate\""), "{ledger}");
+}
+
 /// ADR-057 (C5): `harness-run` в ACP-режиме сообщает режим и версию
 /// адаптера, а JSON-контракт берётся из финального текста ACP-сессии.
 /// Фикстура — self-contained python-скрипт, сети не требует.

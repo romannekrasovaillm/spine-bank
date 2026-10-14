@@ -32,6 +32,7 @@ use tokio::process::Command;
 
 use crate::config::{AcpMode, CodingHarnessConfig, Config, PromptMode};
 use crate::error::{HarnessError, Result};
+use crate::gate_loop::{GateVerdict, RunRef};
 use crate::handoff::{HANDOFF_DIR, git_out, recommended_timeout_secs};
 use crate::llm::ToolSpec;
 use crate::proc::kill_process_group;
@@ -43,6 +44,33 @@ pub mod acp;
 /// меньшие значения (модель оптимистично просит «5 минут») поднимаются —
 /// ранний обрыв оставлял репозиторий в полусобранном состоянии.
 const MIN_HARNESS_TIMEOUT_SECS: u64 = 600;
+
+/// Дефолтная команда приёмки (L2, ADR-086 п.1): включается, когда репозиторий
+/// несёт реестр правил в корне. Иначе приёмки нет — вывод прогона остаётся
+/// байт-в-байт прежним (совместимость 0.4.10).
+pub const DEFAULT_ACCEPT_CMD: &str = "arch-be gate .";
+
+/// Команда приёмки прогона (L2, ADR-086 п.1).
+///
+/// Порядок: поле адаптера `[harnesses.x].accept_cmd` (аргумент `accept`
+/// инструмента кладётся сюда же — он сильнее поля, см. `HarnessRunTool::call`);
+/// пустое значение — приёмка выключена явно; не задано — дефолт
+/// [`DEFAULT_ACCEPT_CMD`] при `CONSTRAINTS.yaml` В КОРНЕ репозитория.
+///
+/// Пакетный реестр (`.arch-handoff/CONSTRAINTS.yaml`) дефолт намеренно НЕ
+/// включает: это явный выбор адаптера, а не молчаливый прогон гейта на каждом
+/// `harness_run` (совместимость; реестр кейса живёт в корне — там же, где его
+/// видит `arch-be gate .`).
+#[must_use]
+pub fn resolve_accept(cfg: &CodingHarnessConfig, repo: &Path) -> Option<String> {
+    if let Some(command) = &cfg.accept_cmd {
+        let command = command.trim();
+        return (!command.is_empty()).then(|| command.to_string());
+    }
+    repo.join("CONSTRAINTS.yaml")
+        .is_file()
+        .then(|| DEFAULT_ACCEPT_CMD.to_string())
+}
 
 /// Имена известных кодовых харнессов.
 #[must_use]
@@ -85,6 +113,14 @@ pub struct HarnessRun {
     /// вне окружения исполнителя. `None` — пост-гейт отключён адаптером
     /// (`post_gate = false`) либо прогон прерван (судить нечего).
     pub post_gate: Option<PostGate>,
+    /// Вердикт приёмки (L2, ADR-086): результат команды `accept`/`accept_cmd`,
+    /// приведённый к `gate-verdict/v1`. `None` — приёмка не задана (вывод
+    /// прогона тогда байт-в-байт как до ADR-086) либо прогон прерван жёстко
+    /// (судить промежуточное дерево нечем).
+    pub accept: Option<GateVerdict>,
+    /// Идентификатор прогона (`<харнесс>-<UTC>`): ключ доказательств реестра
+    /// уроков и поле события `gate_verdict` (ADR-085/ADR-086).
+    pub run_id: String,
     /// Политика окружения прогона (C2): заметка о применённом whitelist или
     /// предупреждение о полном наследовании (`env_inherit = true`). `None` —
     /// обычный режим (Fast/Standard с наследованием) без замечаний.
@@ -581,25 +617,91 @@ async fn finalize_run(
     } else {
         None
     };
+    // L2 (ADR-086): приёмка — после финализации (авто-коммит и пост-гейт уже
+    // отработали), ВНЕ песочницы исполнителя: команду запускает сам харнесс,
+    // в своём окружении, с рабочим каталогом прогона. Как и пост-гейт, только
+    // по завершённому прогону: у жёстко прерванного судить нечего.
+    let accept = if termination.is_soft_completion() {
+        match resolve_accept(cfg, repo) {
+            Some(command) => Some(run_accept(repo, &command, cfg.post_gate_timeout_secs).await),
+            None => None,
+        }
+    } else {
+        None
+    };
     // Контракт разбирается один раз на стороне запуска — механически,
     // а не эвристикой у потребителей.
     let contract = parse_result_contract(&stdout);
+    // B3 (ADR-086 п.6): пост-гейт без handoff-манифеста больше не «пропуск
+    // молча» — если приёмка задана, пропуск назван явно вместе с тем, ЧЕМ
+    // результат проверен.
+    let mut post_gate = post_gate;
+    if accept.is_some() {
+        if let Some(pg) = post_gate.as_mut() {
+            if pg.verdict == PostGateVerdict::Skipped {
+                pg.summary.push_str(
+                    " (B3: пропуск не молчаливый — результат проверен командой приёмки, \
+                     вердикт в первой строке)",
+                );
+            }
+        }
+    }
     HarnessRun {
         harness: name.into(),
         exit_code,
         stdout,
         stderr,
         // Длительность считается в точке сборки итога (как до ADR-057:
-        // включает пост-гейт) — поведение headless не меняется.
+        // включает пост-гейт и приёмку) — поведение headless не меняется.
         duration_secs: started.elapsed().as_secs_f64(),
         termination,
         auto_commit,
         contract,
         post_gate,
+        accept,
+        run_id: format!("{name}-{}", Utc::now().format("%Y%m%dT%H%M%S")),
         env_note,
         mode,
         acp,
         mode_note: None,
+    }
+}
+
+/// Команда приёмки прогона (L2, ADR-086 п.2–3): `<bash> -c <команда>` в
+/// каталоге прогона, вне окружения исполнителя, с таймаутом пост-гейта и
+/// убийством всей процессной группы по истечении (тот же механизм, что у
+/// `command_succeeds`: сирот-внуков ранний таймаут не оставляет,
+/// `src/proc.rs`).
+///
+/// Вывод приводится к `gate-verdict/v1` ([`GateVerdict::from_output`]):
+/// JSON-конверт — «как есть», иначе построчный разбор кодов, статус по коду
+/// возврата. Незавершившаяся команда — вердикт TIMEOUT, сбой запуска — ERROR:
+/// непроверенный результат не выдаётся за принятый.
+async fn run_accept(repo: &Path, command: &str, timeout_secs: u64) -> GateVerdict {
+    let timeout = Duration::from_secs(timeout_secs.max(1));
+    let repo_owned = repo.to_path_buf();
+    let command_owned = command.to_string();
+    let started = Instant::now();
+    let outcome = tokio::task::spawn_blocking(move || {
+        crate::proc::run_shell(&repo_owned, "bash", &command_owned, timeout)
+    })
+    .await;
+    let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    match outcome {
+        Ok(Ok(out)) => match out.status {
+            Some(status) => GateVerdict::from_output(
+                command,
+                &String::from_utf8_lossy(&out.stdout),
+                &String::from_utf8_lossy(&out.stderr),
+                status.code(),
+                elapsed_ms,
+            ),
+            None => GateVerdict::timeout(command, timeout_secs, elapsed_ms),
+        },
+        Ok(Err(e)) => GateVerdict::error(command, &e.to_string(), elapsed_ms),
+        Err(join) => {
+            GateVerdict::error(command, &format!("сбой потока приёмки: {join}"), elapsed_ms)
+        }
     }
 }
 
@@ -963,6 +1065,21 @@ async fn run_post_gate(
     }
 }
 
+/// Ключ задачи для доказательства урока (ADR-085): первая строка задачи,
+/// усечённая до 60 символов (как заголовок авто-коммита). Пустая задача —
+/// `None`: ключом «разных задач» станет `run_id`.
+fn task_key(task: &str) -> Option<String> {
+    let first = task.lines().next().unwrap_or("").trim();
+    if first.is_empty() {
+        return None;
+    }
+    let mut key: String = first.chars().take(60).collect();
+    if first.chars().count() > 60 {
+        key.push('…');
+    }
+    Some(key)
+}
+
 /// Коммитит незакоммиченные правки исполнителя (кроме `.arch-handoff/` и
 /// мусора `__pycache__/`/`*.pyc`/`.pytest_cache/`). None — не git-репозиторий
 /// или дерево чистое. Сбой коммита не роняет прогон: исполнитель мог
@@ -1290,8 +1407,12 @@ impl HarnessRunTool {
         let run_name = name.to_string();
         let note_run = note.to_string();
         let report_path_run = report_path.clone();
+        // Конфиг нужен хвосту петли L2 (реестр уроков и журнал сессии) — тем
+        // же путём, что у синхронного прогона: у фонового прогона свой
+        // run_id, но те же уроки и то же событие `gate_verdict`.
+        let loop_cfg = Arc::clone(&ctx.config);
         tokio::spawn(async move {
-            let out = execute_run(&run_name, &hcfg, &repo, &task, note_run).await;
+            let out = execute_run(&run_name, &hcfg, &repo, &task, note_run, Some(&loop_cfg)).await;
             let status = if out.is_error {
                 crate::subagent::TaskStatus::Failed
             } else {
@@ -1429,7 +1550,14 @@ impl Tool for HarnessRunTool {
                 исполнителя) — «код 0 у исполнителя» ещё не значит «результат прошёл гейт». \
                 Вердикт пост-гейта виден в итоге; FAIL/INCOMPLETE/TIMEOUT делают прогон \
                 ошибкой (is_error). Отключается только флагом адаптера post_gate = false \
-                (с предупреждением в выводе)."
+                (с предупреждением в выводе). \
+                ПРИЁМКА (accept, ADR-086): после финализации харнесс прогоняет команду приёмки \
+                ВНЕ песочницы исполнителя (аргумент accept, иначе accept_cmd адаптера, иначе \
+                arch-be gate . при CONSTRAINTS.yaml в корне репозитория) и приводит вывод к \
+                контракту arch-be/gate-verdict/v1. Вердикт идёт ПЕРВОЙ строкой результата и \
+                пишется событием gate_verdict в журнал сессии; FAIL/INCOMPLETE/TIMEOUT делают \
+                прогон ошибкой, а каждый FAIL-код становится уроком реестра (источник gate; \
+                ADR-085, включено при [lessons] enabled = true). Пустая строка выключает приёмку."
                 .into(),
             parameters: json!({
                 "type": "object",
@@ -1437,6 +1565,10 @@ impl Tool for HarnessRunTool {
                     "harness": {
                         "type": "string",
                         "description": "Имя харнесса: claude-code, qwen-code, openclaw, hermes, theseus, codewhale, kimi-code"
+                    },
+                    "accept": {
+                        "type": "string",
+                        "description": "Команда приёмки результата (shell-строка; база — каталог прогона, запуск вне песочницы исполнителя с таймаутом пост-гейта). Не задана — accept_cmd адаптера, иначе `arch-be gate .` при CONSTRAINTS.yaml в корне репозитория; пустая строка — приёмка выключена. Вердикт — первой строкой результата"
                     },
                     "path": {
                         "type": "string",
@@ -1540,6 +1672,11 @@ impl Tool for HarnessRunTool {
         // харнесс на реальной задаче работает дольше — ранний таймаут
         // обрывал прогон и оставлял репозиторий в полусобранном состоянии.
         let mut hcfg = hcfg.clone();
+        // Приёмка (L2, ADR-086): аргумент инструмента сильнее поля адаптера —
+        // кладём его в копию адаптера (пустая строка = явное выключение).
+        if let Some(command) = args.get("accept").and_then(Value::as_str) {
+            hcfg.accept_cmd = Some(command.to_string());
+        }
         let mut note = gate_note;
         if let Some(t) = args.get("timeout_secs").and_then(Value::as_u64) {
             if t < MIN_HARNESS_TIMEOUT_SECS {
@@ -1565,25 +1702,51 @@ impl Tool for HarnessRunTool {
         if args.get("background").and_then(Value::as_bool) == Some(true) {
             return Ok(self.launch_background(name, hcfg, repo, task, &note, ctx));
         }
-        Ok(execute_run(name, &hcfg, &repo, &task, note).await)
+        Ok(execute_run(name, &hcfg, &repo, &task, note, Some(&live)).await)
     }
 }
 
 /// Синхронный прогон харнесса и форматирование результата: итог (код
 /// возврата/прерывание/авто-коммит), механический разбор JSON-контракта,
-/// stdout/stderr. Общий код синхронного пути (`harness_run`) и фонового
+/// stdout/stderr; хвост петли L2 (ADR-086 п.4–5) — вердикт приёмки первой
+/// строкой, событие `gate_verdict` в журнал сессии, автозапись уроков из
+/// FAIL-кодов. Общий код синхронного пути (`harness_run`) и фонового
 /// (`background=true` — вызывается из spawned-задачи).
+///
+/// `loop_cfg` — конфиг петли (реестр уроков и журнал сессии); `None` —
+/// вызывающий без конфига (юнит-тесты прогона): вердикт приёмки остаётся
+/// в выводе, но уроками и событием журнала не фиксируется.
 async fn execute_run(
     name: &str,
     hcfg: &CodingHarnessConfig,
     repo: &Path,
     task: &str,
     note: String,
+    loop_cfg: Option<&Config>,
 ) -> ToolOutput {
     match run_harness(name, hcfg, repo, task).await {
-        Ok(run) => {
+        Ok(mut run) => {
             let code = run.exit_code.map_or("сигнал".into(), |c| c.to_string());
+            // L2 (ADR-086 п.4–5): хвост петли — событие `gate_verdict` в журнал
+            // сессии и автозапись уроков из FAIL-кодов. ДО рендера: вердикт в
+            // выводе обязан назвать и число записанных уроков.
+            if let (Some(verdict), Some(cfg)) = (run.accept.as_mut(), loop_cfg) {
+                let run_id = run.run_id.clone();
+                let harness = run.harness.clone();
+                let key = task_key(task);
+                let reference = RunRef::new(&run_id)
+                    .with_harness(Some(harness.as_str()))
+                    .with_task(key.as_deref());
+                crate::gate_loop::close_loop(cfg, repo, verdict, &reference);
+            }
             let mut content = note;
+            // Вердикт приёмки — ПЕРВОЙ строкой результата (ADR-086 п.4):
+            // «код 0 у исполнителя» и вердикт гейта — разные вещи, и именно
+            // вердикт решает, принят ли результат.
+            if let Some(verdict) = &run.accept {
+                content.push_str(&verdict.first_line());
+                content.push('\n');
+            }
             match &run.termination {
                 Termination::Completed => {
                     let _ = write!(
@@ -1719,6 +1882,11 @@ async fn execute_run(
                 }
                 None => {}
             }
+            // L2: блок приёмки — вердикт, источник, коды, находки, уроки
+            // реестра и сырой вывод команды (первая строка итога — выше).
+            if let Some(verdict) = &run.accept {
+                content.push_str(&verdict.block());
+            }
             match &run.contract {
                 ContractParse::Valid(c) => {
                     let _ = writeln!(
@@ -1774,20 +1942,29 @@ async fn execute_run(
                 content.push_str(run.stderr.trim_end());
             }
             let post_gate_red = run.post_gate.as_ref().is_some_and(|pg| pg.verdict.is_red());
+            // Ошибка исполнения для оркестратора (как у пост-гейта): красный
+            // вердикт приёмки. Таймауты и сбой самой команды приёмки — тоже
+            // красный: непроверенный результат не выдаётся за принятый.
+            let accept_red = run.accept.as_ref().is_some_and(GateVerdict::is_red);
             // Exit-семантика (дельта agent-modes-acp): мягкая отмена/лимит —
             // не ошибка исполнения для оркестратора (итог с предупреждением);
-            // красный пост-гейт делает прогон красным и для них. Таймауты и
-            // отказ агента — ошибка независимо от кода возврата (как раньше).
+            // красный пост-гейт/приёмка делает прогон красным и для них.
+            // Таймауты и отказ агента — ошибка независимо от кода возврата
+            // (как раньше).
             let is_error = run.termination.is_run_error()
                 || match &run.termination {
-                    Termination::Completed => run.exit_code != Some(0) || post_gate_red,
-                    _ => post_gate_red,
+                    Termination::Completed => {
+                        run.exit_code != Some(0) || post_gate_red || accept_red
+                    }
+                    _ => post_gate_red || accept_red,
                 };
             ToolOutput {
                 content,
                 is_error,
                 images: Vec::new(),
-                data: None,
+                // Машинный контур (T-12): конверт `gate-verdict/v1` приёмки —
+                // структурный результат рядом с текстом (MCP: structuredContent).
+                data: run.accept.as_ref().map(GateVerdict::to_json),
             }
             .truncated(HARNESS_RUN_MAX_CHARS)
         }

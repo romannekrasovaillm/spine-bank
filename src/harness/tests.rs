@@ -1025,7 +1025,7 @@ async fn post_gate_red_on_toxic_run_ra6() {
     assert!(joined.contains("control_plane_tampered"), "{joined}");
     assert!(joined.contains("no_pan_in_logs"), "{joined}");
     // Итог для оркестратора — ошибка, хотя исполнитель «успешен».
-    let out = execute_run("stub", &cfg, &repo, "задача", String::new()).await;
+    let out = execute_run("stub", &cfg, &repo, "задача", String::new(), None).await;
     assert!(out.is_error, "{}", out.content);
     assert!(out.content.contains("Пост-гейт: FAIL"), "{}", out.content);
     assert!(
@@ -1051,7 +1051,7 @@ async fn post_gate_passes_on_clean_run() {
     assert_eq!(pg.exit_code, Some(0), "{pg:?}");
     assert!(pg.findings.is_empty(), "{:?}", pg.findings);
     assert!(!pg.verdict.is_red());
-    let out = execute_run("stub", &cfg, &repo, "задача", String::new()).await;
+    let out = execute_run("stub", &cfg, &repo, "задача", String::new(), None).await;
     assert!(!out.is_error, "{}", out.content);
     assert!(out.content.contains("Пост-гейт: PASS"), "{}", out.content);
 }
@@ -1089,7 +1089,7 @@ async fn post_gate_red_on_manifest_tampering() {
     // отличалась бы от снимка.
     let repo2 = tmp.path().join("repo2");
     a4_sandbox(&repo2, true);
-    let out = execute_run("stub", &cfg, &repo2, "задача", String::new()).await;
+    let out = execute_run("stub", &cfg, &repo2, "задача", String::new(), None).await;
     assert!(out.is_error, "{}", out.content);
     assert!(out.content.contains("Пост-гейт: FAIL"), "{}", out.content);
     assert!(out.content.contains("manifest_tampered"), "{}", out.content);
@@ -1145,7 +1145,7 @@ async fn post_gate_skips_when_manifest_appears_mid_run() {
     let repo2 = tmp.path().join("repo2");
     a4_sandbox(&repo2, true);
     std::fs::remove_file(repo2.join(".arch-handoff/MANIFEST.json")).expect("rm manifest");
-    let out = execute_run("stub", &cfg, &repo2, "задача", String::new()).await;
+    let out = execute_run("stub", &cfg, &repo2, "задача", String::new(), None).await;
     assert!(!out.is_error, "{}", out.content);
 }
 
@@ -1163,7 +1163,7 @@ async fn post_gate_disabled_by_adapter_warns() {
         .await
         .expect("run");
     assert!(run.post_gate.is_none(), "отключён — вердикта нет");
-    let out = execute_run("stub", &cfg, &repo, "задача", String::new()).await;
+    let out = execute_run("stub", &cfg, &repo, "задача", String::new(), None).await;
     assert!(!out.is_error, "{}", out.content);
     assert!(
         out.content
@@ -1188,7 +1188,7 @@ async fn post_gate_skips_without_package() {
     assert_eq!(pg.verdict, PostGateVerdict::Skipped, "{pg:?}");
     assert!(pg.summary.contains("нет handoff-пакета"), "{}", pg.summary);
     assert!(!pg.verdict.is_red());
-    let out = execute_run("stub", &cfg, &repo, "задача", String::new()).await;
+    let out = execute_run("stub", &cfg, &repo, "задача", String::new(), None).await;
     assert!(!out.is_error, "{}", out.content);
 }
 
@@ -1227,7 +1227,7 @@ async fn post_gate_red_when_spine_removed_incomplete() {
     assert_eq!(pg.verdict, PostGateVerdict::Incomplete, "{pg:?}");
     assert!(pg.summary.contains("spine_lint"), "{}", pg.summary);
     assert!(pg.verdict.is_red());
-    let out = execute_run("stub", &cfg, &repo, "задача", String::new()).await;
+    let out = execute_run("stub", &cfg, &repo, "задача", String::new(), None).await;
     assert!(out.is_error, "{}", out.content);
 }
 
@@ -1255,7 +1255,7 @@ async fn post_gate_timeout_is_red() {
     let pg = run.post_gate.expect("пост-гейт отработал");
     assert_eq!(pg.verdict, PostGateVerdict::Timeout, "{pg:?}");
     assert!(pg.verdict.is_red());
-    let out = execute_run("stub", &cfg, &repo, "задача", String::new()).await;
+    let out = execute_run("stub", &cfg, &repo, "задача", String::new(), None).await;
     assert!(out.is_error, "{}", out.content);
     assert!(
         out.content.contains("Пост-гейт: TIMEOUT"),
@@ -1418,7 +1418,7 @@ async fn post_gate_self_approved_on_real_adr_and_override_ra7() {
     let joined = pg.findings.join("\n");
     assert!(joined.contains("self_approved"), "{joined}");
     assert!(joined.contains("rule_weakened"), "{joined}");
-    let out = execute_run("stub", &cfg, &repo, "задача", String::new()).await;
+    let out = execute_run("stub", &cfg, &repo, "задача", String::new(), None).await;
     assert!(out.is_error, "{}", out.content);
     assert!(out.content.contains("self_approved"), "{}", out.content);
     println!("RA-7 после фикса:\n{}", out.content);
@@ -1790,7 +1790,7 @@ async fn acp_turn_limit_keeps_partial_contract_and_runs_post_gate() {
         .post_gate
         .expect("пост-гейт обязан отработать (пакет есть)");
     assert_eq!(pg.verdict, PostGateVerdict::Pass, "{pg:?}");
-    let out = execute_run("fake", &cfg, &repo, "задача", String::new()).await;
+    let out = execute_run("fake", &cfg, &repo, "задача", String::new(), None).await;
     assert!(
         !out.is_error,
         "TurnLimit — не ошибка исполнения: {}",
@@ -1827,7 +1827,7 @@ async fn acp_cancelled_after_cancel_is_soft_not_error() {
         .await
         .expect("run");
     assert_eq!(run.termination, Termination::Cancelled);
-    let out = execute_run("fake", &cfg, tmp.path(), "задача", String::new()).await;
+    let out = execute_run("fake", &cfg, tmp.path(), "задача", String::new(), None).await;
     assert!(!out.is_error, "мягкая отмена — не ошибка: {}", out.content);
     assert!(out.content.contains("ПРЕРВАН МЯГКО"), "{}", out.content);
 }
@@ -1853,7 +1853,7 @@ async fn acp_refusal_is_run_error() {
         .await
         .expect("run");
     assert_eq!(run.termination, Termination::Refused);
-    let out = execute_run("fake", &cfg, tmp.path(), "задача", String::new()).await;
+    let out = execute_run("fake", &cfg, tmp.path(), "задача", String::new(), None).await;
     assert!(out.is_error, "отказ — ошибка прогона: {}", out.content);
     assert!(out.content.contains("ОТКАЗАЛСЯ"), "{}", out.content);
     assert!(
@@ -1861,4 +1861,227 @@ async fn acp_refusal_is_run_error() {
         "текст агента сохранён: {}",
         out.content
     );
+}
+
+// --- L2 (ADR-086): гейт в петле исполнителя ------------------------------
+
+/// Вердикт приёмки без данных прогона: «Приёмка (accept): …» первой строкой
+/// результата. Хелпер тестов ниже.
+fn accepts_marker(text: &str) -> bool {
+    text.lines()
+        .next()
+        .is_some_and(|l| l.starts_with("Приёмка (accept):"))
+}
+
+/// Приёмочный гейт в петле (L2, ADR-086): команда приёмки задана адаптером и
+/// завершается FAIL с кодом находки — вердикт идёт ПЕРВОЙ строкой результата,
+/// событие `gate_verdict` пишется в журнал сессии, а FAIL-код становится
+/// уроком (источник `gate`) реестра.
+#[tokio::test]
+async fn accept_gate_fail_is_first_line_event_and_lesson() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("mkdir repo");
+    let mut cfg = cfg_in(tmp.path());
+    cfg.lessons.enabled = true;
+    cfg.paths.sessions_dir = tmp.path().join("sessions");
+    let session = cfg
+        .paths
+        .sessions_dir
+        .join("session-20261014-000000-1.jsonl");
+    write_file(&session, "# шапка журнала\n");
+    cfg.harnesses.insert(
+        "fake".into(),
+        CodingHarnessConfig {
+            binary: "cat".into(),
+            prompt_mode: PromptMode::Stdin,
+            timeout_secs: 30,
+            idle_timeout_secs: 0,
+            accept_cmd: Some("echo '[G5] находка приёмочного гейта'; exit 1".into()),
+            ..CodingHarnessConfig::default()
+        },
+    );
+    let tool = HarnessRunTool { cfg: cfg.clone() };
+    let ctx = ToolContext::new(repo.clone(), Arc::new(cfg.clone()));
+    let out = tool
+        .call(
+            json!({"harness": "fake", "path": repo.display().to_string(), "task": "задача L2"}),
+            &ctx,
+        )
+        .await
+        .expect("call");
+    assert!(
+        out.is_error,
+        "FAIL приёмки — красный прогон: {}",
+        out.content
+    );
+    let first = out.content.lines().next().unwrap_or_default();
+    assert!(
+        first.starts_with("Приёмка (accept): FAIL"),
+        "первая строка — вердикт: {first}"
+    );
+    assert!(first.contains("G5"), "код находки в вердикте: {first}");
+
+    let log = std::fs::read_to_string(&session).expect("журнал сессии");
+    assert!(log.contains("gate_verdict"), "событие журнала: {log}");
+    assert!(log.contains("\"FAIL\""), "вердикт в событии: {log}");
+
+    let ledger =
+        std::fs::read_to_string(repo.join(".arch/lessons/ledger.jsonl")).expect("реестр уроков");
+    assert!(ledger.contains("\"source\":\"gate\""), "{ledger}");
+    assert!(ledger.contains("\"code\":\"G5\""), "{ledger}");
+    assert!(
+        repo.join(".arch/lessons/LESSONS.md").is_file(),
+        "рендер реестра уроков"
+    );
+    // B3 (ADR-086 п.6): пост-гейт без handoff-манифеста не «пропущен молча»,
+    // когда приёмка задана — сводка называет, чем результат проверен.
+    assert!(
+        out.content.contains("B3: пропуск не молчаливый"),
+        "B3 закрыт: {}",
+        out.content
+    );
+}
+
+/// Совместимость (ADR-086): без заданного accept вывод прогона не меняется —
+/// ни вердикта первой строкой, ни новых секций; явное отключение
+/// (`accept_cmd = ""`) даёт ровно тот же результат.
+#[tokio::test]
+async fn accept_absent_keeps_legacy_output() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    // Каталог БЕЗ CONSTRAINTS.yaml: дефолт `arch-be gate .` не включается.
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("mkdir repo");
+    let cfg = cfg_with_fake_harness(tmp.path());
+    let base = cfg.harnesses.get("fake").cloned().expect("адаптер fake");
+    let mut disabled = base.clone();
+    disabled.accept_cmd = Some(String::new());
+
+    let run = run_harness("fake", &base, &repo, "задача")
+        .await
+        .expect("run");
+    assert!(run.accept.is_none(), "accept не задан — вердикта нет");
+
+    let out = execute_run("fake", &base, &repo, "задача", String::new(), None).await;
+    assert!(!accepts_marker(&out.content), "{}", out.content);
+    assert!(
+        out.content
+            .starts_with("Харнесс 'fake' завершился: код 0, "),
+        "историческая первая строка: {}",
+        out.content
+    );
+    let off = execute_run("fake", &disabled, &repo, "задача", String::new(), None).await;
+    assert_eq!(
+        without_duration(&out.content),
+        without_duration(&off.content),
+        "явное отключение приёмки не меняет вывод"
+    );
+}
+
+/// Недетерминированная длительность в строке завершения — единственное, чем
+/// различаются два прогона одного и того же адаптера; для сверки «байт-в-байт»
+/// она нормализуется.
+fn without_duration(text: &str) -> String {
+    let mut out = String::new();
+    for line in text.lines() {
+        if line.starts_with("Харнесс '") && line.contains("завершился: код") {
+            out.push_str("<итог>\n");
+        } else {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// Выбор команды приёмки (ADR-086 п.1): поле адаптера `accept_cmd` (куда
+/// кладётся и аргумент инструмента — он сильнее) → дефолт `arch-be gate .`
+/// при CONSTRAINTS.yaml в корне репозитория; пустое значение — отключение.
+#[test]
+fn accept_command_resolution_order() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("mkdir repo");
+    let default = CodingHarnessConfig::default();
+    assert_eq!(
+        resolve_accept(&default, &repo),
+        None,
+        "нет реестра — нет дефолта"
+    );
+
+    write_file(&repo.join("CONSTRAINTS.yaml"), "rules: []\n");
+    assert_eq!(
+        resolve_accept(&default, &repo).as_deref(),
+        Some(DEFAULT_ACCEPT_CMD),
+        "дефолт — `arch-be gate .` при реестре в корне"
+    );
+    // Пакетный реестр (.arch-handoff/) дефолт НЕ включает: это явный выбор
+    // адаптера (accept_cmd), а не молчаливый прогон гейта на каждом прогоне.
+    let handoff = tmp.path().join("pkg");
+    write_file(
+        &handoff.join(".arch-handoff/CONSTRAINTS.yaml"),
+        "rules: []\n",
+    );
+    assert_eq!(resolve_accept(&default, &handoff), None);
+
+    let cfg = CodingHarnessConfig {
+        accept_cmd: Some("make accept".into()),
+        ..CodingHarnessConfig::default()
+    };
+    assert_eq!(
+        resolve_accept(&cfg, &repo).as_deref(),
+        Some("make accept"),
+        "поле адаптера сильнее дефолта"
+    );
+    let off = CodingHarnessConfig {
+        accept_cmd: Some(String::new()),
+        ..CodingHarnessConfig::default()
+    };
+    assert_eq!(
+        resolve_accept(&off, &repo),
+        None,
+        "пустое поле адаптера отключает приёмку и дефолт"
+    );
+}
+
+/// Аргумент `accept` инструмента сильнее поля адаптера: команда из аргумента
+/// отрабатывает, поле адаптера не участвует.
+#[tokio::test]
+async fn accept_argument_overrides_adapter_field() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("mkdir repo");
+    let mut cfg = cfg_with_fake_harness(tmp.path());
+    cfg.harnesses.insert(
+        "fake".into(),
+        CodingHarnessConfig {
+            binary: "cat".into(),
+            prompt_mode: PromptMode::Stdin,
+            timeout_secs: 30,
+            idle_timeout_secs: 0,
+            accept_cmd: Some("echo adapter-field; exit 1".into()),
+            ..CodingHarnessConfig::default()
+        },
+    );
+    let tool = HarnessRunTool { cfg: cfg.clone() };
+    let ctx = ToolContext::new(repo.clone(), Arc::new(cfg));
+    let out = tool
+        .call(
+            json!({"harness": "fake", "path": repo.display().to_string(),
+                    "task": "задача", "accept": "echo argument-wins; exit 0"}),
+            &ctx,
+        )
+        .await
+        .expect("call");
+    assert!(
+        out.content.contains("argument-wins"),
+        "команда из аргумента: {}",
+        out.content
+    );
+    assert!(
+        !out.content.contains("adapter-field"),
+        "поле адаптера перекрыто: {}",
+        out.content
+    );
+    assert!(!out.is_error, "PASS приёмки: {}", out.content);
 }
