@@ -20,6 +20,9 @@
   а не через относительный путь. Зафиксировать отдельным пунктом (улучшение fitness,
   не входит в L1–L11 — кандидат в BACKLOG).
 
+
+(продолжение — по мере прогонов L1/L2/L3: провалы clippy, control check, тестов)
+
 ## 2026-10-14 · LSN-черновик 3 · source: tool (прогон L11, hr-20261014-135849-04)
 - Факт: claude-code повис по таймауту тишины 1800 с; stderr —
   `[claude-code:unrecognized_model] {"model":"deepseek-flash","query_source":"sdk"}`.
@@ -42,4 +45,16 @@
 - evidence: транскрипт сессии 058f74aa (entrypoint sdk-cli, background task
   «Run full test suite» killed, totalDuration ≈ 1800 с).
 
-(продолжение — по мере прогонов L1/L2/L3: провалы clippy, control check, тестов)
+## 2026-10-14 · LSN-черновик 5 · source: tool (из прогона L2)
+- Факт: общий `CARGO_TARGET_DIR=/home/roman/spine-bank/target` у параллельных
+  worktree флота даёт одинаковые имена артефактов. Сборка соседнего исполнителя
+  (L11, `cargo test --lib learning_metrics`) подменила тестовый бинарь, и
+  `cargo test --lib gate_loop::` отрапортовал «running 0 tests» при непустом
+  модуле — ложно-зелёный прогон; полный `cargo test` тем же механизмом мог бы
+  пройти на бинаре чужого дерева (и `-C extra-filename` совпал: -3656f21866e5b917).
+- Урок-кандидат: проверки в прогоне флота выполнять с ПРИВАТНЫМ target
+  (свой на worktree), общий target — только для артефакта дог-фуд-гейта
+  (`./target/debug/arch-be`); «0 tests» вместо ожидаемого числа — сигнал подмены
+  бинаря, а не отсутствия тестов.
+- evidence: сессия L2 2026-10-14; после `CARGO_TARGET_DIR=<приватный>` те же
+  11 тестов модуля зелёные (а полный `cargo test` — 2377+).

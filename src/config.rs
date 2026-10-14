@@ -634,6 +634,8 @@ pub struct CodingHarnessConfig {
     /// за принятый (RA-5: `dependency_direction` на больших реестрах
     /// патологически дорог — это сигнал, а не блокер механизма).
     pub post_gate_timeout_secs: u64,
+    /// Команда приёмки прогона (L2, ADR-086; см. `docs/harness_integrations.md`): shell-строка вне песочницы исполнителя; не задано — дефолт `arch-be gate .` при `CONSTRAINTS.yaml` в корне, пусто — выключено.
+    pub accept_cmd: Option<String>,
     /// Режим вызова агента (C1, ADR-057): `auto` (дефолт) | `acp` | `prompt`.
     /// Аддитивно: старые конфиги без поля работают как `auto`, а без секции
     /// `acp` — как headless (поведение до ADR-057).
@@ -660,6 +662,7 @@ impl Default for CodingHarnessConfig {
             auto_commit: true,
             post_gate: true,
             post_gate_timeout_secs: 600,
+            accept_cmd: None,
             mode: AcpMode::Auto,
             acp: None,
         }
