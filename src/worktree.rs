@@ -482,6 +482,52 @@ pub fn render_list(infos: &[WorktreeInfo]) -> String {
     out
 }
 
+/// Стигмергия флота (L8, критерий E6): перерисовывает `LESSONS.md`
+/// канонического реестра `source` во все перечисленные активные worktree.
+///
+/// Источник истины — реестр уроков `source` (основное дерево или только что
+/// завершившийся worktree с новым уроком); рендер детерминирован (ADR-085),
+/// запись атомарна (tmp + rename через [`crate::lessons::render::write_atomic`]),
+/// поэтому читатель-исполнитель никогда не видит половину файла. Завершённые
+/// worktree в `active` не передаются — их файл не меняется. Сбой записи в один
+/// worktree не роняет остальные (warn + continue). Сам `source` пропускается.
+///
+/// Возвращает число обновлённых файлов (0 — нечего писать или реестр пуст).
+#[must_use]
+pub fn propagate_lessons_md(
+    cfg: &crate::config::Config,
+    source: &Path,
+    active: &[PathBuf],
+) -> usize {
+    let thresholds = crate::lessons::Thresholds::from(&cfg.lessons);
+    let ledger = crate::lessons::Ledger::repo(source);
+    let snapshot = match ledger.snapshot(&thresholds) {
+        Ok(snapshot) => snapshot,
+        Err(e) => {
+            tracing::warn!(
+                "стигмергия флота: снимок реестра {}: {e}",
+                ledger.path().display()
+            );
+            return 0;
+        }
+    };
+    let text = crate::lessons::render::render(&snapshot.lessons);
+    let mut written = 0usize;
+    for wt in active {
+        if wt.as_path() == source || !wt.is_dir() {
+            continue;
+        }
+        let target = wt
+            .join(crate::lessons::LEDGER_DIR)
+            .join(crate::lessons::LESSONS_MD);
+        match crate::lessons::render::write_atomic(&target, &text) {
+            Ok(()) => written += 1,
+            Err(e) => tracing::warn!("стигмергия флота: LESSONS.md в {}: {e}", wt.display()),
+        }
+    }
+    written
+}
+
 /// Инструмент агента: `worktree_new` — создать изолированное дерево работы.
 pub struct WorktreeNewTool;
 
@@ -816,5 +862,76 @@ mod tests {
             .await
             .expect_err("нет ветки");
         assert!(err.to_string().contains("ghost"), "{err}");
+    }
+
+    #[test]
+    fn propagate_lessons_md_writes_active_skips_completed_and_is_atomic() {
+        use crate::lessons::{
+            Evidence, Ledger, LessonSource, Outcome, RecordInput, Scope, ScopeLevel, Signature,
+            Thresholds,
+        };
+        let tmp = tempfile::tempdir().expect("tmp");
+        let main = tmp.path().join("main");
+        std::fs::create_dir_all(&main).expect("mkdir main");
+        let mut cfg = Config::default();
+        cfg.paths.reports_dir = tmp.path().join("reports");
+
+        // Урок в каноническом реестре основного дерева (источник LESSONS.md).
+        let th = Thresholds::default();
+        let ledger = Ledger::repo(&main);
+        let input = RecordInput::new(
+            Signature::new(LessonSource::Gate, "G5"),
+            Evidence {
+                run_id: "run-1".into(),
+                harness: Some("claude-code".into()),
+                verdict_excerpt: "[G5] нет __all__".into(),
+                file: Some("src/lib.rs".into()),
+                line: Some(12),
+                ts: "2026-10-14T10:00:00.000Z".into(),
+                outcome: Outcome::Fail,
+                task: Some("T1".into()),
+            },
+        )
+        .with_statement("Объявляй __all__")
+        .with_scope(Scope::new(ScopeLevel::Module, vec!["src/**".to_string()]));
+        ledger.record(&input, &th, "2026-10-14").expect("record");
+
+        // Три активных worktree и один завершённый (в active не передаётся).
+        let wt1 = tmp.path().join("wt1");
+        let wt2 = tmp.path().join("wt2");
+        let wt3 = tmp.path().join("wt3");
+        let done = tmp.path().join("wt-done");
+        for d in [&wt1, &wt2, &wt3, &done] {
+            std::fs::create_dir_all(d).expect("mkdir worktree");
+        }
+
+        let active = vec![wt1.clone(), wt2.clone(), wt3.clone()];
+        let written = propagate_lessons_md(&cfg, &main, &active);
+        assert_eq!(written, 3, "все три активных worktree обновлены");
+
+        for wt in [&wt1, &wt2, &wt3] {
+            let md =
+                std::fs::read_to_string(wt.join(".arch/lessons/LESSONS.md")).expect("LESSONS.md");
+            assert!(md.contains("gate · G5"), "урок в рендере: {md}");
+            assert!(md.contains("__all__"), "формулировка в рендере: {md}");
+            // Атомарность: временных файлов не осталось (читатель не видит половину).
+            let leftovers = std::fs::read_dir(wt.join(".arch/lessons"))
+                .expect("каталог реестра")
+                .flatten()
+                .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
+                .count();
+            assert_eq!(leftovers, 0, "временных файлов нет");
+        }
+        // Завершённый worktree не тронут.
+        assert!(
+            !done.join(".arch/lessons/LESSONS.md").exists(),
+            "завершённый worktree не меняется"
+        );
+        // Основное дерево (источник) не перезаписано собственной копией —
+        // его LESSONS.md уже лежит в реестре, отдельной записи нет.
+        assert!(
+            !main.join(".arch/lessons/LESSONS.md").exists(),
+            "источник не переписывается сам в себя"
+        );
     }
 }

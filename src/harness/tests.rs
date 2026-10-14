@@ -2044,6 +2044,78 @@ fn accept_command_resolution_order() {
     );
 }
 
+/// Стигмергия флота (L8, E6): `propagate_new_lesson` распространяет LESSONS.md
+/// в активные worktree только при новом уроке (рост событий) и включённых
+/// флагах; PASS-прогон и выключенная механика ничего не перерисовывают.
+#[test]
+fn propagate_new_lesson_gates_on_growth_and_flags() {
+    use crate::lessons::{
+        Evidence, Ledger, LessonSource, Outcome, RecordInput, Scope, ScopeLevel, Signature,
+        Thresholds,
+    };
+    let tmp = tempfile::tempdir().expect("tmp");
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("mkdir repo");
+    let wt = tmp.path().join("wt-active");
+    std::fs::create_dir_all(&wt).expect("mkdir worktree");
+
+    let mut cfg = cfg_in(tmp.path());
+    cfg.fleet.require_worktree = true;
+    cfg.lessons.enabled = true;
+
+    let th = Thresholds::default();
+    let ledger = Ledger::repo(&repo);
+    let record = |code: &str| {
+        RecordInput::new(
+            Signature::new(LessonSource::Gate, code),
+            Evidence {
+                run_id: format!("run-{code}"),
+                harness: Some("claude-code".into()),
+                verdict_excerpt: format!("[{code}] нарушение"),
+                file: Some("src/lib.rs".into()),
+                line: Some(1),
+                ts: "2026-10-14T10:00:00.000Z".into(),
+                outcome: Outcome::Fail,
+                task: Some("T1".into()),
+            },
+        )
+        .with_statement(format!("Правило {code}"))
+        .with_scope(Scope::new(ScopeLevel::Module, vec!["src/**".to_string()]))
+    };
+
+    let before = ledger.snapshot(&th).expect("snapshot").events;
+    // PASS-прогон: событий не прибавилось — соседей не трогаем.
+    assert_eq!(
+        propagate_new_lesson(&cfg, &repo, before, std::slice::from_ref(&wt)),
+        0,
+        "нет нового урока — нет перерисовки"
+    );
+    assert!(!wt.join(".arch/lessons/LESSONS.md").exists());
+
+    // FAIL-прогон: событие прибавилось — активный worktree получает LESSONS.md.
+    ledger
+        .record(&record("G6"), &th, "2026-10-14")
+        .expect("record");
+    assert_eq!(
+        propagate_new_lesson(&cfg, &repo, before, std::slice::from_ref(&wt)),
+        1,
+        "новый урок распространён"
+    );
+    let md = std::fs::read_to_string(wt.join(".arch/lessons/LESSONS.md")).expect("LESSONS.md");
+    assert!(md.contains("gate · G6"), "урок в рендере: {md}");
+
+    // Выключенная механика: даже при росте событий распространения нет.
+    cfg.lessons.enabled = false;
+    ledger
+        .record(&record("G7"), &th, "2026-10-14")
+        .expect("record");
+    assert_eq!(
+        propagate_new_lesson(&cfg, &repo, before, std::slice::from_ref(&wt)),
+        0,
+        "[lessons] enabled=false гасит стигмергию"
+    );
+}
+
 /// Аргумент `accept` инструмента сильнее поля адаптера: команда из аргумента
 /// отрабатывает, поле адаптера не участвует.
 #[tokio::test]

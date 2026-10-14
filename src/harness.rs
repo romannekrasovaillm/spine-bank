@@ -1397,6 +1397,10 @@ impl HarnessRunTool {
             started_at: crate::subagent::now_iso(),
             finished_at: None,
         });
+        // Стигмергия флота (L8): worktree прогона сопоставлен задаче `hr-*`,
+        // чтобы при записи нового урока LESSONS.md перерисовался во все
+        // активные worktree (реестр читает сопоставление по id).
+        registry.set_worktree(&id, repo.clone());
         let report_path = ctx
             .config
             .paths
@@ -1413,6 +1417,14 @@ impl HarnessRunTool {
         // run_id, но те же уроки и то же событие `gate_verdict`.
         let loop_cfg = Arc::clone(&ctx.config);
         tokio::spawn(async move {
+            // L8: событий в реестре до прогона — база для детекции нового
+            // урока (прогон PASS не должен перерисовать LESSONS.md соседей
+            // пустым рендером).
+            let thresholds = crate::lessons::Thresholds::from(&loop_cfg.lessons);
+            let run_ledger = crate::lessons::Ledger::repo(&repo);
+            let before = run_ledger
+                .snapshot(&thresholds)
+                .map_or(0, |s| s.events);
             let out = execute_run(
                 &run_name,
                 &hcfg,
@@ -1423,6 +1435,12 @@ impl HarnessRunTool {
                 &matched,
             )
             .await;
+            // Стигмергия флота (L8, E6): если прогон записал новый урок —
+            // перерисовать LESSONS.md во все активные worktree; завершённые
+            // в `running_worktrees` не попадают и остаются нетронутыми.
+            // Число обновлённых worktree — диагностика, а не контракт прогона:
+            // сбой распространения не роняет сам прогон (best effort).
+            let _ = propagate_new_lesson(&loop_cfg, &repo, before, &registry.running_worktrees());
             let status = if out.is_error {
                 crate::subagent::TaskStatus::Failed
             } else {
@@ -1798,6 +1816,28 @@ impl Tool for HarnessRunTool {
         )
         .await)
     }
+}
+
+/// Стигмергия флота (L8, E6): перерисовывает `LESSONS.md` во все активные
+/// worktree, если реестр `source` пополнился новым уроком за время прогона
+/// (`before` — число событий до прогона). Возвращает число обновлённых
+/// worktree (0 — урок не записан, механика выключена или некому передавать).
+///
+/// Гейт по счётчику событий обязателен: прогон PASS не записывает урок, и
+/// без него пустой рендер затёр бы LESSONS.md соседей.
+#[must_use]
+fn propagate_new_lesson(cfg: &Config, source: &Path, before: usize, active: &[PathBuf]) -> usize {
+    if !cfg.fleet.require_worktree || !cfg.lessons.enabled {
+        return 0;
+    }
+    let thresholds = crate::lessons::Thresholds::from(&cfg.lessons);
+    let after = crate::lessons::Ledger::repo(source)
+        .snapshot(&thresholds)
+        .map_or(before, |s| s.events);
+    if after <= before {
+        return 0;
+    }
+    crate::worktree::propagate_lessons_md(cfg, source, active)
 }
 
 /// Задача исполнителю вместе с отобранными префлайтом уроками (L4).
