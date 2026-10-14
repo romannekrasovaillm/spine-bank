@@ -24,6 +24,7 @@ mod rules;
 mod specs;
 mod web;
 
+use std::fmt::Write as _;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -1121,6 +1122,10 @@ pub(crate) async fn run() -> Result<()> {
             // путь, что у инструмента harness_run); сбой сборки прогон не роняет.
             let accept_cmd = arch_harness::harness::resolve_accept(hcfg, &repo);
             let pack_state = arch_harness::handoff::auto::state(&repo);
+            // L2×L5 (ADR-086): заметка автопакета — служебная, поэтому при
+            // заданной приёмке печатается ПОСЛЕ вердикта (вердикт обязан быть
+            // первой строкой). Без приёмки заметка уходит сразу, как раньше.
+            let mut autopack_note = String::new();
             if pack_state.needs_build() {
                 match arch_harness::handoff::auto::build(
                     &repo,
@@ -1129,14 +1134,20 @@ pub(crate) async fn run() -> Result<()> {
                     accept_cmd.as_deref(),
                     share,
                 ) {
-                    Ok(packet) => println!(
-                        "автопакет handoff (L5): {} — собран {}; уроков в LESSONS.md: {}.",
-                        pack_state.label(),
-                        packet.dir.display(),
-                        packet.lessons
-                    ),
+                    Ok(packet) => {
+                        let _ = writeln!(
+                            autopack_note,
+                            "автопакет handoff (L5): {} — собран {}; уроков в LESSONS.md: {}.",
+                            pack_state.label(),
+                            packet.dir.display(),
+                            packet.lessons
+                        );
+                    }
                     Err(e) => tracing::warn!("автопакет handoff {}: {e}", repo.display()),
                 }
+            }
+            if accept_cmd.is_none() {
+                print!("{autopack_note}");
             }
             let task_text = arch_harness::lesson_block::augment_task(&task_text, &lessons.block);
             let mut hcfg_owned = hcfg.clone();
@@ -1168,6 +1179,10 @@ pub(crate) async fn run() -> Result<()> {
             // «код 0 у исполнителя» ≠ «результат принят гейтом».
             if let Some(verdict) = &run.accept {
                 println!("{}", verdict.first_line());
+            }
+            // Служебная заметка автопакета (L5) — ПОСЛЕ вердикта приёмки.
+            if accept_cmd.is_some() {
+                print!("{autopack_note}");
             }
             // C5 (ADR-057): режим прогона виден в выводе — включая откат
             // ACP → headless (иначе деградация ACP осталась бы незамеченной).

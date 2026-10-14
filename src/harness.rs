@@ -1422,9 +1422,7 @@ impl HarnessRunTool {
             // пустым рендером).
             let thresholds = crate::lessons::Thresholds::from(&loop_cfg.lessons);
             let run_ledger = crate::lessons::Ledger::repo(&repo);
-            let before = run_ledger
-                .snapshot(&thresholds)
-                .map_or(0, |s| s.events);
+            let before = run_ledger.snapshot(&thresholds).map_or(0, |s| s.events);
             let out = execute_run(
                 &run_name,
                 &hcfg,
