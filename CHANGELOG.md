@@ -5,6 +5,77 @@
 обязательный: обновление контура контроля меняет вердикты, и это должно быть
 сказано до обновления, а не после.
 
+## [Unreleased] — 0.5.0 «контур, который учится» (ветка arch/learning-loop-050)
+
+Обучение в контексте на уровне оркестратора становится свойством архитектуры,
+а не удачей сессии (задание TASK-Spine-0.5.0-learning-loop.md, живые прогоны
+0.4.10: 36 сессий, 108 запусков исполнителя). Ключевой принцип (AD-2):
+жизненный цикл урока — детерминированные счётчики доказательств, LLM только
+формулирует текст. Всё новое — за `[lessons] enabled` (по умолчанию `false`;
+включение — после бенчмарка benchmarks/icl-transfer). ADR-085…092.
+
+### Добавлено
+
+- **Lesson Ledger (L1, ADR-085)** — реестр уроков `src/lessons/`: сущность
+  `Lesson` (id `LSN-<sha8>`, signature, scope, evidence с run_id, hits/misses),
+  append-only `.arch/lessons/ledger.jsonl` + `$ARCH_HOME/lessons`,
+  детерминированный рендер `LESSONS.md`, статусы observed→candidate→confirmed→
+  promoted→retired только по счётчикам. CLI `arch-be lessons
+  list|show|record|retire|export|import`; MCP `lessons_query` (read-only) и
+  `lessons_record` (под `--rw`), оба в core-сборке.
+- **Гейт в петле исполнителя (L2, ADR-086)** — `harness_run --accept` /
+  `[harnesses.x].accept_cmd` (дефолт `arch-be gate .` при CONSTRAINTS.yaml);
+  вердикт приводится к gate-verdict/v1, идёт первой строкой результата и
+  событием `gate_verdict` в журнал; FAIL автоматически пишет урок (источник
+  `gate`); `post_gate` без манифеста при заданном accept больше не молчит (B3);
+  Core-хуки stop/post-tool-use пишут FAIL-коды в реестр.
+- **Инъекция уроков и защита от компактификации (L3, ADR-087)** — закреплённый
+  блок «Уроки контура» (top-K по scope, лимит токенов) пересобирается из
+  реестра после L1/L3-компактификации (B5); миграция `failure_lessons.md` в
+  реестр (B1/B2); Core-хуки `session-start`/`user-prompt-submit` (B9); блок
+  уроков — в свежий контекст субагентов и ralph-раундов (B8); карантин
+  prompt-injection через `src/injection.rs`.
+- **Префлайт-подбор (L4)** — `lessons_match(task, paths)`: scope + BM25 +
+  приоритет статусов; событие `prevented` для метрик.
+- **Автоупаковка handoff (L5, B4)** — при отсутствии/устаревании
+  `.arch-handoff/` `harness_run` сам собирает лёгкий пакет: TASK.md + «Правила
+  репозитория (выучено)» + LESSONS.md + accept_cmd; явный `handoff_create`
+  приоритетен; уроки user/org не утекают без `--share`.
+- **Обобщение и композиция (L6, ADR-088)** — расширение scope по счётчикам
+  (модуль→пакет→репо, откат по контрпримеру), составные чек-листы `LSN-C-*`
+  по `subject_kind` (классификатор по диффу), LLM формулирует — счётчик решает.
+- **Промоушен в fitness-правило (L7, ADR-089)** — `arch-be lessons promote`:
+  выразимость шаблоном rule_templates, redteam-засев (ловит исходное нарушение,
+  не краснит HEAD), подпись человека на Standard/Critical, ловля на pre-commit,
+  анти-ослабление на промоутированных правилах.
+- **Стигмергия флота (L8, E6)** — новый урок перерисовывает LESSONS.md во всех
+  активных worktree флота (атомарно, завершённые не трогаются).
+- **Ленивые инструменты (L9, ADR-090, B6)** — ядро + `tool_search`, профили
+  `orchestrate`/`architect`/`reverse`/`full` (дефолт пока `full`); первый
+  запрос профиля orchestrate ≤ 25 000 символов (тест).
+- **Межрепозиторная память (L10, ADR-091)** — `lessons export` →
+  lessons-bundle/v1 (SHA-256, evidence-хэши); импорт с понижением статуса до
+  candidate; org-реестр `[lessons] org_dir`, MCP в Core.
+- **Метрики обучения (L11, B7)** — usage в журнале при `stream=false`;
+  `arch-be metrics --learning` (learning-metrics/v1): repeat_failure_rate,
+  prevented, dispatches_per_task, статусы уроков, promoted_rules, токены.
+
+### Исправлено
+
+- FIX-1: вердикт приёмки — всегда первая строка результата `harness_run`
+  (заметка автопакета L5 — после него, ADR-086).
+- `rule_templates_have_teeth` резолвит бинарь через `${CARGO_TARGET_DIR:-./target}`
+  (ADR-092; дог-фуд урок №2 — 127 при приватном target исполнителя).
+- `config.rs` декомпозирован в `src/config/` (C-33: 3020 > 3000 строк).
+
+### Что может покраснеть после обновления
+
+- Поведение по умолчанию НЕ меняется (`[lessons] enabled=false`, профиль
+  `full`). Новые коды/события журнала (`gate_verdict`, `prevented`, `usage`
+  при нестриме) — парсеры журнала увидят новые типы событий.
+- Собственный дог-фуд: `.arch/lessons/` репозитория несёт 5 уроков confirmed
+  из работы над 0.5.0.
+
 ## [0.4.11] — 2026-10-14
 
 ### Исправлено
