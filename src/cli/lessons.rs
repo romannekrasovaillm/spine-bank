@@ -16,8 +16,8 @@ use clap::Subcommand;
 
 use arch_harness::config::Config;
 use arch_harness::lessons::{
-    self, Evidence, Ledger, Lesson, LessonSource, LessonStatus, Mutation, Outcome, RecordInput,
-    Scope, ScopeLevel, Signature, Thresholds,
+    self, Evidence, Ledger, Lesson, LessonSource, LessonStatus, Mutation, Outcome, PromoteOptions,
+    RecordInput, Scope, ScopeLevel, Signature, Thresholds,
 };
 
 /// Подкоманды `arch-be lessons`.
@@ -182,6 +182,30 @@ pub(crate) enum LessonsCmd {
         /// Пользовательский реестр `$ARCH_HOME/lessons`.
         #[arg(long)]
         user: bool,
+    },
+    /// Промоушен урока в fitness-правило (L7, ADR-089): confirmed-урок,
+    /// выразимый шаблоном `rule_templates`, проходит redteam-засев и пишется в
+    /// CONSTRAINTS.yaml со статусом `proposed` через дельту. На маршрутах
+    /// Standard/Critical обязательна подпись человека (`--sign-off`).
+    Promote {
+        /// Идентификатор урока (`LSN-…`) в статусе confirmed.
+        id: String,
+        /// Репозиторий с реестром (по умолчанию — текущий каталог).
+        #[arg(long, value_name = "PATH")]
+        repo: Option<PathBuf>,
+        /// Маршрут значимости: fast|standard|critical (по умолчанию fast).
+        #[arg(long, default_value = "fast", value_name = "ROUTE")]
+        route: String,
+        /// Подпись человека: маркер `[РЕШЕНИЕ ЧЕЛОВЕКА]` уходит в дельту
+        /// (обязателен на Standard/Critical).
+        #[arg(long)]
+        sign_off: bool,
+        /// Инвариант спайна для поля `ad` правила (`AD-6`).
+        #[arg(long, value_name = "AD")]
+        ad: Option<String>,
+        /// Имя дельты (по умолчанию — `promote-<LSN>`).
+        #[arg(long, value_name = "NAME")]
+        delta_name: Option<String>,
     },
 }
 
@@ -437,6 +461,33 @@ pub(crate) fn cmd_lessons(cfg: &Config, cmd: LessonsCmd) -> Result<()> {
                 file.display(),
                 moved
             );
+            Ok(())
+        }
+        LessonsCmd::Promote {
+            id,
+            repo,
+            route,
+            sign_off,
+            ad,
+            delta_name,
+        } => {
+            let repo = repo.unwrap_or_else(|| PathBuf::from("."));
+            let th = thresholds(cfg);
+            let route = route
+                .parse::<arch_harness::control::Route>()
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let opts = PromoteOptions {
+                route,
+                sign_off,
+                ad,
+                delta_name,
+            };
+            let report = lessons::promote(&repo, &id, &opts, &th)?;
+            println!("Урок {} → правило {}", report.lesson_id, report.rule_name);
+            println!("  вид: {}", report.kind.as_str());
+            println!("  реестр: {}", report.constraints.display());
+            println!("  дельта: {}", report.delta.display());
+            println!("\nФрагмент правила:\n{}", report.yaml);
             Ok(())
         }
     }
