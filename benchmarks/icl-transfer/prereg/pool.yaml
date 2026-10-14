@@ -1,0 +1,75 @@
+# Пул скрытых конвенций benchmarks/icl-transfer (14 шт., параметризованы).
+# Прогон по семени выбирает 2–3 не-holdout конвенции и инстанцирует параметры.
+# Маркерные строки (marker) используются CI-грепом анти-Goodhart: им запрещено
+# появляться в src/, assets/, промптах и скиллах вне benchmarks/icl-transfer/.
+pool:
+  - id: HC-01
+    name: "Обязательный __all__ в новом модуле пакета"
+    subject_kind: new_public_symbol
+    params: { package: "paylib" }
+    marker: "HC01-ALL"
+  - id: HC-02
+    name: "Строка новой операции в каталоге операций"
+    subject_kind: new_module
+    params: { catalog_file: "docs/OPERATIONS-CATALOG.md", format: "| {op} | {module} | {owner} |" }
+    marker: "HC02-CATALOG"
+  - id: HC-03
+    name: "Префикс логгера равен имени пакета в верхнем регистре"
+    subject_kind: new_module
+    params: { pattern: 'logging.getLogger("PAYLIB.{mod}")' }
+    marker: "HC03-LOGPFX"
+  - id: HC-04
+    name: "Запрет импорта модуля X из модуля Y (направление зависимостей)"
+    subject_kind: new_module
+    params: { forbid_from: "paylib.api", forbid_import: "paylib.store" }
+    marker: "HC04-IMPDIR"
+  - id: HC-05
+    name: "Файл CHANGELOG.d/<task-id>.md для каждого изменения"
+    subject_kind: new_module
+    params: { dir: "CHANGELOG.d", name_pattern: "{task_id}.md" }
+    marker: "HC05-CHLOGD"
+  - id: HC-06
+    name: "Имя теста test_<unit>__<scenario>__<expected>"
+    subject_kind: new_public_symbol
+    params: { pattern: '^test_[a-z0-9_]+__[a-z0-9_]+__[a-z0-9_]+$' }
+    marker: "HC06-TSTNAME"
+  - id: HC-07
+    name: "Декоратор аудита на публичных операциях с деньгами"
+    subject_kind: new_public_symbol
+    params: { decorator: "@audit_op" }
+    marker: "HC07-AUDIT"
+  - id: HC-08
+    name: "Новый HTTP-маршрут фиксируется в openapi.yaml"
+    subject_kind: new_endpoint
+    params: { spec: "openapi.yaml" }
+    marker: "HC08-OASPEC"
+  - id: HC-09
+    name: "Деньги только через Decimal-фабрику money.to_money"
+    subject_kind: new_public_symbol
+    params: { factory: "paylib.money.to_money" }
+    marker: "HC09-DECIMAL"
+  - id: HC-10
+    name: "Запрет print() в библиотечном коде — только logging"
+    subject_kind: new_module
+    params: { forbid_regex: '\bprint\(' }
+    marker: "HC10-NOPRINT"
+  - id: HC-11
+    name: "Docstring Google-формата у новой публичной функции (Args/Returns)"
+    subject_kind: new_public_symbol
+    params: { sections: ["Args:", "Returns:"] }
+    marker: "HC11-DOCSTR"
+  - id: HC-12
+    name: "Файл OWNERS с кодом владельца в каждом новом пакете"
+    subject_kind: new_package
+    params: { file: "OWNERS", line_pattern: "^[A-Z]{3}-[0-9]{3}$" }
+    marker: "HC12-OWNERS"
+  - id: HC-13
+    name: "Только tz-aware datetime (запрет naive utcnow)"
+    subject_kind: new_module
+    params: { forbid_regex: 'datetime\.utcnow\(' }
+    marker: "HC13-TZAWARE"
+  - id: HC-14
+    name: "Идемпотентный ключ у mutating-операции (параметр idempotency_key)"
+    subject_kind: new_endpoint
+    params: { arg: "idempotency_key" }
+    marker: "HC14-IDEMP"
