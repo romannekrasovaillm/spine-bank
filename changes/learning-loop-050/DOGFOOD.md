@@ -20,4 +20,15 @@
   а не через относительный путь. Зафиксировать отдельным пунктом (улучшение fitness,
   не входит в L1–L11 — кандидат в BACKLOG).
 
+## 2026-10-14 · LSN-черновик 3 · source: tool (прогон L11, hr-20261014-135849-04)
+- Факт: claude-code повис по таймауту тишины 1800 с; stderr —
+  `[claude-code:unrecognized_model] {"model":"deepseek-flash","query_source":"sdk"}`.
+  Корень: `~/.claude/settings.json` несёт протухшие имена моделей, и для sdk-субагентов
+  они перекрывают env адаптера. L1 выжил (не звал субагентов), L11 — нет.
+- Урок: env адаптера НЕ побеждает settings.json пользователя; фикс — флаг
+  `--settings /home/roman/.arch-harness/claude-harness-settings.json` (приоритет
+  командной строки над user-настройками) в адаптерах claude-code*.
+- evidence: отчёт hr-20261014-135849-04; фикс — ~/.config/arch-harness/config.toml
+  (вне репозитория) + ~/.arch-harness/claude-harness-settings.json.
+
 (продолжение — по мере прогонов L1/L2/L3: провалы clippy, control check, тестов)
