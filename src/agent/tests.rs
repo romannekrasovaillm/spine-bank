@@ -630,6 +630,56 @@ async fn no_usage_record_without_stream_usage() {
     );
 }
 
+/// Провайдер, отдающий usage в НЕСТРИМИНГОВОМ ответе (B7, L11):
+/// `complete_with_usage` перекрыт; `complete` и дефолтная обёртка `stream`
+/// отдают только текст.
+#[derive(Debug)]
+struct CompleteUsageLlm;
+
+#[async_trait::async_trait]
+impl LlmProvider for CompleteUsageLlm {
+    fn name(&self) -> &'static str {
+        "complete-usage"
+    }
+    fn model(&self) -> &'static str {
+        "complete-usage-1"
+    }
+    async fn complete(&self, _req: ChatRequest) -> Result<ChatMessage> {
+        Ok(ChatMessage::assistant("готово", Vec::new()))
+    }
+    async fn complete_with_usage(&self, req: ChatRequest) -> Result<(ChatMessage, Usage)> {
+        let msg = self.complete(req).await?;
+        Ok((
+            msg,
+            Usage {
+                prompt_tokens: 90,
+                completion_tokens: 10,
+            },
+        ))
+    }
+}
+
+#[tokio::test]
+async fn non_streamed_usage_is_logged_to_journal() {
+    // B7: при stream=false usage нестримингового ответа теперь доходит до
+    // журнала (через complete_with_usage), а не теряется.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut s = make_session(tmp.path(), Arc::new(CompleteUsageLlm), |cfg| {
+        cfg.agent.stream = false;
+    });
+    let reply = s.send("ход", None).await.expect("send");
+    assert_eq!(reply, "готово");
+    let journal = read_journal(tmp.path());
+    let usage_line = journal
+        .lines()
+        .find(|l| l.contains("\"kind\":\"usage\""))
+        .expect("запись usage в журнале");
+    let v: Value = serde_json::from_str(usage_line).expect("json");
+    assert_eq!(v["model"], "complete-usage-1");
+    assert_eq!(v["prompt_tokens"], 90);
+    assert_eq!(v["completion_tokens"], 10);
+}
+
 #[tokio::test]
 async fn tool_end_event_carries_full_output_history_keeps_truncated() {
     let tmp = tempfile::tempdir().expect("tempdir");

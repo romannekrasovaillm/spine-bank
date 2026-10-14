@@ -578,6 +578,18 @@ enum Cmd {
         /// Смета по реальному usage: таблица по моделям, топ-10 дорогих сессий.
         #[arg(long)]
         cost_report: bool,
+        /// Метрики обучения контура (learning-metrics/v1): журналы сессий +
+        /// реестр уроков. Формат — markdown, с `--json` — машиночитаемый.
+        #[arg(long)]
+        learning: bool,
+        /// Машиночитаемый вывод (JSON, схема learning-metrics/v1) — только с
+        /// `--learning`.
+        #[arg(long)]
+        json: bool,
+        /// Репозиторий с реестром уроков для `--learning` (по умолчанию —
+        /// текущий каталог).
+        #[arg(long, value_name = "PATH")]
+        repo: Option<PathBuf>,
     },
     /// Недельный дайджест outcome-данных MCP-контроля (`docs/outcome-metrics.md`):
     /// итерации FAIL→PASS по инструментам, топ нарушаемых правил, доля ложных
@@ -1931,7 +1943,36 @@ pub(crate) async fn run() -> Result<()> {
             None => cmd_policy(&cfg, check)?,
         },
         Some(Cmd::Evidence { cmd }) => cmd_evidence(&cfg, cmd)?,
-        Some(Cmd::Metrics { cost_report }) => {
+        Some(Cmd::Metrics {
+            cost_report,
+            learning,
+            json,
+            repo,
+        }) => {
+            if learning {
+                let ledger = match repo.as_deref() {
+                    Some(path) => arch_harness::lessons::Ledger::repo(path),
+                    None => arch_harness::lessons::Ledger::repo(Path::new(".")),
+                };
+                let thresholds = arch_harness::lessons::Thresholds::from(&cfg.lessons);
+                let report = arch_harness::metrics::LearningMetrics::collect(
+                    &cfg.paths.sessions_dir,
+                    &ledger,
+                    &thresholds,
+                )?;
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string(&report).expect("LearningMetrics сериализуется")
+                    );
+                } else {
+                    print!(
+                        "{}",
+                        arch_harness::metrics::render_learning_markdown(&report)
+                    );
+                }
+                return Ok(());
+            }
             if cost_report {
                 // Смета по реальным записям usage журналов (тарифы — из конфига).
                 let report =
