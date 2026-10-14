@@ -454,7 +454,7 @@ constraints:
   - id: C-31
     name: rule_templates_have_teeth
     type: command_succeeds
-    command: "./target/debug/arch-be rules template verify --all --require-python"
+    command: "${CARGO_TARGET_DIR:-.}/target/debug/arch-be rules template verify --all --require-python"
     timeout_secs: 600
     severity: error
     ad: AD-9

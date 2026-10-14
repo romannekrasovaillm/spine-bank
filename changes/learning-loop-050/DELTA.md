@@ -26,6 +26,7 @@
 - `failure_memory`: сигнатуры источников `gate`/`fitness`; `failure_lessons.md` мигрирует в реестр уроков.
 - Хуки Core: добавляются `session-start`, `user-prompt-submit` (connect для Claude Code и Kimi Code, fail-soft).
 - `post_gate` без манифеста: не «пропускается молча», если задан `accept` (B3).
+- CONSTRAINTS.yaml: правило `rule_templates_have_teeth` — команда резолвит бинарь через `${CARGO_TARGET_DIR:-.}` (дог-фуд урок №2: относительный `./target/...` ломал гейт при приватном target-каталоге исполнителя).
 
 ## REMOVED
 
