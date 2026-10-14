@@ -153,6 +153,11 @@ pub struct SubagentRegistry {
     notify: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<BackgroundNotice>>>>,
     /// Ёмкость слотов (по умолчанию [`MAX_RUNNING`]; меньше — в тестах).
     capacity: usize,
+    /// Сопоставление фоновой задачи `hr-*` с worktree её прогона (стигмергия
+    /// флота L8/E6): заполняется при `harness_run(background=true)`, читается
+    /// при записи нового урока — перерисовать LESSONS.md во все активные
+    /// worktree. Задачи субагентов (`sa-*`) worktree не имеют и сюда не входят.
+    worktrees: Arc<Mutex<std::collections::HashMap<String, PathBuf>>>,
 }
 
 impl Default for SubagentRegistry {
@@ -161,6 +166,7 @@ impl Default for SubagentRegistry {
             tasks: Arc::new(Mutex::new(Vec::new())),
             notify: Arc::new(Mutex::new(None)),
             capacity: MAX_RUNNING,
+            worktrees: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
     }
 }
@@ -179,6 +185,7 @@ impl SubagentRegistry {
             tasks: Arc::new(Mutex::new(Vec::new())),
             notify: Arc::new(Mutex::new(None)),
             capacity,
+            worktrees: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -269,6 +276,32 @@ impl SubagentRegistry {
         if found {
             self.emit_notice(id, status);
         }
+    }
+
+    /// Сопоставляет фоновую задачу `hr-*` с worktree её прогона (стигмергия
+    /// флота L8): по id задача находит свой каталог, когда запись урока
+    /// требует перерисовать LESSONS.md во все активные worktree.
+    pub(crate) fn set_worktree(&self, id: &str, path: PathBuf) {
+        if let Ok(mut map) = self.worktrees.lock() {
+            map.insert(id.to_string(), path);
+        }
+    }
+
+    /// Worktree активных (ещё выполняющихся) фоновых задач `hr-*` в порядке
+    /// регистрации. Завершённые задачи (Done/Failed) и субагенты без worktree
+    /// не попадают — их файлы при стигмергии не трогаются.
+    #[must_use]
+    pub(crate) fn running_worktrees(&self) -> Vec<PathBuf> {
+        let tasks = self.tasks.lock().map_or_else(|_| Vec::new(), |t| t.clone());
+        let map = self
+            .worktrees
+            .lock()
+            .map_or_else(|_| std::collections::HashMap::new(), |m| m.clone());
+        tasks
+            .iter()
+            .filter(|t| t.status == TaskStatus::Running)
+            .filter_map(|t| map.get(&t.id).cloned())
+            .collect()
     }
 
     /// Запускает субагента в фоне; возвращает id задачи.
@@ -790,6 +823,41 @@ mod tests {
         // Неизвестный id — уведомления нет.
         registry.finish("hr-нет-такого", TaskStatus::Failed, String::new());
         assert!(rx.try_recv().is_err(), "лишнего уведомления быть не должно");
+    }
+
+    #[test]
+    fn running_worktrees_filters_completed_and_agents_without_worktree() {
+        let registry = SubagentRegistry::new();
+        let running = |id: &str| SubagentTask {
+            id: id.into(),
+            agent: "harness:fake".into(),
+            task: "прогон".into(),
+            status: TaskStatus::Running,
+            report: String::new(),
+            started_at: "t0".into(),
+            finished_at: None,
+        };
+        // Три фоновых прогона: первый уже завершён, два — активны.
+        let mut done = running("hr-1");
+        done.status = TaskStatus::Done;
+        registry.insert(done);
+        registry.set_worktree("hr-1", PathBuf::from("/wt/one"));
+        registry.insert(running("hr-2"));
+        registry.set_worktree("hr-2", PathBuf::from("/wt/two"));
+        registry.insert(running("hr-3"));
+        registry.set_worktree("hr-3", PathBuf::from("/wt/three"));
+        // Субагент (без worktree) не даёт пути, хотя и активен.
+        let mut sa = running("sa-9");
+        sa.agent = "auditor".into();
+        registry.insert(sa);
+
+        let mut active = registry.running_worktrees();
+        active.sort();
+        assert_eq!(
+            active,
+            vec![PathBuf::from("/wt/three"), PathBuf::from("/wt/two")],
+            "завершённые и субагенты не участвуют в стигмергии"
+        );
     }
 
     #[test]
