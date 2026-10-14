@@ -194,7 +194,7 @@ pub(crate) fn launch_ralph(
     });
 
     // Инструменты раунда: полный реестр минус оркестрация; whitelist спеки — поверх.
-    let mut tools = crate::tools::full_registry(&tool_ctx.config).excluding(&SUBAGENT_TOOLS);
+    let mut tools = crate::tools::session_registry(&tool_ctx.config).excluding(&SUBAGENT_TOOLS);
     if !spec.tools.is_empty() {
         tools = tools.subset(&spec.tools);
     }

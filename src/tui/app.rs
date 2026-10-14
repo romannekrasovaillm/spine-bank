@@ -366,7 +366,7 @@ impl App {
         let provider = registry.default();
         let model_name = format!("{}:{}", registry.default_name(), provider.model());
 
-        let mut tools = tools::full_registry(&cfg);
+        let mut tools = tools::session_registry(&cfg);
         let mut status_extra = None;
         let mut mcp_manager = None;
         // MCP по умолчанию ленивый (connect_on_start=false): старт TUI не ждёт
@@ -1641,7 +1641,11 @@ fn system_prompt(cfg: &Config) -> String {
     };
     // Ошибка чтения памяти не фатальна: сессия работает без неё.
     let memory = crate::memory::load(&cfg.paths.memory_file).ok().flatten();
-    crate::memory::augment_system_prompt(&base, memory.as_deref(), &cfg.paths.memory_file)
+    let with_memory =
+        crate::memory::augment_system_prompt(&base, memory.as_deref(), &cfg.paths.memory_file);
+    // Уроки прошлых сбоев — в системный промпт (живёт вне истории, L1/L3
+    // компактификация его не сжимает).
+    crate::failure_memory::augment_prompt_with_lessons(&with_memory, &cfg.paths.state_dir)
 }
 
 /// Максимум символов дескриптора действия в строке tool-блока.

@@ -292,6 +292,84 @@ fn looks_like_filename(token: &str) -> bool {
         && ext.chars().any(|c| c.is_ascii_alphabetic())
 }
 
+/// Максимум символов блока уроков в системном промпте: файл на диске
+/// остаётся полным, в промпт идут самые свежие записи.
+pub const LESSONS_PROMPT_MAX_CHARS: usize = 3000;
+
+/// Секция «уроки прошлых сбоев» для системного промпта: свежие записи
+/// `failure_lessons.md` (файл append-only, свежие внизу), урезанные до
+/// `max_chars` по границам записей (каждая начинается с `## `). `None` —
+/// файла нет, он пуст или не читается: уроки — вспомогательный канал, сессия
+/// без них работает.
+///
+/// Блок живёт в СИСТЕМНОМ промпте, а не в истории: L1/L3-компактификация
+/// сжимает историю сообщений, системный промпт не трогает — уроки переживают
+/// компактификацию и смену модели (отчёт «две гипотезы», 2026-10-14:
+/// «failure_lessons.md никто не читает» — теперь читает сам агент).
+#[must_use]
+pub fn lessons_prompt_section(path: &Path, max_chars: usize) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    // Записи разделяются заголовком «## »: режем по границам, не ломая их.
+    let mut entries: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("## ") {
+            if !current.is_empty() {
+                entries.push(std::mem::take(&mut current));
+            }
+            current.push_str(rest);
+        } else {
+            current.push_str(line);
+        }
+        current.push('\n');
+    }
+    if !current.is_empty() {
+        entries.push(current);
+    }
+    // Свежие записи важнее: набираем с конца, пока хватает бюджета.
+    let mut chosen: Vec<&str> = Vec::new();
+    let mut used = 0usize;
+    for entry in entries.iter().rev() {
+        let cost = entry.len() + 5; // маркер «## » + переводы строк-разделители
+        if used + cost > max_chars && !chosen.is_empty() {
+            break;
+        }
+        used += cost;
+        chosen.push(entry.trim_end());
+    }
+    chosen.reverse();
+    let body = chosen
+        .iter()
+        .map(|e| format!("## {e}"))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    Some(format!(
+        "# Уроки прошлых сбоев\n\n{body}\n\n\
+         Эти уроки контур записал по итогам прошлых сбоев инструментов и \
+         провалов гейтов (файл `{}` пополняется автоматически). Учитывай их \
+         сразу, не повторяя прошлых ошибок; не дублируй правило, которое уже \
+         действует.\n",
+        path.display()
+    ))
+}
+
+/// Дописывает секцию уроков в конец системного промпта (после секции
+/// памяти). Уроков нет или файл не читается — промпт возвращается неизменным:
+/// канал вспомогательный, сессия без него работает.
+#[must_use]
+pub fn augment_prompt_with_lessons(base: &str, state_dir: &Path) -> String {
+    let Some(section) =
+        lessons_prompt_section(&state_dir.join(LESSONS_FILE), LESSONS_PROMPT_MAX_CHARS)
+    else {
+        return base.to_string();
+    };
+    format!("{base}\n\n{section}")
+}
+
 /// Дописывает блок урока в `failure_lessons.md` (файл и родительский
 /// каталог создаются; существующее содержимое не трогается — только append).
 ///
@@ -457,6 +535,56 @@ mod tests {
         append_lesson(&path, "## урок 2\n").expect("append 2");
         let text = std::fs::read_to_string(&path).expect("read");
         assert_eq!(text, "## урок 1\n\n## урок 2\n", "append с разделителем");
+    }
+
+    #[test]
+    fn lessons_prompt_section_absent_file_is_none() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("failure_lessons.md");
+        assert!(lessons_prompt_section(&path, 1000).is_none());
+        std::fs::write(&path, "   \n").expect("write");
+        assert!(lessons_prompt_section(&path, 1000).is_none(), "пустой файл");
+    }
+
+    #[test]
+    fn lessons_prompt_section_keeps_fresh_entries_within_budget() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("failure_lessons.md");
+        let mut body = String::new();
+        for i in 1..=5 {
+            body.push_str(&format!("## 2026-10-1{i} · `tool{i}` · класс{i}\n\n- детали {i}\n\n"));
+        }
+        std::fs::write(&path, &body).expect("write");
+        // Бюджет на две последние записи (запись ≈ 53 байта + 5 служебных;
+        // кириллица считается байтами — 130 вмещает ровно две).
+        let section = lessons_prompt_section(&path, 130).expect("секция");
+        assert!(section.starts_with("# Уроки прошлых сбоев"), "шапка: {section}");
+        assert!(section.contains("tool5"), "свежая запись: {section}");
+        assert!(section.contains("tool4"), "вторая свежая: {section}");
+        assert!(!section.contains("tool3"), "старая не влезла: {section}");
+        // Границы записей целы: каждая «## » начинает запись.
+        assert_eq!(section.matches("## 2026").count(), 2, "две записи: {section}");
+    }
+
+    #[test]
+    fn lessons_prompt_section_single_oversized_entry_still_shown() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("failure_lessons.md");
+        std::fs::write(&path, "## урок\n\n- длинные детали, превышающие бюджет\n").expect("write");
+        let section = lessons_prompt_section(&path, 10).expect("хотя бы одна запись");
+        assert!(section.contains("## урок"), "единственная запись видна: {section}");
+    }
+
+    #[test]
+    fn augment_prompt_with_lessons_appends_section() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state = tmp.path();
+        // Без файла уроков — промпт неизменен.
+        assert_eq!(augment_prompt_with_lessons("БАЗА", state), "БАЗА");
+        append_lesson(&state.join(LESSONS_FILE), "## урок · `bash` · io\n").expect("append");
+        let out = augment_prompt_with_lessons("БАЗА", state);
+        assert!(out.starts_with("БАЗА\n\n# Уроки прошлых сбоев"), "секция: {out}");
+        assert!(out.contains("## урок · `bash` · io"), "запись: {out}");
     }
 
     #[test]

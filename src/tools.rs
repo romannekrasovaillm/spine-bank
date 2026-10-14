@@ -52,6 +52,81 @@ pub fn full_registry(cfg: &Config) -> ToolRegistry {
     reg.with_policy(policy)
 }
 
+/// Доменные инструменты, снимаемые профилем `orchestrate` (`[agent]
+/// tools_profile`): оркестрационные сессии работают базовыми инструментами,
+/// `harness_run` и `significance_score` (отчёт «две гипотезы», 2026-10-14:
+/// 84% первого запроса — схемы всех 67 инструментов; вызваны хотя бы раз 12
+/// из 51 доменного). Список — ЯВНЫЙ drop-list: инструмент, забытый сюда при
+/// добавлении, остаётся видим (fail-open) — профиль никогда не скрывает
+/// новую возможность молча.
+const ORCHESTRATE_DROP: &[&str] = &[
+    "adr_new",
+    "adr_registry",
+    "agentsmd_generate",
+    "agentsmd_lint",
+    "arch_diff",
+    "archify_compare",
+    "archify_deliver",
+    "archify_show",
+    "archify_validate",
+    "architect_review",
+    "asyncapi_lint",
+    "bench_run",
+    "change_impact",
+    "contract_diff",
+    "contracts",
+    "cron",
+    "delta_guard",
+    "delta_propose",
+    "evidence_pack",
+    "evidence_verify",
+    "fitness_check",
+    "fleet_audit",
+    "landscape_report",
+    "mermaid_render",
+    "model_drift",
+    "model_graph",
+    "model_query",
+    "model_validate",
+    "nfr_check",
+    "openapi_lint",
+    "openspec_coverage",
+    "plugin_list",
+    "recover",
+    "report",
+    "reverse_survey",
+    "rubric_accept",
+    "rubric_evaluate",
+    "rubric_generate",
+    "rubric_handover",
+    "rubric_list",
+    "rule_template_apply",
+    "rule_template_list",
+    "rule_template_show",
+    "skill_distill",
+    "spine_lint",
+    "trace_check",
+];
+
+/// Реестр инструментов агентной сессии (TUI, `run`, субагенты, ralph):
+/// полный реестр, профилированный `[agent] tools_profile` (рекомендация 3
+/// отчёта «две гипотезы»). Мост MCP (`mcp serve`) сюда не ходит — у моста
+/// свои белые списки (`mcp_server`), профиль сессии его не режет.
+#[must_use]
+pub fn session_registry(cfg: &Config) -> ToolRegistry {
+    let registry = full_registry(cfg);
+    match cfg.agent.tools_profile.as_deref().map(str::trim) {
+        None | Some("") | Some("full" | "architect") => registry,
+        Some("orchestrate") => registry.excluding(ORCHESTRATE_DROP),
+        Some(other) => {
+            // Опечатка в конфиге не должна ронять сессию — полный реестр
+            // (поведение до появления профилей) и предупреждение в лог.
+            tracing::warn!("[agent] tools_profile = '{other}' неизвестен — используется full");
+            registry
+        }
+    }
+}
+
 fn domain_tools(cfg: &Config) -> Vec<Arc<dyn Tool>> {
     let mut out: Vec<Arc<dyn Tool>> = Vec::new();
     out.extend(crate::mermaid::tools());
@@ -271,6 +346,66 @@ mod tests {
             assert!(
                 !names.iter().any(|n| n == banned),
                 "инструмент {banned} не должен регистрироваться при [archify].enabled=false"
+            );
+        }
+    }
+
+    #[test]
+    fn orchestrate_profile_drops_domain_tools_and_keeps_core() {
+        // Отчёт «две гипотезы» (2026-10-14): в оркестрации 60% вызовов — 4
+        // базовых инструмента, из 51 доменного использованы 12; профиль
+        // orchestrate убирает доменный слой из схем каждого запроса.
+        let mut cfg = Config::default();
+        cfg.agent.tools_profile = Some("orchestrate".into());
+        let names = session_registry(&cfg).names();
+        for kept in [
+            "bash",
+            "read_file",
+            "write_file",
+            "edit_file",
+            "glob",
+            "grep",
+            "harness_run",
+            "handoff_create",
+            "subagent_run",
+            "ralph_run",
+            "worktree_new",
+            "skill_search",
+            "skill_load",
+            "kb_search",
+            "significance_score",
+        ] {
+            assert!(names.iter().any(|n| n == kept), "{kept} обязан остаться");
+        }
+        for dropped in [
+            "fitness_check",
+            "architect_review",
+            "trace_check",
+            "model_query",
+            "delta_guard",
+            "rubric_evaluate",
+            "spine_lint",
+            "openapi_lint",
+            "nfr_check",
+            "adr_registry",
+            "mermaid_render",
+        ] {
+            assert!(
+                !names.iter().any(|n| n == dropped),
+                "{dropped} обязан быть снят профилем orchestrate"
+            );
+        }
+    }
+
+    #[test]
+    fn full_architect_and_unknown_profiles_keep_full_registry() {
+        for value in [None, Some("full"), Some("architect"), Some("orkestrate")] {
+            let mut cfg = Config::default();
+            cfg.agent.tools_profile = value.map(str::to_string);
+            let names = session_registry(&cfg).names();
+            assert!(
+                names.iter().any(|n| n == "fitness_check"),
+                "при tools_profile={value:?} реестр обязан быть полным"
             );
         }
     }
