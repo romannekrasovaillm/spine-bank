@@ -630,6 +630,57 @@ async fn no_usage_record_without_stream_usage() {
     );
 }
 
+/// Провайдер, чей НЕстриминговый ответ несёт usage (как openai_compat
+/// `complete_with_usage` — статистика берётся из тела ответа API).
+#[derive(Debug)]
+struct UsageLlmNonStream;
+
+#[async_trait::async_trait]
+impl LlmProvider for UsageLlmNonStream {
+    fn name(&self) -> &'static str {
+        "usage-llm-ns"
+    }
+    fn model(&self) -> &'static str {
+        "usage-ns-1"
+    }
+    async fn complete(&self, _req: ChatRequest) -> Result<ChatMessage> {
+        Ok(ChatMessage::assistant("готово", Vec::new()))
+    }
+    async fn complete_with_usage(&self, req: ChatRequest) -> Result<(ChatMessage, Usage)> {
+        let msg = self.complete(req).await?;
+        Ok((
+            msg,
+            Usage {
+                prompt_tokens: 77,
+                completion_tokens: 12,
+            },
+        ))
+    }
+}
+
+/// Баг из отчёта «две гипотезы» (2026-10-14): в non-stream режиме usage в
+/// журнал не писался — стоимость хода не измерялась. Теперь путь
+/// `complete` в агентном цикле идёт через `complete_with_usage` и журналирует
+/// статистику так же, как стрим.
+#[tokio::test]
+async fn nonstream_usage_is_logged_to_journal() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut s = make_session(tmp.path(), Arc::new(UsageLlmNonStream), |cfg| {
+        cfg.agent.stream = false;
+    });
+    let reply = s.send("ход", None).await.expect("send");
+    assert_eq!(reply, "готово");
+    let journal = read_journal(tmp.path());
+    let usage_line = journal
+        .lines()
+        .find(|l| l.contains("\"kind\":\"usage\""))
+        .expect("запись usage в журнале non-stream режима");
+    let v: Value = serde_json::from_str(usage_line).expect("json");
+    assert_eq!(v["model"], "usage-ns-1");
+    assert_eq!(v["prompt_tokens"], 77);
+    assert_eq!(v["completion_tokens"], 12);
+}
+
 #[tokio::test]
 async fn tool_end_event_carries_full_output_history_keeps_truncated() {
     let tmp = tempfile::tempdir().expect("tempdir");

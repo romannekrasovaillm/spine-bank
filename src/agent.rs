@@ -304,7 +304,7 @@ impl AgentSession {
                     streamed = true;
                     race_cancel(self.cancel.clone(), self.stream_request(request, tx)).await
                 }
-                _ => race_cancel(self.cancel.clone(), self.provider.complete(request)).await,
+                _ => race_cancel(self.cancel.clone(), self.complete_capture_usage(request)).await,
             };
             // Отмена во время запроса к модели: история консистентна
             // (висячих tool-вызовов нет) — просто завершаем ход.
@@ -353,7 +353,7 @@ impl AgentSession {
                                     _ => {
                                         race_cancel(
                                             self.cancel.clone(),
-                                            self.provider.complete(request),
+                                            self.complete_capture_usage(request),
                                         )
                                         .await
                                     }
@@ -382,7 +382,7 @@ impl AgentSession {
                                     .await
                             }
                             _ => {
-                                race_cancel(self.cancel.clone(), self.provider.complete(request))
+                                race_cancel(self.cancel.clone(), self.complete_capture_usage(request))
                                     .await
                             }
                         };
@@ -721,7 +721,7 @@ impl AgentSession {
                 final_streamed = true;
                 self.stream_request(request, tx).await
             }
-            _ => self.provider.complete(request).await,
+            _ => self.complete_capture_usage(request).await,
         }?;
         if !final_streamed {
             self.emit_reasoning_full(&events, &reply).await;
@@ -1073,7 +1073,7 @@ impl AgentSession {
                     *streamed = true;
                     race_cancel(self.cancel.clone(), self.stream_request(cont_req, tx)).await
                 }
-                _ => race_cancel(self.cancel.clone(), self.provider.complete(cont_req)).await,
+                _ => race_cancel(self.cancel.clone(), self.complete_capture_usage(cont_req)).await,
             };
             let part = match cont {
                 Some(Ok(part)) => part,
@@ -1301,6 +1301,19 @@ impl AgentSession {
             }
         }
         result
+    }
+
+    /// Нестриминговый запрос с захватом статистики токенов (баг из разбора
+    /// «две гипотезы», 2026-10-14: в non-stream режиме usage в журнал не
+    /// писался — стоимость ICL не измерялась). Нули-заглушка провайдера
+    /// («usage не прислан») записи не даёт — отсутствие записи честно
+    /// отличает «не было данных» от «израсходовано 0».
+    async fn complete_capture_usage(&mut self, req: ChatRequest) -> Result<ChatMessage> {
+        let (msg, usage) = self.provider.complete_with_usage(req).await?;
+        if usage.total() > 0 {
+            self.last_usage = Some(usage);
+        }
+        Ok(msg)
     }
 
     /// Запись `usage` в журнал по итогам ответа LLM (реальные токены из
