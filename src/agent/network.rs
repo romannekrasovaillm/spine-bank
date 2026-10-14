@@ -79,7 +79,7 @@ impl AgentSession {
             race_cancel(self.cancel.clone(), tokio::time::sleep(wait)).await?;
             // Запрос пересобирается: история за время ожидания не менялась,
             // но компактификация следующего хода увидит её актуальной.
-            let request = self.build_request();
+            let (request, _repair) = self.build_request();
             let call = match (events, self.config.agent.stream) {
                 (Some(tx), true) => {
                     *streamed = true;

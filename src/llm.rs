@@ -236,6 +236,115 @@ impl ChatRequest {
     }
 }
 
+/// Текст синтетического tool-ответа-заглушки (ADR-084, порт ADR-056).
+///
+/// Явный маркер обязателен: модель не должна принять его за настоящий вывод
+/// инструмента — иначе начнёт домысливать результат. Просьба «повторите вызов»
+/// закрывает дыру без искажения смысла истории.
+const SYNTHETIC_TOOL_RESULT: &str = "[результат инструмента утрачен при сборке запроса — синтетический ответ для контракта \
+     tool-пар; повторите вызов инструмента, если его вывод нужен]";
+
+/// Итог работы [`sanitize_tool_pairs`] — для аудита (ADR-084).
+///
+/// Ненулевые поля означают, что история запроса РАСХОДИЛАСЬ с контрактом
+/// tool-пар на границе сборки: ремонт надо зафиксировать в журнале сессии
+/// (`tool_pairs_repaired`), иначе класс деградации станет невидимым.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ToolPairRepair {
+    /// Сколько синтетических tool-ответов достроено под висящие `tool_calls`.
+    pub synthesized: usize,
+    /// Сколько сиротских tool-сообщений удалено.
+    pub dropped_orphans: usize,
+}
+
+impl ToolPairRepair {
+    /// Был ли какой-либо ремонт (иначе — валидная история, менять нечего).
+    #[must_use]
+    pub fn repaired(&self) -> bool {
+        self.synthesized > 0 || self.dropped_orphans > 0
+    }
+}
+
+/// Санитайзер контракта tool-пар на границе запроса к провайдеру (ADR-084).
+///
+/// Провайдеры (OpenAI-совместимый контракт) требуют: каждому `id` из
+/// `tool_calls` ассистента обязан отвечать tool-ответ (`role ==
+/// Role::Tool`, `tool_call_id == id`) ДО ближайшего не-tool сообщения.
+/// Нарушение — фатальный HTTP 400 у всего хода агента (инцидент с
+/// `read_image:3`), поэтому защита ставится единой границей перед отправкой
+/// (AD-4), а не по провайдерам.
+///
+/// Поведение:
+/// - висящему `id` достраивается синтетический ответ-[`SYNTHETIC_TOOL_RESULT`]
+///   сразу после последнего существующего tool-ответа группы (или сразу после
+///   assistant-сообщения, если ответов нет вовсе);
+/// - tool-сообщения-сироты (нет предшествующего `tool_call` с этим `id`)
+///   удаляются;
+/// - валидная история не меняется, функция идемпотентна.
+///
+/// Работает на КОПИИ истории запроса: сама история сессии и журнал не
+/// трогаются (AD-5). Возвращает [`ToolPairRepair`] для последующего аудита.
+#[must_use]
+pub fn sanitize_tool_pairs(messages: &mut Vec<ChatMessage>) -> ToolPairRepair {
+    let mut out: Vec<ChatMessage> = Vec::with_capacity(messages.len());
+    let mut repair = ToolPairRepair::default();
+    let mut i = 0;
+    while i < messages.len() {
+        if messages[i].role == Role::Assistant && !messages[i].tool_calls.is_empty() {
+            // Порядок id в ответе провайдера — как в самих tool_calls.
+            let ids: Vec<String> = messages[i]
+                .tool_calls
+                .iter()
+                .map(|c| c.id.clone())
+                .collect();
+            out.push(messages[i].clone());
+            i += 1;
+            // Группа ответов: смежный прогон tool-сообщений строит контракт.
+            let run_start = i;
+            while i < messages.len() && messages[i].role == Role::Tool {
+                i += 1;
+            }
+            let mut answered = vec![false; ids.len()];
+            for m in &messages[run_start..i] {
+                let pos = m
+                    .tool_call_id
+                    .as_deref()
+                    .and_then(|cid| ids.iter().position(|id| id.as_str() == cid));
+                match pos {
+                    Some(p) => {
+                        answered[p] = true;
+                        out.push(m.clone());
+                    }
+                    // Ответ на чужой/отсутствующий id внутри группы — сирота.
+                    None => repair.dropped_orphans += 1,
+                }
+            }
+            // Достраиваем заглушки: после существующих ответов группы, в
+            // порядке висящих id. При `run_start == i` (ответов нет) заглушки
+            // встают сразу за assistant-сообщением.
+            for (pos, ok) in answered.iter().enumerate() {
+                if !ok {
+                    out.push(ChatMessage::tool_result(
+                        ids[pos].clone(),
+                        SYNTHETIC_TOOL_RESULT,
+                    ));
+                    repair.synthesized += 1;
+                }
+            }
+        } else if messages[i].role == Role::Tool {
+            // tool-сообщение вне группы: предшествующего assistant с этим
+            // `tool_call_id` нет — сирота.
+            repair.dropped_orphans += 1;
+            i += 1;
+        } else {
+            out.push(messages[i].clone());
+            i += 1;
+        }
+    }
+    *messages = out;
+    repair
+}
+
 /// Статистика токенов.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Usage {
@@ -596,6 +705,142 @@ mod tests {
         assert!(
             dbg.contains("https://api.giga.chat/v1"),
             "пресет base_url GigaChat: {dbg}"
+        );
+    }
+
+    /// Инвариант контракта tool-пар: каждый `id` из `tool_calls` ассистента
+    /// закрыт tool-ответом до ближайшего не-tool сообщения.
+    fn each_tool_call_closed(history: &[ChatMessage]) -> bool {
+        let mut i = 0;
+        while i < history.len() {
+            if history[i].role == Role::Assistant && !history[i].tool_calls.is_empty() {
+                let ids: Vec<&str> = history[i]
+                    .tool_calls
+                    .iter()
+                    .map(|c| c.id.as_str())
+                    .collect();
+                i += 1;
+                let run_start = i;
+                while i < history.len() && history[i].role == Role::Tool {
+                    i += 1;
+                }
+                for id in ids {
+                    if !history[run_start..i]
+                        .iter()
+                        .any(|m| m.tool_call_id.as_deref() == Some(id))
+                    {
+                        return false;
+                    }
+                }
+            } else {
+                i += 1;
+            }
+        }
+        true
+    }
+
+    fn tool_call(id: &str, name: &str) -> ToolCall {
+        ToolCall {
+            id: id.into(),
+            name: name.into(),
+            arguments: serde_json::json!({}),
+        }
+    }
+
+    #[test]
+    fn sanitize_inserts_stub_for_second_missing_tool_call() {
+        // Сценарий инцидента (read_image:3): пачка из двух tool_calls, ответ
+        // пришёл только на первый — второй (id "img:2") висит.
+        let mut history = vec![
+            ChatMessage::user("сравни кадры"),
+            ChatMessage::assistant(
+                "",
+                vec![
+                    tool_call("img:1", "read_image"),
+                    tool_call("img:2", "read_image"),
+                ],
+            ),
+            ChatMessage::tool_result("img:1", "первый кадр"),
+        ];
+        let repair = sanitize_tool_pairs(&mut history);
+        assert_eq!(
+            repair,
+            ToolPairRepair {
+                synthesized: 1,
+                dropped_orphans: 0
+            }
+        );
+        // Заглушка встала на правильной позиции: сразу за первым ответом.
+        assert_eq!(history.len(), 4);
+        assert_eq!(history[2].tool_call_id.as_deref(), Some("img:1"));
+        let stub = &history[3];
+        assert_eq!(stub.role, Role::Tool);
+        assert_eq!(stub.tool_call_id.as_deref(), Some("img:2"));
+        assert_eq!(stub.content, SYNTHETIC_TOOL_RESULT);
+        assert!(each_tool_call_closed(&history), "каждый id закрыт");
+    }
+
+    #[test]
+    fn sanitize_drops_leading_orphan_tool_message() {
+        let mut history = vec![
+            ChatMessage::tool_result("ghost", "ответ без вопроса"),
+            ChatMessage::user("привет"),
+        ];
+        let repair = sanitize_tool_pairs(&mut history);
+        assert_eq!(
+            repair,
+            ToolPairRepair {
+                synthesized: 0,
+                dropped_orphans: 1
+            }
+        );
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].role, Role::User);
+    }
+
+    #[test]
+    fn sanitize_keeps_valid_history_byte_identical() {
+        let history = vec![
+            ChatMessage::user("запусти два инструмента"),
+            ChatMessage::assistant("", vec![tool_call("c1", "echo"), tool_call("c2", "echo")]),
+            ChatMessage::tool_result("c1", "раз"),
+            ChatMessage::tool_result("c2", "два"),
+            ChatMessage::assistant("готово", Vec::new()),
+        ];
+        let before = serde_json::to_string(&history).expect("сериализация");
+        let mut working = history.clone();
+        let repair = sanitize_tool_pairs(&mut working);
+        assert_eq!(
+            repair,
+            ToolPairRepair {
+                synthesized: 0,
+                dropped_orphans: 0
+            }
+        );
+        assert_eq!(
+            serde_json::to_string(&working).expect("сериализация"),
+            before
+        );
+    }
+
+    #[test]
+    fn sanitize_is_idempotent() {
+        let mut history = vec![
+            ChatMessage::tool_result("ghost", "сирота"),
+            ChatMessage::assistant(
+                "",
+                vec![tool_call("a", "read_image"), tool_call("b", "read_image")],
+            ),
+            ChatMessage::tool_result("a", "кадр"),
+        ];
+        let first = sanitize_tool_pairs(&mut history);
+        assert!(first.repaired());
+        let after_first = serde_json::to_string(&history).expect("сериализация");
+        let second = sanitize_tool_pairs(&mut history);
+        assert_eq!(second, ToolPairRepair::default(), "повторный прогон чист");
+        assert_eq!(
+            serde_json::to_string(&history).expect("сериализация"),
+            after_first
         );
     }
 }

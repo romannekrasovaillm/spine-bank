@@ -12,7 +12,10 @@
 //! - [`RetryPolicy::delays`] — конечный итератор задержек между попытками
 //!   (экспонента с капом + детерминированный джиттер `SplitMix64`);
 //! - [`is_context_overflow`] выделяет «контекст не влез» (HTTP 413 и маркеры
-//!   context length) — сигнал агенту для compact & resubmit.
+//!   context length) — сигнал агенту для compact & resubmit;
+//! - [`is_tool_pair_contract_error`] выделяет нарушение контракта tool-пар
+//!   (HTTP 400 «did not have response messages») — сигнал санитайзеру и
+//!   одному повтору хода (ADR-084).
 
 use std::time::Duration;
 
@@ -85,6 +88,11 @@ const AUTH_MARKERS: &[&str] = &[
 /// Маркеры открытого circuit breaker'а (быстрый отказ источника
 /// авторизации, `GigaChat` OAuth): повторять сейчас бессмысленно.
 const CIRCUIT_OPEN_MARKERS: &[&str] = &["circuit breaker"];
+/// Маркеры нарушения контракта tool-пар в теле HTTP 400 (нижний регистр).
+/// Формулировка из инцидента с kimi (ADR-084): «...responding to each
+/// `tool_call_id`. The following `tool_call_ids` did not have response
+/// messages: `read_image:3`».
+const TOOL_PAIR_CONTRACT_MARKERS: &[&str] = &["tool_call_id", "did not have response messages"];
 
 /// Классифицирует отказ по HTTP-статусу и тексту ошибки.
 ///
@@ -126,6 +134,20 @@ pub fn classify(status: Option<u16>, err_text: &str) -> ErrorKind {
 #[must_use]
 pub fn is_context_overflow(status: Option<u16>, err_text: &str) -> bool {
     classify(status, err_text) == ErrorKind::ContextOverflow
+}
+
+/// Признак нарушения контракта tool-пар (HTTP 400): у ассистентского
+/// `tool_calls` остался `id` без tool-ответа. Триггер санитайзера и ровно
+/// одного повтора хода (ADR-084) — без L3-компактификации.
+///
+/// Отличается от [`classify`]: здесь нужен именно 400 (или упоминание «HTTP
+/// 400» в тексте собственной ошибки харнесса) И оба маркера провайдера, иначе
+/// класс `BadRequest` ушёл бы наверх без ремонта.
+#[must_use]
+pub fn is_tool_pair_contract_error(status: Option<u16>, err_text: &str) -> bool {
+    let text = err_text.to_lowercase();
+    let is_400 = status.map_or_else(|| text.contains("http 400"), |code| code == 400);
+    is_400 && TOOL_PAIR_CONTRACT_MARKERS.iter().all(|m| text.contains(m))
 }
 
 /// Политика «длинного терпения» агента на транспортных окнах (DPI/VPN
@@ -371,5 +393,30 @@ mod tests {
         assert!(is_context_overflow(None, "prompt is too long"));
         assert!(!is_context_overflow(Some(500), ""));
         assert!(!is_context_overflow(None, "timeout"));
+    }
+
+    #[test]
+    fn tool_pair_contract_error_matches_incident_text() {
+        // Текст из инцидента 2026-10-14 (kimi k3), в обёртке HarnessError::Llm.
+        let incident = "llm: kimi: HTTP 400: an assistant message with 'tool_calls' \
+             must be followed by tool messages responding to each 'tool_call_id'. \
+             The following tool_call_ids did not have response messages: read_image:3";
+        assert!(
+            is_tool_pair_contract_error(None, incident),
+            "текст инцидента"
+        );
+        assert!(is_tool_pair_contract_error(Some(400), incident));
+        // Не 400 — не наш класс (санитайзер не спасёт).
+        assert!(!is_tool_pair_contract_error(Some(500), incident));
+        // 400 без нужных маркеров — обычный BadRequest.
+        assert!(!is_tool_pair_contract_error(
+            Some(400),
+            "invalid parameter: temperature"
+        ));
+        // Маркеры без 400 (нет ни статуса, ни «http 400» в тексте).
+        assert!(!is_tool_pair_contract_error(
+            None,
+            "tool_call_id did not have response messages"
+        ));
     }
 }

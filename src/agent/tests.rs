@@ -10,13 +10,16 @@ use crate::tool::Tool;
 
 /// Тестовый провайдер: первый вызов просит инструмент `echo`,
 /// второй — отвечает финальным текстом.
+///
+/// `pub(super)`: провайдером пользуется и соседний тестовый подмодуль
+/// `tool_pair_tests` (ADR-084) — видимость в пределах `agent`, не шире.
 #[derive(Debug)]
-struct FakeLlm {
+pub(super) struct FakeLlm {
     calls: AtomicUsize,
 }
 
 impl FakeLlm {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             calls: AtomicUsize::new(0),
         }
