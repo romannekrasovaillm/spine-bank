@@ -18,12 +18,14 @@ use crate::error::Result;
 use crate::tool::ToolContext;
 use crate::{mcp, plugin};
 
+#[cfg(test)]
+use super::types::MANUAL_TOOLS;
 use super::types::{
     BRIDGE_OUTPUT_MAX_CHARS, BRIDGE_READ_ONLY, BRIDGE_READ_WRITE, CallError, INTERNAL_ERROR,
-    INVALID_PARAMS, INVALID_REQUEST, MAX_LINE_BYTES, MAX_PROMPT_ARG_VALUE_CHARS, METHOD_NOT_FOUND,
-    McpServe, PARSE_ERROR, PATH_ARG_ALIASES, PLAYBOOK_PROMPTS, PlaybookPrompt,
-    SKILL_TEXT_MAX_CHARS, ServeMode, blocking, error_response, ok_response,
-    verdict_from_bridge_text, verdict_from_structured,
+    INVALID_PARAMS, INVALID_REQUEST, MANUAL_TOOLS_READ_WRITE, MAX_LINE_BYTES,
+    MAX_PROMPT_ARG_VALUE_CHARS, METHOD_NOT_FOUND, McpServe, PARSE_ERROR, PATH_ARG_ALIASES,
+    PLAYBOOK_PROMPTS, PlaybookPrompt, SKILL_TEXT_MAX_CHARS, ServeMode, blocking, error_response,
+    ok_response, verdict_from_bridge_text, verdict_from_structured,
 };
 
 /// Исход успешного вызова инструмента: чем заполнить `content`/`structuredContent`.
@@ -541,6 +543,28 @@ impl McpServe {
                 .tool_trust_report(args)
                 .await
                 .map(DispatchOutcome::Structured),
+            // Реестр уроков (ADR-085): межсессионная память хост-агента,
+            // проверенная гейтом. Core-контур — LLM не нужна (AD-2).
+            "lessons_query" => self
+                .tool_lessons_query(args)
+                .await
+                .map(DispatchOutcome::Structured),
+            // Префлайт-подбор уроков под задачу (L4): read-only, без LLM.
+            "lessons_match" => self
+                .tool_lessons_match(args)
+                .await
+                .map(DispatchOutcome::Structured),
+            // Запись урока — только под `--rw` (пишет в каталог клиента).
+            "lessons_record" if self.mode == ServeMode::ReadWrite => self
+                .tool_lessons_record(args)
+                .await
+                .map(DispatchOutcome::Structured),
+            "lessons_record" => Err(CallError::invalid_params(
+                "lessons_record пишет в рабочий каталог клиента (.arch/lessons/) — \
+                 включите режим `arch-be mcp serve --rw`; чтение доступно без него \
+                 (lessons_query)"
+                    .to_string(),
+            )),
             // Мост в реестр инструментов харнесса (белые списки режима).
             other if self.bridge_allowed(other) => self.bridge_dispatch(other, args).await,
             other => Err(CallError::invalid_params(format!(
@@ -976,6 +1000,94 @@ fn tool_specs() -> Vec<Value> {
             },
             "annotations": read_only,
         }),
+        // Реестр уроков (ADR-085, Core): урок переживает сессию, смену модели и
+        // исполнителя. `lessons_query` — чтение, `lessons_record` — дозапись
+        // доказательства; статус выводится из счётчиков, LLM его не меняет.
+        json!({
+            "name": "lessons_query",
+            "description": "Реестр уроков контура (Lesson Ledger, ADR-085): уроки с \
+                            доказательствами (`run_id`), детерминированным статусом \
+                            (observed → candidate → confirmed → promoted → retired) и \
+                            областью действия. Фильтры: `id`, `status`, `scope`; \
+                            возвращает карточки уроков, счётчики журнала и рендер в \
+                            Markdown. Read-only: файлов не создаёт. Межсессионная \
+                            память, проверенная вердиктом гейта, — статус урока движут \
+                            только счётчики доказательств, а не формулировка",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Каталог с реестром (по умолчанию — каталог вызова)"},
+                    "user": {"type": "boolean", "description": "Пользовательский реестр $ARCH_HOME/lessons вместо репозиторного"},
+                    "id": {"type": "string", "description": "Идентификатор урока (`LSN-…`): карточка одного урока"},
+                    "status": {"type": "string", "description": "Фильтр по статусу: observed | candidate | confirmed | promoted | retired"},
+                    "scope": {"type": "string", "description": "Фильтр по уровню области: file | module | package | repo | user | org"},
+                    "cwd": {"type": "string", "description": "Рабочий каталог клиента: относительный `path` резолвится от него"},
+                },
+            },
+            "annotations": read_only,
+        }),
+        json!({
+            "name": "lessons_match",
+            "description": "Префлайт-подбор уроков реестра (Lesson Ledger, ADR-085) под \
+                            задачу (L4): детерминированный отбор без LLM — по области \
+                            действия (глобы путей задачи и путей из текста), BM25 текста \
+                            задачи против формулировки и сигнатуры урока, приоритет \
+                            статусов confirmed > candidate > observed. Возвращает top-K \
+                            уроков (K — из [lessons] k) и рендер в Markdown. Read-only: \
+                            файлов не создаёт. Используй перед упаковкой handoff или \
+                            запуском исполнителя, чтобы отобрать релевантные правила",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task": {"type": "string", "description": "Текст задачи (опционально): подбор против statement и signature, пути извлекаются из текста; пусто — вся область репозитория"},
+                    "paths": {"type": "array", "items": {"type": "string"}, "description": "Явные пути задачи (глобы или файлы); объединяются с путями из текста"},
+                    "path": {"type": "string", "description": "Каталог с реестром (по умолчанию — каталог вызова)"},
+                    "k": {"type": "integer", "description": "Максимум уроков в выдаче (по умолчанию — [lessons] k)"},
+                    "cwd": {"type": "string", "description": "Рабочий каталог клиента: относительный `path` резолвится от него"},
+                },
+            },
+            "annotations": read_only,
+        }),
+        json!({
+            "name": "lessons_record",
+            "description": "Записать исход по подписи урока в реестр (ADR-085): незнакомая \
+                            подпись создаёт урок (`observed`), повторный FAIL переводит в \
+                            `candidate`, PASS после применения (`outcome=pass_after_apply`) \
+                            на двух разных задачах — в `confirmed`. Урок рождается из \
+                            ВЕРДИКТА (source: gate|fitness|tool|review), а не из текста \
+                            исполнителя; статус выводится из счётчиков доказательств, \
+                            `statement` на него не влияет. После записи реестр \
+                            перерисовывается в `.arch/lessons/LESSONS.md` атомарно",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "source": {"type": "string", "description": "Источник урока: gate | fitness | tool | review"},
+                    "code": {"type": "string", "description": "Код: `G5`, id правила реестра, класс ошибки инструмента"},
+                    "subject_kind": {"type": "string", "description": "Вид субъекта (L6): `new_public_symbol`, `new_migration`, …"},
+                    "statement": {"type": "string", "description": "Текст правила (может быть `[inferred]` — на статус не влияет)"},
+                    "scope_level": {"type": "string", "description": "Уровень области действия (по умолчанию repo)"},
+                    "globs": {"type": "array", "items": {"type": "string"}, "description": "Глобы путей области действия"},
+                    "run_id": {"type": "string", "description": "Идентификатор прогона, из которого пришло доказательство"},
+                    "task": {"type": "string", "description": "Задача — ключ «≥ 2 разных задач» в решении о confirmed"},
+                    "harness": {"type": "string", "description": "Исполнитель прогона (claude-code, qwen-code, …)"},
+                    "excerpt": {"type": "string", "description": "Выдержка вердикта (усекается до 512 символов)"},
+                    "file": {"type": "string", "description": "Файл нарушения"},
+                    "line": {"type": "integer", "description": "Строка нарушения"},
+                    "outcome": {"type": "string", "description": "Исход: fail (дефолт) | pass_after_apply"},
+                    "recorder": {"type": "string", "description": "Кто записал (mcp, gate, hook, agent); по умолчанию mcp"},
+                    "path": {"type": "string", "description": "Каталог с реестром (по умолчанию — каталог вызова)"},
+                    "user": {"type": "boolean", "description": "Пользовательский реестр $ARCH_HOME/lessons"},
+                    "cwd": {"type": "string", "description": "Рабочий каталог клиента: относительный `path` резолвится от него"},
+                },
+                "required": ["source", "code", "run_id"],
+            },
+            "annotations": {
+                "readOnlyHint": false,
+                "destructiveHint": false,
+                "idempotentHint": false,
+                "openWorldHint": false,
+            },
+        }),
     ]
 }
 
@@ -983,8 +1095,20 @@ fn tool_specs() -> Vec<Value> {
 /// [`tool_specs`]) + мостовые по белым спискам текущего режима.
 impl McpServe {
     /// `tools/list` текущего режима: ручные + мостовые (сортированы по имени).
+    ///
+    /// Ручные инструменты записи ([`MANUAL_TOOLS_READ_WRITE`]) отдаются только
+    /// в режиме `--rw`: read-only состав сервера не должен уметь писать в
+    /// рабочий каталог клиента (тот же принцип, что у [`BRIDGE_READ_WRITE`]).
     fn all_tool_specs(&self) -> Vec<Value> {
-        let mut specs = tool_specs();
+        let write_mode = self.mode == ServeMode::ReadWrite;
+        let mut specs: Vec<Value> = tool_specs()
+            .into_iter()
+            .filter(|spec| {
+                spec["name"]
+                    .as_str()
+                    .is_some_and(|name| write_mode || !MANUAL_TOOLS_READ_WRITE.contains(&name))
+            })
+            .collect();
         specs.extend(self.bridge_tool_specs());
         specs
     }
@@ -1561,8 +1685,11 @@ mod tests {
         }
         assert_eq!(
             names.len(),
-            MANUAL_TOOLS.len() + BRIDGE_READ_ONLY.len() + expected_rw.len(),
-            "rw-режим: ручные + оба белых списка (в core — без harness-доменов)"
+            MANUAL_TOOLS.len()
+                + MANUAL_TOOLS_READ_WRITE.len()
+                + BRIDGE_READ_ONLY.len()
+                + expected_rw.len(),
+            "rw-режим: ручные (чтение + запись) + оба белых списка (в core — без harness-доменов)"
         );
         // Аннотации: mutating по классификации политики → destructiveHint.
         // handoff_create — в обеих сборках (core-модуль crate::handoff).

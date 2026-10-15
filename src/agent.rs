@@ -18,6 +18,7 @@
 //!   урок по режиму `[agent] failure_memory` (см. [`crate::failure_memory`]);
 //! - [`slash`] — слэш-команды (см. файл); [`prompts`] — библиотека шаблонов.
 
+use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -55,6 +56,9 @@ const COMPACT_TOOL_CHARS: usize = 500;
 const COMPACT_KEEP_TOOL: usize = 4;
 /// Сколько последних сообщений не удалять при жёсткой компактификации.
 const COMPACT_KEEP_TAIL: usize = 6;
+/// Сколько символов пользовательского ввода уходит в BM25-отбор блока уроков
+/// (ADR-087): длинный ввод — это вставленный контекст, а не запрос.
+const LESSONS_QUERY_MAX_CHARS: usize = 1000;
 /// Сколько раз подряд финальный ответ, оборванный потолком `max_tokens`
 /// (`finish_reason=length`), дозапрашивается «продолжи с места обрыва».
 const MAX_LENGTH_CONTINUATIONS: usize = 2;
@@ -105,10 +109,26 @@ pub struct AgentSession {
     provider: Arc<dyn LlmProvider>,
     /// Реестр инструментов.
     tools: ToolRegistry,
+    /// Ленивая загрузка доменных схем (ADR-090): `None` — полный профиль (все
+    /// схемы в каждом запросе, как до волны 3); `Some` — только ядро плюс
+    /// загруженные доменные (кэш живёт до конца сессии).
+    lazy: Option<crate::tools::ToolLazy>,
+    /// Имена, чьи схемы всегда в запросе при ленивом профиле (ядро + профиль).
+    eager: HashSet<String>,
     /// Контекст вызова инструментов.
     tool_ctx: ToolContext,
     /// Системный промпт (первым сообщением каждого запроса).
     system_prompt: String,
+    /// Закреплённый блок уроков реестра (ADR-087): дописывается к системному
+    /// промпту каждого запроса и **пересобирается из реестра** после
+    /// компактификации — L1-маскирование и L3-саммари его не пересказывают,
+    /// потому что блока в истории нет вовсе (закрывает B5).
+    lessons_block: String,
+    /// Пути последнего отбора блока (из текста задачи) — пересборка
+    /// повторяет отбор, а не «прилипает» к самому первому.
+    lessons_paths: Vec<String>,
+    /// Текст последнего запроса для BM25-отбора блока (усечённый).
+    lessons_query: Option<String>,
     /// История хода (без системного сообщения).
     history: Vec<ChatMessage>,
     /// Путь к журналу сессии (None — журнал не удалось открыть).
@@ -189,12 +209,20 @@ impl AgentSession {
         tool_ctx.provider = Some(provider.clone());
         // Память сбоев грузится с диска до переноса config в структуру.
         let failure_memory = crate::failure_memory::FailureMemory::load(&config.paths.state_dir);
+        // Блок уроков собирается из реестра на старте сессии (ADR-087):
+        // область — рабочий каталог сессии, пути задачи уточнят его на ходу.
+        let lessons_block = crate::lesson_block::block(&config, &tool_ctx.cwd, &[]);
         let mut session = Self {
             config,
             provider,
             tools,
+            lazy: None,
+            eager: HashSet::new(),
             tool_ctx,
             system_prompt,
+            lessons_block,
+            lessons_paths: Vec::new(),
+            lessons_query: None,
             history: Vec::new(),
             log_path,
             log_file,
@@ -225,6 +253,17 @@ impl AgentSession {
         }
         session.fire_hook(crate::hooks::HookEvent::SessionStart, None, "{}");
         session
+    }
+
+    /// Включает ленивую загрузку доменных схем (ADR-090): `eager` — имена,
+    /// чьи схемы всегда в запросе (ядро + профиль), `lazy` — разделяемое
+    /// состояние кэша/каталога. Без вызова — полный профиль (все схемы в
+    /// каждом запросе, как до волны 3).
+    #[must_use]
+    pub fn with_lazy_tools(mut self, eager: HashSet<String>, lazy: crate::tools::ToolLazy) -> Self {
+        self.eager = eager;
+        self.lazy = Some(lazy);
+        self
     }
 
     /// Honest-refusal (ADR-083 §5): провайдер `kind = "cli"` не умеет
@@ -281,6 +320,9 @@ impl AgentSession {
                 crate::hooks::block_reason(&outcomes)
             )));
         }
+        // Блок уроков уточняется под ввод (пути задачи, BM25) — до запроса
+        // к модели: «перед каждым ходом» (ADR-087).
+        self.retarget_lessons_block(input);
         self.history.push(ChatMessage::user(input));
         self.log_event("user", serde_json::json!({ "content": input }));
         self.emit_context_usage(&events);
@@ -304,7 +346,7 @@ impl AgentSession {
                     streamed = true;
                     race_cancel(self.cancel.clone(), self.stream_request(request, tx)).await
                 }
-                _ => race_cancel(self.cancel.clone(), self.complete_capture_usage(request)).await,
+                _ => race_cancel(self.cancel.clone(), self.complete_and_capture(request)).await,
             };
             // Отмена во время запроса к модели: история консистентна
             // (висячих tool-вызовов нет) — просто завершаем ход.
@@ -353,7 +395,7 @@ impl AgentSession {
                                     _ => {
                                         race_cancel(
                                             self.cancel.clone(),
-                                            self.complete_capture_usage(request),
+                                            self.complete_and_capture(request),
                                         )
                                         .await
                                     }
@@ -382,11 +424,8 @@ impl AgentSession {
                                     .await
                             }
                             _ => {
-                                race_cancel(
-                                    self.cancel.clone(),
-                                    self.complete_capture_usage(request),
-                                )
-                                .await
+                                race_cancel(self.cancel.clone(), self.complete_and_capture(request))
+                                    .await
                             }
                         };
                         let Some(retried) = retry else {
@@ -539,6 +578,12 @@ impl AgentSession {
                         }
                     }
                 };
+                // Ленивая загрузка (ADR-090): вызов незагруженного доменного
+                // инструмента подгружает его схему (не падает) — следующий ход
+                // увидит её в списке доступных.
+                if let Some(lazy) = &self.lazy {
+                    lazy.mark_loaded(&call.name);
+                }
                 // Редакция секретов до событий/истории/журнала: вывод
                 // инструмента мог содержать ключи из .env, конфигов, PEM.
                 let mut redacted = self.redactor.redact(&out.content);
@@ -724,7 +769,7 @@ impl AgentSession {
                 final_streamed = true;
                 self.stream_request(request, tx).await
             }
-            _ => self.complete_capture_usage(request).await,
+            _ => self.complete_and_capture(request).await,
         }?;
         if !final_streamed {
             self.emit_reasoning_full(&events, &reply).await;
@@ -862,10 +907,27 @@ impl AgentSession {
         self.tools.names()
     }
 
-    /// Спецификации инструментов с описаниями (для `/tools`).
+    /// Спецификации инструментов с описаниями (для `/tools`). При ленивом
+    /// профиле (ADR-090) — только ядро плюс загруженные доменные схемы.
     #[must_use]
     pub fn tool_specs(&self) -> Vec<crate::llm::ToolSpec> {
-        self.tools.specs()
+        self.active_tool_specs()
+    }
+
+    /// Спеки, которые попадут в запрос к модели: при ленивом профиле — ядро
+    /// плюс загруженные доменные (ADR-090); иначе — полный реестр.
+    fn active_tool_specs(&self) -> Vec<crate::llm::ToolSpec> {
+        match &self.lazy {
+            Some(lazy) => {
+                let loaded = lazy.loaded_names();
+                self.tools
+                    .specs()
+                    .into_iter()
+                    .filter(|s| self.eager.contains(&s.name) || loaded.contains(&s.name))
+                    .collect()
+            }
+            None => self.tools.specs(),
+        }
     }
 
     /// Путь к журналу сессии (None — журнал не открыт).
@@ -906,6 +968,11 @@ impl AgentSession {
         self.history.clear();
         self.detectors.reset();
         self.l3_futile = false;
+        // Новая сессия — блок уроков пересобирается из реестра, отбор
+        // возвращается к области репозитория (ADR-087).
+        self.lessons_paths.clear();
+        self.lessons_query = None;
+        self.refresh_lessons_block();
         let prompt = self.system_prompt.clone();
         self.log_event("system", serde_json::json!({ "content": prompt }));
         self.fire_hook(crate::hooks::HookEvent::SessionStart, None, "{}");
@@ -1076,7 +1143,7 @@ impl AgentSession {
                     *streamed = true;
                     race_cancel(self.cancel.clone(), self.stream_request(cont_req, tx)).await
                 }
-                _ => race_cancel(self.cancel.clone(), self.complete_capture_usage(cont_req)).await,
+                _ => race_cancel(self.cancel.clone(), self.complete_and_capture(cont_req)).await,
             };
             let part = match cont {
                 Some(Ok(part)) => part,
@@ -1213,7 +1280,9 @@ impl AgentSession {
     /// [`sanitize_tool_pairs`]: crate::llm::sanitize_tool_pairs
     fn build_request(&self) -> (ChatRequest, ToolPairRepair) {
         let mut messages = Vec::with_capacity(self.history.len() + 1);
-        messages.push(ChatMessage::system(self.system_prompt.clone()));
+        // Закреплённый блок уроков — в системном промпте каждого запроса
+        // (ADR-087): история компактифицируется, блок — нет.
+        messages.push(ChatMessage::system(self.effective_system_prompt()));
         messages.extend(self.history.iter().cloned());
         let repair = crate::llm::sanitize_tool_pairs(&mut messages);
         if repair.repaired() {
@@ -1226,7 +1295,7 @@ impl AgentSession {
         let mc = self.config.models.get(self.provider.name());
         let request = ChatRequest {
             messages,
-            tools: self.tools.specs(),
+            tools: self.active_tool_specs(),
             temperature: mc.and_then(|m| m.temperature),
             max_tokens: mc.and_then(|m| m.max_tokens),
             thinking: self.thinking,
@@ -1249,6 +1318,21 @@ impl AgentSession {
                 }),
             );
         }
+    }
+
+    /// Нестриминговый запрос с захватом статистики токенов (B7, L11):
+    /// `complete` отдаёт только текст, поэтому usage нестримингового ответа
+    /// API терялся. `complete_with_usage` возвращает и счётчики — они
+    /// кладутся в `last_usage` и попадают в журнал записью `usage` при
+    /// логировании ответа (как в стриме). Провайдер usage не отдал (нули) —
+    /// записи в журнале не будет.
+    async fn complete_and_capture(&mut self, request: ChatRequest) -> Result<ChatMessage> {
+        self.last_usage = None;
+        let (msg, usage) = self.provider.complete_with_usage(request).await?;
+        if usage.total() > 0 {
+            self.last_usage = Some(usage);
+        }
+        Ok(msg)
     }
 
     /// Стриминговый запрос: дельты провайдера пересылаются как
@@ -1306,19 +1390,6 @@ impl AgentSession {
         result
     }
 
-    /// Нестриминговый запрос с захватом статистики токенов (баг из разбора
-    /// «две гипотезы», 2026-10-14: в non-stream режиме usage в журнал не
-    /// писался — стоимость ICL не измерялась). Нули-заглушка провайдера
-    /// («usage не прислан») записи не даёт — отсутствие записи честно
-    /// отличает «не было данных» от «израсходовано 0».
-    async fn complete_capture_usage(&mut self, req: ChatRequest) -> Result<ChatMessage> {
-        let (msg, usage) = self.provider.complete_with_usage(req).await?;
-        if usage.total() > 0 {
-            self.last_usage = Some(usage);
-        }
-        Ok(msg)
-    }
-
     /// Запись `usage` в журнал по итогам ответа LLM (реальные токены из
     /// `stream_options.include_usage`). Вызывается после каждого логирования
     /// assistant-сообщения; провайдер usage не отдал (None) — записи нет.
@@ -1334,6 +1405,54 @@ impl AgentSession {
                 "completion_tokens": usage.completion_tokens,
             }),
         );
+    }
+
+    /// Блок уроков, закреплённый за сессией (ADR-087, L3): пусто при
+    /// `[lessons] enabled = false` или пустом реестре.
+    #[must_use]
+    pub fn lessons_block(&self) -> &str {
+        &self.lessons_block
+    }
+
+    /// Системный промпт запроса: база плюс закреплённый блок уроков.
+    ///
+    /// Блок живёт **вне** истории: компактификация (L1-маскирование,
+    /// прунинг, L3-саммари) физически не может его «пересказать» — она режет
+    /// историю, а блок приходит из реестра при каждой сборке запроса.
+    #[must_use]
+    pub fn effective_system_prompt(&self) -> String {
+        crate::lesson_block::augment_system_prompt(&self.system_prompt, &self.lessons_block)
+    }
+
+    /// Пересобирает блок уроков из реестра (ADR-087).
+    ///
+    /// Вызывается после каждой компактификации и на каждом пользовательском
+    /// вводе: урок, выведенный из реестра (`retired`, рост `misses`), исчезает
+    /// из блока, а новый — появляется, без перезапуска сессии. Ошибки чтения
+    /// реестра гасит сам сборщик (fail-soft), ход агента они не рвут.
+    fn refresh_lessons_block(&mut self) {
+        let block = crate::lesson_block::build_report(
+            &self.config,
+            &self.tool_ctx.cwd,
+            &self.lessons_paths,
+            self.lessons_query.as_deref(),
+        )
+        .block;
+        if block != self.lessons_block {
+            self.lessons_block = block;
+        }
+    }
+
+    /// Уточняет отбор блока по тексту пользовательского ввода: пути — для
+    /// scope-отбора, текст — для BM25 (та же логика, что у хука
+    /// `user-prompt-submit`, но внутри harness-сессии).
+    fn retarget_lessons_block(&mut self, input: &str) {
+        if !self.config.lessons.enabled {
+            return;
+        }
+        self.lessons_paths = crate::lesson_block::paths_from_text(input);
+        self.lessons_query = Some(input.chars().take(LESSONS_QUERY_MAX_CHARS).collect());
+        self.refresh_lessons_block();
     }
 
     /// Эффективный бюджет контекста: min(`agent.context_budget_tokens`,
@@ -1389,6 +1508,11 @@ impl AgentSession {
         self.fire_hook(crate::hooks::HookEvent::PreCompact, None, "{}");
         let truncated = self.mask_old_tool_results();
         let folded = self.l3_summarize().await?;
+        // Блок уроков пересобирается из реестра ПОСЛЕ обеих ступеней
+        // компактификации (ADR-087): история могла содержать урок свободным
+        // текстом — он мог быть замаскирован (L1) или пересказан саммари (L3),
+        // поэтому авторитетный источник блока — реестр, а не история (B5).
+        self.refresh_lessons_block();
         let after: usize = self.history.iter().map(ChatMessage::rough_tokens).sum();
         self.log_event(
             "event",
@@ -1480,6 +1604,8 @@ impl AgentSession {
             }
         }
         if truncated > 0 || removed > 0 || l3_folded > 0 {
+            // Блок уроков — из реестра, а не из урезанной истории (B5).
+            self.refresh_lessons_block();
             self.fire_hook(crate::hooks::HookEvent::PostCompact, None, "{}");
         }
     }

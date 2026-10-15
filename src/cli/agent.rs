@@ -2,6 +2,7 @@
 //! Обработчики агентного запуска: `arch-be run` и системный промпт
 //! по умолчанию (B1: выделено из `main.rs`; модуль есть только в сборке `harness`).
 
+use std::collections::HashSet;
 use std::io::{IsTerminal, Read as _, Write as _};
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,6 +13,7 @@ use arch_harness::agent::AgentSession;
 use arch_harness::config::Config;
 use arch_harness::llm::LlmRegistry;
 use arch_harness::tool::ToolContext;
+use arch_harness::tools::{ToolLazy, ToolProfile};
 
 /// Опции headless-прогона `arch-be run` (бюджеты).
 #[cfg(feature = "harness")]
@@ -20,7 +22,9 @@ pub(crate) struct RunOptions {
     pub(crate) timeout_secs: Option<u64>,
     /// Переопределение `agent.max_tool_turns` на прогон.
     pub(crate) max_turns: Option<u64>,
-    /// Профиль прогона (ADR-083 п.3): `reverse` — восстановление архитектуры.
+    /// Профиль прогона: `reverse` (ADR-083 п.3) — восстановление архитектуры;
+    /// `orchestrate`/`architect` (ADR-090) — ленивая загрузка доменных схем;
+    /// `full` — полный реестр (дефолт).
     pub(crate) profile: Option<String>,
 }
 
@@ -67,6 +71,14 @@ pub(crate) async fn cmd_run(
         None => None,
     };
 
+    // Tool-профиль прогона (ADR-090): orchestrate/architect — ленивая загрузка
+    // доменных схем; full/reverse — полный реестр (как до волны 3).
+    let tool_profile = opts
+        .profile
+        .as_deref()
+        .map(parse_tool_profile)
+        .transpose()?
+        .flatten();
     // Бюджет итераций и профиль прогона — на клоне конфига, глобальный не трогаем.
     let cfg = if opts.max_turns.is_some() || opts.profile.is_some() {
         let mut owned = (**cfg).clone();
@@ -91,7 +103,20 @@ pub(crate) async fn cmd_run(
         Some(name) => registry.get(name)?,
         None => registry.default(),
     };
-    let tools = arch_harness::tools::session_registry(&cfg);
+    // Инструментарий: явный флаг `--profile` (ADR-090) приоритетнее конфига
+    // `[agent] tools_profile` (main 0.4.13, дефолт full); без флага — реестр
+    // сессии по профилю из конфига (session_registry). Для ленивых профилей —
+    // реестр + ядро + кэш (ADR-090).
+    let mut lazy_tools: Option<(HashSet<String>, ToolLazy)> = None;
+    let tools = match tool_profile {
+        Some(profile) => {
+            let (registry, eager, lazy) =
+                arch_harness::tools::lazy_toolset(&cfg, profile).into_parts();
+            lazy_tools = Some((eager, lazy));
+            registry
+        }
+        None => arch_harness::tools::session_registry(&cfg),
+    };
     let cwd = std::env::current_dir().context("cwd")?;
     let tool_ctx = ToolContext::new(cwd, cfg.clone())
         .with_llm(registry.clone())
@@ -99,6 +124,9 @@ pub(crate) async fn cmd_run(
         .with_subagents(arch_harness::subagent::SubagentRegistry::new());
     let system = default_system_prompt(&cfg);
     let mut session = AgentSession::new(cfg.clone(), provider, tools, tool_ctx, system);
+    if let Some((eager, lazy)) = lazy_tools {
+        session = session.with_lazy_tools(eager, lazy);
+    }
     session.set_thinking(thinking);
 
     let send = async {
@@ -183,6 +211,8 @@ pub(crate) async fn cmd_run(
 /// выключен, исходники read-only, запись — только в `out/`, встроенные
 /// скиллы при пустой библиотеке). Логика профиля — в [`Config`], здесь
 /// только маршрутизация имени с честным отказом на неизвестное.
+/// `orchestrate`/`architect`/`full` конфиг не трогают — это tool-профили
+/// (ADR-090), их разбирает [`parse_tool_profile`].
 #[cfg(feature = "harness")]
 fn apply_profile(cfg: &mut Config, profile: &str) -> Result<()> {
     match profile {
@@ -190,9 +220,24 @@ fn apply_profile(cfg: &mut Config, profile: &str) -> Result<()> {
             cfg.apply_reverse_profile();
             Ok(())
         }
-        other => {
-            anyhow::bail!("--profile: неизвестный профиль '{other}' (допустимо: reverse)")
-        }
+        "orchestrate" | "architect" | "full" => Ok(()),
+        other => anyhow::bail!(
+            "--profile: неизвестный профиль '{other}' (допустимо: orchestrate|architect|reverse|full)"
+        ),
+    }
+}
+
+/// Разбирает `--profile` в ленивый tool-профиль (ADR-090): `orchestrate`/
+/// `architect` → `Some(..)`; `full`/`reverse` → `None` (полный реестр).
+#[cfg(feature = "harness")]
+fn parse_tool_profile(profile: &str) -> Result<Option<ToolProfile>> {
+    match profile {
+        "orchestrate" => Ok(Some(ToolProfile::Orchestrate)),
+        "architect" => Ok(Some(ToolProfile::Architect)),
+        "full" | "reverse" => Ok(None),
+        other => anyhow::bail!(
+            "--profile: неизвестный профиль '{other}' (допустимо: orchestrate|architect|reverse|full)"
+        ),
     }
 }
 
@@ -212,14 +257,10 @@ fn default_system_prompt(cfg: &Config) -> String {
     let memory = arch_harness::memory::load(&cfg.paths.memory_file)
         .ok()
         .flatten();
-    let with_memory = arch_harness::memory::augment_system_prompt(
-        &base,
-        memory.as_deref(),
-        &cfg.paths.memory_file,
-    );
-    // Уроки прошлых сбоев — в системный промпт (живёт вне истории, L1/L3
-    // компактификация его не сжимает).
-    arch_harness::failure_memory::augment_prompt_with_lessons(&with_memory, &cfg.paths.state_dir)
+    // Блок уроков контура добавляется не здесь, а в `effective_system_prompt`
+    // (закреплённый блок из реестра, ADR-087/L3) — единственный канал уроков;
+    // старый канал `failure_lessons.md` мигрировал в реестр (см. failure_memory).
+    arch_harness::memory::augment_system_prompt(&base, memory.as_deref(), &cfg.paths.memory_file)
 }
 
 /// Встроенный системный промпт (fallback, когда библиотека недоступна).

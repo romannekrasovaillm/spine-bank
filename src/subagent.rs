@@ -5,7 +5,10 @@
 //! на ревью-гейте, включая состязательную):
 //! - **свежий контекст**: субагент получает только поручение (+ явный блок
 //!   контекста), история родителя не наследуется — защита от загрязнения
-//!   и экономия токенов;
+//!   и экономия токенов. Из памяти контура доходит ровно один элемент —
+//!   закреплённый блок уроков реестра (ADR-087, B8): его дописывает в
+//!   системный промпт [`crate::agent::AgentSession`], поэтому субагент видит
+//!   проверенные гейтом правила, но не ход рассуждений родителя;
 //! - **фон**: запуск не блокирует ход — родитель продолжает и забирает
 //!   отчёт позже (`subagent_result`), статусы — `subagent_list`;
 //! - **least privilege**: whitelist инструментов из frontmatter спеки
@@ -150,6 +153,11 @@ pub struct SubagentRegistry {
     notify: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<BackgroundNotice>>>>,
     /// Ёмкость слотов (по умолчанию [`MAX_RUNNING`]; меньше — в тестах).
     capacity: usize,
+    /// Сопоставление фоновой задачи `hr-*` с worktree её прогона (стигмергия
+    /// флота L8/E6): заполняется при `harness_run(background=true)`, читается
+    /// при записи нового урока — перерисовать LESSONS.md во все активные
+    /// worktree. Задачи субагентов (`sa-*`) worktree не имеют и сюда не входят.
+    worktrees: Arc<Mutex<std::collections::HashMap<String, PathBuf>>>,
 }
 
 impl Default for SubagentRegistry {
@@ -158,6 +166,7 @@ impl Default for SubagentRegistry {
             tasks: Arc::new(Mutex::new(Vec::new())),
             notify: Arc::new(Mutex::new(None)),
             capacity: MAX_RUNNING,
+            worktrees: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
     }
 }
@@ -176,6 +185,7 @@ impl SubagentRegistry {
             tasks: Arc::new(Mutex::new(Vec::new())),
             notify: Arc::new(Mutex::new(None)),
             capacity,
+            worktrees: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -266,6 +276,32 @@ impl SubagentRegistry {
         if found {
             self.emit_notice(id, status);
         }
+    }
+
+    /// Сопоставляет фоновую задачу `hr-*` с worktree её прогона (стигмергия
+    /// флота L8): по id задача находит свой каталог, когда запись урока
+    /// требует перерисовать LESSONS.md во все активные worktree.
+    pub(crate) fn set_worktree(&self, id: &str, path: PathBuf) {
+        if let Ok(mut map) = self.worktrees.lock() {
+            map.insert(id.to_string(), path);
+        }
+    }
+
+    /// Worktree активных (ещё выполняющихся) фоновых задач `hr-*` в порядке
+    /// регистрации. Завершённые задачи (Done/Failed) и субагенты без worktree
+    /// не попадают — их файлы при стигмергии не трогаются.
+    #[must_use]
+    pub(crate) fn running_worktrees(&self) -> Vec<PathBuf> {
+        let tasks = self.tasks.lock().map_or_else(|_| Vec::new(), |t| t.clone());
+        let map = self
+            .worktrees
+            .lock()
+            .map_or_else(|_| std::collections::HashMap::new(), |m| m.clone());
+        tasks
+            .iter()
+            .filter(|t| t.status == TaskStatus::Running)
+            .filter_map(|t| map.get(&t.id).cloned())
+            .collect()
     }
 
     /// Запускает субагента в фоне; возвращает id задачи.
@@ -790,6 +826,41 @@ mod tests {
     }
 
     #[test]
+    fn running_worktrees_filters_completed_and_agents_without_worktree() {
+        let registry = SubagentRegistry::new();
+        let running = |id: &str| SubagentTask {
+            id: id.into(),
+            agent: "harness:fake".into(),
+            task: "прогон".into(),
+            status: TaskStatus::Running,
+            report: String::new(),
+            started_at: "t0".into(),
+            finished_at: None,
+        };
+        // Три фоновых прогона: первый уже завершён, два — активны.
+        let mut done = running("hr-1");
+        done.status = TaskStatus::Done;
+        registry.insert(done);
+        registry.set_worktree("hr-1", PathBuf::from("/wt/one"));
+        registry.insert(running("hr-2"));
+        registry.set_worktree("hr-2", PathBuf::from("/wt/two"));
+        registry.insert(running("hr-3"));
+        registry.set_worktree("hr-3", PathBuf::from("/wt/three"));
+        // Субагент (без worktree) не даёт пути, хотя и активен.
+        let mut sa = running("sa-9");
+        sa.agent = "auditor".into();
+        registry.insert(sa);
+
+        let mut active = registry.running_worktrees();
+        active.sort();
+        assert_eq!(
+            active,
+            vec![PathBuf::from("/wt/three"), PathBuf::from("/wt/two")],
+            "завершённые и субагенты не участвуют в стигмергии"
+        );
+    }
+
+    #[test]
     fn subset_and_excluding_shape_subagent_tools() {
         let reg = crate::tools::core_registry();
         let sub = reg.subset(&[
@@ -837,6 +908,107 @@ mod tests {
         // Отчёт продублирован файлом.
         let file = tmp.path().join(format!("reports/subagents/{id}.md"));
         assert!(file.is_file(), "нет файла отчёта: {}", file.display());
+    }
+
+    /// Провайдер, запоминающий системный промпт каждого запроса: проверка
+    /// состава свежего контекста субагента (B8, ADR-087).
+    #[derive(Debug, Clone)]
+    struct CaptureLlm(Arc<std::sync::Mutex<Vec<String>>>);
+
+    #[async_trait]
+    impl LlmProvider for CaptureLlm {
+        fn name(&self) -> &'static str {
+            "capture"
+        }
+        fn model(&self) -> &'static str {
+            "capture-1"
+        }
+        async fn complete(&self, req: ChatRequest) -> Result<ChatMessage> {
+            let system = req
+                .messages
+                .iter()
+                .find(|m| m.role == crate::llm::Role::System)
+                .map(|m| m.content.clone())
+                .unwrap_or_default();
+            if let Ok(mut seen) = self.0.lock() {
+                seen.push(system);
+            }
+            Ok(ChatMessage::assistant("ОТЧЁТ: готово", Vec::new()))
+        }
+    }
+
+    /// B8/ADR-087: в свежий контекст субагента передаётся блок уроков реестра
+    /// (контролируемая утечка опыта) — и больше ничего из памяти родителя.
+    #[tokio::test]
+    async fn fresh_subagent_context_carries_lessons_block_only() {
+        use crate::lessons::{Evidence, Ledger, LessonSource, Outcome, RecordInput, Signature};
+        let tmp = tempfile::tempdir().expect("tmp");
+        let mut cfg = Config::default();
+        cfg.paths.sessions_dir = tmp.path().join("sessions");
+        cfg.paths.reports_dir = tmp.path().join("reports");
+        cfg.plugins.include_hooks = false;
+        cfg.lessons.enabled = true;
+        cfg.lessons.user_dir = Some(tmp.path().join("user-lessons"));
+        let signature = Signature::new(LessonSource::Gate, "G5");
+        let id = signature.id();
+        Ledger::repo(tmp.path())
+            .record(
+                &RecordInput::new(
+                    signature,
+                    Evidence {
+                        run_id: "run-G5".into(),
+                        harness: None,
+                        verdict_excerpt: "[G5] нет __all__".into(),
+                        file: None,
+                        line: None,
+                        ts: "2026-10-14T10:00:00.000Z".into(),
+                        outcome: Outcome::Fail,
+                        task: Some("T1".into()),
+                    },
+                )
+                .with_statement("Публичный символ обязан попасть в __all__"),
+                &crate::lessons::Thresholds::default(),
+                "2026-10-14",
+            )
+            .expect("урок");
+
+        let registry = SubagentRegistry::new();
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let ctx = ToolContext::new(tmp.path().to_path_buf(), Arc::new(cfg))
+            .with_subagents(registry.clone());
+        let id_task = registry
+            .launch(
+                &general_spec(),
+                "проверь src/lib.rs",
+                None,
+                Arc::new(CaptureLlm(seen.clone())),
+                ctx,
+            )
+            .expect("launch");
+        for _ in 0..100 {
+            if registry
+                .get(&id_task)
+                .is_some_and(|t| t.status != TaskStatus::Running)
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let prompts = seen.lock().expect("mutex").clone();
+        assert_eq!(prompts.len(), 1, "ход субагента: {prompts:?}");
+        assert!(
+            prompts[0].contains(crate::lesson_block::HEADER),
+            "блок уроков в свежем контексте: {}",
+            prompts[0]
+        );
+        assert!(prompts[0].contains(&id), "{}", prompts[0]);
+        // Область отбора — пути из поручения субагента; история родителя
+        // не наследуется (её в промпте нет по построению).
+        assert!(
+            !prompts[0].contains("Контекст от родительского агента"),
+            "{}",
+            prompts[0]
+        );
     }
 
     #[tokio::test]

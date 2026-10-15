@@ -25,6 +25,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{HarnessError, Result};
+use crate::lessons as ledger;
 
 /// Имя файла состояния счётчиков в `paths.state_dir`.
 pub const STATE_FILE: &str = "failure_memory.json";
@@ -229,6 +230,185 @@ impl FailureMemory {
 #[must_use]
 pub fn signature(tool: &str, error: &str) -> String {
     format!("{tool}:{}", error_class(error))
+}
+
+/// Источник сбоя, порождающего урок (ADR-085: источник — часть подписи).
+///
+/// Память сбоев поймала только ошибки *инструментов* (B1): FAIL приёмочного
+/// гейта и нарушение fitness-правила проходили мимо. Здесь эти источники
+/// получают ту же форму подписи, что и реестр уроков, — один сбой одного рода
+/// даёт один `LSN-…` независимо от того, кто его заметил.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FailureSource {
+    /// Сбой инструмента (подпись `tool:class`).
+    Tool,
+    /// FAIL приёмочного гейта (код вида `G5`).
+    Gate,
+    /// Нарушение fitness-правила реестра ограничений (id правила).
+    Fitness,
+}
+
+impl FailureSource {
+    /// Каноническая строка источника (как в реестре уроков).
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Tool => "tool",
+            Self::Gate => "gate",
+            Self::Fitness => "fitness",
+        }
+    }
+
+    /// Источник урока реестра (ADR-085) для этого класса сбоя.
+    #[must_use]
+    pub fn lesson_source(self) -> ledger::LessonSource {
+        match self {
+            Self::Tool => ledger::LessonSource::Tool,
+            Self::Gate => ledger::LessonSource::Gate,
+            Self::Fitness => ledger::LessonSource::Fitness,
+        }
+    }
+}
+
+/// Подпись урока реестра для сбоя источника (ADR-085/ADR-087).
+///
+/// `detail` — код гейта (`G5`), id правила или класс сбоя инструмента (в форме
+/// [`signature`]: `read_file:io: <путь> not found`). Идентификатор `LSN-…`
+/// стабилен: один и тот же сбой всегда даёт один и тот же урок.
+#[must_use]
+pub fn lesson_signature(source: FailureSource, detail: &str) -> ledger::Signature {
+    ledger::Signature::new(source.lesson_source(), detail)
+}
+
+/// Разобранный урок файла `failure_lessons.md` (для миграции в реестр).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MigratedLesson {
+    /// Подпись сбоя (`tool:class`) — она же `run_id` доказательства.
+    pub signature: String,
+    /// Имя инструмента.
+    pub tool: String,
+    /// Нормализованный класс ошибки.
+    pub class: String,
+    /// Пример вывода (первая строка последнего случая).
+    pub sample: String,
+    /// ISO-метка последнего случая.
+    pub last_seen: String,
+    /// Число случаев на момент формирования урока.
+    pub count: u32,
+}
+
+impl MigratedLesson {
+    /// Формулировка правила для реестра (без LLM: факт сбоя плюс действие).
+    #[must_use]
+    pub fn statement(&self) -> String {
+        format!(
+            "Инструмент «{}» повторно падает с одним классом ошибки «{}» (случаев: {}) — \
+             обходите причину, а не повторяйте вызов.",
+            self.tool, self.class, self.count
+        )
+    }
+}
+
+/// Разбирает `failure_lessons.md` (формат [`Lesson::to_markdown`]) в записи
+/// миграции. Битые/неполные блоки пропускаются — файл историчен и мог быть
+/// дописан вручную.
+#[must_use]
+pub fn parse_lessons_md(text: &str) -> Vec<MigratedLesson> {
+    let mut out = Vec::new();
+    // Блок начинается заголовком `## `; файл может начинаться с него же —
+    // тогда ведущего перевода строки нет, и первый блок иначе потерялся бы.
+    let normalized = if text.starts_with("## ") {
+        format!("\n{text}")
+    } else {
+        text.to_string()
+    };
+    for block in normalized.split("\n## ").skip(1) {
+        let mut lines = block.lines();
+        let Some(header) = lines.next() else {
+            continue;
+        };
+        // Заголовок: `{ts} · `{tool}` · {class}`.
+        let parts: Vec<&str> = header.split(" · ").collect();
+        if parts.len() < 3 {
+            continue;
+        }
+        let last_seen = parts[0].trim().to_string();
+        let tool = parts[1].trim().trim_matches('`').to_string();
+        let class = parts[2].trim().to_string();
+        let mut signature = String::new();
+        let mut sample = String::new();
+        let mut count = 0u32;
+        for line in lines {
+            let line = line.trim();
+            if let Some(rest) = line.strip_prefix("- Подпись: ") {
+                signature = rest.trim().trim_matches('`').to_string();
+            } else if let Some(rest) = line.strip_prefix("- Случаев: ") {
+                count = rest
+                    .split_whitespace()
+                    .next()
+                    .and_then(|n| n.parse::<u32>().ok())
+                    .unwrap_or(0);
+            } else if let Some(rest) = line.strip_prefix("- Пример вывода: ") {
+                sample = rest.trim().trim_matches('`').to_string();
+            }
+        }
+        if signature.is_empty() || tool.is_empty() {
+            continue;
+        }
+        out.push(MigratedLesson {
+            signature,
+            tool,
+            class,
+            sample,
+            last_seen,
+            count,
+        });
+    }
+    out
+}
+
+/// Мигрирует предложенные уроки памяти сбоев (`failure_lessons.md`) в реестр
+/// уроков (ADR-087; закрывает B2 — файл, который никто не читал).
+///
+/// Каждый разобранный урок записывается доказательством `fail` с источником
+/// `tool`; `run_id` — подпись сбоя, `ts` — последний случай. Повторный прогон
+/// доказательств не плодит (дедупликация реестра по `run_id`/`ts`/`outcome`),
+/// поэтому миграцию можно звать идемпотентно. Отсутствие файла — не ошибка:
+/// мигрировать нечего.
+///
+/// # Errors
+/// Ошибка чтения файла уроков (кроме «нет файла») или записи в реестр.
+pub fn migrate_to_ledger(
+    lessons_file: &Path,
+    ledger: &ledger::Ledger,
+    th: &ledger::Thresholds,
+    today: &str,
+) -> Result<usize> {
+    let text = match std::fs::read_to_string(lessons_file) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(HarnessError::io(lessons_file, e)),
+    };
+    let parsed = parse_lessons_md(&text);
+    for lesson in &parsed {
+        let input = ledger::RecordInput::new(
+            lesson_signature(FailureSource::Tool, &lesson.signature),
+            ledger::Evidence {
+                run_id: lesson.signature.clone(),
+                harness: None,
+                verdict_excerpt: lesson.sample.clone(),
+                file: None,
+                line: None,
+                ts: lesson.last_seen.clone(),
+                outcome: ledger::Outcome::Fail,
+                task: Some(lesson.tool.clone()),
+            },
+        )
+        .with_statement(lesson.statement())
+        .with_recorder("failure-memory");
+        ledger.record(&input, th, today)?;
+    }
+    Ok(parsed.len())
 }
 
 /// Нормализованный класс ошибки: первая строка вывода, где токены-пути
@@ -524,6 +704,120 @@ mod tests {
             reloaded
                 .note_failure("bash", "команда /usr/local/bin/hg не найдена")
                 .is_some()
+        );
+    }
+
+    /// Источники `gate` и `fitness` дают те же подписи реестра, что источник
+    /// `tool` (ADR-087): FAIL гейта и нарушение правила больше не «невидимы».
+    #[test]
+    fn gate_and_fitness_sources_produce_ledger_signatures() {
+        assert_eq!(FailureSource::Tool.as_str(), "tool");
+        assert_eq!(FailureSource::Gate.as_str(), "gate");
+        assert_eq!(FailureSource::Fitness.as_str(), "fitness");
+        assert_eq!(
+            FailureSource::Gate.lesson_source(),
+            ledger::LessonSource::Gate
+        );
+        assert_eq!(
+            FailureSource::Fitness.lesson_source(),
+            ledger::LessonSource::Fitness
+        );
+        let gate = lesson_signature(FailureSource::Gate, "G5");
+        assert_eq!(gate.source, ledger::LessonSource::Gate);
+        assert_eq!(gate.code, "G5");
+        assert_eq!(gate.id(), lesson_signature(FailureSource::Gate, "G5").id());
+        let fitness = lesson_signature(FailureSource::Fitness, "RULE-17");
+        assert_eq!(fitness.source, ledger::LessonSource::Fitness);
+        assert_ne!(gate.id(), fitness.id(), "разные источники — разные уроки");
+        // Подпись инструмента — та же форма, что у памяти сбоев.
+        let tool = lesson_signature(FailureSource::Tool, &signature("read_file", "io: нет"));
+        assert_eq!(tool.source, ledger::LessonSource::Tool);
+        assert!(tool.code.starts_with("read_file:"), "{}", tool.code);
+    }
+
+    /// Формат `failure_lessons.md` разбирается обратно в записи (нужно для
+    /// миграции: файл писался человеку, а читает его теперь реестр).
+    #[test]
+    fn lessons_md_roundtrip_parses_to_migration_records() {
+        let lesson = Lesson {
+            signature: "read_file:io: <путь> not found".into(),
+            tool: "read_file".into(),
+            class: "io: <путь> not found".into(),
+            sample: "io: /a/x.txt: not found".into(),
+            first_seen: "2026-10-13T10:00:00.000Z".into(),
+            last_seen: "2026-10-14T10:00:00.000Z".into(),
+            count: 2,
+        };
+        let parsed = parse_lessons_md(&lesson.to_markdown());
+        assert_eq!(parsed.len(), 1, "{parsed:?}");
+        let rec = &parsed[0];
+        assert_eq!(rec.signature, "read_file:io: <путь> not found");
+        assert_eq!(rec.tool, "read_file");
+        assert_eq!(rec.class, "io: <путь> not found");
+        assert_eq!(rec.count, 2);
+        assert_eq!(rec.last_seen, "2026-10-14T10:00:00.000Z");
+        assert!(rec.statement().contains("read_file"));
+
+        // Мусор и пустой файл — пусто, без паники.
+        assert_eq!(parse_lessons_md("").len(), 0, "пустой файл");
+        assert_eq!(
+            parse_lessons_md("## не заголовок урока\n\nтекст\n").len(),
+            0,
+            "неполный блок пропущен"
+        );
+    }
+
+    /// Миграция: уроки из `failure_lessons.md` попадают в реестр, повторный
+    /// прогон идемпотентен, отсутствие файла — не ошибка (B1, B2).
+    #[test]
+    fn migration_moves_failure_lessons_into_registry() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let lesson = Lesson {
+            signature: "bash:код 2".into(),
+            tool: "bash".into(),
+            class: "код 2".into(),
+            sample: "exit 2".into(),
+            first_seen: "2026-10-13T10:00:00.000Z".into(),
+            last_seen: "2026-10-14T10:00:00.000Z".into(),
+            count: 2,
+        };
+        let file = tmp.path().join("failure_lessons.md");
+        append_lesson(&file, &lesson.to_markdown()).expect("append");
+
+        let ledger_handle = ledger::Ledger::at(tmp.path().join("ledger.jsonl"));
+        let th = ledger::Thresholds::default();
+        assert_eq!(
+            migrate_to_ledger(&file, &ledger_handle, &th, "2026-10-14").expect("миграция"),
+            1
+        );
+        let snapshot = ledger_handle.snapshot(&th).expect("snapshot");
+        assert_eq!(snapshot.lessons.len(), 1, "урок в реестре");
+        let migrated = &snapshot.lessons[0];
+        assert_eq!(migrated.signature.source, ledger::LessonSource::Tool);
+        assert_eq!(migrated.signature.code, "bash:код 2");
+        assert_eq!(migrated.provenance.recorder, "failure-memory");
+        assert!(migrated.statement.contains("баш") || migrated.statement.contains("bash"));
+
+        // Идемпотентность: доказательства не дублируются.
+        let before = snapshot.lessons[0].evidence.len();
+        migrate_to_ledger(&file, &ledger_handle, &th, "2026-10-14").expect("повтор");
+        let again = ledger_handle.snapshot(&th).expect("snapshot 2");
+        assert_eq!(
+            again.lessons[0].evidence.len(),
+            before,
+            "доказательства не растут"
+        );
+
+        // Нет файла — мигрировать нечего, и это не ошибка.
+        assert_eq!(
+            migrate_to_ledger(
+                &tmp.path().join("нет-такого.md"),
+                &ledger_handle,
+                &th,
+                "2026-10-14"
+            )
+            .expect("нет файла"),
+            0
         );
     }
 

@@ -1,7 +1,10 @@
 //! Хуки жизненного цикла хоста (B1): команды Stop/PostToolUse с гардом,
 //! мердж в `.claude/settings.json`, сниппеты для печати (включая TOML-блок
-//! для Kimi Code).
+//! для Kimi Code). С версии 0.5.0 (L3, ADR-087) сюда же — хуки инъекции
+//! уроков `SessionStart`/`UserPromptSubmit`: они ставятся при
+//! `[lessons] enabled = true` и только печатают блок реестра в stdout.
 
+use std::fmt::Write as _;
 use std::path::Path;
 
 use serde_json::{Value, json};
@@ -9,6 +12,7 @@ use serde_json::{Value, json};
 use super::files::{commit_file, read_json_object};
 use super::types::ConnectReport;
 use crate::error::{HarnessError, Result};
+use crate::hook::HookKind;
 
 /// Маркер наших хуков: комментарий в конце команды; по нему повторный
 /// `connect` узнаёт свои записи и не плодит дубли.
@@ -17,6 +21,11 @@ pub(super) const HOOK_MARKER: &str = "spine-connect";
 const STOP_HOOK_TIMEOUT_SECS: u64 = 150;
 /// Таймаут PostToolUse-хука под `--strict-hooks`, секунды.
 const POST_TOOL_USE_HOOK_TIMEOUT_SECS: u64 = 300;
+/// Таймаут хуков уроков, секунды: чтение реестра с диска, без LLM и сети.
+const LESSONS_HOOK_TIMEOUT_SECS: u64 = 15;
+/// События хуков инъекции уроков (ADR-087): старт сессии и ввод пользователя.
+pub(super) const LESSONS_HOOKS: [HookKind; 2] =
+    [HookKind::SessionStart, HookKind::UserPromptSubmit];
 
 /// Команда Stop-хука Claude Code: тонкий shim на бинарь (ROADMAP 1.7 п.2).
 /// Вся семантика — якорь базы диффа, запуск `gate`, коды выхода (2 — блок,
@@ -40,6 +49,29 @@ pub(super) fn post_tool_use_hook_command() -> String {
     format!(
         "if command -v arch-be >/dev/null 2>&1; then arch-be hook post-tool-use; fi \
          # {HOOK_MARKER}:post-tool-use"
+    )
+}
+
+/// Событие хоста для хука урока (имена Claude Code; Kimi Code использует те же
+/// имена в `[[hooks]] event = …`).
+#[must_use]
+pub(super) fn lessons_hook_event(kind: HookKind) -> &'static str {
+    match kind {
+        HookKind::SessionStart => "SessionStart",
+        HookKind::UserPromptSubmit => "UserPromptSubmit",
+        _ => "Stop",
+    }
+}
+
+/// Команда хука инъекции уроков (ADR-087): тот же shim на бинарь. В отличие
+/// от хуков-гейтов stdout хука хост добавляет в контекст модели — это канал
+/// доставки блока уроков в Spine Core без своей LLM; код выхода всегда 0
+/// (память не блокирует работу).
+pub(super) fn lessons_hook_command(kind: HookKind) -> String {
+    let name = crate::hook::hook_subcommand_name(kind);
+    format!(
+        "if command -v arch-be >/dev/null 2>&1; then arch-be hook {name}; fi \
+         # {HOOK_MARKER}:{name}"
     )
 }
 
@@ -121,12 +153,14 @@ fn ensure_hook(
 }
 
 /// Мердж хуков в `.claude/settings.json`: событие `Stop` всегда,
-/// `PostToolUse` (matcher `Edit|Write|MultiEdit`) — под `--strict-hooks`.
-/// Чужие ключи и хуки не трогаются; записи прежних версий (shell-шаблоны с
-/// зашитой логикой) обновляются до shim'а на бинарь.
+/// `PostToolUse` (matcher `Edit|Write|MultiEdit`) — под `--strict-hooks`,
+/// `SessionStart`/`UserPromptSubmit` (инъекция уроков, ADR-087) — при
+/// `[lessons] enabled = true`. Чужие ключи и хуки не трогаются; записи прежних
+/// версий (shell-шаблоны с зашитой логикой) обновляются до shim'а на бинарь.
 pub(super) fn merge_claude_settings(
     path: &Path,
     strict: bool,
+    lessons: bool,
     dry_run: bool,
     report: &mut ConnectReport,
 ) -> Result<()> {
@@ -168,6 +202,24 @@ pub(super) fn merge_claude_settings(
             upgraded.push("PostToolUse");
         }
     }
+    if lessons {
+        for kind in LESSONS_HOOKS {
+            let event = lessons_hook_event(kind);
+            let (a, u) = ensure_hook(
+                hooks,
+                event,
+                None,
+                &lessons_hook_command(kind),
+                LESSONS_HOOK_TIMEOUT_SECS,
+            )?;
+            if a {
+                added.push(event);
+            }
+            if u {
+                upgraded.push(event);
+            }
+        }
+    }
     if !added.is_empty() {
         report.notes.push(format!(
             "хуки добавлены: {} (маркер «{HOOK_MARKER}» — повторный connect дублей не плодит)",
@@ -190,6 +242,14 @@ pub(super) fn merge_claude_settings(
          с command_succeeds-правилами)"
             .into(),
     );
+    if lessons {
+        report.notes.push(
+            "хуки уроков ([lessons] enabled = true, ADR-087): SessionStart/UserPromptSubmit \
+             печатают блок реестра в stdout — хост добавляет его в контекст модели; код выхода \
+             всегда 0 (память не блокирует); без реестра и при enabled = false вывод пуст"
+                .into(),
+        );
+    }
     let new = match serde_json::to_string_pretty(&Value::Object(root)) {
         Ok(text) => format!("{text}\n"),
         Err(e) => return Err(HarnessError::Json(e)),
@@ -199,7 +259,7 @@ pub(super) fn merge_claude_settings(
 
 /// Сниппет хуков для печати (формат Claude Code settings.json): те же
 /// команды, что пишутся мерджем, — у хостов без записи виден точный текст.
-pub(super) fn hooks_snippet(strict: bool) -> String {
+pub(super) fn hooks_snippet(strict: bool, lessons: bool) -> String {
     let mut hooks = serde_json::Map::new();
     // Свежая карта — ensure заведомо добавляет; ошибка формы невозможна.
     let _ = ensure_hook(
@@ -218,6 +278,17 @@ pub(super) fn hooks_snippet(strict: bool) -> String {
             POST_TOOL_USE_HOOK_TIMEOUT_SECS,
         );
     }
+    if lessons {
+        for kind in LESSONS_HOOKS {
+            let _ = ensure_hook(
+                &mut hooks,
+                lessons_hook_event(kind),
+                None,
+                &lessons_hook_command(kind),
+                LESSONS_HOOK_TIMEOUT_SECS,
+            );
+        }
+    }
     let v = json!({"hooks": Value::Object(hooks)});
     match serde_json::to_string_pretty(&v) {
         Ok(text) => text,
@@ -233,8 +304,8 @@ pub(super) fn hooks_snippet(strict: bool) -> String {
 /// только пользовательский уровень; семантика exit-кодов совпадает с
 /// Claude Code — 0 пропуск, 2 блок (stderr уходит модели), прочие сбои
 /// fail-open; рабочий каталог команды — каталог проекта сессии.
-pub(super) fn kimi_hooks_toml_block() -> String {
-    format!(
+pub(super) fn kimi_hooks_toml_block(lessons: bool) -> String {
+    let mut out = format!(
         "# Семантика: exit 0 — пропустить, exit 2 — блок (stderr уходит модели),\n\
          # прочие ошибки — fail-open. Команда выполняется в каталоге проекта.\n\
          [[hooks]]\n\
@@ -243,7 +314,25 @@ pub(super) fn kimi_hooks_toml_block() -> String {
          timeout = {}\n",
         toml_escape_basic(&stop_hook_command()),
         STOP_HOOK_TIMEOUT_SECS
-    )
+    );
+    if lessons {
+        let _ = write!(
+            out,
+            "\n# Хуки инъекции уроков ([lessons] enabled = true, ADR-087): stdout хука\n\
+             # хост добавляет в контекст модели; код выхода всегда 0 — память не блокирует\n\
+             # работу. Имена событий — как в Claude Code: сверьтесь с версией Kimi Code,\n\
+             # при ином имени событие просто не срабатывает (безопасно).\n"
+        );
+        for kind in LESSONS_HOOKS {
+            let _ = write!(
+                out,
+                "[[hooks]]\nevent = \"{}\"\ncommand = \"{}\"\ntimeout = {LESSONS_HOOK_TIMEOUT_SECS}\n\n",
+                lessons_hook_event(kind),
+                toml_escape_basic(&lessons_hook_command(kind))
+            );
+        }
+    }
+    out
 }
 
 /// Экранирует строку для встраивания в TOML basic string (печать сниппета):
@@ -301,7 +390,7 @@ mod tests {
         )
         .expect("settings");
         let mut report = ConnectReport::default();
-        merge_claude_settings(&path, false, false, &mut report).expect("merge");
+        merge_claude_settings(&path, false, false, false, &mut report).expect("merge");
         let text = std::fs::read_to_string(&path).expect("read");
         assert!(text.contains("arch-be hook stop"), "shim: {text}");
         assert!(
@@ -321,7 +410,95 @@ mod tests {
         );
         // Повторный connect — уже канон, ничего не меняет.
         let mut report2 = ConnectReport::default();
-        merge_claude_settings(&path, false, false, &mut report2).expect("повтор");
+        merge_claude_settings(&path, false, false, false, &mut report2).expect("повтор");
         assert_eq!(text, std::fs::read_to_string(&path).expect("read2"));
+    }
+
+    /// Хуки инъекции уроков (ADR-087): команда — тот же shim на бинарь,
+    /// stdout хука хост добавляет в контекст модели, поэтому блокировки нет.
+    #[test]
+    fn lessons_hook_commands_are_marked_shims() {
+        for kind in LESSONS_HOOKS {
+            let cmd = lessons_hook_command(kind);
+            assert!(cmd.contains("command -v arch-be"), "{cmd}");
+            assert!(cmd.contains("arch-be hook "), "{cmd}");
+            assert!(cmd.contains(HOOK_MARKER), "{cmd}");
+            assert!(!cmd.contains("exit 2"), "хук уроков не блокирует: {cmd}");
+        }
+        assert_eq!(
+            lessons_hook_command(HookKind::SessionStart),
+            stop_hook_command()
+                .replace("hook stop", "hook session-start")
+                .replace(":stop", ":session-start"),
+            "форма команды — та же, что у гейтов"
+        );
+        assert_eq!(
+            lessons_hook_event(HookKind::UserPromptSubmit),
+            "UserPromptSubmit"
+        );
+    }
+
+    /// При `[lessons] enabled = true` (флаг `lessons`) connect ставит оба
+    /// события, не трогая существующие записи; при `false` — не ставит.
+    #[test]
+    fn merge_adds_lessons_hooks_only_when_enabled() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let path = tmp.path().join("settings.json");
+        let mut report = ConnectReport::default();
+        merge_claude_settings(&path, false, false, false, &mut report).expect("without lessons");
+        let text = std::fs::read_to_string(&path).expect("read");
+        assert!(
+            !text.contains("session-start"),
+            "выключено — хука нет: {text}"
+        );
+
+        let mut report2 = ConnectReport::default();
+        merge_claude_settings(&path, false, true, false, &mut report2).expect("with lessons");
+        let text = std::fs::read_to_string(&path).expect("read2");
+        for event in ["SessionStart", "UserPromptSubmit"] {
+            assert!(text.contains(event), "нет события {event}: {text}");
+        }
+        assert!(text.contains("arch-be hook session-start"), "{text}");
+        assert!(text.contains("arch-be hook user-prompt-submit"), "{text}");
+        assert!(text.contains("arch-be hook stop"), "гейт-хук цел: {text}");
+        assert!(
+            report2.notes.iter().any(|n| n.contains("хуки уроков")),
+            "заметка о хуках уроков: {:?}",
+            report2.notes
+        );
+
+        // Идемпотентность: повторный connect с тем же флагом ничего не меняет.
+        let mut report3 = ConnectReport::default();
+        merge_claude_settings(&path, false, true, false, &mut report3).expect("повтор");
+        assert_eq!(text, std::fs::read_to_string(&path).expect("read3"));
+        assert!(
+            report3.notes.iter().all(|n| !n.contains("хуки добавлены")),
+            "повтор не добавляет записи: {:?}",
+            report3.notes
+        );
+    }
+
+    /// Сниппет и TOML-блок Kimi: хуки уроков появляются только под флагом,
+    /// схема блоков валидна как TOML (парсится).
+    #[test]
+    fn snippets_carry_lessons_hooks_when_enabled() {
+        let plain = hooks_snippet(false, false);
+        assert!(!plain.contains("SessionStart"), "{plain}");
+        let with = hooks_snippet(false, true);
+        assert!(with.contains("SessionStart") && with.contains("UserPromptSubmit"));
+        // Разбор JSON — проверка формы сниппета.
+        let parsed: Value = serde_json::from_str(&with).expect("JSON сниппета");
+        assert!(parsed.get("hooks").is_some(), "{with}");
+
+        let toml_plain = kimi_hooks_toml_block(false);
+        assert!(!toml_plain.contains("SessionStart"), "{toml_plain}");
+        let toml_lessons = kimi_hooks_toml_block(true);
+        assert!(toml_lessons.contains("SessionStart") && toml_lessons.contains("UserPromptSubmit"));
+        let parsed: toml::Value = toml::from_str(&toml_lessons).expect("TOML блока Kimi");
+        let hooks = parsed
+            .get("hooks")
+            .and_then(toml::Value::as_array)
+            .expect("массив [[hooks]]");
+        assert_eq!(hooks.len(), 3, "Stop + два события уроков: {toml_lessons}");
     }
 }

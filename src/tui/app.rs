@@ -1641,11 +1641,10 @@ fn system_prompt(cfg: &Config) -> String {
     };
     // Ошибка чтения памяти не фатальна: сессия работает без неё.
     let memory = crate::memory::load(&cfg.paths.memory_file).ok().flatten();
-    let with_memory =
-        crate::memory::augment_system_prompt(&base, memory.as_deref(), &cfg.paths.memory_file);
-    // Уроки прошлых сбоев — в системный промпт (живёт вне истории, L1/L3
-    // компактификация его не сжимает).
-    crate::failure_memory::augment_prompt_with_lessons(&with_memory, &cfg.paths.state_dir)
+    // Блок уроков контура добавляется в `effective_system_prompt` (закреплённый
+    // блок из реестра, ADR-087/L3); старый канал failure_lessons.md мигрировал
+    // в реестр (см. failure_memory).
+    crate::memory::augment_system_prompt(&base, memory.as_deref(), &cfg.paths.memory_file)
 }
 
 /// Максимум символов дескриптора действия в строке tool-блока.

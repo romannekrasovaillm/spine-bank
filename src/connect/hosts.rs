@@ -92,6 +92,7 @@ pub(super) fn connect_claude(opts: &ConnectOptions, report: &mut ConnectReport) 
         merge_claude_settings(
             &opts.dir.join(".claude/settings.json"),
             opts.strict_hooks,
+            opts.lessons,
             opts.dry_run,
             report,
         )?;
@@ -168,7 +169,7 @@ pub(super) fn connect_qwen(opts: &ConnectOptions, report: &mut ConnectReport) ->
         );
         report.snippets.push((
             "Хуки (формат Claude Code, референс)".to_string(),
-            hooks_snippet(opts.strict_hooks),
+            hooks_snippet(opts.strict_hooks, opts.lessons),
         ));
     }
     report.next_steps.extend([
@@ -271,7 +272,7 @@ pub(super) fn connect_gigacode(opts: &ConnectOptions, report: &mut ConnectReport
         );
         report.snippets.push((
             "Хуки (формат Claude Code, референс)".to_string(),
-            hooks_snippet(opts.strict_hooks),
+            hooks_snippet(opts.strict_hooks, opts.lessons),
         ));
     }
     report.next_steps.extend([
@@ -364,7 +365,7 @@ pub(super) fn connect_kimi(opts: &ConnectOptions, report: &mut ConnectReport) ->
             "Хук-гейт для Kimi Code — добавьте в ~/.kimi-code/config.toml \
              (проектного уровня у хуков нет; схема подтверждена докой Kimi Code):"
                 .to_string(),
-            kimi_hooks_toml_block(),
+            kimi_hooks_toml_block(opts.lessons),
         ));
     }
     if opts.skills {
@@ -474,7 +475,7 @@ pub(super) fn connect_generic(opts: &ConnectOptions, report: &mut ConnectReport)
         report.snippets.push((
             "Хуки (формат settings.json Claude Code; exit 2 = блок, stderr уходит агенту):"
                 .to_string(),
-            hooks_snippet(opts.strict_hooks),
+            hooks_snippet(opts.strict_hooks, opts.lessons),
         ));
     }
     if opts.skills {

@@ -32,6 +32,7 @@ use tokio::process::Command;
 
 use crate::config::{AcpMode, CodingHarnessConfig, Config, PromptMode};
 use crate::error::{HarnessError, Result};
+use crate::gate_loop::{GateVerdict, RunRef, VerdictStatus};
 use crate::handoff::{HANDOFF_DIR, git_out, recommended_timeout_secs};
 use crate::llm::ToolSpec;
 use crate::proc::kill_process_group;
@@ -43,6 +44,33 @@ pub mod acp;
 /// меньшие значения (модель оптимистично просит «5 минут») поднимаются —
 /// ранний обрыв оставлял репозиторий в полусобранном состоянии.
 const MIN_HARNESS_TIMEOUT_SECS: u64 = 600;
+
+/// Дефолтная команда приёмки (L2, ADR-086 п.1): включается, когда репозиторий
+/// несёт реестр правил в корне. Иначе приёмки нет — вывод прогона остаётся
+/// байт-в-байт прежним (совместимость 0.4.10).
+pub const DEFAULT_ACCEPT_CMD: &str = "arch-be gate .";
+
+/// Команда приёмки прогона (L2, ADR-086 п.1).
+///
+/// Порядок: поле адаптера `[harnesses.x].accept_cmd` (аргумент `accept`
+/// инструмента кладётся сюда же — он сильнее поля, см. `HarnessRunTool::call`);
+/// пустое значение — приёмка выключена явно; не задано — дефолт
+/// [`DEFAULT_ACCEPT_CMD`] при `CONSTRAINTS.yaml` В КОРНЕ репозитория.
+///
+/// Пакетный реестр (`.arch-handoff/CONSTRAINTS.yaml`) дефолт намеренно НЕ
+/// включает: это явный выбор адаптера, а не молчаливый прогон гейта на каждом
+/// `harness_run` (совместимость; реестр кейса живёт в корне — там же, где его
+/// видит `arch-be gate .`).
+#[must_use]
+pub fn resolve_accept(cfg: &CodingHarnessConfig, repo: &Path) -> Option<String> {
+    if let Some(command) = &cfg.accept_cmd {
+        let command = command.trim();
+        return (!command.is_empty()).then(|| command.to_string());
+    }
+    repo.join("CONSTRAINTS.yaml")
+        .is_file()
+        .then(|| DEFAULT_ACCEPT_CMD.to_string())
+}
 
 /// Имена известных кодовых харнессов.
 #[must_use]
@@ -85,11 +113,19 @@ pub struct HarnessRun {
     /// вне окружения исполнителя. `None` — пост-гейт отключён адаптером
     /// (`post_gate = false`) либо прогон прерван (судить нечего).
     pub post_gate: Option<PostGate>,
-    /// Приёмочная команда адаптера (`accept_cmd`, рекомендация 2 отчёта
-    /// «две гипотезы»): произвольный гейт владельца контура в корне
-    /// репозитория после завершения прогона. `None` — не настроена либо
-    /// прогон прерван (судить нечего).
+    /// Вердикт приёмки (L2, ADR-086): результат команды `accept`/`accept_cmd`,
+    /// приведённый к `gate-verdict/v1`. `None` — приёмка не задана (вывод
+    /// прогона тогда байт-в-байт как до ADR-086) либо прогон прерван жёстко
+    /// (судить промежуточное дерево нечем).
+    pub accept: Option<GateVerdict>,
+    /// Поверхность 0.4.13 того же исполнения приёмки (`accept_cmd`,
+    /// рекомендация 2 отчёта «две гипотезы»): вердикт по коду выхода и первая
+    /// строка stdout — для «Приёмка: …» в итоге и реестра конвенций. `None` —
+    /// как у [`Self::accept`].
     pub accept_gate: Option<AcceptGate>,
+    /// Идентификатор прогона (`<харнесс>-<UTC>`): ключ доказательств реестра
+    /// уроков и поле события `gate_verdict` (ADR-085/ADR-086).
+    pub run_id: String,
     /// Политика окружения прогона (C2): заметка о применённом whitelist или
     /// предупреждение о полном наследовании (`env_inherit = true`). `None` —
     /// обычный режим (Fast/Standard с наследованием) без замечаний.
@@ -630,12 +666,25 @@ async fn finalize_run(
     } else {
         None
     };
-    // Приёмочная команда адаптера (accept_cmd) — после пост-гейта, по тому же
-    // условию «судить есть что»: только завершённый (в т.ч. мягко) прогон.
-    let accept_gate = if termination.is_soft_completion() {
-        run_accept_gate(repo, cfg).await
+    // L2 (ADR-086) + рекомендация 2 отчёта «две гипотезы»: приёмка — после
+    // финализации (авто-коммит и пост-гейт уже отработали), ВНЕ песочницы
+    // исполнителя: команду запускает сам харнесс, в своём окружении, с рабочим
+    // каталогом прогона. Как и пост-гейт, только по завершённому прогону: у
+    // жёстко прерванного судить нечего. ОДНО исполнение команды приёмки —
+    // результат в двух поверхностях: `GateVerdict` (gate-verdict/v1, уроки,
+    // событие gate_verdict) и `AcceptGate` (0.4.13: «Приёмка: …» в итоге,
+    // реестр конвенций).
+    let (accept, accept_gate) = if termination.is_soft_completion() {
+        match resolve_accept(cfg, repo) {
+            Some(command) => {
+                let verdict = run_accept(repo, &command, cfg.post_gate_timeout_secs).await;
+                let gate = AcceptGate::from_verdict(&verdict);
+                (Some(verdict), Some(gate))
+            }
+            None => (None, None),
+        }
     } else {
-        None
+        (None, None)
     };
     // Реестр конвенций (рекомендация 1 отчёта «две гипотезы»): каждый красный
     // вердикт приёмки фиксируется артефактом в репозитории — урок переживает
@@ -655,23 +704,77 @@ async fn finalize_run(
     // Контракт разбирается один раз на стороне запуска — механически,
     // а не эвристикой у потребителей.
     let contract = parse_result_contract(&stdout);
+    // B3 (ADR-086 п.6): пост-гейт без handoff-манифеста больше не «пропуск
+    // молча» — если приёмка задана, пропуск назван явно вместе с тем, ЧЕМ
+    // результат проверен.
+    let mut post_gate = post_gate;
+    if accept.is_some() {
+        if let Some(pg) = post_gate.as_mut() {
+            if pg.verdict == PostGateVerdict::Skipped {
+                pg.summary.push_str(
+                    " (B3: пропуск не молчаливый — результат проверен командой приёмки, \
+                     вердикт в первой строке)",
+                );
+            }
+        }
+    }
     HarnessRun {
         harness: name.into(),
         exit_code,
         stdout,
         stderr,
         // Длительность считается в точке сборки итога (как до ADR-057:
-        // включает пост-гейт) — поведение headless не меняется.
+        // включает пост-гейт и приёмку) — поведение headless не меняется.
         duration_secs: started.elapsed().as_secs_f64(),
         termination,
         auto_commit,
         contract,
         post_gate,
+        accept,
         accept_gate,
+        run_id: format!("{name}-{}", Utc::now().format("%Y%m%dT%H%M%S")),
         env_note,
         mode,
         acp,
         mode_note: None,
+    }
+}
+
+/// Команда приёмки прогона (L2, ADR-086 п.2–3): `<bash> -c <команда>` в
+/// каталоге прогона, вне окружения исполнителя, с таймаутом пост-гейта и
+/// убийством всей процессной группы по истечении (тот же механизм, что у
+/// `command_succeeds`: сирот-внуков ранний таймаут не оставляет,
+/// `src/proc.rs`).
+///
+/// Вывод приводится к `gate-verdict/v1` ([`GateVerdict::from_output`]):
+/// JSON-конверт — «как есть», иначе построчный разбор кодов, статус по коду
+/// возврата. Незавершившаяся команда — вердикт TIMEOUT, сбой запуска — ERROR:
+/// непроверенный результат не выдаётся за принятый.
+async fn run_accept(repo: &Path, command: &str, timeout_secs: u64) -> GateVerdict {
+    let timeout = Duration::from_secs(timeout_secs.max(1));
+    let repo_owned = repo.to_path_buf();
+    let command_owned = command.to_string();
+    let started = Instant::now();
+    let outcome = tokio::task::spawn_blocking(move || {
+        crate::proc::run_shell(&repo_owned, "bash", &command_owned, timeout)
+    })
+    .await;
+    let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    match outcome {
+        Ok(Ok(out)) => match out.status {
+            Some(status) => GateVerdict::from_output(
+                command,
+                &String::from_utf8_lossy(&out.stdout),
+                &String::from_utf8_lossy(&out.stderr),
+                status.code(),
+                elapsed_ms,
+            ),
+            None => GateVerdict::timeout(command, timeout_secs, elapsed_ms),
+        },
+        Ok(Err(e)) => GateVerdict::error(command, &e.to_string(), elapsed_ms),
+        Err(join) => {
+            GateVerdict::error(command, &format!("сбой потока приёмки: {join}"), elapsed_ms)
+        }
     }
 }
 
@@ -1035,73 +1138,49 @@ async fn run_post_gate(
     }
 }
 
-/// Приёмочная команда прогона (`accept_cmd`; рекомендация 2 отчёта «две
-/// гипотезы», 2026-10-14): произвольный гейт владельца контура (скрипт
-/// приёмки репозитория), запускается в корне рабочего дерева после
-/// завершения прогона. Вердикт — код выхода (0 — PASS, прочее — FAIL),
-/// причина — первая непустая строка stdout; таймаут — общий бюджет проверок
-/// результата (`post_gate_timeout_secs`). `None` — команда не настроена.
-///
-/// stdio всегда перехватывается: прогон может идти внутри TUI-сеанса, чужой
-/// вывод на alternate screen ломает кадр (инцидент 2026-10-14).
-async fn run_accept_gate(repo: &Path, cfg: &CodingHarnessConfig) -> Option<AcceptGate> {
-    let cmd = cfg.accept_cmd.as_deref()?.trim().to_string();
-    if cmd.is_empty() {
+/// Ключ задачи для доказательства урока (ADR-085): первая строка задачи,
+/// усечённая до 60 символов (как заголовок авто-коммита). Пустая задача —
+/// `None`: ключом «разных задач» станет `run_id`.
+fn task_key(task: &str) -> Option<String> {
+    let first = task.lines().next().unwrap_or("").trim();
+    if first.is_empty() {
         return None;
     }
-    let timeout = Duration::from_secs(cfg.post_gate_timeout_secs.max(1));
-    let repo_owned = repo.to_path_buf();
-    let cmd_for_run = cmd.clone();
-    // AD-9 (правило `no_direct_shell_spawn`): shell — только через
-    // crate::proc::run_shell: команда стартует в собственной процессной
-    // группе и таймаут убивает группу целиком — внуки приёмки (воркеры,
-    // `server &`) не остаются сиротами. stdio перехватывается (утечка в TUI
-    // исключена — инцидент 2026-10-14).
-    let outcome = tokio::task::spawn_blocking(move || {
-        crate::proc::run_shell(&repo_owned, "bash", &cmd_for_run, timeout)
-    })
-    .await;
-    Some(match outcome {
-        Ok(Ok(out)) => match out.status {
-            Some(status) => {
-                let verdict = if status.success() {
-                    AcceptVerdict::Pass
-                } else {
-                    AcceptVerdict::Fail
-                };
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                let line = stdout
-                    .lines()
-                    .map(str::trim)
-                    .find(|l| !l.is_empty())
-                    .unwrap_or("")
-                    .chars()
-                    .take(240)
-                    .collect();
-                AcceptGate { cmd, verdict, line }
+    let mut key: String = first.chars().take(60).collect();
+    if first.chars().count() > 60 {
+        key.push('…');
+    }
+    Some(key)
+}
+impl AcceptGate {
+    /// Поверхность 0.4.13 того же исполнения приёмки, что и [`GateVerdict`]
+    /// (ADR-086): вердикт по коду выхода (0 — PASS, прочее — FAIL, таймаут —
+    /// TIMEOUT) и первая непустая строка stdout — для «Приёмка: …» в итоге и
+    /// реестра конвенций (рекомендация 2 отчёта «две гипотезы», 2026-10-14).
+    #[must_use]
+    pub fn from_verdict(v: &GateVerdict) -> Self {
+        let verdict = match v.status {
+            VerdictStatus::Pass => AcceptVerdict::Pass,
+            VerdictStatus::Timeout => AcceptVerdict::Timeout,
+            VerdictStatus::Fail | VerdictStatus::Incomplete | VerdictStatus::Error => {
+                AcceptVerdict::Fail
             }
-            // status=None — убита по таймауту (группа завершена целиком):
-            // результат не проверен.
-            None => AcceptGate {
-                cmd,
-                verdict: AcceptVerdict::Timeout,
-                line: format!(
-                    "приёмка не завершилась за {} с — результат не проверен",
-                    timeout.as_secs()
-                ),
-            },
-        },
-        Ok(Err(e)) => AcceptGate {
-            cmd,
-            verdict: AcceptVerdict::Fail,
-            line: format!("accept_cmd не запустился: {e}"),
-        },
-        Err(join) => AcceptGate {
-            cmd,
-            verdict: AcceptVerdict::Fail,
-            line: format!("сбой потока приёмки: {join}"),
-        },
-    })
+        };
+        let line = v
+            .stdout
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+            .unwrap_or(v.summary.as_str())
+            .chars()
+            .take(240)
+            .collect();
+        Self {
+            cmd: v.command.clone(),
+            verdict,
+            line,
+        }
+    }
 }
 
 /// Имя файла реестра конвенций в `.arch-handoff/` (рекомендация 1 отчёта
@@ -1501,7 +1580,7 @@ impl HarnessRunTool {
         name: &str,
         hcfg: CodingHarnessConfig,
         repo: PathBuf,
-        task: String,
+        task: RunTask,
         note: &str,
         ctx: &ToolContext,
     ) -> ToolOutput {
@@ -1517,16 +1596,21 @@ impl HarnessRunTool {
                 registry.capacity()
             ));
         }
+        let RunTask { text, matched } = task;
         let id = registry.next_id("hr");
         registry.insert(crate::subagent::SubagentTask {
             id: id.clone(),
             agent: format!("harness:{name}"),
-            task: task.chars().take(2000).collect(),
+            task: text.chars().take(2000).collect(),
             status: crate::subagent::TaskStatus::Running,
             report: String::new(),
             started_at: crate::subagent::now_iso(),
             finished_at: None,
         });
+        // Стигмергия флота (L8): worktree прогона сопоставлен задаче `hr-*`,
+        // чтобы при записи нового урока LESSONS.md перерисовался во все
+        // активные worktree (реестр читает сопоставление по id).
+        registry.set_worktree(&id, repo.clone());
         let report_path = ctx
             .config
             .paths
@@ -1538,8 +1622,33 @@ impl HarnessRunTool {
         let run_name = name.to_string();
         let note_run = note.to_string();
         let report_path_run = report_path.clone();
+        // Конфиг нужен хвосту петли L2 (реестр уроков и журнал сессии) — тем
+        // же путём, что у синхронного прогона: у фонового прогона свой
+        // run_id, но те же уроки и то же событие `gate_verdict`.
+        let loop_cfg = Arc::clone(&ctx.config);
         tokio::spawn(async move {
-            let out = execute_run(&run_name, &hcfg, &repo, &task, note_run).await;
+            // L8: событий в реестре до прогона — база для детекции нового
+            // урока (прогон PASS не должен перерисовать LESSONS.md соседей
+            // пустым рендером).
+            let thresholds = crate::lessons::Thresholds::from(&loop_cfg.lessons);
+            let run_ledger = crate::lessons::Ledger::repo(&repo);
+            let before = run_ledger.snapshot(&thresholds).map_or(0, |s| s.events);
+            let out = execute_run(
+                &run_name,
+                &hcfg,
+                &repo,
+                &text,
+                note_run,
+                Some(&loop_cfg),
+                &matched,
+            )
+            .await;
+            // Стигмергия флота (L8, E6): если прогон записал новый урок —
+            // перерисовать LESSONS.md во все активные worktree; завершённые
+            // в `running_worktrees` не попадают и остаются нетронутыми.
+            // Число обновлённых worktree — диагностика, а не контракт прогона:
+            // сбой распространения не роняет сам прогон (best effort).
+            let _ = propagate_new_lesson(&loop_cfg, &repo, before, &registry.running_worktrees());
             let status = if out.is_error {
                 crate::subagent::TaskStatus::Failed
             } else {
@@ -1638,6 +1747,24 @@ fn copy_dir(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
+impl HarnessRunTool {
+    /// Задача исполнителю с закреплённым блоком уроков реестра впереди
+    /// (ADR-087): префлайт-подбор L4 по тексту задачи, K и лимит токенов — из
+    /// `[lessons]`. Возвращает задачу с отобранными уроками и число уроков
+    /// блока (0 — блок пуст: флаг выключен, реестр пуст или уроки не в области).
+    fn task_with_lessons(&self, live: &Config, repo: &Path, task: &str) -> (RunTask, usize) {
+        let report = crate::lesson_block::build_report_for_task(live, repo, task);
+        let text = crate::lesson_block::augment_task(task, &report.block);
+        (
+            RunTask {
+                text,
+                matched: report.lessons,
+            },
+            report.selected,
+        )
+    }
+}
+
 #[async_trait]
 impl Tool for HarnessRunTool {
     fn spec(&self) -> ToolSpec {
@@ -1677,12 +1804,21 @@ impl Tool for HarnessRunTool {
                 исполнителя) — «код 0 у исполнителя» ещё не значит «результат прошёл гейт». \
                 Вердикт пост-гейта виден в итоге; FAIL/INCOMPLETE/TIMEOUT делают прогон \
                 ошибкой (is_error). Отключается только флагом адаптера post_gate = false \
-                (с предупреждением в выводе). ПРИЁМКА (accept_cmd в конфиге адаптера): \
-                произвольная команда приёмки владельца контура (например, \
-                `python3 gate/accept.py .`) — вердикт по коду выхода виден в первой строке \
-                итога, причина (первая строка её stdout) при FAIL записывается в реестр \
-                конвенций .arch-handoff/CONVENTIONS.md, а реестр автоматически включается в \
-                следующие задания исполнителю (отключается conventions = false у адаптера)."
+                (с предупреждением в выводе). \
+                ПРИЁМКА (accept_cmd / accept, ADR-086): после финализации харнесс прогоняет \
+                ОДНУ команду приёмки ВНЕ песочницы исполнителя (аргумент accept, иначе \
+                accept_cmd адаптера, иначе arch-be gate . при CONSTRAINTS.yaml в корне \
+                репозитория). Вердикт по коду выхода («Приёмка: …») идёт ПЕРВОЙ строкой \
+                результата; FAIL пишет причину в реестр конвенций .arch-handoff/CONVENTIONS.md \
+                (реестр включается в следующие задания; отключается conventions = false). \
+                Поверх того же исполнения вывод приводится к контракту arch-be/gate-verdict/v1 \
+                и пишется событием gate_verdict в журнал сессии; FAIL/INCOMPLETE/TIMEOUT делают \
+                прогон ошибкой, а каждый FAIL-код становится уроком реестра (источник gate; \
+                ADR-085, включено при [lessons] enabled = true). Пустая строка выключает приёмку. \
+                АВТОПАКЕТ (L5): при отсутствии .arch-handoff/ или пакете старше HEAD харнесс \
+                сам собирает лёгкий пакет (TASK.md с секцией «Правила репозитория (выучено)» + \
+                приёмка accept_cmd + JSON-контракт, LESSONS.md, CONSTRAINTS.yaml); явный \
+                handoff_create приоритетнее."
                 .into(),
             parameters: json!({
                 "type": "object",
@@ -1690,6 +1826,10 @@ impl Tool for HarnessRunTool {
                     "harness": {
                         "type": "string",
                         "description": "Имя харнесса: claude-code, qwen-code, openclaw, hermes, theseus, codewhale, kimi-code"
+                    },
+                    "accept": {
+                        "type": "string",
+                        "description": "Команда приёмки результата (shell-строка; база — каталог прогона, запуск вне песочницы исполнителя с таймаутом пост-гейта). Не задана — accept_cmd адаптера, иначе `arch-be gate .` при CONSTRAINTS.yaml в корне репозитория; пустая строка — приёмка выключена. Вердикт — первой строкой результата"
                     },
                     "path": {
                         "type": "string",
@@ -1708,6 +1848,10 @@ impl Tool for HarnessRunTool {
                     "background": {
                         "type": "boolean",
                         "description": "true — прогон в фоне (немедленный возврат, задача hr-* в реестре фоновых задач; результат забирается через subagent_result). false/отсутствует — синхронно: ход агента ждёт завершения прогона"
+                    },
+                    "share": {
+                        "type": "boolean",
+                        "description": "true — разрешить запись уроков уровня user/org в пакет .arch-handoff/ (LESSONS.md и чек-лист TASK.md). Без флага в репозиторий пишутся только уроки области репозитория (ADR-085, риск утечки личного знания)"
                     }
                 },
                 "required": ["harness", "path"]
@@ -1792,12 +1936,58 @@ impl Tool for HarnessRunTool {
         // прошлых FAIL приёмки — в задании исполнителю штатно, а не по памяти
         // оркестратора. Отключается `conventions = false` у адаптера.
         let task = inject_conventions(&repo, task, hcfg);
+        // Закреплённый блок уроков перед КАЖДОЙ задачей исполнителю (ADR-087):
+        // префлайт-подбор L4 по тексту задачи, K и лимит токенов — из
+        // `[lessons]`. Флаг выключен — блок пуст, задача после конвенций
+        // остаётся байт-в-байт прежней.
+        let (run_task, selected) = self.task_with_lessons(&live, &repo, &task);
         // Переопределение таймаута — копией конфига адаптера. Минимум 600 с:
         // модели склонны занижать таймаут («успеет за 5 минут»), а кодовый
         // харнесс на реальной задаче работает дольше — ранний таймаут
         // обрывал прогон и оставлял репозиторий в полусобранном состоянии.
         let mut hcfg = hcfg.clone();
+        // Приёмка (L2, ADR-086): аргумент инструмента сильнее поля адаптера —
+        // кладём его в копию адаптера (пустая строка = явное выключение).
+        if let Some(command) = args.get("accept").and_then(Value::as_str) {
+            hcfg.accept_cmd = Some(command.to_string());
+        }
         let mut note = gate_note;
+        // L5 (ADR-085, B4): автопакет handoff — лёгкий пакет собирается, когда
+        // явного handoff_create нет или пакет старше HEAD. Приёмка — из
+        // финализированной копии адаптера (аргумент `accept` уже применён);
+        // сбой сборки прогон не роняет (задача уже сформирована).
+        let accept_cmd = resolve_accept(&hcfg, &repo);
+        let share = args.get("share").and_then(Value::as_bool).unwrap_or(false);
+        let pack_state = crate::handoff::auto::state(&repo);
+        if pack_state.needs_build() {
+            match crate::handoff::auto::build(
+                &repo,
+                &task,
+                &run_task.matched,
+                accept_cmd.as_deref(),
+                share,
+            ) {
+                Ok(packet) => {
+                    let _ = writeln!(
+                        note,
+                        "Автопакет handoff (L5, ADR-085): {} — собран {}; уроков в LESSONS.md: {}{}; приёмка: {}.",
+                        pack_state.label(),
+                        packet.dir.display(),
+                        packet.lessons,
+                        if packet.shared_excluded > 0 {
+                            format!(
+                                " (отсечено user/org без --share: {})",
+                                packet.shared_excluded
+                            )
+                        } else {
+                            String::new()
+                        },
+                        accept_cmd.as_deref().unwrap_or("выключена"),
+                    );
+                }
+                Err(e) => tracing::warn!("автопакет handoff {}: {e}", repo.display()),
+            }
+        }
         if let Some(t) = args.get("timeout_secs").and_then(Value::as_u64) {
             if t < MIN_HARNESS_TIMEOUT_SECS {
                 let _ = writeln!(
@@ -1817,30 +2007,108 @@ impl Tool for HarnessRunTool {
                 hcfg.timeout_secs
             );
         }
+        if selected > 0 {
+            // Версия задачи, ушедшая исполнителю, отличается от исходной —
+            // это факт прогона, и он обязан быть виден (ADR-087).
+            let _ = writeln!(
+                note,
+                "Блок уроков реестра: {selected} (ADR-087) передан исполнителю \
+                 в тексте задачи."
+            );
+        }
         // Фоновый прогон: инструмент возвращается немедленно, агент остаётся
         // доступным пользователю (длинные handoff-прогоны не блокируют диалог).
         if args.get("background").and_then(Value::as_bool) == Some(true) {
-            return Ok(self.launch_background(name, hcfg, repo, task, &note, ctx));
+            return Ok(self.launch_background(name, hcfg, repo, run_task, &note, ctx));
         }
-        Ok(execute_run(name, &hcfg, &repo, &task, note).await)
+        Ok(execute_run(
+            name,
+            &hcfg,
+            &repo,
+            &run_task.text,
+            note,
+            Some(&live),
+            &run_task.matched,
+        )
+        .await)
     }
+}
+
+/// Стигмергия флота (L8, E6): перерисовывает `LESSONS.md` во все активные
+/// worktree, если реестр `source` пополнился новым уроком за время прогона
+/// (`before` — число событий до прогона). Возвращает число обновлённых
+/// worktree (0 — урок не записан, механика выключена или некому передавать).
+///
+/// Гейт по счётчику событий обязателен: прогон PASS не записывает урок, и
+/// без него пустой рендер затёр бы LESSONS.md соседей.
+#[must_use]
+fn propagate_new_lesson(cfg: &Config, source: &Path, before: usize, active: &[PathBuf]) -> usize {
+    if !cfg.fleet.require_worktree || !cfg.lessons.enabled {
+        return 0;
+    }
+    let thresholds = crate::lessons::Thresholds::from(&cfg.lessons);
+    let after = crate::lessons::Ledger::repo(source)
+        .snapshot(&thresholds)
+        .map_or(before, |s| s.events);
+    if after <= before {
+        return 0;
+    }
+    crate::worktree::propagate_lessons_md(cfg, source, active)
+}
+
+/// Задача исполнителю вместе с отобранными префлайтом уроками (L4).
+struct RunTask {
+    /// Текст задачи (с закреплённым блоком уроков впереди).
+    text: String,
+    /// Уроки, отобранные префлайтом и попавшие в задание (для `prevented`).
+    matched: Vec<crate::lessons::Lesson>,
 }
 
 /// Синхронный прогон харнесса и форматирование результата: итог (код
 /// возврата/прерывание/авто-коммит), механический разбор JSON-контракта,
-/// stdout/stderr. Общий код синхронного пути (`harness_run`) и фонового
+/// stdout/stderr; хвост петли L2 (ADR-086 п.4–5) — вердикт приёмки первой
+/// строкой, событие `gate_verdict` в журнал сессии, автозапись уроков из
+/// FAIL-кодов. Общий код синхронного пути (`harness_run`) и фонового
 /// (`background=true` — вызывается из spawned-задачи).
+///
+/// `loop_cfg` — конфиг петли (реестр уроков и журнал сессии); `None` —
+/// вызывающий без конфига (юнит-тесты прогона): вердикт приёмки остаётся
+/// в выводе, но уроками и событием журнала не фиксируется.
 async fn execute_run(
     name: &str,
     hcfg: &CodingHarnessConfig,
     repo: &Path,
     task: &str,
     note: String,
+    loop_cfg: Option<&Config>,
+    matched: &[crate::lessons::Lesson],
 ) -> ToolOutput {
     match run_harness(name, hcfg, repo, task).await {
-        Ok(run) => {
+        Ok(mut run) => {
             let code = run.exit_code.map_or("сигнал".into(), |c| c.to_string());
-            let mut content = note;
+            // L2 (ADR-086 п.4–5): хвост петли — событие `gate_verdict` в журнал
+            // сессии и автозапись уроков из FAIL-кодов. ДО рендера: вердикт в
+            // выводе обязан назвать и число записанных уроков.
+            if let (Some(verdict), Some(cfg)) = (run.accept.as_mut(), loop_cfg) {
+                let run_id = run.run_id.clone();
+                let harness = run.harness.clone();
+                let key = task_key(task);
+                let reference = RunRef::new(&run_id)
+                    .with_harness(Some(harness.as_str()))
+                    .with_task(key.as_deref());
+                crate::gate_loop::close_loop(cfg, repo, verdict, &reference, matched);
+            }
+            let mut content = String::new();
+            // Вердикт приёмки — ПЕРВОЙ строкой результата (ADR-086 п.4):
+            // «код 0 у исполнителя» и вердикт гейта — разные вещи, и именно
+            // вердикт решает, принят ли результат. Заметки прогона (изоляция,
+            // автопакет L5, блок уроков) идут ПОСЛЕ вердикта — иначе вердикт
+            // перестал бы быть первой строкой.
+            if let Some(verdict) = &run.accept {
+                content.push_str(&verdict.first_line());
+                content.push('\n');
+            }
+            content.push_str(&note);
             match &run.termination {
                 Termination::Completed => {
                     let _ = write!(
@@ -1980,20 +2248,21 @@ async fn execute_run(
                 }
                 None => {}
             }
-            // Приёмочная команда (accept_cmd, рекомендация 2 отчёта «две
-            // гипотезы»): вердикт и причина — в итоге; красный вердикт уже
-            // записал причину в реестр конвенций (см. finalize_run).
-            if let Some(ag) = &run.accept_gate {
-                let _ = writeln!(content, "Приёмка (accept_cmd): {}.", ag.verdict.label());
-                if !ag.line.is_empty() {
-                    let _ = writeln!(content, "  Причина/сводка: {}", ag.line);
-                }
-                if ag.verdict == AcceptVerdict::Fail {
-                    content.push_str(
-                        "Причина записана в реестр конвенций \
-                         (.arch-handoff/CONVENTIONS.md) — следующие задания \
-                         исполнителю уже включают её.\n",
-                    );
+            // L2: блок приёмки — вердикт, источник, коды, находки, уроки
+            // реестра и сырой вывод команды (первая строка итога — выше).
+            if let Some(verdict) = &run.accept {
+                content.push_str(&verdict.block());
+                // Приёмочная команда (accept_cmd, рекомендация 2 отчёта «две
+                // гипотезы»): красный вердикт уже записал причину в реестр
+                // конвенций (см. finalize_run).
+                if let Some(ag) = &run.accept_gate {
+                    if ag.verdict == AcceptVerdict::Fail {
+                        content.push_str(
+                            "Причина записана в реестр конвенций \
+                             (.arch-handoff/CONVENTIONS.md) — следующие задания \
+                             исполнителю уже включают её.\n",
+                        );
+                    }
                 }
             }
             match &run.contract {
@@ -2051,15 +2320,15 @@ async fn execute_run(
                 content.push_str(run.stderr.trim_end());
             }
             let post_gate_red = run.post_gate.as_ref().is_some_and(|pg| pg.verdict.is_red());
-            let accept_red = run
-                .accept_gate
-                .as_ref()
-                .is_some_and(|ag| ag.verdict.is_red());
+            // Ошибка исполнения для оркестратора (как у пост-гейта): красный
+            // вердикт приёмки. Таймауты и сбой самой команды приёмки — тоже
+            // красный: непроверенный результат не выдаётся за принятый.
+            let accept_red = run.accept.as_ref().is_some_and(GateVerdict::is_red);
             // Exit-семантика (дельта agent-modes-acp): мягкая отмена/лимит —
             // не ошибка исполнения для оркестратора (итог с предупреждением);
-            // красный пост-гейт или красная приёмка делают прогон красным и
-            // для них. Таймауты и отказ агента — ошибка независимо от кода
-            // возврата (как раньше).
+            // красный пост-гейт/приёмка делает прогон красным и для них.
+            // Таймауты и отказ агента — ошибка независимо от кода возврата
+            // (как раньше).
             let is_error = run.termination.is_run_error()
                 || match &run.termination {
                     Termination::Completed => {
@@ -2071,7 +2340,9 @@ async fn execute_run(
                 content,
                 is_error,
                 images: Vec::new(),
-                data: None,
+                // Машинный контур (T-12): конверт `gate-verdict/v1` приёмки —
+                // структурный результат рядом с текстом (MCP: structuredContent).
+                data: run.accept.as_ref().map(GateVerdict::to_json),
             }
             .truncated(HARNESS_RUN_MAX_CHARS)
         }

@@ -2,20 +2,29 @@
 //! `PostToolUse` / `pre-commit` / `pre-push`, раньше зашитая в shell-шаблоны
 //! `connect`, версионируется вместе с ядром — обновление `arch-be`
 //! обновляет семантику уже установленных хуков без повторного `connect`
-//! на каждой машине.
+//! на каждой машине. Сюда же — хуки инъекции уроков `session-start` и
+//! `user-prompt-submit` (ADR-087): они ничего не блокируют, а печатают
+//! закреплённый блок реестра в stdout (хосты добавляют stdout хука в контекст
+//! модели) — Spine Core без своей LLM получает проверенную гейтом память.
 //!
 //! Установленные хуки — тонкие shim'ы вида `arch-be hook stop`; в shell
 //! остаётся только fail-soft гард `command -v arch-be` (удалённый бинарь не
 //! ломает сессии и коммиты). База диффа (якорь основной ветки, stdin git'а
 //! для pre-push), запуск гейта и коды выхода — здесь. Семантика кодов по
 //! площадкам: Claude/Kimi — exit 2 блок (stderr уходит модели), git-хуки —
-//! exit 1.
+//! exit 1; хуки уроков — всегда 0 (память не блокирует работу).
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use crate::config::Config;
 use crate::error::{HarnessError, Result};
+use crate::gate::GateReport;
+use crate::lesson_block::{self, Quarantined};
+
+/// Сколько символов промпта уходит в BM25-отбор уроков (хвост отбрасывается:
+/// длинный ввод — это вставленный контекст, а не запрос).
+const MAX_QUERY_CHARS: usize = 1000;
 
 /// Вид хука — совпадает с именами подкоманд `arch-be hook`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,10 +37,15 @@ pub enum HookKind {
     PreCommit,
     /// git pre-push: полный гейт с базой из stdin git'а (Н5).
     PrePush,
+    /// `SessionStart` хоста: уроки области репозитория в контекст (ADR-087).
+    SessionStart,
+    /// `UserPromptSubmit` хоста: уроки по упомянутым в промпте путям (ADR-087).
+    UserPromptSubmit,
 }
 
 impl HookKind {
-    /// Разбирает имя подкоманды (`stop`, `post-tool-use`, `pre-commit`, `pre-push`).
+    /// Разбирает имя подкоманды (`stop`, `post-tool-use`, `pre-commit`,
+    /// `pre-push`, `session-start`, `user-prompt-submit`).
     ///
     /// # Errors
     /// Незнакомое имя — перечень допустимых.
@@ -41,20 +55,138 @@ impl HookKind {
             "post-tool-use" => Ok(Self::PostToolUse),
             "pre-commit" => Ok(Self::PreCommit),
             "pre-push" => Ok(Self::PrePush),
+            "session-start" => Ok(Self::SessionStart),
+            "user-prompt-submit" => Ok(Self::UserPromptSubmit),
             other => Err(HarnessError::Config(format!(
-                "неизвестный хук '{other}': допустимы stop, post-tool-use, pre-commit, pre-push"
+                "неизвестный хук '{other}': допустимы stop, post-tool-use, pre-commit, \
+                 pre-push, session-start, user-prompt-submit"
             ))),
         }
     }
 
+    /// Хук инъекции уроков (печатает блок, никогда не блокирует).
+    #[must_use]
+    pub fn is_lessons(self) -> bool {
+        matches!(self, Self::SessionStart | Self::UserPromptSubmit)
+    }
+
+    /// Читает ли хук stdin (git pre-push и хуки уроков — читают).
+    #[must_use]
+    pub fn reads_stdin(self) -> bool {
+        matches!(
+            self,
+            Self::PrePush | Self::SessionStart | Self::UserPromptSubmit
+        )
+    }
+
     /// Код блокировки по семантике площадки: хостовые хуки (Claude/Kimi) —
-    /// 2 (stderr уходит модели), git-хуки — 1.
+    /// 2 (stderr уходит модели), git-хуки — 1, хуки уроков — 0 (не блокируют).
     fn block_code(self) -> i32 {
         match self {
             Self::Stop | Self::PostToolUse => 2,
             Self::PreCommit | Self::PrePush => 1,
+            Self::SessionStart | Self::UserPromptSubmit => 0,
         }
     }
+}
+
+/// Разобранный stdin хука хоста: рабочий каталог и текст промпта.
+///
+/// Claude Code и Kimi Code передают хуку JSON (`cwd`, `prompt`), но контур не
+/// полагается на это: неизвестный/битый вход трактуется как текст промпта,
+/// пустой — как «ничего не сообщено» (fail-soft, ADR-087).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HookInput {
+    /// Рабочий каталог сессии (если хост его сообщил).
+    pub cwd: Option<PathBuf>,
+    /// Текст пользовательского промпта (если хост его сообщил).
+    pub prompt: Option<String>,
+}
+
+/// Разбор stdin хука (JSON Claude Code/Kimi Code с фолбэком на сырой текст).
+#[must_use]
+pub fn parse_hook_input(stdin_text: &str) -> HookInput {
+    let trimmed = stdin_text.trim();
+    if trimmed.is_empty() {
+        return HookInput::default();
+    }
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        let cwd = value
+            .get("cwd")
+            .and_then(serde_json::Value::as_str)
+            .map(PathBuf::from);
+        let prompt = ["prompt", "user_prompt", "text"]
+            .iter()
+            .find_map(|key| value.get(*key).and_then(serde_json::Value::as_str))
+            .map(str::to_string);
+        return HookInput { cwd, prompt };
+    }
+    // Не JSON — хост отдал сырой текст (например, промпт одной строкой).
+    HookInput {
+        cwd: None,
+        prompt: Some(trimmed.to_string()),
+    }
+}
+
+/// Итог хука уроков: текст для stdout плюс отсеянные карантином уроки.
+#[derive(Debug, Clone, Default)]
+pub struct LessonHook {
+    /// Блок уроков (пусто — печатать нечего).
+    pub block: String,
+    /// Уроки, не прошедшие проверку на prompt-injection.
+    pub quarantined: Vec<Quarantined>,
+}
+
+/// Текст, который хук уроков печатает в stdout (без печати — тестируемо).
+///
+/// `session-start` — уроки области репозитория (пути не передаются: область
+/// сессии — весь репозиторий); `user-prompt-submit` — уроки, релевантные
+/// упомянутым в промпте путям (BM25 из `src/kb.rs` плюс scope-отбор).
+#[must_use]
+pub fn lessons_hook_output(
+    kind: HookKind,
+    cfg: &Config,
+    repo: &Path,
+    stdin_text: &str,
+) -> LessonHook {
+    let input = parse_hook_input(stdin_text);
+    let cwd = input.cwd.unwrap_or_else(|| repo.to_path_buf());
+    let (paths, query) = if kind == HookKind::UserPromptSubmit {
+        let prompt: String = input
+            .prompt
+            .unwrap_or_default()
+            .chars()
+            .take(MAX_QUERY_CHARS)
+            .collect();
+        (lesson_block::paths_from_text(&prompt), Some(prompt))
+    } else {
+        (Vec::new(), None)
+    };
+    let report = lesson_block::build_report(cfg, &cwd, &paths, query.as_deref());
+    LessonHook {
+        block: report.block,
+        quarantined: report.quarantined,
+    }
+}
+
+/// Выполняет хук уроков: блок в stdout, карантин — строкой в stderr (виден
+/// человеку; stdout уходит в контекст модели, служебный текст там лишний).
+/// Возвращает 0 всегда: память не имеет права блокировать работу хоста.
+fn run_lessons_hook(kind: HookKind, cfg: &Config, repo: &Path, stdin_text: &str) -> i32 {
+    let hook = lessons_hook_output(kind, cfg, repo, stdin_text);
+    if !hook.block.is_empty() {
+        print!("{}", hook.block);
+    }
+    if !hook.quarantined.is_empty() {
+        let ids: Vec<&str> = hook.quarantined.iter().map(|q| q.id.as_str()).collect();
+        eprintln!(
+            "spine-connect: карантин уроков: {} с признаками prompt-injection не попали \
+             в контекст ({}) — разберите формулировки (`arch-be lessons show <id>`)",
+            ids.len(),
+            ids.join(", ")
+        );
+    }
+    0
 }
 
 /// Выполняет хук и возвращает код выхода для процесса (0 — пропуск).
@@ -69,13 +201,35 @@ pub fn run_hook(kind: HookKind, cfg: &Config, repo: &Path, stdin_text: &str) -> 
     if kind == HookKind::PreCommit {
         return run_fitness_hook(cfg, repo);
     }
+    if kind.is_lessons() {
+        return Ok(run_lessons_hook(kind, cfg, repo, stdin_text));
+    }
     let base = match kind {
         HookKind::PrePush => pre_push_base(repo, stdin_text),
         _ => crate::control::default_anchor_base(repo),
     };
-    let code = run_gate(cfg, repo, base.as_deref())?;
+    let (code, report) = run_gate(cfg, repo, base.as_deref())?;
     if code == 0 {
         return Ok(0);
+    }
+    // L2 (ADR-086 п.7): FAIL-коды гейта становятся уроками реестра у ХОСТОВЫХ
+    // хуков (Stop/PostToolUse) — у хост-агента без своей памяти копятся уроки,
+    // проверенные гейтом. `pre-push` — git-хук рабочей машины, не сессия
+    // агента: реестр он не пополняет. Запись fail-soft и только при
+    // `[lessons] enabled` (ADR-085).
+    if matches!(kind, HookKind::Stop | HookKind::PostToolUse) {
+        let verdict = crate::gate_loop::GateVerdict::from_report("arch-be gate", &report);
+        let run_id = format!("hook-{}-{}", hook_subcommand_name(kind), now_stamp());
+        let reference = crate::gate_loop::RunRef::new(&run_id);
+        let ids = crate::gate_loop::record_verdict_lessons(cfg, repo, &verdict, &reference);
+        if !ids.is_empty() {
+            eprintln!(
+                "spine-connect: уроков записано в реестр: {} (источник gate, {}: {})",
+                ids.len(),
+                crate::lessons::LEDGER_DIR,
+                ids.join(", ")
+            );
+        }
     }
     let note = match kind {
         HookKind::Stop => {
@@ -88,6 +242,9 @@ pub fn run_hook(kind: HookKind, cfg: &Config, repo: &Path, stdin_text: &str) -> 
         }
         HookKind::PrePush => "pre-push FAIL — arch-be gate не пройден (находки выше)",
         HookKind::PreCommit => unreachable!("pre-commit обрабатывается выше"),
+        HookKind::SessionStart | HookKind::UserPromptSubmit => {
+            unreachable!("хуки уроков обрабатываются выше и не блокируют")
+        }
     };
     eprintln!("\nspine-connect: {note}");
     Ok(kind.block_code())
@@ -95,9 +252,10 @@ pub fn run_hook(kind: HookKind, cfg: &Config, repo: &Path, stdin_text: &str) -> 
 
 /// Прогон единого гейта для хука (маршрут auto): опции и требования — как у
 /// CLI-края `arch-be gate` (дефолтная политика доверия exec, составляющие
-/// из конфига). Возвращает exit-код гейта (0/1/2/3); отчёт печатается в
-/// stderr только при ненулевом коде — зелёный хук молчит.
-fn run_gate(cfg: &Config, repo: &Path, base: Option<&str>) -> Result<i32> {
+/// из конфига). Возвращает exit-код гейта (0/1/2/3) и сам отчёт — из него
+/// берутся FAIL-коды для реестра уроков (L2, ADR-086 п.7); отчёт печатается
+/// в stderr только при ненулевом коде — зелёный хук молчит.
+fn run_gate(cfg: &Config, repo: &Path, base: Option<&str>) -> Result<(i32, GateReport)> {
     let limits = cfg.significance.limits()?;
     let options = crate::gate::GateOptions {
         exec: crate::cmd_trust::ExecPolicy::cli(false),
@@ -109,7 +267,13 @@ fn run_gate(cfg: &Config, repo: &Path, base: Option<&str>) -> Result<i32> {
     if code != 0 {
         eprint!("{}", crate::gate::render(&report));
     }
-    Ok(code)
+    Ok((code, report))
+}
+
+/// Метка времени для идентификатора прогона урока (`hook-<имя>-<ISO UTC>`):
+/// различает прогоны одной и той же сигнатуры («FAIL повторился»).
+fn now_stamp() -> String {
+    chrono::Utc::now().format("%Y%m%dT%H%M%S").to_string()
 }
 
 /// pre-commit: быстрый fitness-гейт (`control check`). Расположение реестра
@@ -246,6 +410,8 @@ pub fn hook_subcommand_name(kind: HookKind) -> &'static str {
         HookKind::PostToolUse => "post-tool-use",
         HookKind::PreCommit => "pre-commit",
         HookKind::PrePush => "pre-push",
+        HookKind::SessionStart => "session-start",
+        HookKind::UserPromptSubmit => "user-prompt-submit",
     }
 }
 
@@ -311,8 +477,106 @@ mod tests {
             HookKind::PreCommit
         );
         assert_eq!(HookKind::parse("pre-push").expect("pp"), HookKind::PrePush);
+        assert_eq!(
+            HookKind::parse("session-start").expect("ss"),
+            HookKind::SessionStart
+        );
+        assert_eq!(
+            HookKind::parse("user-prompt-submit").expect("ups"),
+            HookKind::UserPromptSubmit
+        );
         let err = HookKind::parse("stop-hook").expect_err("неизвестный");
         assert!(err.to_string().contains("допустимы"), "{err}");
+        assert!(err.to_string().contains("session-start"), "{err}");
+        // Хуки уроков: не блокируют, stdin читают, имя подкоманды — канон.
+        for kind in [HookKind::SessionStart, HookKind::UserPromptSubmit] {
+            assert!(kind.is_lessons(), "{kind:?}");
+            assert!(kind.reads_stdin(), "{kind:?}");
+            assert_eq!(kind.block_code(), 0, "{kind:?}");
+            assert!(hook_subcommand_name(kind).contains('-'), "{kind:?}");
+        }
+        assert!(!HookKind::Stop.is_lessons() && !HookKind::Stop.reads_stdin());
+    }
+
+    /// Хук `session-start` без реестра (дефолтный конфиг: `[lessons] enabled =
+    /// false`) — пустой блок и код 0: fail-soft, никакой блокировки сессии.
+    #[test]
+    fn session_start_hook_without_registry_is_silent_and_soft() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let cfg = Config::default();
+        assert!(!cfg.lessons.enabled, "дефолт — выключено");
+        let hook = lessons_hook_output(HookKind::SessionStart, &cfg, tmp.path(), "");
+        assert!(hook.block.is_empty(), "{}", hook.block);
+        assert_eq!(hook.quarantined.len(), 0);
+        assert_eq!(
+            run_hook(HookKind::SessionStart, &cfg, tmp.path(), "").expect("хук"),
+            0,
+            "хук уроков не блокирует"
+        );
+    }
+
+    /// Хук `session-start` с непустым реестром отдаёт блок уроков; ввод хоста
+    /// (JSON с `cwd`) переносит область отбора в рабочий каталог сессии.
+    #[test]
+    fn session_start_hook_emits_block_from_registry() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo");
+        let mut cfg = Config::default();
+        cfg.lessons.enabled = true;
+        cfg.lessons.user_dir = Some(tmp.path().join("user-lessons"));
+        let th = crate::lessons::Thresholds::default();
+        let ledger = crate::lessons::Ledger::repo(&repo);
+        let input = crate::lessons::RecordInput::new(
+            crate::lessons::Signature::new(crate::lessons::LessonSource::Gate, "G5"),
+            crate::lessons::Evidence {
+                run_id: "run-1".into(),
+                harness: Some("claude-code".into()),
+                verdict_excerpt: "[G5] нет __all__".into(),
+                file: Some("src/lib.rs".into()),
+                line: Some(7),
+                ts: "2026-10-14T10:00:00.000Z".into(),
+                outcome: crate::lessons::Outcome::Fail,
+                task: Some("T1".into()),
+            },
+        )
+        .with_statement("Новый публичный символ обязан попасть в __all__ пакета");
+        ledger.record(&input, &th, "2026-10-14").expect("record");
+
+        let cwd_json = format!(
+            "{{\"cwd\": \"{}\", \"source\": \"startup\"}}",
+            repo.display()
+        );
+        let hook = lessons_hook_output(HookKind::SessionStart, &cfg, &repo, &cwd_json);
+        assert!(hook.block.contains(lesson_block::HEADER), "{}", hook.block);
+        assert!(hook.block.contains("__all__"), "{}", hook.block);
+        // Хук никогда не отдаёт ненулевой код — даже с непустым реестром.
+        assert_eq!(
+            run_hook(HookKind::SessionStart, &cfg, &repo, &cwd_json).expect("хук"),
+            0
+        );
+    }
+
+    /// Хук `user-prompt-submit`: блок отбирается по путям и тексту промпта,
+    /// а битый stdin не роняет хук (fail-soft в пользу хоста).
+    #[test]
+    fn user_prompt_submit_hook_reads_paths_and_survives_garbage() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let mut cfg = Config::default();
+        cfg.lessons.enabled = true;
+        cfg.lessons.user_dir = Some(tmp.path().join("user-lessons"));
+        let input = parse_hook_input("{\"prompt\": \"поправь src/a.rs\"}");
+        assert_eq!(input.prompt.as_deref(), Some("поправь src/a.rs"));
+        assert_eq!(input.cwd, None);
+        let raw = parse_hook_input("просто текст без JSON");
+        assert_eq!(raw.prompt.as_deref(), Some("просто текст без JSON"));
+        assert_eq!(parse_hook_input("  "), HookInput::default());
+        // Битый JSON — как текст промпта, не паника.
+        assert!(parse_hook_input("{не json").prompt.is_some());
+        assert_eq!(
+            run_hook(HookKind::UserPromptSubmit, &cfg, tmp.path(), "{не json").expect("хук"),
+            0
+        );
     }
 
     #[test]
@@ -386,6 +650,66 @@ mod tests {
             run_hook(HookKind::PreCommit, &cfg, &repo, "").expect("hook"),
             1
         );
+    }
+
+    /// L2 (ADR-086 п.7): хук хоста после FAIL гейта пишет FAIL-коды находок
+    /// в реестр уроков (источник `gate`) — хост-агент без своей памяти копит
+    /// уроки, проверенные гейтом. Без `[lessons] enabled` автоматической
+    /// записи нет (флаг гасит автозапись, ADR-085).
+    #[test]
+    fn gate_hook_records_fail_codes_as_lessons() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(
+            repo.join("CONSTRAINTS.yaml"),
+            "rules:\n  - id: X-1\n    name: no_pan\n    type: must_not_contain\n    glob: \"**/*.py\"\n    pattern: \"PAN=\"\n    severity: critical\n",
+        )
+        .unwrap();
+        std::fs::write(repo.join("a.py"), "print('PAN=4111')\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-q", "-m", "base"]);
+
+        // Флаг реестра выключен (дефолт 0.4.11): гейт красный, реестра нет.
+        let off = Config::default();
+        assert_eq!(
+            run_hook(HookKind::PostToolUse, &off, &repo, "").expect("hook"),
+            2
+        );
+        assert!(
+            !repo.join(".arch/lessons/ledger.jsonl").exists(),
+            "без [lessons] enabled автозаписи нет"
+        );
+
+        // Флаг включён — код находки становится уроком реестра.
+        let mut cfg = Config::default();
+        cfg.lessons.enabled = true;
+        assert_eq!(
+            run_hook(HookKind::PostToolUse, &cfg, &repo, "").expect("hook"),
+            2
+        );
+        let text =
+            std::fs::read_to_string(repo.join(".arch/lessons/ledger.jsonl")).expect("реестр");
+        assert!(text.contains("\"source\":\"gate\""), "{text}");
+        assert!(text.contains("\"code\":\"no_pan\""), "{text}");
+        assert!(
+            repo.join(".arch/lessons/LESSONS.md").is_file(),
+            "рендер реестра"
+        );
+
+        // Stop-хук — тот же путь (ADR-086 п.7).
+        assert_eq!(run_hook(HookKind::Stop, &cfg, &repo, "").expect("hook"), 2);
+        // pre-push гейт не трогаем: реестр пишет только хост-хук.
+        let before =
+            std::fs::read_to_string(repo.join(".arch/lessons/ledger.jsonl")).expect("ledger");
+        assert_eq!(
+            run_hook(HookKind::PrePush, &cfg, &repo, "").expect("hook"),
+            1
+        );
+        let after =
+            std::fs::read_to_string(repo.join(".arch/lessons/ledger.jsonl")).expect("ledger");
+        assert_eq!(before, after, "pre-push в реестр не пишет");
     }
 
     /// pre-commit без реестра — понятная ошибка и блок, а не молчаливый

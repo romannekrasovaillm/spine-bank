@@ -144,6 +144,57 @@ pub fn tools() -> Vec<Arc<dyn Tool>> {
     vec![Arc::new(KbSearchTool)]
 }
 
+/// BM25-ранжирование произвольных строк-документов тем же скорингом, что у
+/// поиска по корпусу файлов ([`bm25_idf`]/[`bm25_tf`], корневой матч терминов):
+/// корпус — массив в памяти, а не дерево файлов.
+///
+/// Нужен контурам, у которых «документы» — не файлы: блок уроков реестра
+/// подбирает уроки по тексту задачи (`lesson_block`, ADR-087). Возвращает
+/// пары `(индекс документа, вес)` по убыванию веса; документы без совпадений
+/// не попадают в результат, при равных весах порядок — по индексу
+/// (детерминизм: блок уроков обязан быть воспроизводим байт-в-байт).
+#[must_use]
+pub fn rank_documents(query: &str, docs: &[&str]) -> Vec<(usize, f64)> {
+    let terms = query_terms(query);
+    if terms.is_empty() || docs.is_empty() {
+        return Vec::new();
+    }
+    let term_chars: Vec<usize> = terms.iter().map(|t| t.chars().count()).collect();
+    let tokens: Vec<Vec<String>> = docs.iter().map(|d| tokenize(d)).collect();
+    let n_docs = tokens.len();
+    let total: usize = tokens.iter().map(Vec::len).sum();
+    let avgdl = total as f64 / n_docs as f64;
+    let matches = |doc: &[String], t: usize| {
+        doc.iter()
+            .filter(|token| term_matches_token(MatchMode::Stem, &terms[t], term_chars[t], token))
+            .count()
+    };
+    let mut df = vec![0usize; terms.len()];
+    for doc in &tokens {
+        for (t, count) in df.iter_mut().enumerate() {
+            if matches(doc, t) > 0 {
+                *count += 1;
+            }
+        }
+    }
+    let idfs: Vec<f64> = df.iter().map(|&d| bm25_idf(n_docs, d)).collect();
+    let mut scored: Vec<(usize, f64)> = Vec::new();
+    for (idx, doc) in tokens.iter().enumerate() {
+        let mut score = 0.0;
+        for (t, idf) in idfs.iter().enumerate() {
+            let tf = matches(doc, t);
+            if tf > 0 {
+                score += idf * bm25_tf(tf as f64, doc.len(), avgdl);
+            }
+        }
+        if score > 0.0 {
+            scored.push((idx, score));
+        }
+    }
+    scored.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+    scored
+}
+
 /// Ключ кэша: канонизированный набор каталогов + расширений корпуса.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct CorpusKey {
@@ -1534,5 +1585,34 @@ mod tests {
             "пометка фолбэка: {}",
             out.content
         );
+    }
+
+    /// BM25 по строкам в памяти (ADR-087): релевантный документ первым,
+    /// несовпавшие — вне выдачи, пустой запрос — пусто, порядок стабилен.
+    #[test]
+    fn rank_documents_orders_by_bm25_and_skips_non_matching() {
+        let docs = [
+            "Новый публичный символ обязан попасть в __all__ пакета",
+            "Миграция обязана быть обратимой",
+            "Публичный API не выносится из пакета символов",
+        ];
+        let ranked = rank_documents("новый публичный символ пакета", &docs);
+        assert_eq!(
+            ranked.len(),
+            2,
+            "документ про миграции не совпал: {ranked:?}"
+        );
+        assert_eq!(ranked[0].0, 0, "самый релевантный — первый: {ranked:?}");
+        assert!(ranked[0].1 > ranked[1].1, "веса убывают: {ranked:?}");
+        // Детерминизм: тот же вход — тот же порядок.
+        assert_eq!(
+            rank_documents("новый публичный символ пакета", &docs),
+            ranked
+        );
+        // Пустой запрос и пустой корпус — пустая выдача.
+        assert_eq!(rank_documents("   ", &docs).len(), 0, "пустой запрос");
+        assert_eq!(rank_documents("символ", &[]).len(), 0, "пустой корпус");
+        // Термин, которого нет ни в одном документе, не даёт выдачу.
+        assert_eq!(rank_documents("кафка", &docs).len(), 0, "нет совпадений");
     }
 }

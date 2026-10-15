@@ -1,0 +1,321 @@
+{
+ "A1": {
+  "calls": {
+   "glob": 2,
+   "bash": 10,
+   "read_file": 8,
+   "spine_lint": 1,
+   "fitness_check": 1,
+   "architect_review": 1,
+   "trace_check": 1,
+   "adr_registry": 1,
+   "significance_score": 2
+  },
+  "artefacts": 0
+ },
+ "A2": {
+  "calls": {
+   "bash": 5,
+   "glob": 1,
+   "recover": 2,
+   "model_drift": 1
+  },
+  "artefacts": 0
+ },
+ "A3": {
+  "calls": {
+   "bash": 4,
+   "glob": 1,
+   "read_file": 5,
+   "significance_score": 1,
+   "fitness_check": 3,
+   "adr_new": 1,
+   "asyncapi_lint": 1,
+   "model_validate": 1,
+   "write_file": 2,
+   "trace_check": 1,
+   "delta_guard": 2,
+   "adr_registry": 1,
+   "architect_review": 2,
+   "edit_file": 1
+  },
+  "artefacts": 0
+ },
+ "A4": {
+  "calls": {
+   "bash": 5,
+   "read_file": 12,
+   "architect_review": 1,
+   "spine_lint": 1,
+   "fitness_check": 1,
+   "trace_check": 1,
+   "significance_score": 2
+  },
+  "artefacts": 0
+ },
+ "A5": {
+  "calls": {
+   "bash": 8,
+   "glob": 1,
+   "recover": 1,
+   "model_drift": 1,
+   "model_validate": 1,
+   "grep": 1,
+   "read_file": 1
+  },
+  "artefacts": 0
+ },
+ "A6": {
+  "calls": {
+   "bash": 7,
+   "glob": 1,
+   "significance_score": 1,
+   "fitness_check": 3,
+   "asyncapi_lint": 1,
+   "model_validate": 1,
+   "adr_new": 1,
+   "read_file": 1,
+   "write_file": 1,
+   "architect_review": 2,
+   "delta_guard": 2,
+   "trace_check": 1,
+   "adr_registry": 1,
+   "model_drift": 1,
+   "edit_file": 1
+  },
+  "artefacts": 0
+ },
+ "F1-T1": {
+  "calls": {
+   "significance_score": 2,
+   "bash": 7,
+   "harness_run": 2
+  },
+  "artefacts": 0
+ },
+ "F1-T2": {
+  "calls": {
+   "significance_score": 2,
+   "bash": 5,
+   "harness_run": 1
+  },
+  "artefacts": 1
+ },
+ "F1-T3": {
+  "calls": {
+   "significance_score": 2,
+   "bash": 5,
+   "harness_run": 1
+  },
+  "artefacts": 1
+ },
+ "F1-T4": {
+  "calls": {
+   "harness_run": 1,
+   "bash": 3
+  },
+  "artefacts": 0
+ },
+ "F1-T5": {
+  "calls": {
+   "significance_score": 2,
+   "bash": 13,
+   "harness_run": 1
+  },
+  "artefacts": 0
+ },
+ "F2-T1": {
+  "calls": {
+   "significance_score": 1,
+   "bash": 9,
+   "read_file": 5,
+   "harness_run": 3
+  },
+  "artefacts": 0
+ },
+ "F2-T2": {
+  "calls": {
+   "bash": 5,
+   "significance_score": 2,
+   "harness_run": 1
+  },
+  "artefacts": 0
+ },
+ "F2-T3": {
+  "calls": {
+   "significance_score": 1,
+   "bash": 6,
+   "harness_run": 1
+  },
+  "artefacts": 0
+ },
+ "F2-T4": {
+  "calls": {
+   "harness_run": 1,
+   "bash": 3
+  },
+  "artefacts": 0
+ },
+ "F2-T5": {
+  "calls": {
+   "significance_score": 1,
+   "bash": 8,
+   "harness_run": 1
+  },
+  "artefacts": 0
+ },
+ "FI1-T1": {
+  "calls": {
+   "significance_score": 2,
+   "bash": 8,
+   "harness_run": 3
+  },
+  "artefacts": 0
+ },
+ "FI1-T2": {
+  "calls": {
+   "significance_score": 2,
+   "handoff_create": 1,
+   "harness_run": 2,
+   "bash": 4
+  },
+  "artefacts": 0
+ },
+ "FI1-T3": {
+  "calls": {
+   "bash": 3,
+   "significance_score": 1,
+   "harness_run": 2
+  },
+  "artefacts": 0
+ },
+ "FI1-T4": {
+  "calls": {
+   "harness_run": 3,
+   "bash": 3
+  },
+  "artefacts": 0
+ },
+ "FI1-T5": {
+  "calls": {
+   "bash": 6,
+   "harness_run": 2
+  },
+  "artefacts": 0
+ },
+ "FI2-T1": {
+  "calls": {
+   "significance_score": 3,
+   "harness_run": 2,
+   "bash": 3
+  },
+  "artefacts": 0
+ },
+ "FI2-T2": {
+  "calls": {
+   "significance_score": 1,
+   "harness_run": 3,
+   "bash": 7
+  },
+  "artefacts": 0
+ },
+ "FI2-T3": {
+  "calls": {
+   "significance_score": 1,
+   "bash": 4,
+   "harness_run": 2
+  },
+  "artefacts": 0
+ },
+ "FI2-T4": {
+  "calls": {
+   "significance_score": 2,
+   "bash": 4,
+   "read_file": 2,
+   "handoff_create": 1,
+   "harness_run": 2
+  },
+  "artefacts": 0
+ },
+ "FI2-T5": {
+  "calls": {
+   "significance_score": 1,
+   "bash": 3,
+   "handoff_create": 1,
+   "harness_run": 2
+  },
+  "artefacts": 0
+ },
+ "S1": {
+  "calls": {
+   "harness_run": 6,
+   "bash": 6
+  },
+  "artefacts": 0
+ },
+ "S2": {
+  "calls": {
+   "harness_run": 7,
+   "bash": 9
+  },
+  "artefacts": 170
+ },
+ "S3": {
+  "calls": {
+   "harness_run": 6,
+   "bash": 12
+  },
+  "artefacts": 0
+ },
+ "S4": {
+  "calls": {
+   "harness_run": 8,
+   "bash": 10
+  },
+  "artefacts": 0
+ },
+ "SI1": {
+  "calls": {
+   "harness_run": 5,
+   "bash": 5
+  },
+  "artefacts": 0
+ },
+ "SI2": {
+  "calls": {
+   "harness_run": 7,
+   "bash": 8,
+   "read_file": 4
+  },
+  "artefacts": 0
+ },
+ "SI3": {
+  "calls": {
+   "harness_run": 6,
+   "bash": 6
+  },
+  "artefacts": 0
+ },
+ "SI4": {
+  "calls": {
+   "harness_run": 2,
+   "bash": 2
+  },
+  "artefacts": 0
+ },
+ "SI5": {
+  "calls": {
+   "harness_run": 8,
+   "bash": 11,
+   "grep": 1
+  },
+  "artefacts": 0
+ },
+ "SI6": {
+  "calls": {
+   "harness_run": 7,
+   "bash": 6
+  },
+  "artefacts": 0
+ }
+}

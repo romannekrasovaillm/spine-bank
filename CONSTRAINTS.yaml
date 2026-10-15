@@ -454,7 +454,7 @@ constraints:
   - id: C-31
     name: rule_templates_have_teeth
     type: command_succeeds
-    command: "./target/debug/arch-be rules template verify --all --require-python"
+    command: "${CARGO_TARGET_DIR:-./target}/debug/arch-be rules template verify --all --require-python"
     timeout_secs: 600
     severity: error
     ad: AD-9
@@ -671,3 +671,9 @@ constraints:
     severity: error
     owner: "solution-архитектор BE"
     expiry: "2027-10-03"
+
+# Исключения стража rule_weakened (формат: rule + adr + until; ADR-092).
+overrides:
+  - rule: rule_templates_have_teeth
+    adr: ADR-092
+    until: "2026-11-14"

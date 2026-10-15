@@ -12,6 +12,7 @@ mod constraints_harvest;
 mod control;
 mod fleet;
 mod landscape;
+mod lessons;
 mod library;
 mod mcp;
 mod misc;
@@ -23,6 +24,7 @@ mod rules;
 mod specs;
 mod web;
 
+use std::fmt::Write as _;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -48,6 +50,7 @@ use fleet::{FleetCmd, cmd_fleet};
 #[cfg(feature = "harness")]
 use fleet::{WorktreeCmd, cmd_worktree};
 use landscape::{LandscapeCmd, cmd_landscape};
+use lessons::{LessonsCmd, cmd_lessons};
 #[cfg(feature = "harness")]
 use library::cmd_prompts;
 use library::{MemoryCmd, PluginsCmd, SkillsCmd, cmd_init, cmd_memory, cmd_plugins, cmd_skills};
@@ -114,11 +117,13 @@ enum Cmd {
         /// из конфига модели; без флага — дефолт провайдера).
         #[arg(long, value_name = "on|off")]
         think: Option<String>,
-        /// Профиль прогона (ADR-083 п.3): `reverse` — восстановление
-        /// архитектуры по чужому репозиторию. Веб-инструменты выключены,
-        /// исходники только на чтение (запись — в `out/`), встроенные скиллы
-        /// reverse-discovery/recover-review при пустой библиотеке.
-        #[arg(long, value_name = "reverse")]
+        /// Профиль прогона: `reverse` (ADR-083 п.3) — восстановление
+        /// архитектуры по чужому репозиторию (веб выключен, исходники только
+        /// на чтение, запись — в `out/`, встроенные скиллы при пустой
+        /// библиотеке); `orchestrate`/`architect` (ADR-090) — ленивая загрузка
+        /// доменных схем (ядро + `significance_score` / контрольный контур);
+        /// `full` — полный реестр (дефолт).
+        #[arg(long, value_name = "PROFILE")]
         profile: Option<String>,
     },
     /// Список настроенных моделей.
@@ -223,6 +228,10 @@ enum Cmd {
         /// Задача (иначе — из .arch-handoff/TASK.md).
         #[arg(long)]
         task: Option<String>,
+        /// Разрешить запись уроков уровня user/org в автопакет .arch-handoff/
+        /// (без флага — только уроки области репозитория, ADR-085).
+        #[arg(long)]
+        share: bool,
     },
     /// Список известных кодовых харнессов. Только сборка `harness`.
     #[cfg(feature = "harness")]
@@ -540,6 +549,13 @@ enum Cmd {
         #[command(subcommand)]
         cmd: NfrCmd,
     },
+    /// Реестр уроков Lesson Ledger (ADR-085): урок как сущность контура —
+    /// доказательства с `run_id`, детерминированный статус по счётчикам,
+    /// append-only журнал `.arch/lessons/ledger.jsonl` и рендер `LESSONS.md`.
+    Lessons {
+        #[command(subcommand)]
+        cmd: LessonsCmd,
+    },
     /// Библиотека скиллов: список, поиск, показ.
     Skills {
         #[command(subcommand)]
@@ -569,6 +585,18 @@ enum Cmd {
         /// Смета по реальному usage: таблица по моделям, топ-10 дорогих сессий.
         #[arg(long)]
         cost_report: bool,
+        /// Метрики обучения контура (learning-metrics/v1): журналы сессий +
+        /// реестр уроков. Формат — markdown, с `--json` — машиночитаемый.
+        #[arg(long)]
+        learning: bool,
+        /// Машиночитаемый вывод (JSON, схема learning-metrics/v1) — только с
+        /// `--learning`.
+        #[arg(long)]
+        json: bool,
+        /// Репозиторий с реестром уроков для `--learning` (по умолчанию —
+        /// текущий каталог).
+        #[arg(long, value_name = "PATH")]
+        repo: Option<PathBuf>,
     },
     /// Недельный дайджест outcome-данных MCP-контроля (`docs/outcome-metrics.md`):
     /// итерации FAIL→PASS по инструментам, топ нарушаемых правил, доля ложных
@@ -1109,6 +1137,7 @@ pub(crate) async fn run() -> Result<()> {
             harness,
             repo,
             task,
+            share,
         }) => {
             use arch_harness::harness::Termination;
             let hcfg = cfg
@@ -1139,16 +1168,93 @@ pub(crate) async fn run() -> Result<()> {
                 None => std::fs::read_to_string(repo.join(".arch-handoff/TASK.md"))
                     .context("нет --task и не найден .arch-handoff/TASK.md")?,
             };
+            // Закреплённый блок уроков перед задачей исполнителю (ADR-087):
+            // CLI-край идёт мимо инструмента `harness_run`, поэтому вставка
+            // делается здесь тем же префлайт-подбором L4 (при enabled = false —
+            // пустой блок, задача байт-в-байт прежняя).
+            let lessons =
+                arch_harness::lesson_block::build_report_for_task(&cfg, &repo, &task_text);
+            if !lessons.block.is_empty() {
+                println!(
+                    "блок уроков реестра: {} урок(ов) передано исполнителю (ADR-087)",
+                    lessons.selected
+                );
+            }
+            // L5 (ADR-085, B4): автопакет handoff — лёгкий пакет собирается,
+            // когда явного handoff_create нет или пакет старше HEAD (тот же
+            // путь, что у инструмента harness_run); сбой сборки прогон не роняет.
+            let accept_cmd = arch_harness::harness::resolve_accept(hcfg, &repo);
+            let pack_state = arch_harness::handoff::auto::state(&repo);
+            // L2×L5 (ADR-086): заметка автопакета — служебная, поэтому при
+            // заданной приёмке печатается ПОСЛЕ вердикта (вердикт обязан быть
+            // первой строкой). Без приёмки заметка уходит сразу, как раньше.
+            let mut autopack_note = String::new();
+            if pack_state.needs_build() {
+                match arch_harness::handoff::auto::build(
+                    &repo,
+                    &task_text,
+                    &lessons.lessons,
+                    accept_cmd.as_deref(),
+                    share,
+                ) {
+                    Ok(packet) => {
+                        let _ = writeln!(
+                            autopack_note,
+                            "автопакет handoff (L5): {} — собран {}; уроков в LESSONS.md: {}.",
+                            pack_state.label(),
+                            packet.dir.display(),
+                            packet.lessons
+                        );
+                    }
+                    Err(e) => tracing::warn!("автопакет handoff {}: {e}", repo.display()),
+                }
+            }
+            if accept_cmd.is_none() {
+                print!("{autopack_note}");
+            }
+            let task_text = arch_harness::lesson_block::augment_task(&task_text, &lessons.block);
             let mut hcfg_owned = hcfg.clone();
             if let Some(t) = arch_harness::handoff::recommended_timeout_secs(&repo) {
                 // Пакет несёт рекомендацию по маршруту значимости (Fast/Standard/Critical).
                 hcfg_owned.timeout_secs = t.clamp(600, 7200);
             }
-            let run = arch_harness::harness::run_harness(&harness, &hcfg_owned, &repo, &task_text)
-                .await?;
+            let mut run =
+                arch_harness::harness::run_harness(&harness, &hcfg_owned, &repo, &task_text)
+                    .await?;
+            // L2 (ADR-086): хвост петли — событие `gate_verdict` в журнал
+            // активной сессии и автозапись уроков из FAIL-кодов приёмки
+            // (реестр — `<repo>/.arch/lessons`, ADR-085).
+            if let Some(verdict) = run.accept.as_mut() {
+                let run_id = run.run_id.clone();
+                let key = task_text.lines().next().unwrap_or("").trim().to_string();
+                let reference = arch_harness::gate_loop::RunRef::new(&run_id)
+                    .with_harness(Some(harness.as_str()))
+                    .with_task((!key.is_empty()).then_some(key.as_str()));
+                arch_harness::gate_loop::close_loop(
+                    &cfg,
+                    &repo,
+                    verdict,
+                    &reference,
+                    &lessons.lessons,
+                );
+            }
+            // Вердикт приёмки — первой строкой результата прогона (ADR-086 п.4):
+            // «код 0 у исполнителя» ≠ «результат принят гейтом».
+            if let Some(verdict) = &run.accept {
+                println!("{}", verdict.first_line());
+            }
+            // Служебная заметка автопакета (L5) — ПОСЛЕ вердикта приёмки.
+            if accept_cmd.is_some() {
+                print!("{autopack_note}");
+            }
             // C5 (ADR-057): режим прогона виден в выводе — включая откат
             // ACP → headless (иначе деградация ACP осталась бы незамеченной).
             println!("режим: {}", run.mode.label());
+            // L2: блок приёмки — вердикт, источник, коды, находки, уроки и
+            // сырой вывод команды (детали к первой строке выше).
+            if let Some(verdict) = &run.accept {
+                println!("{}", verdict.block());
+            }
             if let Some(info) = &run.acp {
                 println!(
                     "ACP-адаптер: {}; request_permission (авто-allow, эквивалент \
@@ -1426,8 +1532,9 @@ pub(crate) async fn run() -> Result<()> {
         }
         Some(Cmd::Hook { kind, repo }) => {
             let kind = arch_harness::hook::HookKind::parse(&kind).map_err(anyhow::Error::msg)?;
-            // pre-push читает строки git'а из stdin; на терминале — без блокировки.
-            let stdin_text = if kind == arch_harness::hook::HookKind::PrePush {
+            // pre-push читает строки git'а из stdin, хуки уроков — JSON хоста
+            // (`cwd`/`prompt`); на терминале — без блокировки.
+            let stdin_text = if kind.reads_stdin() {
                 arch_harness::hook::read_stdin_if_piped()
             } else {
                 String::new()
@@ -1932,6 +2039,7 @@ pub(crate) async fn run() -> Result<()> {
         Some(Cmd::Model { cmd }) => cmd_model(&cfg, cmd)?,
         Some(Cmd::Trace { cmd }) => cmd_trace(&cfg, cmd)?,
         Some(Cmd::Nfr { cmd }) => cmd_nfr(cmd)?,
+        Some(Cmd::Lessons { cmd }) => cmd_lessons(&cfg, cmd)?,
         Some(Cmd::Skills { cmd }) => cmd_skills(&cfg, cmd)?,
         Some(Cmd::Plugins { cmd }) => cmd_plugins(&cfg, cmd)?,
         Some(Cmd::Policy { cmd, check }) => match cmd {
@@ -1944,7 +2052,36 @@ pub(crate) async fn run() -> Result<()> {
             None => cmd_policy(&cfg, check)?,
         },
         Some(Cmd::Evidence { cmd }) => cmd_evidence(&cfg, cmd)?,
-        Some(Cmd::Metrics { cost_report }) => {
+        Some(Cmd::Metrics {
+            cost_report,
+            learning,
+            json,
+            repo,
+        }) => {
+            if learning {
+                let ledger = match repo.as_deref() {
+                    Some(path) => arch_harness::lessons::Ledger::repo(path),
+                    None => arch_harness::lessons::Ledger::repo(Path::new(".")),
+                };
+                let thresholds = arch_harness::lessons::Thresholds::from(&cfg.lessons);
+                let report = arch_harness::metrics::LearningMetrics::collect(
+                    &cfg.paths.sessions_dir,
+                    &ledger,
+                    &thresholds,
+                )?;
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string(&report).expect("LearningMetrics сериализуется")
+                    );
+                } else {
+                    print!(
+                        "{}",
+                        arch_harness::metrics::render_learning_markdown(&report)
+                    );
+                }
+                return Ok(());
+            }
             if cost_report {
                 // Смета по реальным записям usage журналов (тарифы — из конфига).
                 let report =
@@ -2181,6 +2318,10 @@ pub(crate) async fn run() -> Result<()> {
                 hooks: !no_hooks,
                 agents_md: !no_agents_md,
                 strict_hooks,
+                // Хуки инъекции уроков (ADR-087) — ровно при включённом реестре:
+                // при `enabled = false` они печатали бы пусто, но хост платил бы
+                // стартом процесса на каждый промпт.
+                lessons: cfg.lessons.enabled,
                 apply_global,
                 dry_run,
                 home: dirs::home_dir(),

@@ -11,7 +11,7 @@
 //! ТОЛЬКО по тарифам `price_in_per_1m`/`price_out_per_1m` из конфига модели —
 //! выдуманного курса нет: без тарифа отчёт показывает одни токены.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::Path;
 
@@ -19,6 +19,7 @@ use serde::Serialize;
 
 use crate::config::ModelConfig;
 use crate::error::Result;
+use crate::lessons::{Ledger, LessonStatus, Thresholds};
 
 /// Сводные метрики.
 #[derive(Debug, Clone, Default, Serialize)]
@@ -744,6 +745,254 @@ fn collect_reports(dir: &Path, m: &mut HarnessMetrics) {
     }
 }
 
+/// Схема JSON-отчёта метрик обучения (L11, `arch-be metrics --learning`).
+pub const LEARNING_METRICS_SCHEMA: &str = "learning-metrics/v1";
+
+/// Метрики обучения контура (`learning-metrics/v1`).
+///
+/// Источники: журналы сессий (`session-*.jsonl`) и реестр уроков
+/// (`.arch/lessons/ledger.jsonl`). Все счётчики детерминированы: один и тот
+/// же журнал + реестр дают один и тот же отчёт. None-поля — «данных нет»
+/// (нулевой знаменатель), а не «ноль»: отчёт честно отличает пустое
+/// состояние от нулевого значения.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct LearningMetrics {
+    /// Схема отчёта (версионирование JSON-контракта).
+    pub schema: String,
+    /// Доля повторных FAIL (0..1): FAIL по сигнатуре, уже бывшей в реестре.
+    /// None — FAIL не было вовсе.
+    pub repeat_failure_rate: Option<f64>,
+    /// Повторных FAIL (сигнатура уже была в реестре).
+    pub repeat_failures: u64,
+    /// Всего FAIL по всем сигнатурам.
+    pub total_failures: u64,
+    /// Предотвращённых провалов: урок был в задании, сигнатура прошла гейт
+    /// без FAIL (событие `hit`).
+    pub prevented: u64,
+    /// Прогонов исполнителя на задачу. None — задач не было.
+    pub dispatches_per_task: Option<f64>,
+    /// Всего прогонов исполнителя (`harness_run`).
+    pub total_dispatches: u64,
+    /// Разных задач (по ключу `task`/`path` прогона).
+    pub total_tasks: u64,
+    /// Распределение уроков по статусам (ключ — каноническая строка статуса).
+    pub lesson_statuses: BTreeMap<LessonStatus, usize>,
+    /// Всего уроков в реестре.
+    pub lessons_total: usize,
+    /// Промоутированных правил (уроков с заполненным `promoted_rule`).
+    pub promoted_rules: u64,
+    /// Доля блока уроков в промпте (0..1). None — нет данных (нет записей
+    /// usage или реестр пуст).
+    pub lessons_block_prompt_share: Option<f64>,
+    /// Оценка размера блока уроков в токенах (сумма рендеров уроков без
+    /// `retired`, символы / 4 — конвенция оценки токенов проекта).
+    pub lessons_block_tokens: u64,
+    /// Токены на задачу. None — задач нет или нет записей usage.
+    pub tokens_per_task: Option<f64>,
+    /// Всего токенов (prompt + completion) из записей usage.
+    pub total_tokens: u64,
+    /// Сессий с записями usage.
+    pub sessions_with_usage: usize,
+    /// Сессий (журналов) всего.
+    pub sessions: usize,
+}
+
+impl LearningMetrics {
+    /// Считает метрики обучения из журналов сессий и реестра уроков.
+    ///
+    /// # Errors
+    /// Реестр уроков не читается.
+    pub fn collect(sessions_dir: &Path, ledger: &Ledger, thresholds: &Thresholds) -> Result<Self> {
+        let snapshot = ledger.snapshot(thresholds)?;
+
+        // --- Счётчики реестра ---
+        let mut total_failures: u64 = 0;
+        let mut repeat_failures: u64 = 0;
+        let mut prevented: u64 = 0;
+        let mut promoted_rules: u64 = 0;
+        for lesson in &snapshot.lessons {
+            total_failures += u64::from(lesson.fails);
+            // Первый FAIL каждой сигнатуры — рождение урока; все последующие
+            // — повтор по сигнатуре, уже бывшей в реестре.
+            repeat_failures += u64::from(lesson.fails.saturating_sub(1));
+            prevented += u64::from(lesson.hits);
+            if lesson.promoted_rule.is_some() {
+                promoted_rules += 1;
+            }
+        }
+        let repeat_failure_rate =
+            (total_failures > 0).then_some(repeat_failures as f64 / total_failures as f64);
+        let lesson_statuses = snapshot.count_by_status();
+
+        // --- Счётчики журнала ---
+        let mut total_dispatches: u64 = 0;
+        let mut task_keys: BTreeSet<String> = BTreeSet::new();
+        let mut total_prompt_tokens: u64 = 0;
+        let mut total_completion_tokens: u64 = 0;
+        let mut sessions_with_usage: usize = 0;
+        let mut sessions: usize = 0;
+        for path in session_files(sessions_dir) {
+            sessions += 1;
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let mut saw_usage = false;
+            for line in text.lines() {
+                let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+                    continue;
+                };
+                let kind = v.get("kind").and_then(|k| k.as_str()).unwrap_or("");
+                match kind {
+                    "usage" => {
+                        saw_usage = true;
+                        total_prompt_tokens += v
+                            .get("prompt_tokens")
+                            .and_then(serde_json::Value::as_u64)
+                            .unwrap_or(0);
+                        total_completion_tokens += v
+                            .get("completion_tokens")
+                            .and_then(serde_json::Value::as_u64)
+                            .unwrap_or(0);
+                    }
+                    "assistant" => {
+                        if let Some(calls) = v.get("tool_calls").and_then(|t| t.as_array()) {
+                            for call in calls {
+                                if call.get("name").and_then(|n| n.as_str()) == Some("harness_run")
+                                {
+                                    total_dispatches += 1;
+                                    if let Some(key) = dispatch_task_key(call) {
+                                        task_keys.insert(key);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if saw_usage {
+                sessions_with_usage += 1;
+            }
+        }
+        let total_tasks = task_keys.len() as u64;
+        let dispatches_per_task =
+            (total_tasks > 0).then_some(total_dispatches as f64 / total_tasks as f64);
+        let total_tokens = total_prompt_tokens + total_completion_tokens;
+        let tokens_per_task = (total_tasks > 0 && total_tokens > 0)
+            .then_some(total_tokens as f64 / total_tasks as f64);
+
+        // Доля блока уроков в промпте: оценка размера блока — сумма рендеров
+        // уроков без `retired` (символы / 4), делённая на сумму prompt-токенов
+        // usage-записей. Пустой реестр даёт нулевой блок, а не шапку файла.
+        let lessons_block_tokens = (snapshot
+            .lessons
+            .iter()
+            .filter(|l| l.status != LessonStatus::Retired)
+            .map(|l| crate::lessons::render::render_lesson(l).chars().count())
+            .sum::<usize>()
+            / 4) as u64;
+        let lessons_block_prompt_share = (total_prompt_tokens > 0 && lessons_block_tokens > 0)
+            .then_some(lessons_block_tokens as f64 / total_prompt_tokens as f64);
+
+        Ok(Self {
+            schema: LEARNING_METRICS_SCHEMA.to_string(),
+            repeat_failure_rate,
+            repeat_failures,
+            total_failures,
+            prevented,
+            dispatches_per_task,
+            total_dispatches,
+            total_tasks,
+            lesson_statuses,
+            lessons_total: snapshot.lessons.len(),
+            promoted_rules,
+            lessons_block_prompt_share,
+            lessons_block_tokens,
+            tokens_per_task,
+            total_tokens,
+            sessions_with_usage,
+            sessions,
+        })
+    }
+}
+
+/// Ключ задачи прогона `harness_run`: явный `task`, иначе путь репозитория
+/// (задача читалась из `TASK.md`). Ключ нужен только для счёта РАЗНЫХ задач.
+fn dispatch_task_key(call: &serde_json::Value) -> Option<String> {
+    let args = call.get("arguments")?;
+    if let Some(task) = args.get("task").and_then(serde_json::Value::as_str) {
+        if !task.trim().is_empty() {
+            return Some(task.to_string());
+        }
+    }
+    args.get("path")
+        .or_else(|| args.get("repo"))
+        .and_then(serde_json::Value::as_str)
+        .map(|p| format!("path:{p}"))
+}
+
+/// Markdown-отчёт метрик обучения.
+#[must_use]
+pub fn render_learning_markdown(m: &LearningMetrics) -> String {
+    let mut out = String::from("# Метрики обучения контура (learning-metrics/v1)\n\n");
+    match m.repeat_failure_rate {
+        Some(rate) => {
+            let _ = writeln!(
+                out,
+                "- Повторные FAIL (сигнатура уже в реестре): **{rate:.0}%** ({}/{})",
+                m.repeat_failures, m.total_failures
+            );
+        }
+        None => out.push_str("- FAIL ещё не было: repeat_failure_rate не определён.\n"),
+    }
+    let _ = writeln!(
+        out,
+        "- Предотвращено провалов (урок в задании → PASS): **{}**",
+        m.prevented
+    );
+    match m.dispatches_per_task {
+        Some(d) => {
+            let _ = writeln!(
+                out,
+                "- Прогонов исполнителя на задачу: **{d:.2}** ({} прогонов / {} задач)",
+                m.total_dispatches, m.total_tasks
+            );
+        }
+        None => out.push_str("- Прогонов исполнителя ещё не было.\n"),
+    }
+    let _ = writeln!(out, "- Уроков в реестре: **{}**", m.lessons_total);
+    let statuses = m
+        .lesson_statuses
+        .iter()
+        .map(|(st, n)| format!("{}: {n}", st.as_str()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let _ = writeln!(out, "- Статусы уроков: {statuses}");
+    let _ = writeln!(out, "- Промоутировано правил: **{}**", m.promoted_rules);
+    match m.lessons_block_prompt_share {
+        Some(share) => {
+            let _ = writeln!(
+                out,
+                "- Доля блока уроков в промпте: **{:.1}%** (блок ≈ {} токенов)",
+                share * 100.0,
+                m.lessons_block_tokens
+            );
+        }
+        None => out.push_str("- Доля блока уроков в промпте: данных нет.\n"),
+    }
+    match m.tokens_per_task {
+        Some(t) => {
+            let _ = writeln!(
+                out,
+                "- Токены на задачу: **{t:.0}** (всего {}, сессий с usage {}/{})",
+                m.total_tokens, m.sessions_with_usage, m.sessions
+            );
+        }
+        None => out.push_str("- Токены на задачу: данных нет (нет задач или usage).\n"),
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1062,5 +1311,172 @@ mod tests {
         let m = collect(&tmp.path().join("nope"), &tmp.path().join("nada")).expect("collect");
         assert_eq!(m.sessions, 0);
         assert_eq!(m.tool_error_rate(), 0.0);
+    }
+
+    /// Доказательство для фикстур реестра (fail / `pass_after_apply`).
+    fn evidence(
+        run_id: &str,
+        task: &str,
+        outcome: crate::lessons::Outcome,
+    ) -> crate::lessons::Evidence {
+        crate::lessons::Evidence {
+            run_id: run_id.to_string(),
+            harness: None,
+            verdict_excerpt: format!("[{task}] нарушение"),
+            file: None,
+            line: None,
+            ts: "2026-10-14T10:00:00Z".to_string(),
+            outcome,
+            task: Some(task.to_string()),
+        }
+    }
+
+    #[test]
+    fn learning_metrics_are_deterministic_on_fixed_journal_and_ledger() {
+        use crate::lessons::{Ledger, LessonSource, Outcome, RecordInput, Signature, Thresholds};
+
+        let tmp = tempfile::tempdir().expect("tmp");
+        let sessions = tmp.path().join("sessions");
+        std::fs::create_dir_all(&sessions).expect("sessions");
+
+        // Журнал 1: два прогона harness_run одной задачи T1 + usage.
+        std::fs::write(
+            sessions.join("session-20261014-100000.jsonl"),
+            concat!(
+                "{\"ts\":\"t\",\"kind\":\"assistant\",\"content\":\"\",\"tool_calls\":[",
+                "{\"id\":\"c1\",\"name\":\"harness_run\",\"arguments\":{\"task\":\"T1\",\"path\":\".\",\"harness\":\"claude-code\"}},",
+                "{\"id\":\"c2\",\"name\":\"harness_run\",\"arguments\":{\"task\":\"T1\",\"path\":\".\",\"harness\":\"claude-code\"}}]}\n",
+                "{\"ts\":\"t\",\"kind\":\"usage\",\"model\":\"deepseek-v4-flash\",\"prompt_tokens\":1000,\"completion_tokens\":200}\n"
+            ),
+        )
+        .expect("journal 1");
+        // Журнал 2: один прогон задачи T2 + usage (без task — путь).
+        std::fs::write(
+            sessions.join("session-20261014-110000.jsonl"),
+            concat!(
+                "{\"ts\":\"t\",\"kind\":\"assistant\",\"content\":\"\",\"tool_calls\":[",
+                "{\"id\":\"c3\",\"name\":\"harness_run\",\"arguments\":{\"path\":\"./paylib\",\"harness\":\"qwen-code\"}}]}\n",
+                "{\"ts\":\"t\",\"kind\":\"usage\",\"model\":\"deepseek-v4-flash\",\"prompt_tokens\":500,\"completion_tokens\":100}\n"
+            ),
+        )
+        .expect("journal 2");
+
+        // Реестр: G5 дважды провалился и один раз применился (hit); G6 — один
+        // провал, один hit и промоушен в правило C-99.
+        let ledger = Ledger::at(tmp.path().join("ledger.jsonl"));
+        let th = Thresholds::default();
+        let today = "2026-10-14";
+        let sig_a = Signature::new(LessonSource::Gate, "G5");
+        let sig_b = Signature::new(LessonSource::Gate, "G6");
+        for (run, task) in [("r1", "T1"), ("r2", "T1")] {
+            ledger
+                .record(
+                    &RecordInput::new(sig_a.clone(), evidence(run, task, Outcome::Fail)),
+                    &th,
+                    today,
+                )
+                .expect("record A fail");
+        }
+        ledger
+            .record(
+                &RecordInput::new(sig_a.clone(), evidence("r3", "T2", Outcome::PassAfterApply)),
+                &th,
+                today,
+            )
+            .expect("record A hit");
+        ledger
+            .record(
+                &RecordInput::new(sig_b.clone(), evidence("r4", "T1", Outcome::Fail)),
+                &th,
+                today,
+            )
+            .expect("record B fail");
+        ledger
+            .record(
+                &RecordInput::new(sig_b.clone(), evidence("r5", "T2", Outcome::PassAfterApply)),
+                &th,
+                today,
+            )
+            .expect("record B hit");
+        ledger
+            .promote(&sig_b.id(), "C-99", None, &th)
+            .expect("promote B");
+
+        let m = LearningMetrics::collect(&sessions, &ledger, &th).expect("collect");
+        assert_eq!(m.schema, LEARNING_METRICS_SCHEMA);
+        assert_eq!(m.total_failures, 3);
+        assert_eq!(
+            m.repeat_failures, 1,
+            "первый FAIL каждой сигнатуры не повтор"
+        );
+        let rate = m.repeat_failure_rate.expect("FAIL есть");
+        assert!((rate - 1.0 / 3.0).abs() < 1e-9, "rate: {rate}");
+        assert_eq!(m.prevented, 2);
+        assert_eq!(m.total_dispatches, 3);
+        assert_eq!(m.total_tasks, 2, "T1 и path:./paylib");
+        let dpt = m.dispatches_per_task.expect("задачи есть");
+        assert!((dpt - 1.5).abs() < 1e-9, "dpt: {dpt}");
+        assert_eq!(m.lessons_total, 2);
+        assert_eq!(m.lesson_statuses[&LessonStatus::Promoted], 1);
+        assert_eq!(m.lesson_statuses[&LessonStatus::Candidate], 1);
+        assert_eq!(m.promoted_rules, 1);
+        assert_eq!(m.total_tokens, 1800);
+        let tpt = m.tokens_per_task.expect("usage и задачи есть");
+        assert!((tpt - 900.0).abs() < 1e-9, "tpt: {tpt}");
+        assert_eq!(m.sessions, 2);
+        assert_eq!(m.sessions_with_usage, 2);
+        assert!(m.lessons_block_tokens > 0, "рендер блока непуст");
+        let share = m.lessons_block_prompt_share.expect("usage и блок есть");
+        assert!(
+            (share - m.lessons_block_tokens as f64 / 1500.0).abs() < 1e-9,
+            "share: {share}"
+        );
+
+        // JSON-контракт: сериализуется, содержит версию схемы, детерминирован.
+        let json = serde_json::to_string(&m).expect("serialize");
+        assert!(json.contains("\"learning-metrics/v1\""), "{json}");
+        let m2 = LearningMetrics::collect(&sessions, &ledger, &th).expect("collect 2");
+        assert_eq!(
+            serde_json::to_string(&m2).expect("serialize 2"),
+            json,
+            "детерминизм"
+        );
+
+        // Markdown содержит ключевые строки.
+        let md = render_learning_markdown(&m);
+        assert!(md.contains("Повторные FAIL"), "{md}");
+        assert!(
+            md.contains("Прогонов исполнителя на задачу: **1.50**"),
+            "{md}"
+        );
+    }
+
+    #[test]
+    fn learning_metrics_empty_state_is_honest_not_zero() {
+        use crate::lessons::{Ledger, Thresholds};
+
+        let tmp = tempfile::tempdir().expect("tmp");
+        let sessions = tmp.path().join("sessions");
+        std::fs::create_dir_all(&sessions).expect("sessions");
+        let ledger = Ledger::at(tmp.path().join("ledger.jsonl"));
+        let th = Thresholds::default();
+
+        let m = LearningMetrics::collect(&sessions, &ledger, &th).expect("collect");
+        assert_eq!(m.schema, LEARNING_METRICS_SCHEMA);
+        assert!(m.repeat_failure_rate.is_none(), "FAIL не было — не ноль");
+        assert_eq!(m.total_failures, 0);
+        assert!(m.dispatches_per_task.is_none());
+        assert!(m.tokens_per_task.is_none());
+        assert!(
+            m.lessons_block_prompt_share.is_none(),
+            "реестр пуст — не ноль"
+        );
+        assert_eq!(m.lessons_total, 0);
+        assert_eq!(m.lessons_block_tokens, 0);
+        for n in m.lesson_statuses.values() {
+            assert_eq!(*n, 0);
+        }
+        let md = render_learning_markdown(&m);
+        assert!(md.contains("данных нет"), "{md}");
     }
 }

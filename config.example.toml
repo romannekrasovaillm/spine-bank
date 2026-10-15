@@ -467,6 +467,17 @@ idle_timeout_secs = 600
 auto_commit = true
 post_gate = true
 post_gate_timeout_secs = 600
+# accept_cmd — команда приёмки результата (L2, ADR-086): запускается после
+# финализации прогона ВНЕ песочницы исполнителя (bash -c в каталоге прогона,
+# таймаут post_gate_timeout_secs), вывод приводится к контракту
+# arch-be/gate-verdict/v1, вердикт идёт ПЕРВОЙ строкой результата и событием
+# gate_verdict в журнал сессии, FAIL-коды становятся уроками реестра
+# (.arch/lessons, источник gate — при [lessons] enabled = true).
+# Не задано — дефолт `arch-be gate .`, если в КОРНЕ репозитория есть
+# CONSTRAINTS.yaml (пакетный .arch-handoff/CONSTRAINTS.yaml дефолт НЕ включает).
+# Пустая строка — приёмка выключена. Аргумент accept инструмента harness_run
+# сильнее этого поля.
+# accept_cmd = "arch-be gate ."
 # Whitelist наследуемого окружения (по умолчанию наследуется всё; непустой
 # список — чистое окружение + перечисленное + env адаптера):
 # env_allow = ["PATH", "HOME", "LANG", "TERM", "TMPDIR",
@@ -759,3 +770,24 @@ fast     = ["fitness", "spine_lint"]
 standard = ["fitness", "spine_lint", "trace_check", "rule_weakened", "nfr"]
 critical = ["fitness", "spine_lint", "trace_check", "rule_weakened",
             "delta_guard", "sensors", "nfr", "evidence_verify"]
+
+# Реестр уроков (Lesson Ledger, ADR-085): детерминированный жизненный цикл
+# урока по счётчикам доказательств (AD-2: LLM статус не меняет) и бюджет
+# блока уроков в контексте (L3, ADR-087). Дефолт enabled=false — поведение
+# 0.4.11; явные вызовы CLI/MCP работают независимо от флага.
+# [lessons]
+# enabled = false          # автозапись из вердикта гейта (L2) и блок уроков (L3)
+# candidate_fails = 2      # наблюдённых FAIL по сигнатуре до candidate
+# confirm_hits = 2         # hits для confirmed
+# confirm_max_misses = 0   # misses, допустимые для confirmed
+# confirm_tasks = 2        # разных задач для confirmed
+# retire_misses = 2        # серия misses подряд → retired
+# expiry_days = 0          # срок жизни урока в днях (0 — без срока)
+# k = 5                    # уроков в блоке инъекции L3
+# token_limit = 900        # лимит токенов блока (оценка — символы/4)
+# user_dir = "~/.arch-harness/lessons"  # каталог пользовательского реестра
+#                          # (по умолчанию $ARCH_HOME/lessons; переопределение
+#                          # нужно раздельным контурам и изоляции тестов)
+# org_dir = "/srv/lessons" # каталог организационного реестра уроков (ADR-091):
+#                          # общий git-репозиторий/каталог с ledger.jsonl;
+#                          # без него --org и MCP `org` возвращают ошибку
