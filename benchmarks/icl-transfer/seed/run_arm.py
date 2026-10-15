@@ -2,8 +2,8 @@
 """Run one experimental arm. Usage: run_arm.py <arm: S|F|C> <replicate-id>"""
 import json, os, shutil, subprocess, sys, time
 
-LAB = "/home/claude/lab"
-BIN = "/home/claude/spine-bank/target/release/arch-be"
+LAB = "/home/user/lab"
+BIN = "/home/user/spine-bank/target/release/arch-be"
 CFG = f"{LAB}/arch-harness.toml"
 TASKS = json.load(open(f"{LAB}/tasks.json"))
 arm, rep = sys.argv[1], sys.argv[2]

@@ -60,13 +60,13 @@ def classify(calls):
 
 if __name__ == "__main__":
     res = {}
-    for home in sorted(glob.glob("/home/claude/lab/homes/*")):
+    for home in sorted(glob.glob("/home/user/lab/homes/*")):
         name = os.path.basename(home)
         if name.startswith("_") or name == "smoke":
             continue
         calls, usage, ht, ev = session_stats(home)
         res[name] = {"calls": dict(calls), "class": classify(calls), "usage": usage,
                      "harness_tasks": ht, "events": dict(ev)}
-    json.dump(res, open("/home/claude/lab/tool_stats.json", "w"), ensure_ascii=False, indent=1)
+    json.dump(res, open("/home/user/lab/tool_stats.json", "w"), ensure_ascii=False, indent=1)
     for n, r in res.items():
         print(n, r["class"], r["usage"]["turns"], dict(sorted(r["calls"].items(), key=lambda x: -x[1])))

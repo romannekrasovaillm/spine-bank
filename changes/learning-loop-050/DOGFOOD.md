@@ -29,7 +29,7 @@
   Корень: `~/.claude/settings.json` несёт протухшие имена моделей, и для sdk-субагентов
   они перекрывают env адаптера. L1 выжил (не звал субагентов), L11 — нет.
 - Урок: env адаптера НЕ побеждает settings.json пользователя; фикс — флаг
-  `--settings /home/roman/.arch-harness/claude-harness-settings.json` (приоритет
+  `--settings /home/user/.arch-harness/claude-harness-settings.json` (приоритет
   командной строки над user-настройками) в адаптерах claude-code*.
 - evidence: отчёт hr-20261014-135849-04; фикс — ~/.config/arch-harness/config.toml
   (вне репозитория) + ~/.arch-harness/claude-harness-settings.json.
@@ -58,7 +58,7 @@
   `ps`: pytest net/tests 5 ГБ RSS; free: 46 ГБ total.
 
 ## 2026-10-14 · LSN-черновик 5 · source: tool (из прогона L2)
-- Факт: общий `CARGO_TARGET_DIR=/home/roman/spine-bank/target` у параллельных
+- Факт: общий `CARGO_TARGET_DIR=/home/user/spine-bank/target` у параллельных
   worktree флота даёт одинаковые имена артефактов. Сборка соседнего исполнителя
   (L11, `cargo test --lib learning_metrics`) подменила тестовый бинарь, и
   `cargo test --lib gate_loop::` отрапортовал «running 0 tests» при непустом

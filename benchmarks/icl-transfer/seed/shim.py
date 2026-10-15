@@ -10,7 +10,7 @@ import json, os, subprocess, sys, time, uuid, threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 MODEL = os.environ.get("SHIM_MODEL", "sonnet")
-LOG = os.environ.get("SHIM_LOG", "/home/claude/lab/shim-log.jsonl")
+LOG = os.environ.get("SHIM_LOG", "/home/user/lab/shim-log.jsonl")
 lock = threading.Lock()
 
 SCHEMA = {

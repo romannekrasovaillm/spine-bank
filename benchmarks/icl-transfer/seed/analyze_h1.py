@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import json, glob, os, collections, re
 
-LAB = "/home/claude/lab"
+LAB = "/home/user/lab"
 TASKS = json.load(open(f"{LAB}/tasks.json"))
 MOD = {t["id"]: t["module"] for t in TASKS}
 gl = [json.loads(l) for l in open(f"{LAB}/old/gate-log-v0.jsonl") if "/runs/C1/" in l]

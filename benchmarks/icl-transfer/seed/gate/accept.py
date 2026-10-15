@@ -3,12 +3,12 @@
 
 Usage: python3 accept.py <repo> [--quiet-log]
 Печатает PASS/FAIL и нарушения с кодами. Каждый вызов журналируется
-в /home/claude/lab/gate/gate-log.jsonl (для анализа эксперимента).
+в /home/user/lab/gate/gate-log.jsonl (для анализа эксперимента).
 """
 import ast, json, os, re, subprocess, sys, time
 
 SKIP = {"__init__", "money", "registry"}
-LOG = "/home/claude/lab/gate/gate-log.jsonl"
+LOG = "/home/user/lab/gate/gate-log.jsonl"
 
 
 def public_funcs(tree):

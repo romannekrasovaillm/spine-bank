@@ -61,3 +61,6 @@ benchmarks/platformv-arch-bench/runs/
 
 # локальные worktree флота разработки
 .worktrees/
+
+# Прочие приватные target-каталоги флота (target-int, target-core, target-lN…)
+target-*/
