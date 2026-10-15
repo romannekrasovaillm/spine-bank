@@ -4,7 +4,17 @@
 > правьте журнал событий, а не этот файл. Уроков в статусе `retired`
 > в блок инъекции не попадает. Сортировка — по `id`.
 
-Уроков: 7 (observed 0, candidate 2, confirmed 5, promoted 0, retired 0)
+Уроков: 8 (observed 0, candidate 3, confirmed 5, promoted 0, retired 0)
+
+## LSN-10018b1b — tool · idle-vs-research · harness_launch · candidate
+
+- **Правило:** В prompt-режиме длинные фазы чтения/исследования не дают ни stdout, ни файловых изменений: idle_timeout адаптера ≥ 3600 для портов/мержей + инструкция исполнителю писать каркас/тесты в первые 20 минут
+- **Область:** repo
+- **Счётчики:** hits 1 · misses 0 (подряд 0) · fails 1 · задач 2
+- **Провенанс:** записал cli · arch-be 0.4.11 · sha256 вердикта 014bee70b0b7
+- **Доказательства:**
+  - 2026-10-15T07:30:09.822+03:00 · fail · port-l1-065807 · claude-code-ps · `убит по idle 1800 посреди 35-мин фазы чтения эталона (prompt-режим: stdout только в конце)`
+  - 2026-10-15T07:30:09.863+03:00 · pass_after_apply · port-l1-072953 · claude-code-ps · `idle 3600 + ранняя запись каркаса`
 
 ## LSN-1e36136a — tool · unrecognized-model · harness_launch · confirmed
 
