@@ -22,7 +22,7 @@ must be followed by tool messages … did not have response messages: read_image
 ## Decision
 
 Портировать в arch-be решение spine-aiml ADR-056 (эталон — коммит `3b146d0` в
-`/home/roman/spine-aiml`), с адаптацией под расхождения редакций (прямой cherry-pick не накладывается):
+`/home/.../spine-aiml`), с адаптацией под расхождения редакций (прямой cherry-pick не накладывается):
 
 1. `src/llm.rs` — `ToolPairRepair` + `sanitize_tool_pairs(&mut Vec<ChatMessage>) -> ToolPairRepair`:
    висячему `tool_call.id` достраивается синтетический tool-ответ-заглушка с явным маркером,
@@ -66,7 +66,7 @@ reversible: порт — чистая функция + точки вызова; 
 
 ## References
 
-- Эталон: spine-aiml ADR-056 (`/home/roman/spine-aiml/docs/adr/ADR-056-*.md`), коммит `3b146d0`.
+- Эталон: spine-aiml ADR-056 (`/home/.../spine-aiml/docs/adr/ADR-056-*.md`), коммит `3b146d0`.
 - Spine: AD-4 (единый провайдерный слой), AD-5 (журнал — источник аудита).
 - Инцидент: `session-20261014-084215-1311952.jsonl` (банковский системный промпт), скриншот
   2026-10-14 08-44-16.

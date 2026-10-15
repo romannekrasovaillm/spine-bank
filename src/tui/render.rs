@@ -68,8 +68,16 @@ fn line_is_art(line: &Line<'_>) -> bool {
     line.spans.iter().any(|s| is_art(&s.content))
 }
 
-/// Рисует текущий экран приложения.
+/// Рисует текущий экран приложения и гасит управляющие символы в кадре —
+/// граница кадра одна на все виджеты и все пути (`fatal`, интро, «терминал
+/// мал», чат), поэтому обёртка, а не вызов в каждой ветке.
 pub(crate) fn draw(f: &mut Frame, app: &mut App) {
+    draw_screen(f, app);
+    neutralize_control_cells(f);
+}
+
+/// Собственно экран: диспетчер по состоянию приложения.
+fn draw_screen(f: &mut Frame, app: &mut App) {
     let theme = app.theme;
     f.render_widget(Block::default().style(theme.base()), f.area());
     match &app.screen {
@@ -80,6 +88,32 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App) {
             draw_fatal(f, f.area(), &theme, &error);
         }
         Screen::Chat => draw_chat(f, app),
+    }
+}
+
+/// Вычищает управляющие символы из ячеек кадра на границе кадра.
+///
+/// Зачем: backend ratatui пишет символ ячейки в терминал КАК ЕСТЬ
+/// (`backend/crossterm.rs`, `queue!(Print(cell.symbol()))`), а позицию курсора
+/// помнит по колонке ячейки (`last_pos`). Табуляция (`\t`) — управляющий
+/// символ: терминал исполняет её как HT, уводит курсор к следующей табуляции,
+/// и весь остаток прогона печатается со сдвигом. Хвост строки уходит за правый
+/// край, терминал переносит его на следующую строку — экран расходится с
+/// моделью буфера. Diff ratatui сравнивает ТОЛЬКО собственные буферы, поэтому
+/// рассинхрон не лечится: обрывки текста (в сессии — колонки id/длительности
+/// из таб-разделённого вывода `gh run list`) остаются висеть поверх панелей,
+/// пока эти ячейки не сменятся по другой причине. Замена на пробел раскладку
+/// не двигает: в модели ratatui табуляция занимает ровно одну ячейку — столько
+/// же занимает пробел.
+///
+/// Источники таких символов — внешний текст: вывод инструментов и результаты
+/// слэш-команд, попадающие в диалог и на вкладки панели. Гасим на границе
+/// кадра — точка одна на все виджеты и источники текста.
+pub(crate) fn neutralize_control_cells(f: &mut Frame<'_>) {
+    for cell in &mut f.buffer_mut().content {
+        if cell.symbol().chars().any(char::is_control) {
+            cell.set_symbol(" ");
+        }
     }
 }
 
@@ -2010,5 +2044,154 @@ mod tests {
             "выбранный последний пункт обязан быть виден:\n{text}"
         );
         assert!(text.contains("12/12"), "индикатор позиции:\n{text}");
+    }
+
+    /// Шаг табуляции терминала (HT): 8 колонок — умолчание xterm/vte.
+    const TAB_STOP: usize = 8;
+
+    /// Строки буфера как ячейки (символ на колонку) — для побайтовой сверки
+    /// кадра с терминальной моделью.
+    fn buffer_rows(term: &Terminal<TestBackend>) -> Vec<Vec<String>> {
+        let buf = term.backend().buffer();
+        let area = buf.area;
+        (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Кадр с выводом инструмента, несущим табуляции (`gh run list` — вывод,
+    /// разделённый табуляциями; инцидент 2026-10-14: колонки id/длительности
+    /// висели обрывками поверх диалога). Вход повторяет оба реальных пути
+    /// попадания внешнего текста на экран: сводка инструмента в диалоге
+    /// (последняя строка `summary` блока) и вывод на вкладке правой панели
+    /// (`App::route_tool_output` → `panels.knowledge`).
+    fn app_with_tabbed_tool_output() -> App {
+        let url = "https://github.com/romannekrasovaillm/spine-bank/actions/runs/38558891705/job/113267802327";
+        let row = format!("completed\tci\tmain\t{url}\t7m6s\t");
+        let mut app = test_app();
+        app.screen = Screen::Chat;
+        app.push_block(ChatBlock::Tool {
+            name: "bash".into(),
+            action: "gh run list".into(),
+            state: ToolState::Ok,
+            summary: format!("итог прогона\n{row}"),
+        });
+        app.panels.knowledge = format!("{row}\n{row}");
+        app.right_tab = RightTab::Knowledge;
+        app
+    }
+
+    /// Терминальная модель кадра: символы печатаются подряд (кадр после
+    /// `terminal.clear()` — один прогон без `MoveTo`), `\t` — HT к следующей
+    /// табуляции ([`TAB_STOP`] колонок), выход за правый край — автоперенос.
+    fn replay_on_terminal(rows: &[Vec<String>]) -> Vec<Vec<String>> {
+        let height = rows.len();
+        let width = rows.first().map_or(0, Vec::len);
+        let mut screen = vec![vec![" ".to_string(); width]; height];
+        let (mut cursor_x, mut cursor_y) = (0usize, 0usize);
+        for row in rows {
+            let mut cell = 0;
+            while cell < row.len() {
+                if cursor_x >= width {
+                    cursor_x = 0;
+                    cursor_y += 1;
+                }
+                if cursor_y >= height {
+                    return screen;
+                }
+                let sym = &row[cell];
+                if sym == "\t" {
+                    cursor_x = (cursor_x / TAB_STOP + 1) * TAB_STOP;
+                    cell += 1;
+                    continue;
+                }
+                screen[cursor_y][cursor_x] = sym.clone();
+                // Широкая клетка занимает две колонки; вторая ячейка буфера —
+                // её скрытая половина, отдельным символом не печатается.
+                let wide = UnicodeWidthStr::width(sym.as_str()) == 2
+                    && row.get(cell + 1).is_some_and(|next| next == " ");
+                cursor_x += if wide { 2 } else { 1 };
+                cell += if wide { 2 } else { 1 };
+            }
+        }
+        screen
+    }
+
+    /// Дефект утечки отрисовки (скриншот 2026-10-14: колонки `38558891705 /
+    /// 7m6s / 2026-…` из таб-разделённого `gh run list` поверх диалога): в
+    /// ячейки кадра попадали табуляции из вывода инструментов.
+    ///
+    /// Терминал истолковывает `\t` ячейки как HT и уводит курсор к следующей
+    /// табуляции, а backend ratatui (`backend/crossterm.rs`: `queue!(Print(cell.symbol()))`
+    /// при `last_pos`, выставленном в колонку ячейки) считает, что курсор остался
+    /// на месте: остаток прогона печатается со сдвигом, хвост строки уходит за
+    /// правый край и терминал переносит его на следующую строку. Diff ratatui
+    /// сравнивает ТОЛЬКО собственные буферы и рассинхрон не лечит — обрывки
+    /// остаются на экране до смены этих ячеек. Инвариант кадра: управляющих
+    /// символов в ячейках нет.
+    #[test]
+    fn frame_never_holds_control_characters_in_cells() {
+        let mut app = app_with_tabbed_tool_output();
+        let mut term = Terminal::new(TestBackend::new(124, 32)).expect("term");
+        term.draw(|f| app.render(f)).expect("draw");
+
+        let buf = term.backend().buffer();
+        let bad: Vec<(u16, u16, String)> = buf
+            .content
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.symbol().chars().any(char::is_control))
+            .map(|(i, c)| {
+                (
+                    u16::try_from(i).unwrap_or(0) % buf.area.width,
+                    u16::try_from(i).unwrap_or(0) / buf.area.width,
+                    c.symbol().to_string(),
+                )
+            })
+            .collect();
+        assert!(
+            bad.is_empty(),
+            "в кадре {} ячеек с управляющими символами (первые 5: {:?}) — \
+             терминал разойдётся с моделью буфера",
+            bad.len(),
+            &bad[..bad.len().min(5)]
+        );
+        // Фикс — нейтрализация, а не выбрасывание текста: содержимое на месте.
+        let text = buffer_text(&term);
+        assert!(
+            text.contains("38558891705"),
+            "вывод инструмента обязан остаться в кадре:\n{text}"
+        );
+    }
+
+    /// Симптом того же дефекта, без модели терминала: кадр, записанный в
+    /// терминал как есть, обязан воспроизвести сам себя. С табуляцией в ячейке
+    /// не воспроизводит — HT сдвигает остаток строки, и текст уезжает в чужие
+    /// колонки (та самая утечка поверх панелей).
+    #[test]
+    fn frame_written_to_terminal_reproduces_itself() {
+        let mut app = app_with_tabbed_tool_output();
+        let mut term = Terminal::new(TestBackend::new(124, 32)).expect("term");
+        term.draw(|f| app.render(f)).expect("draw");
+        let rows = buffer_rows(&term);
+        let shown = replay_on_terminal(&rows);
+        let mut drift = Vec::new();
+        for (y, (want, got)) in rows.iter().zip(&shown).enumerate() {
+            for (x, (w, g)) in want.iter().zip(got).enumerate() {
+                if w != g {
+                    drift.push((x, y, w.clone(), g.clone()));
+                }
+            }
+        }
+        assert!(
+            drift.is_empty(),
+            "терминал покажет не то, что нарисовано в {} ячейках (первые 5: x,y,кадр,экран: {:?})",
+            drift.len(),
+            &drift[..drift.len().min(5)]
+        );
     }
 }

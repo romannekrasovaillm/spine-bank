@@ -2157,3 +2157,170 @@ async fn accept_argument_overrides_adapter_field() {
     );
     assert!(!out.is_error, "PASS приёмки: {}", out.content);
 }
+// --- Приёмка прогона (accept_cmd) и реестр конвенций (отчёт «две гипотезы»,
+// рекомендации 1-2, 2026-10-14) ------------------------------------------
+
+/// cat-харнесс с приёмочной командой `accept`.
+fn cfg_with_accept(accept: &str) -> CodingHarnessConfig {
+    CodingHarnessConfig {
+        binary: "cat".into(),
+        prompt_mode: PromptMode::Stdin,
+        timeout_secs: 30,
+        accept_cmd: Some(accept.into()),
+        ..CodingHarnessConfig::default()
+    }
+}
+
+#[tokio::test]
+async fn accept_cmd_pass_keeps_run_green_and_writes_nothing() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let cfg = cfg_with_accept("echo 'G1-G7 ок'");
+    let run = run_harness("test-cat", &cfg, tmp.path(), "задача")
+        .await
+        .expect("run");
+    let ag = run.accept_gate.as_ref().expect("accept_gate присутствует");
+    assert_eq!(ag.verdict, AcceptVerdict::Pass);
+    assert_eq!(ag.line, "G1-G7 ок", "первая строка stdout — сводка");
+    assert!(
+        !conventions_path(tmp.path()).exists(),
+        "на PASS реестр не пишется"
+    );
+}
+
+#[tokio::test]
+async fn accept_cmd_fail_marks_run_red_and_records_convention() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let cfg = cfg_with_accept("echo 'G5: нет __all__ в модуле'; exit 1");
+    let run = run_harness("test-cat", &cfg, tmp.path(), "задача")
+        .await
+        .expect("run");
+    let ag = run.accept_gate.as_ref().expect("accept_gate присутствует");
+    assert_eq!(ag.verdict, AcceptVerdict::Fail);
+    assert_eq!(ag.line, "G5: нет __all__ в модуле");
+    let conv = std::fs::read_to_string(conventions_path(tmp.path())).expect("реестр записан");
+    assert!(conv.contains("G5: нет __all__ в модуле"), "запись: {conv}");
+    // Повторный FAIL с той же причиной — дедупликация, без второй записи.
+    let _ = run_harness("test-cat", &cfg, tmp.path(), "задача")
+        .await
+        .expect("run2");
+    let conv2 = std::fs::read_to_string(conventions_path(tmp.path())).expect("реестр");
+    assert_eq!(
+        conv2.matches("G5: нет __all__ в модуле").count(),
+        1,
+        "дедупликация по тексту причины: {conv2}"
+    );
+}
+
+#[tokio::test]
+async fn accept_cmd_absent_keeps_previous_behaviour() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let cfg = CodingHarnessConfig {
+        binary: "cat".into(),
+        prompt_mode: PromptMode::Stdin,
+        timeout_secs: 30,
+        ..CodingHarnessConfig::default()
+    };
+    let run = run_harness("test-cat", &cfg, tmp.path(), "задача")
+        .await
+        .expect("run");
+    assert!(run.accept_gate.is_none(), "без accept_cmd приёмки нет");
+}
+
+#[tokio::test]
+async fn accept_cmd_timeout_is_red() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let cfg = CodingHarnessConfig {
+        accept_cmd: Some("sleep 5".into()),
+        post_gate_timeout_secs: 1,
+        ..cfg_with_accept("true")
+    };
+    let run = run_harness("test-cat", &cfg, tmp.path(), "задача")
+        .await
+        .expect("run");
+    let ag = run.accept_gate.as_ref().expect("accept_gate");
+    assert_eq!(ag.verdict, AcceptVerdict::Timeout, "таймаут — красный");
+}
+
+#[test]
+fn conventions_registry_caps_to_keep_last_entries() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = tmp.path();
+    for i in 1..=(CONVENTIONS_KEEP + 5) {
+        record_convention(repo, &format!("причина номер {i}"));
+    }
+    let conv = std::fs::read_to_string(conventions_path(repo)).expect("реестр");
+    let entries = conv.matches("\n- ").count() + usize::from(conv.starts_with("- "));
+    assert_eq!(
+        entries, CONVENTIONS_KEEP,
+        "реестр урезан до KEEP: {entries}"
+    );
+    assert!(conv.contains("причина номер 55"), "свежая запись: {conv}");
+    // Записи 1..=5 сжаты (сравнение с переводом строки — «номер 2» является
+    // префиксом «номер 21», без границы ассерт ловил бы фантома).
+    assert!(!conv.contains("причина номер 2\n"), "старая сжата: {conv}");
+}
+
+#[test]
+fn inject_conventions_appends_registry_to_task() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let repo = tmp.path();
+    // Нет реестра — задача неизменна.
+    let cfg = CodingHarnessConfig::default();
+    assert_eq!(inject_conventions(repo, "ЗАДАЧА".into(), &cfg), "ЗАДАЧА");
+    record_convention(repo, "G6: строка в docs/CATALOG.md обязательна");
+    let out = inject_conventions(repo, "ЗАДАЧА".into(), &cfg);
+    assert!(out.starts_with("ЗАДАЧА"), "задание первым: {out}");
+    assert!(
+        out.contains("G6: строка в docs/CATALOG.md обязательна"),
+        "реестр: {out}"
+    );
+    assert!(
+        out.contains("Конвенции репозитория"),
+        "маркер секции: {out}"
+    );
+    // conventions = false — байт-точное задание (эталонные прогоны).
+    let off = CodingHarnessConfig {
+        conventions: false,
+        ..CodingHarnessConfig::default()
+    };
+    assert_eq!(inject_conventions(repo, "ЗАДАЧА".into(), &off), "ЗАДАЧА");
+}
+
+#[tokio::test]
+async fn accept_fail_makes_tool_output_error() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let cfg = cfg_with_accept("echo 'G6: нет строки в CATALOG'; exit 1");
+    let out = execute_run(
+        "test-cat",
+        &cfg,
+        tmp.path(),
+        "задача",
+        String::new(),
+        None,
+        &[],
+    )
+    .await;
+    assert!(
+        out.is_error,
+        "красная приёмка = красный прогон: {}",
+        out.content
+    );
+    assert!(
+        out.content.contains("Приёмка: FAIL"),
+        "первая строка: {}",
+        &out.content[..400]
+    );
+    // и PASS — не ошибка
+    let ok = cfg_with_accept("true");
+    let out2 = execute_run(
+        "test-cat",
+        &ok,
+        tmp.path(),
+        "задача",
+        String::new(),
+        None,
+        &[],
+    )
+    .await;
+    assert!(!out2.is_error, "зелёная приёмка не красит прогон");
+}

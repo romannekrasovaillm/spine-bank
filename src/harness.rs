@@ -32,7 +32,7 @@ use tokio::process::Command;
 
 use crate::config::{AcpMode, CodingHarnessConfig, Config, PromptMode};
 use crate::error::{HarnessError, Result};
-use crate::gate_loop::{GateVerdict, RunRef};
+use crate::gate_loop::{GateVerdict, RunRef, VerdictStatus};
 use crate::handoff::{HANDOFF_DIR, git_out, recommended_timeout_secs};
 use crate::llm::ToolSpec;
 use crate::proc::kill_process_group;
@@ -118,6 +118,11 @@ pub struct HarnessRun {
     /// прогона тогда байт-в-байт как до ADR-086) либо прогон прерван жёстко
     /// (судить промежуточное дерево нечем).
     pub accept: Option<GateVerdict>,
+    /// Поверхность 0.4.13 того же исполнения приёмки (`accept_cmd`,
+    /// рекомендация 2 отчёта «две гипотезы»): вердикт по коду выхода и первая
+    /// строка stdout — для «Приёмка: …» в итоге и реестра конвенций. `None` —
+    /// как у [`Self::accept`].
+    pub accept_gate: Option<AcceptGate>,
     /// Идентификатор прогона (`<харнесс>-<UTC>`): ключ доказательств реестра
     /// уроков и поле события `gate_verdict` (ADR-085/ADR-086).
     pub run_id: String,
@@ -227,6 +232,50 @@ pub struct PostGate {
     pub summary: String,
     /// Главные находки (error-строки составляющих, до 10).
     pub findings: Vec<String>,
+}
+
+/// Вердикт приёмочной команды прогона (`accept_cmd` — обобщение пост-гейта;
+/// отчёт «две гипотезы», 2026-10-14, рекомендация 2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AcceptVerdict {
+    /// Команда завершилась кодом 0 — результат принят.
+    Pass,
+    /// Ненулевой код или сбой запуска — результат отклонён.
+    Fail,
+    /// Команда не завершилась за `post_gate_timeout_secs` — результат не
+    /// проверен (недоверенный, как TIMEOUT пост-гейта).
+    Timeout,
+}
+
+impl AcceptVerdict {
+    /// Метка вердикта для вывода/журнала.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Pass => "PASS",
+            Self::Fail => "FAIL",
+            Self::Timeout => "TIMEOUT",
+        }
+    }
+
+    /// Красный вердикт: прогон становится ошибкой для оркестратора.
+    #[must_use]
+    pub fn is_red(self) -> bool {
+        !matches!(self, Self::Pass)
+    }
+}
+
+/// Итог приёмочной команды (`accept_cmd`): вердикт по коду выхода; первая
+/// непустая строка stdout — машиночитаемая причина (идёт в реестр конвенций
+/// и в первую строку итога прогона).
+#[derive(Debug, Clone)]
+pub struct AcceptGate {
+    /// Команда, как задана в конфиге адаптера.
+    pub cmd: String,
+    /// Вердикт.
+    pub verdict: AcceptVerdict,
+    /// Первая непустая строка stdout (максимум 240 символов).
+    pub line: String,
 }
 
 impl PostGate {
@@ -617,18 +666,41 @@ async fn finalize_run(
     } else {
         None
     };
-    // L2 (ADR-086): приёмка — после финализации (авто-коммит и пост-гейт уже
-    // отработали), ВНЕ песочницы исполнителя: команду запускает сам харнесс,
-    // в своём окружении, с рабочим каталогом прогона. Как и пост-гейт, только
-    // по завершённому прогону: у жёстко прерванного судить нечего.
-    let accept = if termination.is_soft_completion() {
+    // L2 (ADR-086) + рекомендация 2 отчёта «две гипотезы»: приёмка — после
+    // финализации (авто-коммит и пост-гейт уже отработали), ВНЕ песочницы
+    // исполнителя: команду запускает сам харнесс, в своём окружении, с рабочим
+    // каталогом прогона. Как и пост-гейт, только по завершённому прогону: у
+    // жёстко прерванного судить нечего. ОДНО исполнение команды приёмки —
+    // результат в двух поверхностях: `GateVerdict` (gate-verdict/v1, уроки,
+    // событие gate_verdict) и `AcceptGate` (0.4.13: «Приёмка: …» в итоге,
+    // реестр конвенций).
+    let (accept, accept_gate) = if termination.is_soft_completion() {
         match resolve_accept(cfg, repo) {
-            Some(command) => Some(run_accept(repo, &command, cfg.post_gate_timeout_secs).await),
-            None => None,
+            Some(command) => {
+                let verdict = run_accept(repo, &command, cfg.post_gate_timeout_secs).await;
+                let gate = AcceptGate::from_verdict(&verdict);
+                (Some(verdict), Some(gate))
+            }
+            None => (None, None),
         }
     } else {
-        None
+        (None, None)
     };
+    // Реестр конвенций (рекомендация 1 отчёта «две гипотезы»): каждый красный
+    // вердикт приёмки фиксируется артефактом в репозитории — урок переживает
+    // сессию и компактификацию и попадает в следующие задания исполнителю.
+    if let Some(ag) = &accept_gate {
+        if ag.verdict == AcceptVerdict::Fail {
+            record_convention(repo, &format!("приёмка FAIL: {}", ag.line));
+        }
+    }
+    if let Some(pg) = &post_gate {
+        if pg.verdict.is_red() {
+            for f in pg.findings.iter().take(3) {
+                record_convention(repo, &format!("пост-гейт {}: {f}", pg.verdict.label()));
+            }
+        }
+    }
     // Контракт разбирается один раз на стороне запуска — механически,
     // а не эвристикой у потребителей.
     let contract = parse_result_contract(&stdout);
@@ -659,6 +731,7 @@ async fn finalize_run(
         contract,
         post_gate,
         accept,
+        accept_gate,
         run_id: format!("{name}-{}", Utc::now().format("%Y%m%dT%H%M%S")),
         env_note,
         mode,
@@ -1078,6 +1151,143 @@ fn task_key(task: &str) -> Option<String> {
         key.push('…');
     }
     Some(key)
+}
+impl AcceptGate {
+    /// Поверхность 0.4.13 того же исполнения приёмки, что и [`GateVerdict`]
+    /// (ADR-086): вердикт по коду выхода (0 — PASS, прочее — FAIL, таймаут —
+    /// TIMEOUT) и первая непустая строка stdout — для «Приёмка: …» в итоге и
+    /// реестра конвенций (рекомендация 2 отчёта «две гипотезы», 2026-10-14).
+    #[must_use]
+    pub fn from_verdict(v: &GateVerdict) -> Self {
+        let verdict = match v.status {
+            VerdictStatus::Pass => AcceptVerdict::Pass,
+            VerdictStatus::Timeout => AcceptVerdict::Timeout,
+            VerdictStatus::Fail | VerdictStatus::Incomplete | VerdictStatus::Error => {
+                AcceptVerdict::Fail
+            }
+        };
+        let line = v
+            .stdout
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+            .unwrap_or(v.summary.as_str())
+            .chars()
+            .take(240)
+            .collect();
+        Self {
+            cmd: v.command.clone(),
+            verdict,
+            line,
+        }
+    }
+}
+
+/// Имя файла реестра конвенций в `.arch-handoff/` (рекомендация 1 отчёта
+/// «две гипотезы»).
+pub const CONVENTIONS_FILE: &str = "CONVENTIONS.md";
+
+/// Сколько последних записей держит реестр (старшее сжимается при
+/// переполнении: реестр — канал переноса уроков, не архив).
+const CONVENTIONS_KEEP: usize = 50;
+
+/// Потолок символов реестра, включаемого в задание исполнителю (свежие
+/// записи важнее — урезание с головы по границе записи).
+const CONVENTIONS_TASK_MAX_CHARS: usize = 4000;
+
+/// Путь к реестру конвенций репозитория прогона.
+fn conventions_path(repo: &Path) -> PathBuf {
+    repo.join(HANDOFF_DIR).join(CONVENTIONS_FILE)
+}
+
+/// Дописывает причину красного вердикта в реестр конвенций
+/// (дедупликация по тексту записи; при переполнении — последние
+/// [`CONVENTIONS_KEEP`]). Сбой записи не роняет прогон — реестр
+/// вспомогателен (warn в tracing).
+fn record_convention(repo: &Path, entry: &str) {
+    if let Err(e) = record_convention_impl(repo, entry) {
+        tracing::warn!("реестр конвенций не дописан ({}): {e}", repo.display());
+    }
+}
+
+fn record_convention_impl(repo: &Path, entry: &str) -> Result<()> {
+    let path = conventions_path(repo);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| HarnessError::io(parent, e))?;
+    }
+    let date = Utc::now().format("%Y-%m-%d");
+    let bullet = format!("- {date} · {}", entry.trim());
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    // Дедупликация по тексту без даты: та же причина FAIL не плодит записи.
+    let key = entry.trim();
+    if existing
+        .lines()
+        .any(|l| l.ends_with(key) && l.starts_with("- "))
+    {
+        return Ok(());
+    }
+    let mut lines: Vec<&str> = existing.lines().collect();
+    lines.retain(|l| !l.trim().is_empty());
+    let mut entries: Vec<String> = lines
+        .into_iter()
+        .filter(|l| l.starts_with("- "))
+        .map(str::to_string)
+        .collect();
+    entries.push(bullet);
+    if entries.len() > CONVENTIONS_KEEP {
+        entries = entries.split_off(entries.len() - CONVENTIONS_KEEP);
+    }
+    let body = format!(
+        "# Конвенции репозитория (реестр уроков приёмки)\n\n\
+         Ведётся харнессом автоматически: каждый красный вердикт приёмки \
+         (`accept_cmd`/пост-гейт) фиксирует здесь причину. `harness_run` \
+         включает реестр в задание исполнителю. Устаревшие записи снимайте \
+         вручную; зрелые правила переносите в CONSTRAINTS.yaml.\n\n{}\n",
+        entries.join("\n")
+    );
+    std::fs::write(&path, body).map_err(|e| HarnessError::io(&path, e))
+}
+
+/// Читает реестр конвенций для включения в задание исполнителю: только
+/// записи (шапка служебная), урезанные с головы до
+/// [`CONVENTIONS_TASK_MAX_CHARS`] по границе записи. `None` — реестра нет
+/// или он пуст.
+fn conventions_for_task(repo: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(conventions_path(repo)).ok()?;
+    let entries: Vec<&str> = text.lines().filter(|l| l.starts_with("- ")).collect();
+    if entries.is_empty() {
+        return None;
+    }
+    let mut used = 0usize;
+    let mut chosen: Vec<&str> = Vec::new();
+    for entry in entries.iter().rev() {
+        let cost = entry.len() + 1;
+        if used + cost > CONVENTIONS_TASK_MAX_CHARS && !chosen.is_empty() {
+            break;
+        }
+        used += cost;
+        chosen.push(entry);
+    }
+    chosen.reverse();
+    Some(chosen.join("\n"))
+}
+
+/// Включает реестр конвенций в задание исполнителю (рекомендация 1): урок
+/// прошлых FAIL доезжает до кодера штатно, а не зависит от того, вспомнил ли
+/// о нём оркестратор. Отключается флагом адаптера `conventions = false`
+/// (прогоны, где задание обязано быть байт-точным — эталонные, бенчмарки).
+fn inject_conventions(repo: &Path, task: String, cfg: &CodingHarnessConfig) -> String {
+    if !cfg.conventions {
+        return task;
+    }
+    let Some(body) = conventions_for_task(repo) else {
+        return task;
+    };
+    format!(
+        "{task}\n\n## Конвенции репозитория (реестр `.arch-handoff/CONVENTIONS.md`, \
+         проверяются приёмкой):\n{body}\n\
+         Соблюдай их с первой попытки — они выучены на прошлых провалах гейта."
+    )
 }
 
 /// Коммитит незакоммиченные правки исполнителя (кроме `.arch-handoff/` и
@@ -1595,11 +1805,14 @@ impl Tool for HarnessRunTool {
                 Вердикт пост-гейта виден в итоге; FAIL/INCOMPLETE/TIMEOUT делают прогон \
                 ошибкой (is_error). Отключается только флагом адаптера post_gate = false \
                 (с предупреждением в выводе). \
-                ПРИЁМКА (accept, ADR-086): после финализации харнесс прогоняет команду приёмки \
-                ВНЕ песочницы исполнителя (аргумент accept, иначе accept_cmd адаптера, иначе \
-                arch-be gate . при CONSTRAINTS.yaml в корне репозитория) и приводит вывод к \
-                контракту arch-be/gate-verdict/v1. Вердикт идёт ПЕРВОЙ строкой результата и \
-                пишется событием gate_verdict в журнал сессии; FAIL/INCOMPLETE/TIMEOUT делают \
+                ПРИЁМКА (accept_cmd / accept, ADR-086): после финализации харнесс прогоняет \
+                ОДНУ команду приёмки ВНЕ песочницы исполнителя (аргумент accept, иначе \
+                accept_cmd адаптера, иначе arch-be gate . при CONSTRAINTS.yaml в корне \
+                репозитория). Вердикт по коду выхода («Приёмка: …») идёт ПЕРВОЙ строкой \
+                результата; FAIL пишет причину в реестр конвенций .arch-handoff/CONVENTIONS.md \
+                (реестр включается в следующие задания; отключается conventions = false). \
+                Поверх того же исполнения вывод приводится к контракту arch-be/gate-verdict/v1 \
+                и пишется событием gate_verdict в журнал сессии; FAIL/INCOMPLETE/TIMEOUT делают \
                 прогон ошибкой, а каждый FAIL-код становится уроком реестра (источник gate; \
                 ADR-085, включено при [lessons] enabled = true). Пустая строка выключает приёмку. \
                 АВТОПАКЕТ (L5): при отсутствии .arch-handoff/ или пакете старше HEAD харнесс \
@@ -1719,9 +1932,14 @@ impl Tool for HarnessRunTool {
                 }
             }
         };
+        // Реестр конвенций (рекомендация 1 отчёта «две гипотезы»): уроки
+        // прошлых FAIL приёмки — в задании исполнителю штатно, а не по памяти
+        // оркестратора. Отключается `conventions = false` у адаптера.
+        let task = inject_conventions(&repo, task, hcfg);
         // Закреплённый блок уроков перед КАЖДОЙ задачей исполнителю (ADR-087):
         // префлайт-подбор L4 по тексту задачи, K и лимит токенов — из
-        // `[lessons]`. Флаг выключен — блок пуст, задача байт-в-байт прежняя.
+        // `[lessons]`. Флаг выключен — блок пуст, задача после конвенций
+        // остаётся байт-в-байт прежней.
         let (run_task, selected) = self.task_with_lessons(&live, &repo, &task);
         // Переопределение таймаута — копией конфига адаптера. Минимум 600 с:
         // модели склонны занижать таймаут («успеет за 5 минут»), а кодовый
@@ -1903,6 +2121,10 @@ async fn execute_run(
                     if let Some(pg) = &run.post_gate {
                         let _ = write!(content, " Пост-гейт: {}.", pg.verdict.label());
                     }
+                    // accept_cmd — туда же: приёмка видна с первой строки.
+                    if let Some(ag) = &run.accept_gate {
+                        let _ = write!(content, " Приёмка: {}.", ag.verdict.label());
+                    }
                     content.push('\n');
                 }
                 Termination::AbsoluteTimeout => {
@@ -2030,6 +2252,18 @@ async fn execute_run(
             // реестра и сырой вывод команды (первая строка итога — выше).
             if let Some(verdict) = &run.accept {
                 content.push_str(&verdict.block());
+                // Приёмочная команда (accept_cmd, рекомендация 2 отчёта «две
+                // гипотезы»): красный вердикт уже записал причину в реестр
+                // конвенций (см. finalize_run).
+                if let Some(ag) = &run.accept_gate {
+                    if ag.verdict == AcceptVerdict::Fail {
+                        content.push_str(
+                            "Причина записана в реестр конвенций \
+                             (.arch-handoff/CONVENTIONS.md) — следующие задания \
+                             исполнителю уже включают её.\n",
+                        );
+                    }
+                }
             }
             match &run.contract {
                 ContractParse::Valid(c) => {
