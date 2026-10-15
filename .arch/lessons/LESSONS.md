@@ -4,7 +4,7 @@
 > правьте журнал событий, а не этот файл. Уроков в статусе `retired`
 > в блок инъекции не попадает. Сортировка — по `id`.
 
-Уроков: 6 (observed 0, candidate 1, confirmed 5, promoted 0, retired 0)
+Уроков: 7 (observed 0, candidate 2, confirmed 5, promoted 0, retired 0)
 
 ## LSN-1e36136a — tool · unrecognized-model · harness_launch · confirmed
 
@@ -37,6 +37,16 @@
   - 2026-10-15T00:03:20.747+03:00 · fail · l2-135701 · claude-code-ps · `running 0 tests при непустом модуле — подмена бинаря соседним прогоном`
   - 2026-10-15T00:03:20.787+03:00 · pass_after_apply · l3fin-163548 · claude-code-ps
   - 2026-10-15T00:03:20.818+03:00 · pass_after_apply · l7-211938 · claude-code-ps
+
+## LSN-661060b1 — tool · gateway-cold-start · harness_launch · candidate
+
+- **Правило:** Тяжёлые прогоны (большой холодный контекст) запускать со сдвигом 10-15 минут: два одновременных холодных старта дают таймауты шлюза и смерть по тишине
+- **Область:** repo
+- **Счётчики:** hits 1 · misses 0 (подряд 0) · fails 1 · задач 2
+- **Провенанс:** записал cli · arch-be 0.4.11 · sha256 вердикта e877a21e4bb3
+- **Доказательства:**
+  - 2026-10-15T06:56:43.068+03:00 · fail · merge1-062456 · claude-code-ps · `Request timed out ×3 (5-мин интервалы) на первом запросе; холодный старт тяжёлого прогона впритык к PORT-L1`
+  - 2026-10-15T06:56:43.090+03:00 · pass_after_apply · merge1-065625 · claude-code-ps · `перезапуск в одиночестве, шлюз отвечает`
 
 ## LSN-6bf06d5e — gate · C-33 · config_growth · confirmed
 
