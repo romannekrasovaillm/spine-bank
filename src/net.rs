@@ -127,6 +127,11 @@ pub fn ensure_local_egress(proxy_url: &str) -> Result<Option<EgressStatus>> {
     }
     let status = Command::new("systemctl")
         .args(["--user", "start", EGRESS_UNIT])
+        // stdout/stderr гасим: вызов может сработать внутри TUI-сеанса, а
+        // чужая строка на alternate screen ломает кадр ratatui (утечка UI,
+        // инцидент 2026-10-14).
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status()
         .map_err(|e| {
             HarnessError::Config(format!(

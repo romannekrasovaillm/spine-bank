@@ -103,8 +103,10 @@ pub(crate) async fn cmd_run(
         Some(name) => registry.get(name)?,
         None => registry.default(),
     };
-    // Инструментарий: для ленивых профилей — реестр + ядро + кэш (ADR-090);
-    // иначе — полный реестр (как до волны 3).
+    // Инструментарий: явный флаг `--profile` (ADR-090) приоритетнее конфига
+    // `[agent] tools_profile` (main 0.4.13, дефолт full); без флага — реестр
+    // сессии по профилю из конфига (session_registry). Для ленивых профилей —
+    // реестр + ядро + кэш (ADR-090).
     let mut lazy_tools: Option<(HashSet<String>, ToolLazy)> = None;
     let tools = match tool_profile {
         Some(profile) => {
@@ -113,7 +115,7 @@ pub(crate) async fn cmd_run(
             lazy_tools = Some((eager, lazy));
             registry
         }
-        None => arch_harness::tools::full_registry(&cfg),
+        None => arch_harness::tools::session_registry(&cfg),
     };
     let cwd = std::env::current_dir().context("cwd")?;
     let tool_ctx = ToolContext::new(cwd, cfg.clone())
@@ -255,6 +257,9 @@ fn default_system_prompt(cfg: &Config) -> String {
     let memory = arch_harness::memory::load(&cfg.paths.memory_file)
         .ok()
         .flatten();
+    // Блок уроков контура добавляется не здесь, а в `effective_system_prompt`
+    // (закреплённый блок из реестра, ADR-087/L3) — единственный канал уроков;
+    // старый канал `failure_lessons.md` мигрировал в реестр (см. failure_memory).
     arch_harness::memory::augment_system_prompt(&base, memory.as_deref(), &cfg.paths.memory_file)
 }
 

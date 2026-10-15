@@ -366,7 +366,7 @@ impl App {
         let provider = registry.default();
         let model_name = format!("{}:{}", registry.default_name(), provider.model());
 
-        let mut tools = tools::full_registry(&cfg);
+        let mut tools = tools::session_registry(&cfg);
         let mut status_extra = None;
         let mut mcp_manager = None;
         // MCP по умолчанию ленивый (connect_on_start=false): старт TUI не ждёт
@@ -1641,6 +1641,9 @@ fn system_prompt(cfg: &Config) -> String {
     };
     // Ошибка чтения памяти не фатальна: сессия работает без неё.
     let memory = crate::memory::load(&cfg.paths.memory_file).ok().flatten();
+    // Блок уроков контура добавляется в `effective_system_prompt` (закреплённый
+    // блок из реестра, ADR-087/L3); старый канал failure_lessons.md мигрировал
+    // в реестр (см. failure_memory).
     crate::memory::augment_system_prompt(&base, memory.as_deref(), &cfg.paths.memory_file)
 }
 

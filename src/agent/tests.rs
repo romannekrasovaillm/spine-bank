@@ -652,19 +652,18 @@ async fn no_usage_record_without_stream_usage() {
     );
 }
 
-/// Провайдер, отдающий usage в НЕСТРИМИНГОВОМ ответе (B7, L11):
-/// `complete_with_usage` перекрыт; `complete` и дефолтная обёртка `stream`
-/// отдают только текст.
+/// Провайдер, чей нестриминговый ответ несёт usage (как у
+/// `openai_compat` — статистика берётся из тела ответа API).
 #[derive(Debug)]
-struct CompleteUsageLlm;
+struct UsageLlmNonStream;
 
 #[async_trait::async_trait]
-impl LlmProvider for CompleteUsageLlm {
+impl LlmProvider for UsageLlmNonStream {
     fn name(&self) -> &'static str {
-        "complete-usage"
+        "usage-llm-ns"
     }
     fn model(&self) -> &'static str {
-        "complete-usage-1"
+        "usage-ns-1"
     }
     async fn complete(&self, _req: ChatRequest) -> Result<ChatMessage> {
         Ok(ChatMessage::assistant("готово", Vec::new()))
@@ -674,19 +673,21 @@ impl LlmProvider for CompleteUsageLlm {
         Ok((
             msg,
             Usage {
-                prompt_tokens: 90,
-                completion_tokens: 10,
+                prompt_tokens: 77,
+                completion_tokens: 12,
             },
         ))
     }
 }
 
+/// Баг из отчёта «две гипотезы» (2026-10-14): в non-stream режиме usage в
+/// журнал не писался — стоимость хода не измерялась. Теперь путь
+/// `complete` в агентном цикле идёт через `complete_with_usage` и журналирует
+/// статистику так же, как стрим.
 #[tokio::test]
-async fn non_streamed_usage_is_logged_to_journal() {
-    // B7: при stream=false usage нестримингового ответа теперь доходит до
-    // журнала (через complete_with_usage), а не теряется.
+async fn nonstream_usage_is_logged_to_journal() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let mut s = make_session(tmp.path(), Arc::new(CompleteUsageLlm), |cfg| {
+    let mut s = make_session(tmp.path(), Arc::new(UsageLlmNonStream), |cfg| {
         cfg.agent.stream = false;
     });
     let reply = s.send("ход", None).await.expect("send");
@@ -695,11 +696,11 @@ async fn non_streamed_usage_is_logged_to_journal() {
     let usage_line = journal
         .lines()
         .find(|l| l.contains("\"kind\":\"usage\""))
-        .expect("запись usage в журнале");
+        .expect("запись usage в журнале non-stream режима");
     let v: Value = serde_json::from_str(usage_line).expect("json");
-    assert_eq!(v["model"], "complete-usage-1");
-    assert_eq!(v["prompt_tokens"], 90);
-    assert_eq!(v["completion_tokens"], 10);
+    assert_eq!(v["model"], "usage-ns-1");
+    assert_eq!(v["prompt_tokens"], 77);
+    assert_eq!(v["completion_tokens"], 12);
 }
 
 #[tokio::test]

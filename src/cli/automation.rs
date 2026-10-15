@@ -76,7 +76,7 @@ pub(crate) async fn cmd_cron(cfg: &Arc<Config>, cmd: CronCmd) -> Result<()> {
                 Some(m) => registry.get(m)?,
                 None => registry.default(),
             };
-            let tools = arch_harness::tools::full_registry(cfg);
+            let tools = arch_harness::tools::session_registry(cfg);
             let out_dir = job
                 .out
                 .clone()
@@ -99,7 +99,7 @@ pub(crate) async fn cmd_cron(cfg: &Arc<Config>, cmd: CronCmd) -> Result<()> {
                 .unwrap_or_else(|| now - chrono::Duration::hours(24));
             let registry = LlmRegistry::from_config(cfg)?;
             let provider = registry.default();
-            let tools = arch_harness::tools::full_registry(cfg);
+            let tools = arch_harness::tools::session_registry(cfg);
             let reports_dir = cfg
                 .cron
                 .out_dir

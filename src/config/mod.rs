@@ -123,6 +123,18 @@ pub struct AgentConfig {
     /// повторяя вызов модели целиком, пока не выйдет этот бюджет. 0 —
     /// выключено (поведение ≤0.3.12: ход падает сразу).
     pub network_retry_budget_secs: u64,
+    /// Профиль набора инструментов сессии (рекомендация 3 отчёта «две
+    /// гипотезы», 2026-10-14: 84% первого запроса — схемы всех 67
+    /// инструментов, реально зовутся 4 базовых): `full` (дефолт) и
+    /// `architect` — полный реестр; `orchestrate` — ядро (fs/bash/веб),
+    /// оркестрация (`harness_run`, субагенты, handoff), знания
+    /// (`skill_search` / `skill_load` / `kb_search`) и `significance_score` — доменный
+    /// слой из схем каждого запроса убран. Неизвестное значение — `full`
+    /// (предупреждение в лог): сессия не падает из-за опечатки в конфиге.
+    /// Мост MCP (`mcp serve`) профиль НЕ применяет — у моста свои белые
+    /// списки.
+    #[serde(default)]
+    pub tools_profile: Option<String>,
 }
 
 /// Режим памяти сбоев инструментов (`[agent] failure_memory`).
@@ -161,6 +173,7 @@ impl Default for AgentConfig {
             compact_l3_pct: 95,
             failure_memory: FailureMemoryMode::Propose,
             network_retry_budget_secs: 180,
+            tools_profile: None,
         }
     }
 }
@@ -477,13 +490,29 @@ pub struct CodingHarnessConfig {
     /// оркестратора. `false` — выключен явным решением адаптера
     /// (предупреждение в выводе и журнале остаётся).
     pub post_gate: bool,
+    /// Приёмочная команда адаптера (рекомендация 2 отчёта «две гипотезы»,
+    /// 2026-10-14): произвольный гейт владельца контура (например,
+    /// `python3 gate/accept.py .`), запускаемый в корне рабочего дерева после
+    /// завершения прогона (мягкие исходы — как у пост-гейта). Вердикт — код
+    /// выхода (0 — PASS), причина — первая непустая строка stdout; вердикт
+    /// виден в первой строке итога прогона, а FAIL дописывает причину в
+    /// реестр конвенций (`.arch-handoff/CONVENTIONS.md`). Таймаут — общий
+    /// бюджет `post_gate_timeout_secs`. Не задано — дефолт `arch-be gate .`
+    /// при `CONSTRAINTS.yaml` в корне репозитория (L2, ADR-086); пусто —
+    /// приёмка выключена явно. `None` — приёмки нет (прежнее поведение).
+    #[serde(default)]
+    pub accept_cmd: Option<String>,
+    /// Включать реестр конвенций в задание исполнителю (рекомендация 1):
+    /// `true` (дефолт) — записи `.arch-handoff/CONVENTIONS.md` подшиваются в
+    /// текст задачи. `false` — для прогонов, где задание обязано быть
+    /// байт-точным (эталонные прогоны, бенчмарки).
+    #[serde(default = "default_true")]
+    pub conventions: bool,
     /// Таймаут пост-гейта, секунды (дефолт 600). Гейт не завершился —
     /// вердикт TIMEOUT, итог красный: непроверенный результат не выдаётся
     /// за принятый (RA-5: `dependency_direction` на больших реестрах
     /// патологически дорог — это сигнал, а не блокер механизма).
     pub post_gate_timeout_secs: u64,
-    /// Команда приёмки прогона (L2, ADR-086; см. `docs/harness_integrations.md`): shell-строка вне песочницы исполнителя; не задано — дефолт `arch-be gate .` при `CONSTRAINTS.yaml` в корне, пусто — выключено.
-    pub accept_cmd: Option<String>,
     /// Режим вызова агента (C1, ADR-057): `auto` (дефолт) | `acp` | `prompt`.
     /// Аддитивно: старые конфиги без поля работают как `auto`, а без секции
     /// `acp` — как headless (поведение до ADR-057).
@@ -509,8 +538,9 @@ impl Default for CodingHarnessConfig {
             idle_timeout_secs: 600,
             auto_commit: true,
             post_gate: true,
-            post_gate_timeout_secs: 600,
             accept_cmd: None,
+            conventions: true,
+            post_gate_timeout_secs: 600,
             mode: AcpMode::Auto,
             acp: None,
         }

@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
-use crossterm::event::{Event, EventStream, KeyEventKind};
+use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -57,6 +57,9 @@ const SPINNER_INTERVAL: Duration = Duration::from_millis(120);
 /// # Errors
 /// Терминал недоступен (нет TTY), ошибка отрисовки кадра.
 pub async fn run(cfg: Arc<Config>) -> Result<()> {
+    // Экран с этого момента принадлежит TUI: библиотечная диагностика обязана
+    // идти через `diag::warn` (в лог-файл), а не в stderr (инцидент 2026-10-14).
+    crate::diag::enter_tui_mode();
     let _guard = TerminalGuard::enter()?;
     install_panic_hook();
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))
@@ -101,7 +104,21 @@ pub async fn run(cfg: Arc<Config>) -> Result<()> {
                 match maybe_event {
                     Some(Ok(Event::Key(key))) => {
                         if key.kind != KeyEventKind::Release {
-                            app.handle_key(key);
+                            // Ctrl+L — полная перерисовка кадра (юниксовая
+                            // конвенция redraw): сбрасывает back-буфер ratatui,
+                            // следующий кадр пишется с нуля. Это путь
+                            // восстановления от любого рассинхрона экрана с
+                            // буфером, который diff-рендер сам не чинит —
+                            // например, от записи в /dev/tty мимо пайпов
+                            // (так могут внуки bash-инструмента). Обрабатывается
+                            // на уровне цикла, чтобы работало поверх модалок.
+                            if key.modifiers.contains(KeyModifiers::CONTROL)
+                                && matches!(key.code, KeyCode::Char('l'))
+                            {
+                                let _ = terminal.clear();
+                            } else {
+                                app.handle_key(key);
+                            }
                         }
                     }
                     // Колесо мыши — прокрутка диалога.
