@@ -112,9 +112,10 @@ fn find_in_path(name: &str) -> Option<PathBuf> {
 /// - `--ro-bind / /` — вся ФС read-only;
 /// - `--dev /dev`, `--proc /proc` — свежие devtmpfs/proc (нужны `/dev/null`,
 ///   `ps` и т.п.);
+/// - `--tmpfs /tmp` — временные файлы; монтируется ДО bind рабочего дерева:
+///   иначе репозиторий под `/tmp` (tempdir в тестах) исчезает под tmpfs;
 /// - `--bind <repo_root> <repo_root>` — рабочее дерево харнесса rw поверх ro;
 ///   запись ВНЕ дерева под sandbox отклоняется ФС;
-/// - `--tmpfs /tmp` — временные файлы;
 /// - `--unshare-net` — сетевого namespace нет: egress дочерних процессов
 ///   закрыт (curl/wget/ssh из команды не выходят наружу, T1);
 /// - `--die-with-parent` — песочница умирает вместе с процессом харнесса
@@ -134,10 +135,13 @@ fn build_bwrap_argv(
     push(&mut argv, &["--ro-bind", "/", "/"]);
     push(&mut argv, &["--dev", "/dev"]);
     push(&mut argv, &["--proc", "/proc"]);
+    // tmpfs /tmp — строго до bind рабочего дерева: bwrap применяет монтирования
+    // по порядку, и обратный порядок прячет репозиторий под /tmp (tempdir в
+    // тестах) под tmpfs — запись в него становится read-only.
+    push(&mut argv, &["--tmpfs", "/tmp"]);
     argv.push("--bind".into());
     argv.push(repo_root.as_os_str().to_os_string());
     argv.push(repo_root.as_os_str().to_os_string());
-    push(&mut argv, &["--tmpfs", "/tmp"]);
     push(&mut argv, &["--unshare-net"]);
     push(&mut argv, &["--die-with-parent"]);
     if let Some(home) = home {
@@ -645,11 +649,11 @@ mod tests {
                 "/dev",
                 "--proc",
                 "/proc",
+                "--tmpfs",
+                "/tmp",
                 "--bind",
                 "/repo",
                 "/repo",
-                "--tmpfs",
-                "/tmp",
                 "--unshare-net",
                 "--die-with-parent",
                 "--setenv",

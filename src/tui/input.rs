@@ -456,6 +456,10 @@ mod tests {
         let mut input = InputState::default();
         type_chars(&mut input, ";1M[<35;13");
         input.flush_debris();
-        assert_eq!(input.text(), "", "недописанный обрывок не должен попасть в текст");
+        assert_eq!(
+            input.text(),
+            "",
+            "недописанный обрывок не должен попасть в текст"
+        );
     }
 }

@@ -26,6 +26,11 @@
   `ordinary_text_with_digits_and_semicolons_survives` и
   `button_mouse_capture_does_not_enable_any_motion_tracking`.
 
+- **bwrap: рабочее дерево под `/tmp` исчезало под tmpfs** — `--tmpfs /tmp`
+  монтировался после `--bind <repo_root>`, и репозиторий (tempdir в тесте
+  `sandboxed_command_repo_rw_world_ro`) оказывался read-only. Порядок
+  монтирований исправлен: tmpfs строго до bind рабочего дерева.
+
 ## [0.4.14] — 2026-10-15
 
 Вливает arch/learning-loop-050 поверх 0.4.13; accept_cmd 0.4.13 сохранён,
