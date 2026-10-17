@@ -18,11 +18,13 @@
 //! сессия возвращается сообщением [`app::AppMessage`]; события
 //! [`crate::agent::AgentEvent`] форвардятся через bounded mpsc(64).
 
+use std::fmt;
 use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+use crossterm::Command;
+use crossterm::event::DisableMouseCapture;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
@@ -152,6 +154,27 @@ pub async fn run(cfg: Arc<Config>) -> Result<()> {
     Ok(())
 }
 
+/// Захват мыши без режима 1003 («любое движение»).
+///
+/// `crossterm::event::EnableMouseCapture` включает 1000+1002+1003+1015+1006.
+/// Режим 1003 шлёт репорт на каждое движение курсора — поток, который
+/// интерфейсу не нужен. При разрыве escape-последовательности по границе
+/// чтения ESC теряется, и остатки репортов приходят в TUI обычными
+/// символами (инцидент 2026-10-17: мусор в поле ввода). Оставляем
+/// 1000 (кнопки/колесо), 1002 (drag с зажатой кнопкой) и 1006 (SGR).
+struct EnableButtonMouseCapture;
+
+impl Command for EnableButtonMouseCapture {
+    fn write_ansi(&self, f: &mut impl fmt::Write) -> fmt::Result {
+        f.write_str("\x1b[?1000h\x1b[?1002h\x1b[?1006h")
+    }
+
+    #[cfg(windows)]
+    fn execute_winapi(&self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 /// RAII-гард терминала: при Drop покидает alternate screen и выключает
 /// raw mode — терминал восстанавливается при любом выходе из [`run`].
 struct TerminalGuard;
@@ -164,7 +187,7 @@ impl TerminalGuard {
     fn enter() -> Result<Self> {
         enable_raw_mode()
             .map_err(|e| HarnessError::Tui(format!("raw mode недоступен (нужен TTY): {e}")))?;
-        if let Err(e) = execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture) {
+        if let Err(e) = execute!(io::stdout(), EnterAlternateScreen, EnableButtonMouseCapture) {
             let _ = disable_raw_mode();
             return Err(HarnessError::Tui(format!("alternate screen: {e}")));
         }
@@ -202,6 +225,22 @@ fn size_changed(last: &mut Option<(u16, u16)>, now: (u16, u16)) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn button_mouse_capture_does_not_enable_any_motion_tracking() {
+        let mut ansi = String::new();
+        EnableButtonMouseCapture
+            .write_ansi(&mut ansi)
+            .expect("ansi");
+        assert!(ansi.contains("?1000h"), "кнопки/колесо: {ansi}");
+        assert!(ansi.contains("?1002h"), "drag с кнопкой: {ansi}");
+        assert!(ansi.contains("?1006h"), "SGR-координаты: {ansi}");
+        assert!(
+            !ansi.contains("?1003h"),
+            "any-motion tracking не включаем: {ansi}"
+        );
+        assert!(!ansi.contains("?1015h"), "urxvt-режим не нужен: {ansi}");
+    }
 
     #[test]
     fn size_change_policy_clears_only_after_first_frame() {
