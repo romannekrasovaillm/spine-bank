@@ -26,6 +26,9 @@ __pycache__/
 # C2): cargo-mutants 27 читает только .cargo/mutants.toml, поэтому он в VCS.
 .cargo/*
 !.cargo/mutants.toml
+# Политика подавлений cargo-audit должна попадать в CI (release.yml): без
+# файла в checkout джоба audit видит адвизории, подавленные осознанно.
+!.cargo/audit.toml
 # Результаты локальных прогонов cargo-mutants (отчёт — docs/experiments/,
 # сам каталог с логами и копиями дерева — не для VCS)
 mutants.out/
