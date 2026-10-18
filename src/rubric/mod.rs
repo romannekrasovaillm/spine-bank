@@ -30,6 +30,8 @@
 //! фикстуры тестов.
 
 mod artifact;
+/// Калибровка и промоушен связок «критерий ↔ правило» (ADR-093, волна 4).
+mod binding_promotion;
 mod catalog;
 mod decision;
 mod human_decision;
@@ -47,6 +49,12 @@ pub use artifact::{
     SecondJudge, artifact_json, artifact_json_for_subject, artifact_slug, independence_for,
     load_artifacts, pack_artifact_slug, repo_root_of, write_artifact, write_artifact_for_subject,
     write_artifact_for_subject_with, write_artifact_with,
+};
+pub use binding_promotion::{
+    BINDING_PROMOTION_SCHEMA, BINDING_PROMOTIONS_DIR, BINDING_SHADOW_LOG, BindingPromotion,
+    MIN_SHADOW_RUNS, PromotionCheck, RuleTeethNote, ShadowRecord, append_shadow, check_promotion,
+    promote as promote_binding, promotion_path, read_promotion, shadow_records,
+    signed as binding_signed,
 };
 pub use catalog::{list, load};
 pub use decision::{
@@ -68,14 +76,15 @@ pub use portfolio::{
 pub use qualify::{
     CaseOutcome, MAX_HUMAN_SHARE, MIN_ACCURACY, MIN_COMPLETENESS, QUALIFICATION_DIR,
     QUALIFICATION_SCHEMA, Qualification, QualificationReport, QualificationSet, Thresholds, Truth,
-    build_report as build_qualification_report, load_set, qualification, refusal_reason,
-    run as run_qualification, stored as stored_qualification, write as write_qualification,
+    build_report as build_qualification_report, load_set, qualification, qualification_strict,
+    refusal_reason, run as run_qualification, stored as stored_qualification,
+    write as write_qualification,
 };
 pub(crate) use report::{EvidenceScope, build_report, parse_judge_response};
 pub use report::{InputInjection, RubricReport, scan_injections, weighted_total};
 pub use tools::tools;
 pub use types::{
-    BindingMode, BindingRole, BoundRule, Coverage, Criterion, CriterionFlag, CriterionScore, CriterionSnapshot, EvidenceOn,
-    JudgeConfigSnapshot, MAX_TARGET_CHARS, Rubric, RubricDecision, RubricSummary, ScenarioVerdict,
-    VerifiedCitation,
+    BindingMode, BindingRole, BoundRule, Coverage, Criterion, CriterionFlag, CriterionScore,
+    CriterionSnapshot, EvidenceOn, JudgeConfigSnapshot, MAX_TARGET_CHARS, Rubric, RubricDecision,
+    RubricSummary, ScenarioVerdict, VerifiedCitation,
 };

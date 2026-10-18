@@ -396,7 +396,10 @@ pub fn load_rule_detectors(repo: &Path) -> Vec<(PathBuf, RuleDetector)> {
     let mut paths: Vec<PathBuf> = entries
         .flatten()
         .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("json")))
+        .filter(|p| {
+            p.extension()
+                .is_some_and(|x| x.eq_ignore_ascii_case("json"))
+        })
         .collect();
     paths.sort();
     paths
@@ -444,10 +447,25 @@ mod tests {
             .iter()
             .map(|d| (d.name.clone(), d.status.clone()))
             .collect();
-        assert_eq!(status.get("C-01").map(String::as_str), Some("fail"), "{status:?}");
-        assert_eq!(status.get("C-02").map(String::as_str), Some("warn"), "{status:?}");
-        assert_eq!(status.get("no_todo").map(String::as_str), Some("warn"), "{status:?}");
-        assert!(!status.contains_key("C-03"), "unverifiable не детектор: {status:?}");
+        assert_eq!(
+            status.get("C-01").map(String::as_str),
+            Some("fail"),
+            "{status:?}"
+        );
+        assert_eq!(
+            status.get("C-02").map(String::as_str),
+            Some("warn"),
+            "{status:?}"
+        );
+        assert_eq!(
+            status.get("no_todo").map(String::as_str),
+            Some("warn"),
+            "{status:?}"
+        );
+        assert!(
+            !status.contains_key("C-03"),
+            "unverifiable не детектор: {status:?}"
+        );
         let money = detectors.iter().find(|d| d.name == "C-01").expect("C-01");
         assert_eq!(money.ad.as_deref(), Some("AD-1"));
         assert_eq!(money.files, vec!["src/pay.rs".to_string()]);
@@ -476,7 +494,11 @@ mod tests {
             .collect();
         assert_eq!(texts, again);
         assert!(!stale.exists(), "детектор удалённого правила убран");
-        assert!(texts.iter().all(|t| !t.contains("judged_at") && t.ends_with('\n')));
+        assert!(
+            texts
+                .iter()
+                .all(|t| !t.contains("judged_at") && t.ends_with('\n'))
+        );
         let loaded = load_rule_detectors(&dir);
         assert_eq!(loaded.len(), first.len());
     }
@@ -489,17 +511,21 @@ mod tests {
             crate::control::load_constraints_resolved(&dir.join("CONSTRAINTS.yaml")).expect("r");
         let mut report = crate::control::check(&dir, &dir.join("CONSTRAINTS.yaml")).expect("check");
         report.issues.retain(|i| i.rule != "no_float_money");
-        report.requires_skipped.push(super::super::types::RequiresSkippedRule {
-            rule: "no_float_money".to_string(),
-            severity: "error".to_string(),
-            resources: vec!["stand".to_string()],
-            reason: "нет стенда".to_string(),
-        });
-        report.not_applicable.push(super::super::types::NotApplicableRule {
-            rule: "has_readme".to_string(),
-            severity: "warn".to_string(),
-            reason: "стек не тот".to_string(),
-        });
+        report
+            .requires_skipped
+            .push(super::super::types::RequiresSkippedRule {
+                rule: "no_float_money".to_string(),
+                severity: "error".to_string(),
+                resources: vec!["stand".to_string()],
+                reason: "нет стенда".to_string(),
+            });
+        report
+            .not_applicable
+            .push(super::super::types::NotApplicableRule {
+                rule: "has_readme".to_string(),
+                severity: "warn".to_string(),
+                reason: "стек не тот".to_string(),
+            });
         report.issues.retain(|i| i.rule != "has_readme");
         let detectors = detectors_for(&dir, &resolved.rules, &report, None);
         let money = detectors.iter().find(|d| d.name == "C-01").expect("C-01");

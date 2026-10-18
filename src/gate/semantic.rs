@@ -37,6 +37,9 @@ const SEMANTIC_SKIP_DIRS: [&str; 5] = [".git", "target", "node_modules", ".venv"
 /// ужесточение покраснило бы чужие пайплайны без предупреждения. Пустой
 /// список рубрик в конфиге — тоже SKIP: составляющую можно включить раньше,
 /// чем завести отчёты.
+// Восемь входов — состав прогона гейта (маршрут, политика, исходы правил);
+// сворачивание в структуру только переименовало бы поля `GateOptions`.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn component_semantic_quality(
     repo: &Path,
     cfg: &crate::config::SemanticQualityConfig,
@@ -76,6 +79,9 @@ pub(super) fn component_semantic_quality(
     // блокирующей связке), и есть ли вообще связки — для детали и паспорта.
     let mut decided_by_rule = 0usize;
     let mut has_bindings = false;
+    // ADR-093 волна 4: теневой режим советующих связок — что было бы при
+    // `blocking`, по критериям; уходит в журнал для решения о промоушене.
+    let mut shadow: Vec<crate::rubric::ShadowRecord> = Vec::new();
     for name in &cfg.rubrics {
         let path = rubrics_dir.join(format!("{name}.yaml"));
         let rubric = match crate::rubric::load(&path) {
@@ -110,6 +116,12 @@ pub(super) fn component_semantic_quality(
             truncated = true;
         }
         has_bindings |= rubric.criteria.iter().any(|c| !c.bound_rules.is_empty());
+        let signing = BindingSigning::of(repo, &rubric, &path);
+        let mut tally: std::collections::BTreeMap<String, (usize, usize, usize)> = signing
+            .shadow
+            .iter()
+            .map(|c| (c.clone(), (0, 0, 0)))
+            .collect();
         for subject in subjects.into_iter().take(MAX_SEMANTIC_SUBJECTS) {
             let packs =
                 crate::rubric_pack::build_with(repo, kind, &subject.subject, &pack_options).ok();
@@ -122,14 +134,22 @@ pub(super) fn component_semantic_quality(
                 cfg,
                 human_policy,
             );
-            let bindings = subject_bindings(
+            let (bindings, would) = subject_bindings(
                 repo,
                 &rubric,
                 packs.as_deref(),
                 &subject,
                 &artifacts,
                 rule_outcomes,
+                &signing,
             );
+            for (criterion, (fail, escalate)) in would {
+                if let Some(t) = tally.get_mut(&criterion) {
+                    t.0 += 1;
+                    t.1 += usize::from(fail);
+                    t.2 += usize::from(escalate);
+                }
+            }
             checked += usize::from(!matches!(state, SemanticState::Skipped));
             unconfirmed += bindings.escalations(human_policy);
             // Короткое замыкание (ADR-093): измерение решило субъект — отчёт
@@ -146,6 +166,17 @@ pub(super) fn component_semantic_quality(
             }
             findings.extend(state.into_findings(name, &subject, human_policy));
             findings.extend(bindings.findings(name, &subject.subject, human_policy));
+        }
+        let at = chrono::Local::now().to_rfc3339();
+        for (criterion, (subjects, would_fail, would_escalate)) in tally {
+            shadow.push(crate::rubric::ShadowRecord {
+                rubric: rubric.name.clone(),
+                criterion,
+                subjects,
+                would_fail,
+                would_escalate,
+                at: at.clone(),
+            });
         }
     }
     let errors = findings.iter().filter(|f| f.severity == "error").count();
@@ -177,10 +208,24 @@ pub(super) fn component_semantic_quality(
         );
     }
     if decided_by_rule > 0 {
-        let _ = write!(
-            detail,
-            "; решено измерением без судьи: {decided_by_rule}"
-        ); // игнорируется: записи в String не падают
+        let _ = write!(detail, "; решено измерением без судьи: {decided_by_rule}"); // игнорируется: записи в String не падают
+    }
+    if !shadow.is_empty() {
+        let lines: Vec<String> = shadow
+            .iter()
+            .map(|r| {
+                format!(
+                    "{}#{} — при blocking провал: {}, человеку: {} из {}",
+                    r.rubric, r.criterion, r.would_fail, r.would_escalate, r.subjects
+                )
+            })
+            .collect();
+        let _ = write!(detail, "; теневой режим связок: {}", lines.join("; ")); // игнорируется: записи в String не падают
+        // Журнал — свидетельство для решения о промоушене, а не вход вердикта:
+        // неудача записи вердикт не меняет и называется в детали.
+        if let Err(e) = crate::rubric::append_shadow(repo, &shadow) {
+            let _ = write!(detail, " (журнал не записан: {e})"); // игнорируется: записи в String не падают
+        }
     }
     let mut notes = vec![
         "балл и обвинение — суждение LLM-судьи по досье; механика сверяет хэш досье, \
@@ -767,9 +812,10 @@ fn subject_bindings(
     subject: &SemanticSubject,
     artifacts: &[crate::rubric::RubricArtifact],
     rule_outcomes: Option<&[crate::control::RuleDetector]>,
-) -> super::binding::BindingVerdict {
+    signing: &BindingSigning,
+) -> (super::binding::BindingVerdict, ShadowOutcome) {
     if rubric.criteria.iter().all(|c| c.bound_rules.is_empty()) {
-        return super::binding::BindingVerdict::default();
+        return (super::binding::BindingVerdict::default(), Vec::new());
     }
     let subject_path = packs
         .and_then(|p| p.first())
@@ -789,22 +835,87 @@ fn subject_bindings(
     let blocking = rubric.criteria.iter().any(|c| {
         !c.bound_rules.is_empty() && c.binding_mode == crate::rubric::BindingMode::Blocking
     });
+    // Волна 4: строгий допуск — метрики пересчитываются по текущим порогам.
     let qualified = match artifact {
         Some(a) if blocking => {
-            match crate::rubric::qualification(repo, &a.rubric, &a.judge_model) {
+            match crate::rubric::qualification_strict(repo, &a.rubric, &a.judge_model) {
                 crate::rubric::Qualification::Qualified(_) => Ok(()),
                 state => Err(crate::rubric::refusal_reason(&state, &a.judge_model)),
             }
         }
         _ => Ok(()),
     };
-    super::binding::evaluate(
+    let verdict = super::binding::evaluate(
         rubric,
         rule_outcomes,
         Some(subject_path.as_str()),
         artifact,
-        qualified,
-    )
+        &qualified,
+        &signing.unsigned,
+    );
+    // Теневой прогон: советующие связки как блокирующие, судья допущен —
+    // чистый эффект связки, без поправок на калибровку.
+    let mut shadow_rubric = rubric.clone();
+    for c in &mut shadow_rubric.criteria {
+        if signing.shadow.contains(&c.id) {
+            c.binding_mode = crate::rubric::BindingMode::Blocking;
+        } else {
+            c.bound_rules.clear();
+        }
+    }
+    let would = if signing.shadow.is_empty() {
+        Vec::new()
+    } else {
+        let shadow = super::binding::evaluate(
+            &shadow_rubric,
+            rule_outcomes,
+            Some(subject_path.as_str()),
+            artifact,
+            &Ok(()),
+            &std::collections::BTreeMap::new(),
+        );
+        signing
+            .shadow
+            .iter()
+            .map(|c| (c.clone(), shadow.criterion_effect(c)))
+            .collect()
+    };
+    (verdict, would)
+}
+
+/// Теневой эффект связок субъекта: критерий → (провалился бы, ушёл бы человеку).
+type ShadowOutcome = Vec<(String, (bool, bool))>;
+
+/// Подписи блокирующих связок рубрики и критерии теневого режима (ADR-093,
+/// волна 4) — считаются один раз на рубрику, а не на каждый субъект.
+struct BindingSigning {
+    /// Критерии с блокирующей связкой без действующей подписи → причина.
+    unsigned: std::collections::BTreeMap<String, String>,
+    /// Критерии, чья связка фактически советующая (объявлена так или не
+    /// подписана): для них гейт считает теневой эффект.
+    shadow: Vec<String>,
+}
+
+impl BindingSigning {
+    /// Состояние подписей рубрики из файла `rubric_path`.
+    fn of(repo: &Path, rubric: &crate::rubric::Rubric, rubric_path: &Path) -> Self {
+        let mut unsigned = std::collections::BTreeMap::new();
+        let mut shadow = Vec::new();
+        for c in rubric.criteria.iter().filter(|c| !c.bound_rules.is_empty()) {
+            match c.binding_mode {
+                crate::rubric::BindingMode::Advisory => shadow.push(c.id.clone()),
+                crate::rubric::BindingMode::Blocking => {
+                    if let Err(reason) =
+                        crate::rubric::binding_signed(repo, rubric, rubric_path, &c.id)
+                    {
+                        unsigned.insert(c.id.clone(), reason);
+                        shadow.push(c.id.clone());
+                    }
+                }
+            }
+        }
+        Self { unsigned, shadow }
+    }
 }
 
 /// Какой источник досье изменился после оценки — поимённо, для сообщения.
@@ -1349,13 +1460,13 @@ mod tests {
 
     /// Правка записанного отчёта смысловой рубрики (ADR-093 волна 0): тесты
     /// добавляют поля, которых нет в базовом отчёте (`decision`, σ, флаги).
-    fn patch_semantic_report(dir: &Path, patch: impl FnOnce(&mut serde_json::Value)) {
+    fn patch_semantic_report(dir: &Path, edit: impl FnOnce(&mut serde_json::Value)) {
         let path = dir
             .join(crate::rubric::RUBRIC_REPORTS_DIR)
             .join("semantic.json");
         let text = std::fs::read_to_string(&path).expect("отчёт");
         let mut value: serde_json::Value = serde_json::from_str(&text).expect("json");
-        patch(&mut value);
+        edit(&mut value);
         std::fs::write(&path, serde_json::to_string_pretty(&value).expect("json"))
             .expect("write report");
     }
@@ -1425,10 +1536,10 @@ mod tests {
             4.0,
             None,
         );
-        let path = dir
+        let report_file = dir
             .join(crate::rubric::RUBRIC_REPORTS_DIR)
             .join("semantic.json");
-        let text = std::fs::read_to_string(&path).expect("отчёт");
+        let text = std::fs::read_to_string(&report_file).expect("отчёт");
         let artifact: crate::rubric::RubricArtifact =
             serde_json::from_str(&text).expect("JSON отчёта");
         let record = crate::rubric::HumanDecision::new(
@@ -1572,7 +1683,10 @@ mod tests {
         );
         assert_eq!(status_of(&failed, "semantic_quality"), GateStatus::Fail);
         let rules = semantic_rules(&failed);
-        assert!(rules.contains(&"semantic_rubric_fail".to_string()), "{rules:?}");
+        assert!(
+            rules.contains(&"semantic_rubric_fail".to_string()),
+            "{rules:?}"
+        );
     }
 
     /// Неподтверждённое обвинение не должно вытеснять подтверждённый низкий

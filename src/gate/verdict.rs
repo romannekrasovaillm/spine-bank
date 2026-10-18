@@ -6,10 +6,10 @@ use std::process::Command;
 
 use super::components::{
     component_approval_conditions, component_arch_drift, component_control_plane,
-    component_decision_quality, component_delta_guard, component_evidence, fitness_with_outcomes,
-    component_model_drift, component_model_validate, component_nfr, component_openspec_coverage,
-    component_rule_weakened, component_secrets, component_sensors, component_spine_lint,
-    component_trace, evidence_bundle_dirs,
+    component_decision_quality, component_delta_guard, component_evidence, component_model_drift,
+    component_model_validate, component_nfr, component_openspec_coverage, component_rule_weakened,
+    component_secrets, component_sensors, component_spine_lint, component_trace,
+    evidence_bundle_dirs, fitness_with_outcomes,
 };
 use super::git::{ConstraintsPath, GitProbe, constraints_label};
 use super::route::{

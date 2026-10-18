@@ -674,6 +674,25 @@ arch-be control check . --changed-since origin/main   # ветка против 
 `--baseline-update` с `--changed-since` **запрещён** (обновление по срезу
 уничтожило бы записи долга в нетронутых файлах). Полный прогон остаётся
 истиной гейта — срез это ускоритель, не замена CI.
+## Исходы правил как детекторы досье (`--export-detectors`, ADR-093)
+
+```bash
+arch-be control check . --export-detectors
+# детекторы правил: 43 → reports/detectors/rules   (в stderr)
+```
+
+Каждое правило (кроме `unverifiable`) получает файл
+`reports/detectors/rules/<id>.json` (схема `arch-be/rule-detector/v1`):
+`status` — `pass`/`fail`/`warn`/`skip`/`na`/`overridden`, `ad`, `severity`,
+`kind`, `reason` (почему не прогонялось), `teeth` (статус зубьев, только если
+замер `rules teeth` относится к той же редакции правила), `files` и первые
+10 находок. Файл детерминирован — без меток времени и длительностей; файлы
+удалённых правил убираются. Детекторы — вход судьи смысловых рубрик (роль
+`detector` досье) и основа связок «критерий ↔ правило» (ADR-093,
+`docs/rubrics_and_benchmarks.md`). В срезе `--changed-since` правила вне среза
+записываются как `skip`. В гейте — `[gate.semantic_quality] export_detectors =
+true` (экспорт после `delta_guard` и `secrets`, до `semantic_quality`).
+
 ### Форматы CI (`--format`): SARIF / JUnit / GitLab Code Quality / markdown
 
 Флаг `--format sarif|junit|gitlab-codequality|markdown` (дефолт `text`;
@@ -1062,12 +1081,12 @@ job summary — `markdown`. Текстовый вывод не меняется;
 | `delta_guard` | `delta guard` (защищённые пути: `model/`, `ARCHITECTURE-SPINE.md`, `CONSTRAINTS.yaml`); деталь PASS-секции — покрытие защищённых файлов дельтами (`— покрытие: file ← 'delta'`) | правки защищённых файлов без активной дельты |
 | `rule_weakened` | анти-ослабление реестра правил относительно git-базы (см. ниже); тот же резолв файла, что у fitness, fail-closed | правило удалено / `exclude_glob` расширен / severity понижен без активного override; явный `--constraints` вне репозитория |
 | `spine_lint` | `control spine ARCHITECTURE-SPINE.md` | error-находки линтера |
-| `trace_check` | `trace check` (нужны `model/` и `CONSTRAINTS.yaml` в корне; crosscheck сверяет все ссылки спайна на сущности модели) | error-находки трассировки |
+| `trace_check` | `trace check` (нужны `model/` и `CONSTRAINTS.yaml` в корне; crosscheck сверяет все ссылки спайна на сущности модели; ADR-093: `judged_by` у AD сверяется с каталогом рубрик) | error-находки трассировки, в т.ч. `ad-judged-by-broken`; `ad-unguarded` — по `[trace] judged_required` |
 | `model_validate` | ссылочная целостность `model/` (`model validate`); SKIP, если каталога нет | error-находки валидации (битая ссылка/дубль ID/цикл); на маршруте **Critical** сюда же повышается `nfr-without-verification` — NFR без способа проверки там не цель, а пожелание |
 | `model_drift` (C1) | дрейф «модель ↔ код» (`model drift`): существование путей `code_roots` CMP, покрытие каталогов с манифестами, звено INT → контракт, мёртвые `depends_on` (`declared-edge-unused`); вне `[gate.required]` находки — **warn** (вердикт не ломают), в `[gate.required]` маршрута error-находки блокируют; SKIP, если нет `model/`; SKIP без молчания, если ни у одного CMP нет `code_roots` — паспорт вердикта пишет «модель не привязана к коду: 0 из N CMP имеют code_roots» (на обязательном маршруте это INCOMPLETE) | `code-root-missing`, `int-contract-missing` (только когда составляющая в `[gate.required]`) |
 | `arch_drift` (K6) | рёбра графа «как построено» против модели: дифф «база (`HEAD` или `--base`) → рабочее дерево» + журнал решений `.arch-handoff/arch-diff-decisions.json` (пишет `arch-be arch-diff accept\|reject`, K5); **по умолчанию SKIP** (дорогая проверка: снимки ревизий) — включается записью `arch_drift` в `[gate.required]` (находки error) или `[gate.arch_drift] enabled = true` (находки warn); SKIP также без git/`model/`/базовой ревизии | `undeclared-edge` (ребро добавлено в код, но его нет в модели), `rejected-edge-present` (отклонённое ребро осталось в коде, пока `grounds_hash` записи совпадает с основаниями ребра), `arch_diff_decisions_invalid` (журнал решений есть, но не читается) |
 | `decision_quality` | качество принятых ADR по отчётам рубрики (`reports/rubric/*.json`, пишут `arch-be rubric run` и MCP `rubric_verify`); **по умолчанию SKIP** — включается только через `[gate.required]`; SKIP, если нет `docs/adr` или принятых ADR | `rubric_report_missing`, `rubric_report_stale` (документ изменён после оценки), `decision_quality_low` (ниже `[gate.decision_quality] min_score`), `rubric_report_inconsistent` (отчёт не сходится со своими сырыми ответами — балл правили руками), `rubric_raw_tampered` (текст сохранённого ответа не сходится с хэшем); warn `judge_is_author` || `decision_quality` | качество принятых ADR по отчётам рубрики (`reports/rubric/*.json`, пишут `arch-be rubric run` и MCP `rubric_verify`); **по умолчанию SKIP** — включается только через `[gate.required]`; SKIP, если нет `docs/adr` или принятых ADR | `rubric_report_missing`, `rubric_report_stale` (документ изменён после оценки), `decision_quality_low` (ниже `[gate.decision_quality] min_score`); warn `judge_is_author` |
-| `semantic_quality` | смысловые рубрики по отчётам судьи (ADR-052): решение против инварианта, ссылка не на ту сущность, обещание без механизма, код против инварианта; **по умолчанию SKIP** — включается через `[gate.required]`; SKIP, если список `[gate.semantic_quality] rubrics` пуст | `semantic_report_missing`, `semantic_report_stale` (изменился любой источник досье, включая спайн), `semantic_contradiction` (главный критерий ≤ 2 с подтверждёнными цитатами); warn: `semantic_quality_low` (итог ниже `min_score`), `semantic_accusation_unconfirmed`, `semantic_coverage_incomplete`, `judge_is_author` |
+| `semantic_quality` | смысловые рубрики по отчётам судьи (ADR-052): решение против инварианта, ссылка не на ту сущность, обещание без механизма, код против инварианта; **по умолчанию SKIP** — включается через `[gate.required]`; SKIP, если список `[gate.semantic_quality] rubrics` пуст | `semantic_report_missing`, `semantic_report_stale` (изменился любой источник досье, включая спайн), `semantic_contradiction` (главный критерий ≤ 2 с подтверждёнными цитатами); warn: `semantic_quality_low` (итог ниже `min_score`), `semantic_accusation_unconfirmed`, `semantic_coverage_incomplete`, `judge_is_author`; ADR-093: эскалация `semantic_detector_contradiction` (на любом маршруте), `semantic_unstable` и `semantic_rubric_human` (по политике маршрута), error `semantic_rubric_fail`; связки «критерий ↔ правило» — `binding_rule_failed`, `binding_contradiction`, `binding_not_measured`, `binding_rule_toothless`, `binding_rule_not_applicable`, `binding_rule_unknown`, `binding_unsigned`, `binding_unqualified` (таблица — `docs/rubrics_and_benchmarks.md`) |
 
 **Граница `model_drift` / `arch_drift` (C1/K6).** Составляющие отвечают за
 разные стороны дрейфа и не дублируют друг друга: `model_drift` — привязка

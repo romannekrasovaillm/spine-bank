@@ -44,7 +44,7 @@ fn make_repo(dir: &Path, adr_body: &str) -> PathBuf {
 
 /// Каталог рубрик: встроенная `adr_spine_consistency` с привязкой главного
 /// критерия к правилу `rule` в заданной роли и режиме.
-fn rubrics_with_binding(dir: &Path, rule: &str, role: &str, mode: &str) -> PathBuf {
+fn rubrics_with_binding(dir: &Path, rule: &str, role_yaml: &str, mode_yaml: &str) -> PathBuf {
     let rubrics = dir.join("rubrics");
     std::fs::create_dir_all(&rubrics).expect("mkdir rubrics");
     let mut rubric: crate::rubric::Rubric =
@@ -56,9 +56,9 @@ fn rubrics_with_binding(dir: &Path, rule: &str, role: &str, mode: &str) -> PathB
         .expect("главный критерий");
     main.bound_rules = vec![crate::rubric::BoundRule {
         rule: rule.to_string(),
-        role: serde_yaml_ng::from_str(role).expect("роль"),
+        role: serde_yaml_ng::from_str(role_yaml).expect("роль"),
     }];
-    main.binding_mode = serde_yaml_ng::from_str(mode).expect("режим");
+    main.binding_mode = serde_yaml_ng::from_str(mode_yaml).expect("режим");
     std::fs::write(
         rubrics.join("adr_spine_consistency.yaml"),
         serde_yaml_ng::to_string(&rubric).expect("yaml"),
@@ -106,8 +106,7 @@ fn semantic_findings(report: &GateReport) -> Vec<(String, String)> {
 
 /// Отчёт судьи по досье, собранному так же, как его соберёт гейт.
 fn write_report(dir: &Path, rubrics: &Path, subject: &str, score: u8) {
-    let rubric =
-        crate::rubric::load(&rubrics.join("adr_spine_consistency.yaml")).expect("рубрика");
+    let rubric = crate::rubric::load(&rubrics.join("adr_spine_consistency.yaml")).expect("рубрика");
     let packs = crate::rubric_pack::build_for(dir, &rubric, subject).expect("досье");
     let artifact = serde_json::json!({
         "schema": crate::rubric::RUBRIC_REPORT_SCHEMA,
@@ -145,6 +144,37 @@ fn write_report(dir: &Path, rubrics: &Path, subject: &str, score: u8) {
 
 const SUBJECT: &str = "docs/adr/ADR-001-reshenie.md";
 
+/// Подпись связки главного критерия (волна 4) — напрямую записью: тесты
+/// гейта проверяют семантику подписанной связки, а не предусловия промоушена
+/// (их проверяет `rubric::binding_promotion`).
+fn sign(dir: &Path, rubrics: &Path) {
+    let path = rubrics.join("adr_spine_consistency.yaml");
+    let rubric = crate::rubric::load(&path).expect("рубрика");
+    let record = crate::rubric::BindingPromotion {
+        schema: crate::rubric::BINDING_PROMOTION_SCHEMA.to_string(),
+        rubric: rubric.name.clone(),
+        criterion: "no_contradiction".to_string(),
+        rubric_sha256: crate::hash::sha256_file(&path).expect("sha"),
+        rules: rubric
+            .criteria
+            .iter()
+            .find(|c| c.id == "no_contradiction")
+            .map(|c| c.bound_rules.iter().map(|b| b.rule.clone()).collect())
+            .unwrap_or_default(),
+        judge_model: "judge-x".to_string(),
+        teeth: Vec::new(),
+        shadow_runs: 1,
+        shadow_would_fail: 0,
+        shadow_would_escalate: 0,
+        decided_by: "Архитектор <a@b>".to_string(),
+        decided_at: "2026-10-18T12:00:00+03:00".to_string(),
+        reason: String::new(),
+    };
+    let target = crate::rubric::promotion_path(dir, &rubric.name, "no_contradiction");
+    std::fs::create_dir_all(target.parent().expect("parent")).expect("mkdir");
+    std::fs::write(&target, serde_json::to_string(&record).expect("json")).expect("подпись");
+}
+
 /// Необходимое правило красное в файле субъекта, связка блокирующая:
 /// субъект решён измерением — без отчёта судьи и без находки «нет отчёта».
 #[test]
@@ -153,6 +183,7 @@ fn necessary_rule_failure_decides_subject_without_report() {
     let dir = tmp.path();
     make_repo(dir, "Сервис делает ПРЯМАЯ ЗАПИСЬ в журнал в обход API.");
     let rubrics = rubrics_with_binding(dir, RULE_ID, "necessary", "blocking");
+    sign(dir, &rubrics);
     let report = run(dir, cfg(false), &rubrics);
     let findings = semantic_findings(&report);
     assert_eq!(
@@ -222,7 +253,9 @@ fn exported_detectors_keep_host_and_gate_dossiers_identical() {
     let rubrics = rubrics_with_binding(dir, RULE_ID, "evidence", "advisory");
     // Первый прогон — экспорт исходов (отчёта ещё нет).
     let first = run(dir, cfg(true), &rubrics);
-    let detector = dir.join(crate::control::RULE_DETECTORS_DIR).join("C-90.json");
+    let detector = dir
+        .join(crate::control::RULE_DETECTORS_DIR)
+        .join("C-90.json");
     assert!(detector.is_file(), "{}", crate::gate::render(&first));
     let text = std::fs::read_to_string(&detector).expect("детектор");
     assert!(text.contains("\"status\":\"pass\""), "{text}");
@@ -234,8 +267,7 @@ fn exported_detectors_keep_host_and_gate_dossiers_identical() {
         .unwrap_or_default();
     assert!(detail.contains("детекторы правил: 1"), "{detail}");
     // Хост собирает досье тем же кодом: детектор привязанного правила в нём.
-    let rubric =
-        crate::rubric::load(&rubrics.join("adr_spine_consistency.yaml")).expect("рубрика");
+    let rubric = crate::rubric::load(&rubrics.join("adr_spine_consistency.yaml")).expect("рубрика");
     let packs = crate::rubric_pack::build_for(dir, &rubric, SUBJECT).expect("досье");
     assert!(
         packs[0]
@@ -295,8 +327,7 @@ fn evidence_rule_red_against_clean_judgement_escalates() {
     make_repo(dir, "Сервис делает ПРЯМАЯ ЗАПИСЬ в журнал в обход API.");
     let rubrics = rubrics_with_binding(dir, RULE_ID, "evidence", "blocking");
     // Допуск судьи к блокирующей связке (волна 4) — пройден.
-    let rubric =
-        crate::rubric::load(&rubrics.join("adr_spine_consistency.yaml")).expect("рубрика");
+    let rubric = crate::rubric::load(&rubrics.join("adr_spine_consistency.yaml")).expect("рубрика");
     let set = crate::rubric::QualificationSet {
         dir: PathBuf::from("/набор"),
         cases: Vec::new(),
@@ -325,6 +356,7 @@ fn evidence_rule_red_against_clean_judgement_escalates() {
         1,
     );
     crate::rubric::write_qualification(dir, &qualification).expect("квалификация");
+    sign(dir, &rubrics);
     let _first = run(dir, cfg(true), &rubrics);
     write_report(dir, &rubrics, SUBJECT, 5);
     let report = run(dir, cfg(true), &rubrics);
@@ -338,5 +370,52 @@ fn evidence_rule_red_against_clean_judgement_escalates() {
         GateStatus::Skip,
         "{}",
         crate::gate::render(&report)
+    );
+}
+
+/// Волна 4: блокирующая связка без подписи действует как советующая —
+/// отчёт судьи по-прежнему обязателен, провал правила — предупреждение, а
+/// теневой журнал записывает, что было бы при `blocking`.
+#[test]
+fn unsigned_blocking_binding_runs_in_shadow() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let dir = tmp.path();
+    make_repo(dir, "Сервис делает ПРЯМАЯ ЗАПИСЬ в журнал в обход API.");
+    let rubrics = rubrics_with_binding(dir, RULE_ID, "necessary", "blocking");
+    let report = run(dir, cfg(false), &rubrics);
+    let findings = semantic_findings(&report);
+    assert!(
+        findings.contains(&("binding_unsigned".to_string(), "warn".to_string())),
+        "{findings:?}"
+    );
+    assert!(
+        findings.contains(&("semantic_report_missing".to_string(), "error".to_string())),
+        "без подписи короткого замыкания нет: {findings:?}"
+    );
+    let records = crate::rubric::shadow_records(dir, "adr_spine_consistency", "no_contradiction");
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_eq!((records[0].subjects, records[0].would_fail), (1, 1));
+    let detail = report
+        .components
+        .iter()
+        .find(|c| c.name == "semantic_quality")
+        .map(|c| c.detail.clone())
+        .unwrap_or_default();
+    assert!(detail.contains("теневой режим связок"), "{detail}");
+    // Подпись, затем правка рубрики — подпись теряет силу.
+    sign(dir, &rubrics);
+    let signed = run(dir, cfg(false), &rubrics);
+    assert!(
+        semantic_findings(&signed)
+            .contains(&("binding_rule_failed".to_string(), "error".to_string()))
+    );
+    let path = rubrics.join("adr_spine_consistency.yaml");
+    let text = std::fs::read_to_string(&path).expect("рубрика");
+    std::fs::write(&path, text.replace("description:", "description: >-\n  ")).expect("правка");
+    let edited = run(dir, cfg(false), &rubrics);
+    let findings = semantic_findings(&edited);
+    assert!(
+        findings.contains(&("binding_unsigned".to_string(), "warn".to_string())),
+        "правка рубрики обесценивает подпись: {findings:?}"
     );
 }

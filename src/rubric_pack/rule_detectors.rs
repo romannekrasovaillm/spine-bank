@@ -103,8 +103,8 @@ pub(super) fn select(
     picked.sort_by(|a, b| a.2.cmp(&b.2));
     let mut out = Vec::with_capacity(picked.len());
     for (_, _, _, path, detector) in picked {
-        let text = std::fs::read_to_string(&path)
-            .map_err(|e| crate::error::HarnessError::io(&path, e))?;
+        let text =
+            std::fs::read_to_string(&path).map_err(|e| crate::error::HarnessError::io(&path, e))?;
         out.push(Source::detector(
             relative(repo, &path),
             text.trim_end().to_string(),

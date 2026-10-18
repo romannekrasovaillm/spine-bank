@@ -537,6 +537,56 @@ pub fn qualification(repo: &Path, rubric: &str, model: &str) -> Qualification {
     }
 }
 
+/// Строгий допуск (ADR-093, волна 4): кроме записанного `passed` метрики
+/// отчёта пересчитываются по ТЕКУЩИМ порогам, а пороги, записанные в отчёт,
+/// не могут быть мягче текущих. Блокирующая связка опирается на суждение
+/// судьи — правка `passed: true` или ослабленных порогов руками не должна
+/// давать допуск.
+#[must_use]
+pub fn qualification_strict(repo: &Path, rubric: &str, model: &str) -> Qualification {
+    let Some(mut report) = stored(repo, rubric, model) else {
+        return Qualification::Missing;
+    };
+    let mut failures = Vec::new();
+    let t = &report.thresholds;
+    if t.min_completeness < MIN_COMPLETENESS
+        || t.min_accuracy < MIN_ACCURACY
+        || t.max_human_share > MAX_HUMAN_SHARE
+    {
+        failures.push(format!(
+            "пороги отчёта мягче текущих (полнота ≥ {MIN_COMPLETENESS:.2}, точность ≥ \
+             {MIN_ACCURACY:.2}, human ≤ {MAX_HUMAN_SHARE:.2})"
+        ));
+    }
+    if report.totals.completeness() < MIN_COMPLETENESS {
+        failures.push(format!(
+            "полнота {:.2} ниже {MIN_COMPLETENESS:.2}",
+            report.totals.completeness()
+        ));
+    }
+    if report.totals.accuracy() < MIN_ACCURACY {
+        failures.push(format!(
+            "точность {:.2} ниже {MIN_ACCURACY:.2}",
+            report.totals.accuracy()
+        ));
+    }
+    if report.human_share > MAX_HUMAN_SHARE {
+        failures.push(format!(
+            "доля human {:.2} выше {MAX_HUMAN_SHARE:.2}",
+            report.human_share
+        ));
+    }
+    if !report.passed && failures.is_empty() {
+        failures.push("отчёт помечен как не пройденный".to_string());
+    }
+    if failures.is_empty() {
+        Qualification::Qualified(Box::new(report))
+    } else {
+        report.failures = failures;
+        Qualification::Failed(Box::new(report))
+    }
+}
+
 /// Человекочитаемая причина отказа в допуске (для находки гейта).
 #[must_use]
 pub fn refusal_reason(state: &Qualification, model: &str) -> String {

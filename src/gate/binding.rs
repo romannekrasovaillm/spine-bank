@@ -78,6 +78,12 @@ pub(super) enum BindingIssueKind {
         /// Причина отказа допуска.
         reason: String,
     },
+    /// Связка объявлена блокирующей, но человек её не подписал или подпись
+    /// устарела (волна 4): до подписи связка советующая.
+    Unsigned {
+        /// Почему подпись не действует.
+        reason: String,
+    },
 }
 
 /// Нарушение одной связки «критерий ↔ правило».
@@ -115,6 +121,20 @@ impl BindingVerdict {
         })
     }
 
+    /// Эффект связок критерия в блокирующем режиме: (провал измерением,
+    /// решение человека при политике `human`) — для теневого режима.
+    #[must_use]
+    pub fn criterion_effect(&self, criterion: &str) -> (bool, bool) {
+        let mine = self.issues.iter().filter(|i| i.criterion == criterion);
+        let mut fail = false;
+        let mut escalate = false;
+        for issue in mine {
+            fail |= matches!(issue.kind, BindingIssueKind::NecessaryFailed { .. });
+            escalate |= escalates(issue, crate::config::HumanPolicy::Human);
+        }
+        (fail, escalate)
+    }
+
     /// Сколько нарушений требуют решения человека при этой политике.
     #[must_use]
     pub fn escalations(&self, policy: crate::config::HumanPolicy) -> usize {
@@ -148,6 +168,7 @@ fn escalates(issue: &BindingIssue, policy: crate::config::HumanPolicy) -> bool {
         BindingIssueKind::NecessaryFailed { .. }
         | BindingIssueKind::NotApplicable { .. }
         | BindingIssueKind::Toothless { .. }
+        | BindingIssueKind::Unsigned { .. }
         | BindingIssueKind::RuleUnknown => false,
     }
 }
@@ -162,6 +183,7 @@ fn severity_of(issue: &BindingIssue, policy: crate::config::HumanPolicy) -> &'st
     }
     match issue.kind {
         BindingIssueKind::NecessaryFailed { .. } => "error",
+        BindingIssueKind::Unsigned { .. } => "warn",
         _ if escalates(issue, policy) => "error",
         _ => "warn",
     }
@@ -174,7 +196,10 @@ fn finding_of(
     subject: &str,
     policy: crate::config::HumanPolicy,
 ) -> GateFinding {
-    let who = if matches!(issue.kind, BindingIssueKind::Unqualified { .. }) {
+    let who = if matches!(
+        issue.kind,
+        BindingIssueKind::Unqualified { .. } | BindingIssueKind::Unsigned { .. }
+    ) {
         format!(
             "субъект '{subject}' (рубрика {rubric}, критерий {} ↔ правила {} [{}])",
             issue.criterion,
@@ -237,6 +262,14 @@ fn finding_of(
             format!(
                 "{who}: правила с таким идентификатором или именем нет в реестре — связка \
                  указывает в пустоту"
+            ),
+        ),
+        BindingIssueKind::Unsigned { reason } => (
+            "binding_unsigned",
+            format!(
+                "{who}: связка объявлена блокирующей, но не действует ({reason}) — до подписи \
+                 человека она советующая; теневые цифры — в {}",
+                crate::rubric::BINDING_SHADOW_LOG
             ),
         ),
         BindingIssueKind::Unqualified { reason } => (
@@ -372,20 +405,44 @@ fn criterion_issues(
 /// находку `binding_unqualified` (эскалация), чтобы понижение было видно.
 /// Вызывающий проверяет допуск только когда отчёт судьи есть — без отчёта
 /// суждения нет, и решают одни измерения.
+///
+/// `unsigned` — критерии с блокирующей связкой без действующей подписи
+/// человека (причина): такая связка работает как советующая, а находка
+/// `binding_unsigned` называет понижение.
 #[must_use]
 pub(super) fn evaluate(
     rubric: &crate::rubric::Rubric,
     outcomes: Option<&[RuleDetector]>,
     subject_path: Option<&str>,
     artifact: Option<&RubricArtifact>,
-    qualified: Result<(), String>,
+    qualified: &Result<(), String>,
+    unsigned: &std::collections::BTreeMap<String, String>,
 ) -> BindingVerdict {
     let mut issues = Vec::new();
     for criterion in rubric.criteria.iter().filter(|c| !c.bound_rules.is_empty()) {
-        let mode = criterion.binding_mode;
+        let mut mode = criterion.binding_mode;
+        if mode == BindingMode::Blocking {
+            if let Some(reason) = unsigned.get(&criterion.id) {
+                issues.push(BindingIssue {
+                    criterion: criterion.id.clone(),
+                    rule: criterion
+                        .bound_rules
+                        .iter()
+                        .map(|b| b.rule.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    role: BindingRole::Necessary,
+                    mode: BindingMode::Blocking,
+                    kind: BindingIssueKind::Unsigned {
+                        reason: reason.clone(),
+                    },
+                });
+                mode = BindingMode::Advisory;
+            }
+        }
         let mut judge_mode = mode;
         if mode == BindingMode::Blocking {
-            if let Err(reason) = &qualified {
+            if let Err(reason) = qualified {
                 issues.push(BindingIssue {
                     criterion: criterion.id.clone(),
                     rule: criterion
@@ -480,7 +537,14 @@ mod tests {
     fn necessary_fail_decides_without_judge() {
         let rubric = rubric_with(BindingRole::Necessary, BindingMode::Blocking);
         let outcomes = [detector("C-01", "fail", &["src/pay.rs"], Some("confirmed"))];
-        let verdict = evaluate(&rubric, Some(&outcomes), Some("src/pay.rs"), None, Ok(()));
+        let verdict = evaluate(
+            &rubric,
+            Some(&outcomes),
+            Some("src/pay.rs"),
+            None,
+            &Ok(()),
+            &std::collections::BTreeMap::new(),
+        );
         assert!(verdict.decided_fail(), "{verdict:?}");
         let findings = verdict.findings("r", "src/pay.rs", HumanPolicy::Warn);
         assert_eq!(findings[0].rule.as_deref(), Some("binding_rule_failed"));
@@ -492,8 +556,20 @@ mod tests {
     #[test]
     fn rule_failure_elsewhere_does_not_touch_subject() {
         let rubric = rubric_with(BindingRole::Necessary, BindingMode::Blocking);
-        let outcomes = [detector("C-01", "fail", &["src/other.rs"], Some("confirmed"))];
-        let verdict = evaluate(&rubric, Some(&outcomes), Some("src/pay.rs"), None, Ok(()));
+        let outcomes = [detector(
+            "C-01",
+            "fail",
+            &["src/other.rs"],
+            Some("confirmed"),
+        )];
+        let verdict = evaluate(
+            &rubric,
+            Some(&outcomes),
+            Some("src/pay.rs"),
+            None,
+            &Ok(()),
+            &std::collections::BTreeMap::new(),
+        );
         assert!(!verdict.decided_fail());
         assert!(verdict.issues.is_empty(), "{verdict:?}");
     }
@@ -502,8 +578,20 @@ mod tests {
     #[test]
     fn registry_level_failure_is_global() {
         let rubric = rubric_with(BindingRole::Necessary, BindingMode::Blocking);
-        let outcomes = [detector("C-01", "fail", &["CONSTRAINTS.yaml"], Some("confirmed"))];
-        let verdict = evaluate(&rubric, Some(&outcomes), Some("docs/adr/ADR-1.md"), None, Ok(()));
+        let outcomes = [detector(
+            "C-01",
+            "fail",
+            &["CONSTRAINTS.yaml"],
+            Some("confirmed"),
+        )];
+        let verdict = evaluate(
+            &rubric,
+            Some(&outcomes),
+            Some("docs/adr/ADR-1.md"),
+            None,
+            &Ok(()),
+            &std::collections::BTreeMap::new(),
+        );
         assert!(verdict.decided_fail());
     }
 
@@ -512,7 +600,14 @@ mod tests {
     fn advisory_binding_only_warns() {
         let rubric = rubric_with(BindingRole::Necessary, BindingMode::Advisory);
         let outcomes = [detector("C-01", "fail", &["src/pay.rs"], Some("confirmed"))];
-        let verdict = evaluate(&rubric, Some(&outcomes), Some("src/pay.rs"), None, Ok(()));
+        let verdict = evaluate(
+            &rubric,
+            Some(&outcomes),
+            Some("src/pay.rs"),
+            None,
+            &Ok(()),
+            &std::collections::BTreeMap::new(),
+        );
         assert!(!verdict.decided_fail());
         let findings = verdict.findings("r", "s", HumanPolicy::Human);
         assert_eq!(findings[0].severity, "warn");
@@ -526,14 +621,28 @@ mod tests {
         let rubric = rubric_with(BindingRole::Evidence, BindingMode::Blocking);
         let outcomes = [detector("C-01", "fail", &["src/pay.rs"], None)];
         let high = artifact_with_score(4);
-        let verdict = evaluate(&rubric, Some(&outcomes), Some("src/pay.rs"), Some(&high), Ok(()));
+        let verdict = evaluate(
+            &rubric,
+            Some(&outcomes),
+            Some("src/pay.rs"),
+            Some(&high),
+            &Ok(()),
+            &std::collections::BTreeMap::new(),
+        );
         assert!(matches!(
             verdict.issues[0].kind,
             BindingIssueKind::Contradiction { score: 4 }
         ));
         assert_eq!(verdict.escalations(HumanPolicy::Warn), 1);
         let low = artifact_with_score(1);
-        let agreed = evaluate(&rubric, Some(&outcomes), Some("src/pay.rs"), Some(&low), Ok(()));
+        let agreed = evaluate(
+            &rubric,
+            Some(&outcomes),
+            Some("src/pay.rs"),
+            Some(&low),
+            &Ok(()),
+            &std::collections::BTreeMap::new(),
+        );
         assert!(agreed.issues.is_empty(), "{agreed:?}");
     }
 
@@ -542,15 +651,32 @@ mod tests {
     fn skipped_rule_is_not_measured() {
         let rubric = rubric_with(BindingRole::Evidence, BindingMode::Blocking);
         let outcomes = [detector("C-01", "skip", &[], None)];
-        let verdict = evaluate(&rubric, Some(&outcomes), Some("src/pay.rs"), None, Ok(()));
+        let verdict = evaluate(
+            &rubric,
+            Some(&outcomes),
+            Some("src/pay.rs"),
+            None,
+            &Ok(()),
+            &std::collections::BTreeMap::new(),
+        );
         assert!(matches!(
             verdict.issues[0].kind,
             BindingIssueKind::NotMeasured { .. }
         ));
         assert_eq!(verdict.escalations(HumanPolicy::Warn), 0);
         assert_eq!(verdict.escalations(HumanPolicy::Human), 1);
-        let none = evaluate(&rubric, None, Some("src/pay.rs"), None, Ok(()));
-        assert!(matches!(none.issues[0].kind, BindingIssueKind::NotMeasured { .. }));
+        let none = evaluate(
+            &rubric,
+            None,
+            Some("src/pay.rs"),
+            None,
+            &Ok(()),
+            &std::collections::BTreeMap::new(),
+        );
+        assert!(matches!(
+            none.issues[0].kind,
+            BindingIssueKind::NotMeasured { .. }
+        ));
     }
 
     /// Связка на несуществующее правило — ошибка конфигурации даже в
@@ -559,7 +685,14 @@ mod tests {
     fn unknown_rule_is_error_in_any_mode() {
         let rubric = rubric_with(BindingRole::Evidence, BindingMode::Advisory);
         let outcomes = [detector("C-77", "pass", &[], None)];
-        let verdict = evaluate(&rubric, Some(&outcomes), Some("src/pay.rs"), None, Ok(()));
+        let verdict = evaluate(
+            &rubric,
+            Some(&outcomes),
+            Some("src/pay.rs"),
+            None,
+            &Ok(()),
+            &std::collections::BTreeMap::new(),
+        );
         let findings = verdict.findings("r", "s", HumanPolicy::Warn);
         assert_eq!(findings[0].rule.as_deref(), Some("binding_rule_unknown"));
         assert_eq!(findings[0].severity, "error");
@@ -570,13 +703,27 @@ mod tests {
     fn green_necessary_rule_without_teeth_is_flagged() {
         let rubric = rubric_with(BindingRole::Necessary, BindingMode::Blocking);
         let outcomes = [detector("C-01", "pass", &[], Some("toothless"))];
-        let verdict = evaluate(&rubric, Some(&outcomes), Some("src/pay.rs"), None, Ok(()));
+        let verdict = evaluate(
+            &rubric,
+            Some(&outcomes),
+            Some("src/pay.rs"),
+            None,
+            &Ok(()),
+            &std::collections::BTreeMap::new(),
+        );
         assert!(matches!(
             &verdict.issues[0].kind,
             BindingIssueKind::Toothless { teeth } if teeth == "toothless"
         ));
         let confirmed = [detector("C-01", "pass", &[], Some("confirmed"))];
-        let ok = evaluate(&rubric, Some(&confirmed), Some("src/pay.rs"), None, Ok(()));
+        let ok = evaluate(
+            &rubric,
+            Some(&confirmed),
+            Some("src/pay.rs"),
+            None,
+            &Ok(()),
+            &std::collections::BTreeMap::new(),
+        );
         assert!(ok.issues.is_empty());
     }
 
@@ -593,7 +740,8 @@ mod tests {
             Some(&outcomes),
             Some("src/pay.rs"),
             Some(&high),
-            Err("нет отчёта квалификации".to_string()),
+            &Err("нет отчёта квалификации".to_string()),
+            &std::collections::BTreeMap::new(),
         );
         let findings = verdict.findings("r", "s", HumanPolicy::Warn);
         let codes: Vec<(String, String)> = findings
@@ -620,8 +768,41 @@ mod tests {
             Some(&outcomes),
             Some("src/pay.rs"),
             Some(&artifact_with_score(5)),
-            Err("нет отчёта квалификации".to_string()),
+            &Err("нет отчёта квалификации".to_string()),
+            &std::collections::BTreeMap::new(),
         );
         assert!(verdict.decided_fail(), "{verdict:?}");
+    }
+
+    /// Неподписанная блокирующая связка работает как советующая: провал
+    /// правила — предупреждение, понижение — находка `binding_unsigned`.
+    #[test]
+    fn unsigned_blocking_binding_is_advisory() {
+        let rubric = rubric_with(BindingRole::Necessary, BindingMode::Blocking);
+        let outcomes = [detector("C-01", "fail", &["src/pay.rs"], Some("confirmed"))];
+        let mut unsigned = std::collections::BTreeMap::new();
+        unsigned.insert("no_violation".to_string(), "подписи нет".to_string());
+        let verdict = evaluate(
+            &rubric,
+            Some(&outcomes),
+            Some("src/pay.rs"),
+            None,
+            &Ok(()),
+            &unsigned,
+        );
+        assert!(!verdict.decided_fail(), "{verdict:?}");
+        let codes: Vec<(String, String)> = verdict
+            .findings("r", "s", HumanPolicy::Human)
+            .into_iter()
+            .map(|f| (f.rule.unwrap_or_default(), f.severity))
+            .collect();
+        assert_eq!(
+            codes,
+            vec![
+                ("binding_unsigned".to_string(), "warn".to_string()),
+                ("binding_rule_failed".to_string(), "warn".to_string()),
+            ]
+        );
+        assert_eq!(verdict.escalations(HumanPolicy::Human), 0);
     }
 }

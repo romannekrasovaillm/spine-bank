@@ -724,12 +724,34 @@ memory_file = "~/.arch-harness/MEMORY.md"  # глобальная md-памят�
 # scope = "changed"          # changed (затронутые диффом) | all (весь пакет)
 # min_score = 3.0            # порог взвешенного итога (калибровка — в docs/experiments/semantic-rubrics-2026-09-20.md)
 # require_distinct_judge = false  # true — судья обязан отличаться от автора
+# export_detectors = false   # ADR-093: писать исходы правил прогона в
+#                            # reports/detectors/rules/ — судья видит измерения
+#                            # рядом с субъектом (разово: `control check --export-detectors`)
+#
+# Связки критериев с правилами (ADR-093) объявляются в проектной копии рубрики:
+#   criteria:
+#     - id: mechanism_sufficient
+#       blocking: true
+#       bound_rules:
+#         - rule: C-17         # id или имя правила CONSTRAINTS.yaml
+#           role: necessary    # necessary — красное правило проваливает критерий без судьи
+#                              # evidence  — исход идёт судье ролью detector (дефолт)
+#       binding_mode: advisory # advisory (дефолт) | blocking — блокирует только
+#                              # после `arch-be rubric promote` (теневой режим,
+#                              # зубья, допуск судьи, подпись человека)
 #
 # Включение на маршруте (пример для Critical):
 # [gate.required]
 # critical = ["fitness", "spine_lint", "trace_check", "rule_weakened",
 #             "delta_guard", "sensors", "nfr", "evidence_verify",
 #             "semantic_quality"]
+
+# Трассировка (ADR-050, ADR-093): требования к инвариантам модели.
+# [trace]
+# executable_required = "off"  # off | warn | error — ad-text-only: у AD нет
+#                              # правила, проверяющего поведение
+# judged_required = "off"      # off | warn | error — ad-unguarded: AD unverifiable
+#                              # без judged_by: [<рубрика>#<критерий>]
 
 # Составляющая `arch_drift` (K6): рёбра графа «как построено» против модели.
 # Дорогая (снимок базовой ревизии + обход рабочего дерева), по умолчанию SKIP:

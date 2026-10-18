@@ -337,8 +337,10 @@ impl McpServe {
             judged_required: self.cfg.trace.judged_required,
             rubrics_dir: Some(self.cfg.paths.rubrics_dir()),
         };
-        let report =
-            blocking("trace_check", move || trace::trace_check_opts(&case, &options)).await?;
+        let report = blocking("trace_check", move || {
+            trace::trace_check_opts(&case, &options)
+        })
+        .await?;
         let levels: Vec<Value> = report
             .levels
             .iter()

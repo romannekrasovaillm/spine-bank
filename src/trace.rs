@@ -360,7 +360,10 @@ fn judged_level(
         unverifiable: 0,
         orphans: Vec::new(),
     };
-    for row in matrix.iter().filter(|r| r.unverifiable && r.rules.is_empty()) {
+    for row in matrix
+        .iter()
+        .filter(|r| r.unverifiable && r.rules.is_empty())
+    {
         level.total += 1;
         if row.judged_by.is_empty() {
             level.orphans.push(row.ad.clone());
@@ -1327,7 +1330,10 @@ mod tests {
         .expect("trace");
         assert!(!report.has_errors(), "{:?}", report.issues);
         let row = &report.ad_matrix[0];
-        assert_eq!(row.judged_by, vec!["code_invariant_conformance#no_violation"]);
+        assert_eq!(
+            row.judged_by,
+            vec!["code_invariant_conformance#no_violation"]
+        );
         assert_eq!(row.status(), "рубрика");
         let md = render_markdown(&report);
         assert!(md.contains("Матрица покрытия AD"), "{md}");
@@ -1356,7 +1362,10 @@ mod tests {
             )
             .expect("trace");
             assert!(
-                report.issues.iter().any(|i| i.rule == "ad-judged-by-broken"),
+                report
+                    .issues
+                    .iter()
+                    .any(|i| i.rule == "ad-judged-by-broken"),
                 "{tail}: {:?}",
                 report.issues
             );
@@ -1381,7 +1390,11 @@ mod tests {
             .iter()
             .find(|i| i.rule == "ad-not-verified")
             .expect("ad-not-verified");
-        assert!(issue.message.contains("judged_by — суждение"), "{}", issue.message);
+        assert!(
+            issue.message.contains("judged_by — суждение"),
+            "{}",
+            issue.message
+        );
         assert_eq!(report.ad_matrix[0].status(), "не покрыт");
     }
 
