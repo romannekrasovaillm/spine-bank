@@ -240,7 +240,7 @@ arch-be connect qwen        # пишет .qwen/settings.json (мердж, чуж
 «Pending approval» (обязательно в qwen-code 0.24+): `qwen mcp approve spine`.
 Проверка: `qwen mcp list` → `spine … ✓ Connected`.
 
-**Быстрое развёртывание силами самого агента GigaCode** (после клона репо — готовый промпт для агента): [docs/GIGACODE.md](docs/GIGACODE.md).
+**Развёртывание и работа силами самого агента GigaCode** — инструкция, адресованная агенту: дайте ему [docs/GIGACODE.md](docs/GIGACODE.md) (установка, подключение, гейт, рубрики и связки 0.4.17).
 
 #### С нуля: сценарии архитектора (все кадры — реальные прогоны)
 
@@ -697,8 +697,8 @@ arch-be mcp serve --rw    # 51 инструмент: + handoff_create, adr_new, 
 
 - **[docs/CONNECT.md](docs/CONNECT.md)** — подробное подключение со
   скриншотами, хуки, `--rw`, устранение неполадок.
-- **[docs/GIGACODE.md](docs/GIGACODE.md)** — развёртывание MCP+скиллов+хуков
-  силами самого агента GigaCode (готовый промпт).
+- **[docs/GIGACODE.md](docs/GIGACODE.md)** — инструкция для агента GigaCode:
+  установка, MCP и скиллы, гейт, смысловые рубрики и связки, диагностика.
 - **[docs/ARCHITECT-IN-HARNESS.md](docs/ARCHITECT-IN-HARNESS.md)** — детальный
   сценарий «архитектор внутри харнесса»: каналы, рабочий день, безопасность.
 - **[docs/HARNESSES.md](docs/HARNESSES.md)** — матрица прогонов пяти
