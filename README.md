@@ -101,7 +101,11 @@ Qwen Code, Kimi Code и другие через `harness_run`, а приёмка
 **6. LLM-судья без своих API-ключей.** `kind="cli"` запускает уже
 авторизованный `claude -p` или аналог подпроцессом — платит подписка хоста
 (`src/llm/harness_cli.rs`). Split-judge (`rubric_prompt` / `rubric_verify`):
-оценивает модель хоста, Spine механически сверяет.
+оценивает модель хоста, Spine механически сверяет. Критерий рубрики
+связывается с fitness-правилом в одну fitness-функцию (ADR-093): исход
+правила лежит в досье судьи, красное необходимое правило проваливает
+критерий без модели, а расхождение судьи с измерением уходит человеку
+(`src/gate/binding.rs`, `src/control/detectors.rs`).
 
 **7. MCP со строгой границей доступа.** По умолчанию — только чтение;
 `--rw=reports` разрешает запись лишь отчётов. Список `BRIDGE_NEVER` (bash,
@@ -360,7 +364,7 @@ arch-be connect codex     # TOML для ~/.codex/config.toml (+ --apply-global)
 arch-be connect generic   # сниппеты для любого MCP-совместимого хоста
 ```
 
-## Шаг 3. Пять способов работы
+## Шаг 3. Шесть способов работы
 
 ### А. Кодер под гейтом
 
@@ -452,16 +456,79 @@ LLM у Spine нет: думает ваш агент, вердикты даёт �
 - **Защита входа.** Директива вердикта в тексте («отметить как чистую»,
   `mark as clean`, …) фиксируется детектором инъекций: судья, подчинившийся
   ей, виден как таковой, а не выглядит честным.
-- **Правило и критерий — одна fitness-функция (ADR-093).** Критерий рубрики
-  связывается с правилами `CONSTRAINTS.yaml` (`bound_rules`): исход правила
-  (`control check --export-detectors`) входит в досье судьи, красное
-  необходимое правило проваливает критерий без судьи, а «чисто» судьи при
-  красном правиле уходит человеку. Блокирующей связка становится только после
-  теневого режима, подтверждённых зубьев, допуска судьи и подписи —
-  `arch-be rubric bindings` / `arch-be rubric promote`
-  ([подробнее](docs/rubrics_and_benchmarks.md)).
+- **Судья видит измерения.** Исходы fitness-правил входят в досье ролью
+  `detector`, и «чисто» при красном правиле не проходит молча — раздел Е.
 
 ![Судья через подписку](docs/screenshots/connect/06-rubric-cli-judge.png)
+
+### Е. Правило + критерий = одна fitness-функция (ADR-093)
+
+Правило `CONSTRAINTS.yaml` видит текст и конструкцию, судья рубрики — смысл.
+По отдельности каждое ошибается по-своему: правило зеленеет на «RPO 0 при
+асинхронной репликации», судья ставит «чисто» коду, который правило поймало.
+Связка делает из них пару — измерение и суждение об одной характеристике — и
+решает механикой, кто прав, а когда звать человека.
+
+**1. Объявите связку** в проектной копии рубрики:
+
+```yaml
+criteria:
+  - id: mechanism_sufficient
+    blocking: true
+    bound_rules:
+      - rule: C-17          # id или имя правила
+        role: necessary     # necessary — без него критерий не выполнен
+                            # evidence  — исход идёт судье как свидетельство
+    binding_mode: advisory  # advisory (дефолт) | blocking — после подписи
+```
+
+**2. Отдайте измерения судье.** `arch-be control check . --export-detectors`
+(или `[gate.semantic_quality] export_detectors = true`) пишет исход каждого
+правила в `reports/detectors/rules/<id>.json`; относящиеся к субъекту
+детекторы попадают в досье, и `rubric pack … --rubric <имя>` показывает его
+ровно таким, каким его видят судья и гейт.
+
+**3. Гейт применяет таблицу сочетаний** к исходам правил того же прогона:
+
+| Правило для субъекта | Роль | Что делает гейт |
+|---|---|---|
+| красное | `necessary` | критерий провален измерением — отчёт судьи не нужен |
+| красное, судья поставил ≥ 3 | любая | `binding_contradiction` — решение человека |
+| не прогонялось | любая | `binding_not_measured` — суждению не на что опереться |
+| зелёное, зубья не подтверждены | `necessary` | `binding_rule_toothless` |
+| нет в реестре | любая | `binding_rule_unknown` — error |
+
+**4. Сначала тень, потом право блокировать.** Пока связка советующая, гейт
+пишет в детали и в `.arch-handoff/binding-shadow.jsonl`, что было бы при
+`blocking`:
+
+```
+[FAIL] semantic_quality * — … теневой режим связок:
+       adr_spine_consistency#no_contradiction — при blocking провал: 1, человеку: 0 из 1
+  ↳ [warn] binding_unsigned — связка объявлена блокирующей, но не действует …
+  ↳ [warn] binding_rule_failed — необходимое правило красное для этого субъекта …
+```
+
+```bash
+arch-be rubric bindings --judge <модель>   # режим, подпись, тень, что мешает подписи
+arch-be rules teeth . --save                # зубья необходимых правил
+arch-be rubric promote <рубрика> <критерий> --judge <модель> --by "Имя <адрес>"
+```
+
+`promote` подписывает связку только при прожитом теневом режиме,
+подтверждённых зубьях и строгом допуске судьи (`rubric qualify`; метрики
+пересчитываются по текущим порогам). Подпись привязана к SHA-256 рубрики:
+правка рубрики возвращает связку в советующий режим.
+
+**5. Инвариант без правила — под охраной суждения.** У `AD` с `unverifiable`
+появляется `judged_by: [<рубрика>#<критерий>]`; `arch-be trace check`
+печатает матрицу «AD × {правило, рубрика}» и называет инварианты, которые не
+охраняет ни то, ни другое (`ad-unguarded` по `[trace] judged_required`).
+
+Всё аддитивно и по умолчанию выключено: без связок в рубриках вердикты
+прежние. Подробности —
+[docs/rubrics_and_benchmarks.md](docs/rubrics_and_benchmarks.md), решение —
+[ADR-093](docs/adr/ADR-093-svyazka-kriteriya-rubriki-s-fitness-pravilom-detektory-v-dosye-determinirovannoe-pervenstvo-judged-by-promoushen-po-kalibrovke.md).
 
 ## MCP для архитекторов
 
@@ -574,6 +641,9 @@ Standard/Critical). Провал — по коду возврата, не по �
 override с ADR). Хуки всех хостов (`arch-be connect <host>`) зовут именно её:
 fail-soft на инфраструктуре (нет бинаря/правил — молча пропускает),
 fail-hard на вердикте (exit 2 → находки уходят агенту как feedback).
+Включённая составляющая `semantic_quality` не бывает мягче решения рубрики
+(«чисто» судьи при красном детекторе — INCOMPLETE на любом маршруте) и
+применяет связки «критерий ↔ правило» (раздел Е).
 
 <p align="center">
   <img src="docs/screenshots/harnesses/waves-claude-tui-hook.png" alt="Claude Code: Stop-хук с arch-be gate блокирует завершение; модель докладывает и просит разрешение" width="49%">
@@ -654,7 +724,8 @@ arch-be mcp serve --rw    # 51 инструмент: + handoff_create, adr_new, 
 ```
 
 - **Контроль**: `fitness_check`, `spine_lint`, `significance_score` +
-  `significance_from_diff` (маршрут из диффа), `trace_check`, `model_query`,
+  `significance_from_diff` (маршрут из диффа), `trace_check` (с матрицей
+  «AD × {правило, рубрика}»), `model_query`,
   `model_validate`, `model_drift`, `contract_diff` (OpenAPI/proto/Avro/
   JSON Schema/DDL), `openapi_lint`, `asyncapi_lint`, `fleet_audit`,
   `archify_validate`, `agentsmd_lint`, `nfr_check`, `delta_guard`,
@@ -705,6 +776,8 @@ arch-be mcp serve --rw    # 51 инструмент: + handoff_create, adr_new, 
   архитекторов: работа из кодового харнесса, карта инструментов по задачам,
   живые сессии со скриншотами.
 - [docs/mcp.md](docs/mcp.md) — контракт MCP-сервера и split-judge.
+- [docs/rubrics_and_benchmarks.md](docs/rubrics_and_benchmarks.md) — рубрики,
+  досье судьи, связки «критерий ↔ правило», калибровка и промоушен (ADR-093).
 - [docs/skills_for_architects.md](docs/skills_for_architects.md) — обзор
   библиотеки: все 79 скиллов в 10 плагинах, с чего начать.
 - [docs/INVERSION.md](docs/INVERSION.md) — отчёт по плану инверсии: что сделано, отступления.

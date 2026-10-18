@@ -42,6 +42,17 @@ agent — or a human architect — a deterministic, LLM-free control loop:
   split-judge — Spine issues the prompt and JSON schema, your host agent
   judges k times, Spine builds the median and verifies every quote against
   the target document.
+- **Rule + rubric criterion = one fitness function** (ADR-093): a rubric
+  criterion is bound to `CONSTRAINTS.yaml` rules (`bound_rules`, role
+  `necessary` or `evidence`). Rule outcomes are exported as dossier detectors
+  (`control check --export-detectors`), so the judge sees the measurement next
+  to the subject. A red necessary rule fails the criterion with no judge
+  involved; a "clean" verdict against a red rule goes to a human. A binding
+  starts advisory and becomes blocking only after a recorded shadow run,
+  confirmed rule teeth, a strictly qualified judge and a human signature
+  (`arch-be rubric bindings` / `arch-be rubric promote`). Invariants marked
+  `unverifiable` can be guarded by `judged_by: [<rubric>#<criterion>]`, and
+  `arch-be trace check` prints an AD × {rule, rubric} coverage matrix.
 - **Evidence discipline**: evidence bundles with hash integrity, a verdict
   passport (`arch-be gate --explain` — what a green verdict does NOT mean),
   a trust metric (`arch-be trust`), mutation testing of the control loop
@@ -118,6 +129,7 @@ environment only, `arch-be` to launch — is covered in
 | Verified harness matrix (5 harnesses, live runs) | [docs/HARNESSES.md](docs/HARNESSES.md) |
 | MCP server contract and tool map | [docs/mcp.md](docs/mcp.md), [docs/mcp_for_architects.md](docs/mcp_for_architects.md) |
 | Control loop: fitness, gate, verdicts | [docs/control.md](docs/control.md), [docs/verdict.md](docs/verdict.md) |
+| Rubrics, judge dossiers, rule ↔ criterion bindings (ADR-093) | [docs/rubrics_and_benchmarks.md](docs/rubrics_and_benchmarks.md) |
 | Architecture decisions (54 ADRs) | [docs/adr/](docs/adr/) |
 | Spine Core API and boundary (workspace split plan) | [docs/SPINE-CORE-API.md](docs/SPINE-CORE-API.md) |
 | Live-case experiment reports | [docs/experiments/](docs/experiments/) |
