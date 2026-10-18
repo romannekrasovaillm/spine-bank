@@ -567,6 +567,9 @@ pub const PLUGIN_ARCH_GOVERNANCE_SKILLS_ARCHITECTURE_SOURCES_MAP_SKILL_MD: &str 
 /// Встроенный файл плагина `assets/plugins/arch-governance/skills/fitness-function-catalog/SKILL.md`.
 pub const PLUGIN_ARCH_GOVERNANCE_SKILLS_FITNESS_FUNCTION_CATALOG_SKILL_MD: &str =
     include_str!("../assets/plugins/arch-governance/skills/fitness-function-catalog/SKILL.md");
+/// Встроенный файл плагина `assets/plugins/arch-governance/skills/fitness-rule-authoring/SKILL.md`.
+pub const PLUGIN_ARCH_GOVERNANCE_SKILLS_FITNESS_RULE_AUTHORING_SKILL_MD: &str =
+    include_str!("../assets/plugins/arch-governance/skills/fitness-rule-authoring/SKILL.md");
 /// Встроенный файл плагина `assets/plugins/arch-governance/skills/rule-library-antipatterns/SKILL.md`.
 pub const PLUGIN_ARCH_GOVERNANCE_SKILLS_RULE_LIBRARY_ANTIPATTERNS_SKILL_MD: &str =
     include_str!("../assets/plugins/arch-governance/skills/rule-library-antipatterns/SKILL.md");
@@ -837,6 +840,7 @@ const PLUGIN_FILES: &[(&str, &str)] = &[
     ("plugins/arch-governance/plugin.json", PLUGIN_ARCH_GOVERNANCE_PLUGIN_JSON),
     ("plugins/arch-governance/skills/architecture-sources-map/SKILL.md", PLUGIN_ARCH_GOVERNANCE_SKILLS_ARCHITECTURE_SOURCES_MAP_SKILL_MD),
     ("plugins/arch-governance/skills/fitness-function-catalog/SKILL.md", PLUGIN_ARCH_GOVERNANCE_SKILLS_FITNESS_FUNCTION_CATALOG_SKILL_MD),
+    ("plugins/arch-governance/skills/fitness-rule-authoring/SKILL.md", PLUGIN_ARCH_GOVERNANCE_SKILLS_FITNESS_RULE_AUTHORING_SKILL_MD),
     ("plugins/arch-governance/skills/rule-library-antipatterns/SKILL.md", PLUGIN_ARCH_GOVERNANCE_SKILLS_RULE_LIBRARY_ANTIPATTERNS_SKILL_MD),
     ("plugins/arch-governance/skills/agent-threat-modeling/SKILL.md", PLUGIN_ARCH_GOVERNANCE_SKILLS_AGENT_THREAT_MODELING_SKILL_MD),
     ("plugins/arch-governance/skills/agent-threat-modeling/references/mitigations.md", PLUGIN_ARCH_GOVERNANCE_SKILLS_AGENT_THREAT_MODELING_REFERENCES_MITIGATIONS_MD),
@@ -2160,6 +2164,49 @@ mod tests {
         let seq = include_str!("../examples/mermaid/seq.mmd");
         assert_eq!(diagram_kind(flow), DiagramKind::Flowchart);
         assert_eq!(diagram_kind(seq), DiagramKind::Sequence);
+    }
+
+    /// Сторож полноты: каждый `SKILL.md` из `assets/plugins/*/skills/*/` на
+    /// диске встроен в бинарь. Без него скилл, добавленный в репозиторий без
+    /// `include_str!`, молча не доходил до `arch-be init` и `connect`
+    /// (так было с `arch-governance/fitness-rule-authoring`).
+    #[test]
+    fn every_plugin_skill_on_disk_is_embedded() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/plugins");
+        let embedded: std::collections::BTreeSet<&str> =
+            PLUGIN_FILES.iter().map(|(rel, _)| *rel).collect();
+        let mut missing = Vec::new();
+        for plugin in std::fs::read_dir(&root).expect("assets/plugins") {
+            let plugin = plugin.expect("plugin dir").path();
+            let skills = plugin.join("skills");
+            if !skills.is_dir() {
+                continue;
+            }
+            for skill in std::fs::read_dir(&skills).expect("skills dir") {
+                let skill = skill.expect("skill dir").path();
+                if !skill.join("SKILL.md").is_file() {
+                    continue;
+                }
+                let rel = format!(
+                    "plugins/{}/skills/{}/SKILL.md",
+                    plugin
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or_default(),
+                    skill
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or_default()
+                );
+                if !embedded.contains(rel.as_str()) {
+                    missing.push(rel);
+                }
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "скиллы на диске без include_str!: {missing:?}"
+        );
     }
 
     #[test]

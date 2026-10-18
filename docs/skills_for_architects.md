@@ -7,13 +7,13 @@
 — в [plugins_and_skills.md](plugins_and_skills.md); этот документ — про
 **содержимое**: что внутри и что попробовать в первую очередь.
 
-Всего **78 скиллов в 10 встроенных плагинах** (`assets/plugins/`, MIT) —
+Всего **79 скиллов в 10 встроенных плагинах** (`assets/plugins/`, MIT) —
 раскладываются командой `arch-be init` в `~/.arch-harness/plugins`.
 
 > **Banking Edition** добавляет шесть доменных плагинов `ru-*` (39 скиллов):
 > ru-integration, ru-data, ru-compliance, ru-architecture, ru-payments,
 > ru-archify — проприетарный слой, в эту публикацию не входит (итого в полной
-> редакции 117 скиллов в 16 плагинах).
+> редакции 118 скиллов в 16 плагинах).
 
 ## Карта библиотеки
 
@@ -23,7 +23,7 @@
 | arch-office | 12 | Офисные артефакты: docx/pptx/xlsx с генераторами (отчёты МД, SAD, матрицы, реестр рисков) |
 | spine-workflows | 10 | Плейбуки работы со Spine из чужого харнесса поверх MCP: quickstart, разбор, гейты, Evidence Bundle, судьи рубрик и смысла, bootstrap, Archify |
 | aws-builders-library | 9 | Дистилляты Amazon Builders' Library: таймауты, load shedding, статическая стабильность |
-| arch-governance | 5 | Библиотека правил и безопасность агентов: каталог fitness-функций, антипаттерны, карта источников, моделирование угроз, защита от prompt injection |
+| arch-governance | 6 | Библиотека правил и безопасность агентов: каталог fitness-функций, методика авторинга правил, антипаттерны, карта источников, моделирование угроз, защита от prompt injection |
 | patterns-integration | 5 | Pattern language Ричардсона (microservices.io): сага, outbox, CQRS, strangler+ACL |
 | patterns-resilience | 5 | Azure Cloud Design Patterns: circuit breaker, bulkhead, cache-aside, throttling |
 | aws-agentic-ai | 5 | Агентные AI-паттерны AWS PG 2026: workflow, сага-оркестрация, reflect-refine |
@@ -239,11 +239,12 @@ openpyxl), корпоративные стили и чек-лист приёмк
 | `multi-agent-collaboration` | Пиринговая координация равных агентов vs workflow-оркестрация |
 | `reflect-refine-loops` | Генератор + независимый оценщик, структурированная обратная связь |
 
-### arch-governance (5) — библиотека правил и безопасность агентов
+### arch-governance (6) — библиотека правил и безопасность агентов
 
 | Скилл | Что даёт |
 |---|---|
 | `fitness-function-catalog` | 20 готовых fitness-функций с regex, три волны внедрения, карточка дистилляции |
+| `fitness-rule-authoring` | Методика хороших fitness-правил: пять частей правила, уровни запуска, связь с ADR, ratchet для легаси, исключения |
 | `rule-library-antipatterns` | 8 антипаттернов расширения + фильтр включения из пяти форм правила |
 | `architecture-sources-map` | Навигация по 15 блокам источников (168 шт.): что встроено, что кандидат |
 | `agent-threat-modeling` | Моделирование угроз AI-агентов: поверхность атаки, OWASP LLM Top 10 и OWASP Agentic |
