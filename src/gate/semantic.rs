@@ -246,6 +246,22 @@ enum SemanticState {
     /// Судья не квалифицирован на эталонном наборе, а маршрут блокирующий
     /// (E6.3): «промах» неотличим от «не умеет» — решение человека.
     JudgeUnqualified(String),
+    /// Судья сказал «чисто», а детектор механического контура красный
+    /// (E7.2, ADR-093 волна 0): измерение первично, и молча зелёным такой
+    /// субъект не проходит ни на одном маршруте — решение человека.
+    DetectorContradiction(String),
+    /// Разброс сэмплов судьи выше порога (`unstable`, ADR-093 волна 0): балл
+    /// критерия — не измерение, а случайность выборки. Политика маршрута
+    /// решает, блокирует ли это вердикт.
+    Unstable(String),
+    /// Рубрика сама решила `human` (E4.1), а ни одно состояние выше эту
+    /// причину не назвало (ADR-093 волна 0): гейт не показывает исход мягче
+    /// собственного решения рубрики.
+    RubricHuman(String),
+    /// Рубрика сама решила `fail` (E4.1), а гейт по своим признакам
+    /// противоречия не нашёл (например, рубрику правили после оценки):
+    /// расхождение блокирует — мягче решения рубрики гейт не бывает.
+    RubricFail(String),
     /// Всё в порядке.
     Ok,
 }
@@ -257,13 +273,19 @@ impl SemanticState {
     /// архитектора уже принято, E4.5) и остальные состояния не блокируют.
     fn escalates(&self, policy: crate::config::HumanPolicy) -> bool {
         match self {
-            Self::InjectionSuspected(_) | Self::InvalidSamples(_) | Self::JudgeUnqualified(_) => {
-                true
-            }
+            // Детектор — измерение, а не мнение: его расхождение с судьёй не
+            // понижается политикой маршрута (ADR-093, детерминированное
+            // первенство).
+            Self::InjectionSuspected(_)
+            | Self::InvalidSamples(_)
+            | Self::JudgeUnqualified(_)
+            | Self::DetectorContradiction(_) => true,
             Self::PartialEvidence(_)
             | Self::Unconfirmed(_)
             | Self::CoverageIncomplete(_)
-            | Self::JudgesDisagreed(_) => policy == crate::config::HumanPolicy::Human,
+            | Self::JudgesDisagreed(_)
+            | Self::Unstable(_)
+            | Self::RubricHuman(_) => policy == crate::config::HumanPolicy::Human,
             _ => false,
         }
     }
@@ -402,6 +424,48 @@ impl SemanticState {
                     } else {
                         ""
                     }
+                ),
+            )],
+            Self::DetectorContradiction(detail) => vec![GateFinding::ruled(
+                "error".to_string(),
+                "semantic_detector_contradiction".to_string(),
+                format!(
+                    "{who}: судья не подтвердил нарушение, о котором сообщает красный детектор \
+                     ({detail}) — измерение первично, механика не выбирает, кому верить; \
+                     решение за человеком"
+                ),
+            )],
+            Self::Unstable(criteria) => vec![GateFinding::ruled(
+                if escalated { "error" } else { "warn" }.to_string(),
+                "semantic_unstable".to_string(),
+                format!(
+                    "{who}: разброс сэмплов судьи выше порога ({criteria}) — балл не измерение, \
+                     а случайность выборки{}",
+                    if escalated {
+                        "; на этом маршруте решение за человеком"
+                    } else {
+                        ""
+                    }
+                ),
+            )],
+            Self::RubricHuman(reasons) => vec![GateFinding::ruled(
+                if escalated { "error" } else { "warn" }.to_string(),
+                "semantic_rubric_human".to_string(),
+                format!(
+                    "{who}: рубрика сама решила `human` ({reasons}){}",
+                    if escalated {
+                        " — на этом маршруте решение за человеком"
+                    } else {
+                        ""
+                    }
+                ),
+            )],
+            Self::RubricFail(reasons) => vec![GateFinding::ruled(
+                "error".to_string(),
+                "semantic_rubric_fail".to_string(),
+                format!(
+                    "{who}: рубрика сама решила `fail` ({reasons}), а признаков противоречия \
+                     гейт не нашёл — расхождение блокирует: гейт не бывает мягче решения рубрики"
                 ),
             )],
             Self::InjectionSuspected(lines) => vec![GateFinding::ruled(
@@ -565,6 +629,36 @@ fn semantic_subject_state(
     {
         state = SemanticState::Low(artifact.weighted_total, artifact.judge_model.clone());
     }
+    // ADR-093 волна 0: красный детектор при «чисто» от судьи сильнее низкого
+    // итога и неподтверждённого обвинения — это расхождение с измерением, а
+    // не качество документа. Подтверждённое противоречие его не порождает
+    // (судья согласился с детектором), поэтому оно не перекрывается.
+    if !matches!(state, SemanticState::Contradiction { .. }) {
+        let against_detector: Vec<String> = artifact
+            .scores
+            .iter()
+            .filter(|s| s.has_flag(crate::rubric::CriterionFlag::DetectorContradiction))
+            .map(|s| format!("{} = {}", s.criterion_id, s.score))
+            .collect();
+        if !against_detector.is_empty() {
+            state = resolved(SemanticState::DetectorContradiction(
+                against_detector.join(", "),
+            ));
+        }
+    }
+    // Рубрика решила `fail`, а гейт противоречия не видит: блокирует, гейт не
+    // бывает мягче решения рубрики (рубрику могли ослабить после оценки).
+    if artifact.decision == Some(crate::rubric::RubricDecision::Fail)
+        && matches!(
+            state,
+            SemanticState::Ok
+                | SemanticState::Low(..)
+                | SemanticState::Unconfirmed(_)
+                | SemanticState::CoverageIncomplete(_)
+        )
+    {
+        state = SemanticState::RubricFail(decision_reasons(artifact));
+    }
     if matches!(state, SemanticState::Ok) {
         let uncovered: Vec<String> = artifact
             .scores
@@ -575,6 +669,29 @@ fn semantic_subject_state(
         if !uncovered.is_empty() {
             state = resolved(SemanticState::CoverageIncomplete(uncovered));
         }
+    }
+    // ADR-093 волна 0: `unstable` раньше до гейта не доходил вовсе — балл,
+    // который при повторе выборки другой, читался как измерение.
+    if matches!(state, SemanticState::Ok) {
+        let mut shaky: Vec<String> = artifact
+            .scores
+            .iter()
+            .filter(|s| s.has_flag(crate::rubric::CriterionFlag::Unstable))
+            .map(|s| format!("{} σ={:.2}", s.criterion_id, s.stdev))
+            .collect();
+        if shaky.is_empty() && artifact.unstable {
+            shaky.push("отчёт помечен unstable".to_string());
+        }
+        if !shaky.is_empty() {
+            state = resolved(SemanticState::Unstable(shaky.join(", ")));
+        }
+    }
+    // Последняя страховка: рубрика решила `human`, а причину не назвало ни
+    // одно состояние выше (новая метка, о которой гейт ещё не знает).
+    if matches!(state, SemanticState::Ok)
+        && artifact.decision == Some(crate::rubric::RubricDecision::Human)
+    {
+        state = resolved(SemanticState::RubricHuman(decision_reasons(artifact)));
     }
     // «Автор = судья» — отдельная находка, но она не перекрывает суть
     // (обвинение или пропуск отчёта): печатается только на спокойном итоге.
@@ -589,6 +706,15 @@ fn semantic_subject_state(
         }
     }
     state
+}
+
+/// Причины решения рубрики одной строкой (E4.4); пусто — честная заглушка.
+fn decision_reasons(artifact: &crate::rubric::RubricArtifact) -> String {
+    if artifact.decision_reasons.is_empty() {
+        "причины в отчёте не записаны".to_string()
+    } else {
+        artifact.decision_reasons.join("; ")
+    }
 }
 
 /// Какой источник досье изменился после оценки — поимённо, для сообщения.
@@ -1127,6 +1253,234 @@ mod tests {
             "{:?}",
             semantic_rules(&report)
         );
+    }
+
+    /// Правка записанного отчёта смысловой рубрики (ADR-093 волна 0): тесты
+    /// добавляют поля, которых нет в базовом отчёте (`decision`, σ, флаги).
+    fn patch_semantic_report(dir: &Path, patch: impl FnOnce(&mut serde_json::Value)) {
+        let path = dir
+            .join(crate::rubric::RUBRIC_REPORTS_DIR)
+            .join("semantic.json");
+        let text = std::fs::read_to_string(&path).expect("отчёт");
+        let mut value: serde_json::Value = serde_json::from_str(&text).expect("json");
+        patch(&mut value);
+        std::fs::write(&path, serde_json::to_string_pretty(&value).expect("json"))
+            .expect("write report");
+    }
+
+    /// Настройки без допуска судьи: тесты волны 0 проверяют не квалификацию.
+    fn semantic_cfg_unqualified_ok() -> crate::config::SemanticQualityConfig {
+        crate::config::SemanticQualityConfig {
+            require_qualified_judge: false,
+            ..semantic_cfg(crate::config::SemanticScope::All)
+        }
+    }
+
+    /// ADR-093 волна 0: «чисто» от судьи при красном детекторе раньше
+    /// проходило PASS — метка `detector_contradiction` из итога не исключает,
+    /// и гейт её не читал. Теперь это эскалация на любом маршруте, даже на
+    /// Fast с политикой `warn`: измерение первично.
+    #[test]
+    fn detector_contradiction_escalates_on_every_route() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        make_semantic_repo(dir);
+        let rubrics = semantic_rubrics_dir(dir);
+        write_semantic_report(
+            dir,
+            "docs/adr/ADR-001-reshenie.md",
+            4,
+            &["detector_contradiction"],
+            4.0,
+            None,
+        );
+        for route in [Route::Fast, Route::Critical] {
+            let report = run_semantic_on(
+                dir,
+                route,
+                crate::config::DecisionPolicyConfig::default(),
+                semantic_cfg_unqualified_ok(),
+                &rubrics,
+            );
+            assert_eq!(
+                status_of(&report, "semantic_quality"),
+                GateStatus::Skip,
+                "{route:?}: {}",
+                crate::gate::render(&report)
+            );
+            assert_eq!(report.outcome, GateOutcome::Incomplete, "{route:?}");
+            assert!(
+                semantic_rules(&report).contains(&"semantic_detector_contradiction".to_string()),
+                "{route:?}: {:?}",
+                semantic_rules(&report)
+            );
+        }
+    }
+
+    /// Решение архитектора по отчёту снимает эскалацию расхождения с
+    /// детектором так же, как другие оговорки судьи (E4.5).
+    #[test]
+    fn human_accept_resolves_detector_contradiction() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        make_semantic_repo(dir);
+        let rubrics = semantic_rubrics_dir(dir);
+        write_semantic_report(
+            dir,
+            "docs/adr/ADR-001-reshenie.md",
+            4,
+            &["detector_contradiction"],
+            4.0,
+            None,
+        );
+        let path = dir
+            .join(crate::rubric::RUBRIC_REPORTS_DIR)
+            .join("semantic.json");
+        let text = std::fs::read_to_string(&path).expect("отчёт");
+        let artifact: crate::rubric::RubricArtifact =
+            serde_json::from_str(&text).expect("JSON отчёта");
+        let record = crate::rubric::HumanDecision::new(
+            &artifact,
+            "reports/rubric/semantic.json",
+            &crate::hash::sha256_hex(text.as_bytes()),
+            crate::rubric::HumanVerdict::Accept,
+            "Архитектор <arch@bank>",
+            "детектор ложноположителен: проверено вручную",
+        );
+        crate::rubric::write_decision(dir, &crate::judge::artifact_slug_of(&artifact), &record)
+            .expect("решение");
+        let report = run_semantic_on(
+            dir,
+            Route::Critical,
+            crate::config::DecisionPolicyConfig::default(),
+            semantic_cfg_unqualified_ok(),
+            &rubrics,
+        );
+        assert_eq!(
+            status_of(&report, "semantic_quality"),
+            GateStatus::Pass,
+            "{}",
+            crate::gate::render(&report)
+        );
+        assert!(
+            semantic_rules(&report).contains(&"human_decision_accepted".to_string()),
+            "{:?}",
+            semantic_rules(&report)
+        );
+    }
+
+    /// ADR-093 волна 0: `unstable` доходит до гейта — предупреждение на
+    /// маршруте с политикой `warn`, эскалация на Critical (`human`).
+    #[test]
+    fn unstable_follows_route_policy() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        make_semantic_repo(dir);
+        let rubrics = semantic_rubrics_dir(dir);
+        write_semantic_report(
+            dir,
+            "docs/adr/ADR-001-reshenie.md",
+            4,
+            &["unstable"],
+            4.0,
+            None,
+        );
+        let fast = run_semantic_on(
+            dir,
+            Route::Fast,
+            crate::config::DecisionPolicyConfig::default(),
+            semantic_cfg_unqualified_ok(),
+            &rubrics,
+        );
+        assert_eq!(status_of(&fast, "semantic_quality"), GateStatus::Pass);
+        assert!(semantic_rules(&fast).contains(&"semantic_unstable".to_string()));
+        let critical = run_semantic_on(
+            dir,
+            Route::Critical,
+            crate::config::DecisionPolicyConfig::default(),
+            semantic_cfg_unqualified_ok(),
+            &rubrics,
+        );
+        assert_eq!(
+            status_of(&critical, "semantic_quality"),
+            GateStatus::Skip,
+            "{}",
+            crate::gate::render(&critical)
+        );
+        assert!(semantic_rules(&critical).contains(&"semantic_unstable".to_string()));
+    }
+
+    /// Отчёт без меток у критерия, но с признаком `unstable` на уровне отчёта
+    /// (старый формат) — тоже не «спокойный итог».
+    #[test]
+    fn report_level_unstable_is_not_ok() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        make_semantic_repo(dir);
+        let rubrics = semantic_rubrics_dir(dir);
+        write_semantic_report(dir, "docs/adr/ADR-001-reshenie.md", 5, &[], 4.5, None);
+        patch_semantic_report(dir, |v| v["unstable"] = serde_json::json!(true));
+        let report = run_semantic_on(
+            dir,
+            Route::Fast,
+            crate::config::DecisionPolicyConfig::default(),
+            semantic_cfg_unqualified_ok(),
+            &rubrics,
+        );
+        assert!(
+            semantic_rules(&report).contains(&"semantic_unstable".to_string()),
+            "{:?}",
+            semantic_rules(&report)
+        );
+    }
+
+    /// ADR-093 волна 0: гейт не бывает мягче решения рубрики. `human` без
+    /// метки, которую гейт знает, — по политике маршрута; `fail` без
+    /// признаков противоречия — блокирует.
+    #[test]
+    fn rubric_decision_is_a_floor_for_the_gate() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let dir = tmp.path();
+        make_semantic_repo(dir);
+        let rubrics = semantic_rubrics_dir(dir);
+        write_semantic_report(dir, "docs/adr/ADR-001-reshenie.md", 5, &[], 4.5, None);
+        patch_semantic_report(dir, |v| {
+            v["decision"] = serde_json::json!("human");
+            v["decision_reasons"] = serde_json::json!(["новая метка судьи"]);
+        });
+        let critical = run_semantic_on(
+            dir,
+            Route::Critical,
+            crate::config::DecisionPolicyConfig::default(),
+            semantic_cfg_unqualified_ok(),
+            &rubrics,
+        );
+        assert_eq!(status_of(&critical, "semantic_quality"), GateStatus::Skip);
+        assert!(semantic_rules(&critical).contains(&"semantic_rubric_human".to_string()));
+        let fast = run_semantic_on(
+            dir,
+            Route::Fast,
+            crate::config::DecisionPolicyConfig::default(),
+            semantic_cfg_unqualified_ok(),
+            &rubrics,
+        );
+        assert_eq!(status_of(&fast, "semantic_quality"), GateStatus::Pass);
+        assert!(semantic_rules(&fast).contains(&"semantic_rubric_human".to_string()));
+
+        patch_semantic_report(dir, |v| {
+            v["decision"] = serde_json::json!("fail");
+            v["decision_reasons"] = serde_json::json!(["блокирующий критерий низкий"]);
+        });
+        let failed = run_semantic_on(
+            dir,
+            Route::Fast,
+            crate::config::DecisionPolicyConfig::default(),
+            semantic_cfg_unqualified_ok(),
+            &rubrics,
+        );
+        assert_eq!(status_of(&failed, "semantic_quality"), GateStatus::Fail);
+        let rules = semantic_rules(&failed);
+        assert!(rules.contains(&"semantic_rubric_fail".to_string()), "{rules:?}");
     }
 
     /// Неподтверждённое обвинение не должно вытеснять подтверждённый низкий
