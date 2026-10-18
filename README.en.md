@@ -41,7 +41,11 @@ agent — or a human architect — a deterministic, LLM-free control loop:
 - **Rubric judging without API keys**: a CLI judge (`kind = "cli"`) or
   split-judge — Spine issues the prompt and JSON schema, your host agent
   judges k times, Spine builds the median and verifies every quote against
-  the target document.
+  the target document. Rule↔criterion bindings (ADR-093): a red
+  `bound_rules` outcome fails the criterion without a judge, a clean verdict
+  over a red rule escalates to a human, and a binding goes blocking only
+  after shadow runs, confirmed rule teeth, judge qualification and a signed
+  promotion (`arch-be rubric bindings` / `promote`).
 - **Evidence discipline**: evidence bundles with hash integrity, a verdict
   passport (`arch-be gate --explain` — what a green verdict does NOT mean),
   a trust metric (`arch-be trust`), mutation testing of the control loop

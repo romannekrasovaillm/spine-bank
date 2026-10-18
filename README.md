@@ -101,7 +101,11 @@ Qwen Code, Kimi Code и другие через `harness_run`, а приёмка
 **6. LLM-судья без своих API-ключей.** `kind="cli"` запускает уже
 авторизованный `claude -p` или аналог подпроцессом — платит подписка хоста
 (`src/llm/harness_cli.rs`). Split-judge (`rubric_prompt` / `rubric_verify`):
-оценивает модель хоста, Spine механически сверяет.
+оценивает модель хоста, Spine механически сверяет. Связка
+«критерий ↔ fitness-правило» (ADR-093): красное необходимое правило проваливает
+критерий без судьи, «чисто» судьи при красном правиле уходит человеку;
+блокирующей связка становится только после теневого режима, зубьев, допуска
+судьи и подписи (`src/gate/binding.rs`, `arch-be rubric bindings` / `promote`).
 
 **7. MCP со строгой границей доступа.** По умолчанию — только чтение;
 `--rw=reports` разрешает запись лишь отчётов. Список `BRIDGE_NEVER` (bash,
@@ -705,6 +709,9 @@ arch-be mcp serve --rw    # 51 инструмент: + handoff_create, adr_new, 
   архитекторов: работа из кодового харнесса, карта инструментов по задачам,
   живые сессии со скриншотами.
 - [docs/mcp.md](docs/mcp.md) — контракт MCP-сервера и split-judge.
+- [docs/rubrics_and_benchmarks.md](docs/rubrics_and_benchmarks.md) — рубрики
+  и судьи: якорные рубрики, split-judge, связки «критерий ↔ fitness-правило»
+  (ADR-093).
 - [docs/skills_for_architects.md](docs/skills_for_architects.md) — обзор
   библиотеки: все 79 скиллов в 10 плагинах, с чего начать.
 - [docs/INVERSION.md](docs/INVERSION.md) — отчёт по плану инверсии: что сделано, отступления.

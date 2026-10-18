@@ -354,6 +354,16 @@ BMAD, Spec Kit, OpenSpec и др.):
   хранилища, контракты, NFR, инварианты) с основаниями `файл:строка`, без
   LLM; правка модели — одним `arch-diff accept`, доставка в PR — одним
   обновляемым комментарием (`connect ci`, docs/arch-diff.md).
+- **Связка «критерий рубрики ↔ fitness-правило»** (0.4.17, ADR-093): одна
+  характеристика — пара «детерминированное измерение + суждение по рубрике».
+  `bound_rules`/`binding_mode` у критерия рубрики, `judged_by` у AD (матрица
+  «AD × {правило, рубрика}» в `trace check`), детекторы правил
+  (`control check --export-detectors`) — в досье судьи. Красное необходимое
+  правило проваливает критерий без судьи — решение за измерением;
+  «чисто» судьи при красном правиле — эскалация человеку. Блокирующей связка
+  становится только после теневого режима, подтверждённых зубьев, допуска
+  судьи и подписи архитектора — `arch-be rubric bindings` / `arch-be rubric
+  promote` (`docs/rubrics_and_benchmarks.md`).
 - **Метрики**: `arch-be metrics` — сессии, инструменты, ошибки, токены/₽, баллы
   рубрик, pass rate бенчей + трансформационные KPI: approval theater (доля
   бездумных согласий), architecture drift (дрейф AGENTS.md по флоту),
@@ -708,7 +718,7 @@ arch-be [--config <path>] <command>   # без команды — TUI
 | `memory [add <текст>]` | Глобальная md-память (`MEMORY.md`): показать / дописать заметку |
 | `mermaid <file>` | Рендер mermaid в Unicode/ASCII-арт (flowchart, sequenceDiagram, erDiagram, C4Context/C4Container/C4Component) |
 | `archify doctor` / `archify guide <q>` / `archify validate <тип> <файл>` / `archify deliver <тип> <файл> <html>` / `archify compare <base> <head> <html>` | Контур диаграмм Archify (JSON IR → HTML/SVG): валидация 9 checks, доставка с SHA-256 receipt, delta-review снапшотов; exit code = гейт CI (требуется `[archify].cli_path`, см. `config.example.toml`) |
-| `rubric list` / `rubric run <rubric> <target>` | Рубрики: список / оценка LLM-судьёй |
+| `rubric list` / `rubric run <rubric> <target>` / `rubric bindings` / `rubric promote <rubric> <criterion>` | Рубрики: список / оценка LLM-судьёй / обзор связок критериев с fitness-правилами и их готовности к подписи / подписанный промоушен блокирующей связки (ADR-093, теневой режим + зубья + допуск судьи) |
 | `bench list` / `bench run <name>` / `bench run --golden` | Архитектурные бенчмарки; `--golden` — калибровка LLM-судьи по golden-set (MAE против эталона; выше `judge.golden_max_mae` — exit 1) |
 | `eval run [--suite <dir>] [--gate <pct>] [--judge]` | Регрессионный eval-сьют конфигурации харнесса (continuous evals): детерминированные проверки офлайн + опциональный LLM-судья; pass-rate ниже гейта (дефолт 100%) — exit 1 (`docs/evals.md`) |
 | `kb <query> [--limit]` | Поиск по локальной базе знаний |
@@ -720,7 +730,7 @@ arch-be [--config <path>] <command>   # без команды — TUI
 | `handoff <harness> --repo <path> --task <text>` | Handoff-пакет `.arch-handoff/` |
 | `harness-run <harness> --repo <path> [--task]` | Прогнать кодовый харнесс по пакету |
 | `harnesses` | Известные кодовые харнессы и их доступность |
-| `control check/spine/sensors/score/adr` | Архитектурный контроль (fitness, линтеры, значимость); у `check` — `--baseline`/`--baseline-update` (ratchet для brownfield), `--changed-since`, `--format sarif\|junit\|gitlab-codequality\|markdown` |
+| `control check/spine/sensors/score/adr` | Архитектурный контроль (fitness, линтеры, значимость); у `check` — `--baseline`/`--baseline-update` (ratchet для brownfield), `--changed-since`, `--export-detectors` (исход каждого правила как детерминированный детектор — вход досье судьи, ADR-093), `--format sarif\|junit\|gitlab-codequality\|markdown` |
 | `control rules-report` / `control fp mark <правило> <файл>` | Реестр правил CONSTRAINTS.yaml (карточки, находки, git-прокси стоимости) / регистр ложных срабатываний (`docs/outcome-metrics.md`) |
 | `gate [--route auto\|fast\|standard\|critical] [--repo] [--base] [--constraints] [--format]` | Единый архитектурный гейт: fitness + delta guard + rule_weakened (анти-ослабление) + spine-линт + трассировка + целостность модели `model_validate` (+ nfr и evidence на Standard/Critical); провал любой составляющей — exit 1 |
 | `redteam <кейс> [--format text\|json\|markdown] [--min-detection]` | Мутационное тестирование пакета: клонирует кейс во временный каталог, засеивает по одному дефекту из каталога раздела 7, гоняет гейт и печатает карту обнаружения (поймано / не поймано / семантика); read-only, без сети, exit 1 ниже порога |
@@ -734,7 +744,7 @@ arch-be [--config <path>] <command>   # без команды — TUI
 | `model drift <dir>` / `model impact <dir> --id\|--paths` / `model landscape <root> [--aliases] [--diff-since]` | Дрейф «модель ↔ код» (code_roots, манифесты без CMP, INT→контракт) / радиус изменения по графу модели (сущности, правила, контракты, владельцы) / ландшафт систем набора проектов (EA-3, ADR-036/037) |
 | `adr registry <root> [--strict]` | Глобальный реестр ADR по набору проектов (ADR-036): коллизии номеров, дубли, пропуски полей |
 | `survey <repo> [--out]` | Обратное обследование legacy-репозитория (reverse discovery): детерминированный сканер → каркас карты `docs/reverse/survey.md` |
-| `trace check <dir>` | Трассируемость модели: покрытие звеньев REQ → NFR → AD/ADR → CMP → fitness-правило, сироты, exit 1 на обязательных звеньях |
+| `trace check <dir>` | Трассируемость модели: покрытие звеньев REQ → NFR → AD/ADR → CMP → fitness-правило, сироты, exit 1 на обязательных звеньях; матрица «AD × {правило, рубрика}» по `judged_by` (ADR-093) |
 | `nfr budget/availability/capacity/cost <dir>` | Количественные NFR поверх модели (ADR-007): latency-бюджет по hop'ам INT-* против цели p99 (расхождение — error с виновными hop'ами), доступность участков против SLA (+RTO/RPO), ёмкость против RPS-цели, TCO и цена выхода; error → exit 1 |
 | `agents-md refresh/lint/lint-all <repo>` | AGENTS.md для репозиториев команд |
 | `evidence pack/verify` | Evidence Bundle как гейт выпуска |
@@ -1000,6 +1010,13 @@ Live mini-case: [`кейсы/fleet-spine-drift`](кейсы/fleet-spine-drift/) 
   architecture benchmarks, fitness functions, spine linter; JVM gates are
   executed by real ArchUnit from the same CONSTRAINTS.yaml —
   `arch-be archunit gen|check|fetch` (ADR-039, `docs/archunit.md`).
+  **Rule↔criterion bindings** (0.4.17, ADR-093): a rubric criterion binds to
+  fitness rules via `bound_rules` — a red necessary rule fails the criterion
+  without a judge, a clean verdict over a red rule escalates to a human, and
+  rule detectors (`control check --export-detectors`) feed the judge's
+  dossier; a binding goes blocking only after shadow runs, confirmed rule
+  teeth, judge qualification and a signed promotion
+  (`arch-be rubric bindings` / `promote`, `docs/rubrics_and_benchmarks.md`).
   **Corporate spine** (`docs/corp-spine.md`): layered CONSTRAINTS
   inheritance (corp → domain → product) via `extends` with a version pin —
   a parent update surfaces as an error finding ("parent updated", re-pin
