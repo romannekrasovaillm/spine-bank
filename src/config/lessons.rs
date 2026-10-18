@@ -599,6 +599,13 @@ pub struct SemanticQualityConfig {
     /// маршруте находка `judge_unqualified` → INCOMPLETE. Дефолт `false`.
     #[serde(default)]
     pub require_qualified_judge: bool,
+    /// Записывать исходы правил прогона детекторами досье
+    /// (`reports/detectors/rules/`, ADR-093): судья смысловых рубрик видит
+    /// измерения рядом с субъектом. Дефолт `false` — гейт не пишет в дерево
+    /// проекта без явного согласия (`control check --export-detectors` —
+    /// разовый экспорт тем же форматом).
+    #[serde(default)]
+    pub export_detectors: bool,
 }
 
 /// Дефолт порога доли невалидных сэмплов (E3.2): половина и больше.
@@ -630,6 +637,7 @@ impl Default for SemanticQualityConfig {
             require_distinct_judge: false,
             max_invalid_samples_ratio: default_max_invalid_ratio(),
             require_qualified_judge: false,
+            export_detectors: false,
         }
     }
 }
@@ -775,12 +783,18 @@ pub enum ExecutableRequired {
 pub struct TraceConfig {
     /// Строгость находки `ad-text-only` по инвариантам без исполняемой проверки.
     pub executable_required: ExecutableRequired,
+    /// Строгость находки `ad-unguarded` (ADR-093): инвариант `unverifiable`
+    /// без смысловой проверки (`judged_by: [<рубрика>#<критерий>]`) — ни
+    /// правило, ни суждение его не охраняют. Дефолт `off` — обратная
+    /// совместимость: до 0.4.17 поля `judged_by` не было.
+    pub judged_required: ExecutableRequired,
 }
 
 impl Default for TraceConfig {
     fn default() -> Self {
         Self {
             executable_required: ExecutableRequired::Off,
+            judged_required: ExecutableRequired::Off,
         }
     }
 }

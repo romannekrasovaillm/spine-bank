@@ -54,6 +54,8 @@
 /// Baseline-режим (ratchet) для brownfield и срез изменённых файлов
 /// (`--baseline`/`--baseline-update`/`--changed-since`) — см. модуль.
 pub mod baseline;
+/// Экспорт исходов правил как детекторов досье (ADR-093, волна 1).
+mod detectors;
 mod diff_triggers;
 mod exec;
 mod registry;
@@ -69,6 +71,11 @@ mod templates;
 mod tools;
 mod types;
 
+pub use detectors::{
+    DetectorFinding, MAX_DETECTOR_FINDINGS, MAX_DETECTOR_MESSAGE_CHARS, RULE_DETECTOR_SCHEMA,
+    RULE_DETECTORS_DIR, RuleDetector, RuleOutcome, detectors_for, export_rule_detectors,
+    load_rule_detectors, rule_detectors, write_rule_detectors,
+};
 pub use diff_triggers::{
     CONNECT_MANIFEST_PATH, DEFAULT_FAST_MAX, DEFAULT_STANDARD_MAX, DIFF_BLIND_TRIGGERS, DiffGlobs,
     DiffTriggers, SIGNIFICANCE_TRIGGERS, SPINEIGNORE_PATH, ScoredTriggers, TriggerSource, base_rev,

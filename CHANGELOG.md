@@ -5,6 +5,54 @@
 обязательный: обновление контура контроля меняет вердикты, и это должно быть
 сказано до обновления, а не после.
 
+## [Unreleased]
+
+### Добавлено
+
+- **Связка «критерий рубрики ↔ fitness-правило» (ADR-093).** Принципы
+  agentic-fitness-functions перенесены механикой: одна характеристика — пара
+  «детерминированное измерение + суждение по рубрике».
+  - **Детекторы правил** (`control::detectors`): `control check
+    --export-detectors` и `[gate.semantic_quality] export_detectors` пишут
+    исход каждого правила в `reports/detectors/rules/<id>.json` (детерминированно,
+    со статусом зубьев той же редакции правила). Детекторы правил входят во все
+    виды досье по относимости (привязка, файл субъекта, инвариант, карточка
+    правила; потолок 12); `rubric pack --rubric` печатает досье как у судьи.
+  - **`bound_rules` / `binding_mode` у критерия рубрики** и таблица сочетаний в
+    `semantic_quality` (`gate::binding`): красное необходимое правило решает
+    субъект без судьи, красное правило против «чисто» — `binding_contradiction`,
+    пропуск — `binding_not_measured`, связка на пустоту — `binding_rule_unknown`.
+  - **`judged_by` у AD** (`[<рубрика>#<критерий>]`): сверка с каталогом рубрик,
+    звено «AD unverifiable → рубрика», матрица «AD × {правило, рубрика}» в
+    `trace check`, `trace_check` (MCP, поле `ad_matrix`) и гейте; находка
+    `ad-unguarded` по `[trace] judged_required`.
+  - **Калибровка и промоушен:** теневой журнал `.arch-handoff/binding-shadow.jsonl`,
+    строгий допуск судьи (`rubric::qualification_strict`), подпись связки
+    `arch-be rubric promote` (привязана к SHA-256 рубрики), обзор
+    `arch-be rubric bindings`.
+
+### Исправлено
+
+- **`semantic_quality` пропускал расхождение судьи с детектором.** Отчёт с
+  `detector_contradiction` (решение рубрики `human`) проходил PASS: метка не
+  исключает критерий из итога, а гейт её не читал. Теперь — эскалация на любом
+  маршруте (`semantic_detector_contradiction`). Гейт не бывает мягче решения
+  рубрики: `semantic_unstable` и `semantic_rubric_human` — по политике маршрута,
+  `semantic_rubric_fail` — error.
+- Документация: `detector_contradiction` срабатывает при балле ≥ 3 (как в коде),
+  а не ≥ 4.
+
+### Что может покраснеть
+
+- **`semantic_quality` (если включена):** отчёты с меткой
+  `detector_contradiction` теперь дают INCOMPLETE на любом маршруте; отчёты с
+  `unstable` или решением `human` — INCOMPLETE на маршрутах с политикой `human`
+  (по умолчанию Critical) и warn на остальных; решение рубрики `fail` без
+  признаков противоречия — FAIL.
+- Остальное выключено по умолчанию: без связок в рубриках, без
+  `export_detectors` и с `[trace] judged_required = "off"` вердикты прежние.
+  Связка на правило, которого нет в реестре, — error даже в советующем режиме.
+
 ## [0.4.16] — 2026-10-18
 
 ### Исправлено

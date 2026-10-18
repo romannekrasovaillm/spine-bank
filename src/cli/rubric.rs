@@ -162,7 +162,100 @@ pub(crate) enum RubricCmd {
         /// Корень репозитория (по умолчанию — текущий каталог).
         #[arg(long)]
         root: Option<PathBuf>,
+        /// Рубрика, для которой собирается досье (ADR-093): детекторы её
+        /// привязанных правил входят в досье — как у судьи и гейта.
+        #[arg(long)]
+        rubric: Option<String>,
     },
+    /// Связки критериев рубрик с fitness-правилами (ADR-093): режим, правила
+    /// и роли, подпись, теневые прогоны и готовность к подписи.
+    Bindings {
+        /// Рубрика (по умолчанию — все рубрики каталога со связками).
+        rubric: Option<String>,
+        /// Модель-судья для проверки допуска (метка, как в отчётах рубрик).
+        #[arg(long)]
+        judge: Option<String>,
+        /// Корень репозитория (по умолчанию — текущий каталог).
+        #[arg(long)]
+        repo: Option<PathBuf>,
+    },
+    /// Подписать блокирующую связку критерия (ADR-093, волна 4): механика
+    /// проверяет теневой режим, зубья необходимых правил и строгий допуск
+    /// судьи; подпись привязана к содержимому рубрики. Ненулевой код —
+    /// связка не готова (препятствия названы).
+    Promote {
+        /// Рубрика (имя в каталоге рубрик).
+        rubric: String,
+        /// Критерий со связкой.
+        criterion: String,
+        /// Модель-судья, чья квалификация проверяется (метка из отчётов).
+        #[arg(long)]
+        judge: String,
+        /// Кто подписывает: `Имя <адрес>`.
+        #[arg(long)]
+        by: String,
+        /// Обоснование подписи.
+        #[arg(long, default_value = "")]
+        reason: String,
+        /// Корень репозитория (по умолчанию — текущий каталог).
+        #[arg(long)]
+        repo: Option<PathBuf>,
+    },
+}
+
+/// Печатает состояние связок одной рубрики (`arch-be rubric bindings`).
+fn print_bindings(
+    repo: &Path,
+    rubric: &arch_harness::rubric::Rubric,
+    path: &Path,
+    judge: Option<&str>,
+) {
+    for c in rubric.criteria.iter().filter(|c| !c.bound_rules.is_empty()) {
+        let rules: Vec<String> = c
+            .bound_rules
+            .iter()
+            .map(|b| format!("{} ({})", b.rule, b.role.as_str()))
+            .collect();
+        println!(
+            "{}#{} [{}] → {}",
+            rubric.name,
+            c.id,
+            c.binding_mode.as_str(),
+            rules.join(", ")
+        );
+        if c.binding_mode == arch_harness::rubric::BindingMode::Blocking {
+            match arch_harness::rubric::binding_signed(repo, rubric, path, &c.id) {
+                Ok(record) => println!(
+                    "  подпись: действует — {} ({})",
+                    record.decided_by, record.decided_at
+                ),
+                Err(reason) => println!("  подпись: не действует — {reason}; связка советующая"),
+            }
+        }
+        let shadow = arch_harness::rubric::shadow_records(repo, &rubric.name, &c.id);
+        match shadow.last() {
+            Some(last) => println!(
+                "  тень: прогонов {}; последний ({}): при blocking провал {}, человеку {} из {}",
+                shadow.len(),
+                last.at,
+                last.would_fail,
+                last.would_escalate,
+                last.subjects
+            ),
+            None => println!("  тень: прогонов нет"),
+        }
+        if let Some(judge) = judge {
+            let check = arch_harness::rubric::check_promotion(repo, rubric, &c.id, judge);
+            if check.ready() {
+                println!("  готовность к подписи (судья {judge}): готово");
+            } else {
+                println!("  готовность к подписи (судья {judge}):");
+                for b in &check.blockers {
+                    println!("    - {b}");
+                }
+            }
+        }
+    }
 }
 
 /// Печатает решение рубрики и, если оно `human`, кладёт пакет для архитектора
@@ -282,7 +375,14 @@ pub(crate) async fn cmd_rubric(cfg: &Arc<Config>, cmd: RubricCmd) -> Result<()> 
                     let repo = root.clone().unwrap_or_else(|| PathBuf::from("."));
                     let repo = repo.canonicalize().unwrap_or(repo);
                     let kind = arch_harness::rubric_pack::PackKind::parse(kind)?;
-                    let packs = arch_harness::rubric_pack::build(&repo, kind, subject)?;
+                    // ADR-093: досье — с привязанными к рубрике правилами, как у
+                    // гейта и `rubric_prompt`.
+                    let packs = arch_harness::rubric_pack::build_with(
+                        &repo,
+                        kind,
+                        subject,
+                        &arch_harness::rubric_pack::PackOptions::for_rubric(&rub),
+                    )?;
                     if packs.len() > 1 {
                         anyhow::bail!(
                             "досье дробится на {} фрагментов — вызывайте по каждому, \
@@ -950,15 +1050,79 @@ pub(crate) async fn cmd_rubric(cfg: &Arc<Config>, cmd: RubricCmd) -> Result<()> 
                 std::process::exit(1);
             }
         }
+        RubricCmd::Bindings {
+            rubric,
+            judge,
+            repo,
+        } => {
+            let repo = repo.unwrap_or_else(|| PathBuf::from("."));
+            let dir = cfg.paths.rubrics_dir();
+            let paths: Vec<PathBuf> = match &rubric {
+                Some(name) => vec![resolve_asset(&dir, name, "yaml")],
+                None => arch_harness::rubric::list(&dir)?
+                    .into_iter()
+                    .map(|s| s.path)
+                    .collect(),
+            };
+            let mut shown = 0usize;
+            for path in paths {
+                let rub = arch_harness::rubric::load(&path)?;
+                if rub.criteria.iter().all(|c| c.bound_rules.is_empty()) {
+                    continue;
+                }
+                shown += 1;
+                print_bindings(&repo, &rub, &path, judge.as_deref());
+            }
+            if shown == 0 {
+                println!(
+                    "связок нет: ни у одного критерия рубрик {} не задано bound_rules",
+                    dir.display()
+                );
+            }
+        }
+        RubricCmd::Promote {
+            rubric,
+            criterion,
+            judge,
+            by,
+            reason,
+            repo,
+        } => {
+            let repo = repo.unwrap_or_else(|| PathBuf::from("."));
+            let path = resolve_asset(&cfg.paths.rubrics_dir(), &rubric, "yaml");
+            let rub = arch_harness::rubric::load(&path)?;
+            match arch_harness::rubric::promote_binding(
+                &repo, &rub, &path, &criterion, &judge, &by, &reason,
+            ) {
+                Ok(written) => println!(
+                    "Связка {}#{criterion} подписана: {} — блокирует, пока рубрика не изменится",
+                    rub.name,
+                    written.display()
+                ),
+                Err(e) => {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                }
+            }
+        }
         RubricCmd::Pack {
             kind,
             subject,
             root,
+            rubric,
         } => {
             let repo = root.unwrap_or_else(|| PathBuf::from("."));
             let repo = repo.canonicalize().unwrap_or(repo);
             let kind = arch_harness::rubric_pack::PackKind::parse(&kind)?;
-            let packs = arch_harness::rubric_pack::build(&repo, kind, &subject)?;
+            let options = match &rubric {
+                Some(name) => {
+                    let path = resolve_asset(&cfg.paths.rubrics_dir(), name, "yaml");
+                    let rub = arch_harness::rubric::load(&path)?;
+                    arch_harness::rubric_pack::PackOptions::for_rubric(&rub)
+                }
+                None => arch_harness::rubric_pack::PackOptions::default(),
+            };
+            let packs = arch_harness::rubric_pack::build_with(&repo, kind, &subject, &options)?;
             for p in &packs {
                 println!("{}", p.text);
                 println!();

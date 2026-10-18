@@ -330,7 +330,17 @@ impl McpServe {
         }
         let args: Args = parse_args(args, "trace_check")?;
         let case = PathBuf::from(args.case);
-        let report = blocking("trace_check", move || trace::trace_check(&case)).await?;
+        // Требования `[trace]` проекта и сверка `judged_by` с каталогом рубрик
+        // (ADR-050, ADR-093) — как у CLI и гейта.
+        let options = trace::TraceOptions {
+            executable_required: self.cfg.trace.executable_required,
+            judged_required: self.cfg.trace.judged_required,
+            rubrics_dir: Some(self.cfg.paths.rubrics_dir()),
+        };
+        let report = blocking("trace_check", move || {
+            trace::trace_check_opts(&case, &options)
+        })
+        .await?;
         let levels: Vec<Value> = report
             .levels
             .iter()
@@ -362,12 +372,26 @@ impl McpServe {
             .filter(|i| i.severity == model::Severity::Error)
             .count();
         let passed = !report.has_errors();
+        let ad_matrix: Vec<Value> = report
+            .ad_matrix
+            .iter()
+            .map(|r| {
+                json!({
+                    "ad": r.ad,
+                    "rules": r.rules,
+                    "judged_by": r.judged_by,
+                    "unverifiable": r.unverifiable,
+                    "status": r.status(),
+                })
+            })
+            .collect();
         Ok(json!({
             "passed": passed,
             "entities": report.entities,
             "constraint_rules": report.constraint_rules,
             "spine_ads": report.spine_ads,
             "levels": levels,
+            "ad_matrix": ad_matrix,
             "issue_count": report.issues.len(),
             "error_count": errors,
             "warn_count": report.issues.len() - errors,

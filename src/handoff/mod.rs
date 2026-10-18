@@ -186,6 +186,8 @@ fn render_rubric_with_change(
         evidence_roles: Vec::new(),
         coverage: None,
         blocking: false,
+        bound_rules: Vec::new(),
+        binding_mode: crate::rubric::BindingMode::default(),
     };
     let criterion_value = serde_yaml_ng::to_value(&criterion)
         .map_err(|e| HarnessError::Harness(format!("рубрика change: {e}")))?;

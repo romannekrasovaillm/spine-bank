@@ -35,6 +35,10 @@ use crate::error::{HarnessError, Result};
 use crate::hash::sha256_hex;
 use crate::rubric::MAX_TARGET_CHARS;
 
+/// Детекторы fitness-правил в досье по относимости (ADR-093, волна 1).
+mod rule_detectors;
+pub use rule_detectors::MAX_RULE_DETECTORS_PER_PACK;
+
 /// Начало маркера источника (полная строка — `=== ИСТОЧНИК <роль>: <путь> ===`).
 pub const SOURCE_BEGIN: &str = "=== ИСТОЧНИК";
 /// Конец маркера источника; строка маркера целиком.
@@ -507,7 +511,62 @@ fn pack_error(code: &str, message: impl std::fmt::Display) -> HarnessError {
 /// маркера; в источнике секрет; текст не влезает в [`MAX_TARGET_CHARS`] и
 /// фрагментация невозможна или недостаточна.
 pub fn build(repo: &Path, kind: PackKind, subject: &str) -> Result<Vec<ContextPack>> {
-    let sources = collector(kind, repo, subject)?;
+    build_with(repo, kind, subject, &PackOptions::default())
+}
+
+/// Параметры сборки досье сверх вида и субъекта (ADR-093).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PackOptions {
+    /// Правила (идентификатор или имя), явно привязанные к критериям рубрики
+    /// (`bound_rules`): их детекторы входят в досье всегда, а не только по
+    /// совпадению файла или инварианта.
+    pub bound_rules: Vec<String>,
+}
+
+impl PackOptions {
+    /// Параметры для рубрики: привязанные правила всех её критериев.
+    #[must_use]
+    pub fn for_rubric(rubric: &crate::rubric::Rubric) -> Self {
+        Self {
+            bound_rules: rubric.bound_rule_keys(),
+        }
+    }
+}
+
+/// Досье для рубрики: вид из `pack:`, привязанные правила — из критериев.
+/// Единая точка для хоста (`rubric_prompt`), гейта и сверки: досье обязано
+/// собираться одинаково у всех, иначе `pack_sha256` разойдётся.
+///
+/// # Errors
+/// Рубрика без `pack:`; ошибки сборки — как у [`build`].
+pub fn build_for(
+    repo: &Path,
+    rubric: &crate::rubric::Rubric,
+    subject: &str,
+) -> Result<Vec<ContextPack>> {
+    let kind = rubric.pack.ok_or_else(|| {
+        pack_error(
+            "pack_rubric_without_pack",
+            format!("рубрика '{}' не объявляет вид досье (`pack:`)", rubric.name),
+        )
+    })?;
+    build_with(repo, kind, subject, &PackOptions::for_rubric(rubric))
+}
+
+/// Собирает досье с параметрами (ADR-093): к источникам вида добавляются
+/// детекторы fitness-правил, относящиеся к субъекту.
+///
+/// # Errors
+/// Как у [`build`].
+pub fn build_with(
+    repo: &Path,
+    kind: PackKind,
+    subject: &str,
+    options: &PackOptions,
+) -> Result<Vec<ContextPack>> {
+    let mut sources = collector(kind, repo, subject)?;
+    let detectors = rule_detectors::select(repo, &sources, subject, &options.bound_rules)?;
+    sources.extend(detectors);
     let (subject_src, refs) = sources.split_first().ok_or_else(|| {
         pack_error(
             "pack_empty",

@@ -411,8 +411,14 @@ pub(crate) fn cmd_trace(cfg: &Config, cmd: TraceCmd) -> Result<()> {
         TraceCmd::Check { dir, format } => {
             let format = arch_harness::report_fmt::ReportFormat::parse(&format)
                 .map_err(anyhow::Error::msg)?;
-            // Требование исполняемой проверки инвариантов — из `[trace]` (ADR-050).
-            let report = arch_harness::trace::trace_check_with(&dir, cfg.trace.executable_required)
+            // Требования исполняемой (ADR-050) и смысловой (ADR-093) проверки
+            // инвариантов — из `[trace]`; `judged_by` сверяется с рубриками.
+            let options = arch_harness::trace::TraceOptions {
+                executable_required: cfg.trace.executable_required,
+                judged_required: cfg.trace.judged_required,
+                rubrics_dir: Some(cfg.paths.rubrics_dir()),
+            };
+            let report = arch_harness::trace::trace_check_opts(&dir, &options)
                 .with_context(|| format!("трассировка кейса {}", dir.display()))?;
             match format {
                 arch_harness::report_fmt::ReportFormat::Text => {

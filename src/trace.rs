@@ -80,6 +80,54 @@ pub struct TraceReport {
     pub spine_ads: Option<usize>,
     /// Находки.
     pub issues: Vec<TraceIssue>,
+    /// Матрица покрытия инвариантов (ADR-093): у каждого AD — механическая
+    /// половина (правила `verified_by`) и смысловая (`judged_by`).
+    pub ad_matrix: Vec<AdMatrixRow>,
+}
+
+/// Строка матрицы покрытия инварианта «AD × {правило, рубрика}» (ADR-093).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdMatrixRow {
+    /// Идентификатор инварианта.
+    pub ad: String,
+    /// Существующие правила реестра из `verified_by`.
+    pub rules: Vec<String>,
+    /// Действительные ссылки `judged_by` (`<рубрика>#<критерий>`).
+    pub judged_by: Vec<String>,
+    /// Помечен ли `unverifiable`.
+    pub unverifiable: bool,
+}
+
+impl AdMatrixRow {
+    /// Статус покрытия: `правило+рубрика`, `правило`, `рубрика` (поверх
+    /// `unverifiable`), `без охраны` (`unverifiable` без рубрики) или
+    /// `не покрыт`.
+    #[must_use]
+    pub fn status(&self) -> &'static str {
+        match (
+            !self.rules.is_empty(),
+            !self.judged_by.is_empty(),
+            self.unverifiable,
+        ) {
+            (true, true, _) => "правило+рубрика",
+            (true, false, _) => "правило",
+            (false, true, true) => "рубрика",
+            (false, false, true) => "без охраны",
+            (false, _, false) => "не покрыт",
+        }
+    }
+}
+
+/// Параметры трассировки (ADR-050, ADR-093).
+#[derive(Debug, Clone, Default)]
+pub struct TraceOptions {
+    /// Строгость `ad-text-only`.
+    pub executable_required: crate::config::ExecutableRequired,
+    /// Строгость `ad-unguarded`.
+    pub judged_required: crate::config::ExecutableRequired,
+    /// Каталог рубрик: по нему ссылки `judged_by` сверяются с настоящими
+    /// рубриками и критериями. `None` — проверяется только формат ссылки.
+    pub rubrics_dir: Option<PathBuf>,
 }
 
 impl TraceReport {
@@ -171,6 +219,22 @@ pub fn trace_check_with(
     case_dir: &Path,
     executable_required: crate::config::ExecutableRequired,
 ) -> Result<TraceReport> {
+    trace_check_opts(
+        case_dir,
+        &TraceOptions {
+            executable_required,
+            ..TraceOptions::default()
+        },
+    )
+}
+
+/// Трассировка с полным набором параметров (ADR-093): к требованию
+/// исполняемой проверки добавляется смысловая — `judged_by` у инвариантов.
+///
+/// # Errors
+/// Те же, что у [`trace_check`].
+pub fn trace_check_opts(case_dir: &Path, options: &TraceOptions) -> Result<TraceReport> {
+    let executable_required = options.executable_required;
     let model_dir = case_dir.join("model");
     let model = load_model_tolerant(&model_dir)?;
     let constraints = load_constraint_ids(&model_dir);
@@ -185,6 +249,7 @@ pub fn trace_check_with(
     // `ad-text-only` (при явном требовании) адресуется несущим инвариантам,
     // а если признак `load_bearing` нигде не задан — всем без проверки.
     let executable = executable_level(case_dir, executable_required, &mut issues);
+    let ad_matrix = ad_matrix(&model, &constraints, options, &mut issues);
     let levels = vec![
         req_level(&model, &index, &mut issues),
         nfr_level(&model, &index, &mut issues),
@@ -193,6 +258,7 @@ pub fn trace_check_with(
         cmp_level(&model, &mut issues),
         int_level(case_dir, &model, &mut issues),
         executable,
+        judged_level(&ad_matrix, options.judged_required, &mut issues),
     ];
     let spine_ads = spine_crosscheck(case_dir, &model, &mut issues)?;
     Ok(TraceReport {
@@ -202,7 +268,128 @@ pub fn trace_check_with(
         constraint_rules,
         spine_ads,
         issues,
+        ad_matrix,
     })
+}
+
+/// Название информационного звена «AD unverifiable → рубрика» (ADR-093).
+const LEVEL_JUDGED: &str = "AD unverifiable → рубрика";
+
+/// Почему ссылка `judged_by` недействительна; `None` — действительна.
+///
+/// Формат — `<рубрика>#<критерий>`. С каталогом рубрик ссылка сверяется с
+/// настоящей рубрикой и её критерием: иначе инвариант «охраняется» суждением,
+/// которого никто не выносит.
+fn judged_ref_problem(raw: &str, rubrics_dir: Option<&Path>) -> Option<String> {
+    let Some((rubric, criterion)) = raw.split_once('#') else {
+        return Some("ожидается `<рубрика>#<критерий>`".to_string());
+    };
+    let (rubric, criterion) = (rubric.trim(), criterion.trim());
+    if rubric.is_empty() || criterion.is_empty() {
+        return Some("пустая рубрика или критерий".to_string());
+    }
+    let dir = rubrics_dir?;
+    let path = dir.join(format!("{rubric}.yaml"));
+    match crate::rubric::load(&path) {
+        Err(_) => Some(format!("рубрики '{rubric}' нет в {}", dir.display())),
+        Ok(r) if !r.criteria.iter().any(|c| c.id == criterion) => {
+            Some(format!("у рубрики '{rubric}' нет критерия '{criterion}'"))
+        }
+        Ok(_) => None,
+    }
+}
+
+/// Матрица покрытия инвариантов «AD × {правило, рубрика}» (ADR-093) и
+/// находки по ссылкам `judged_by`: битая ссылка — error (охрана, которой нет,
+/// хуже честного `unverifiable`).
+fn ad_matrix(
+    model: &Model,
+    constraints: &Constraints,
+    options: &TraceOptions,
+    issues: &mut Vec<TraceIssue>,
+) -> Vec<AdMatrixRow> {
+    let rule_exists = |raw: &str| match constraints {
+        Constraints::Loaded(ids) => ids.contains(raw),
+        _ => false,
+    };
+    let mut rows = Vec::new();
+    for e in model.entities.iter().filter(|e| e.kind == EntityKind::Ad) {
+        let mut judged = Vec::new();
+        for raw in &e.judged_by {
+            match judged_ref_problem(raw, options.rubrics_dir.as_deref()) {
+                None => judged.push(raw.trim().to_string()),
+                Some(problem) => issue(
+                    issues,
+                    Severity::Error,
+                    "ad-judged-by-broken",
+                    format!("{}: judged_by '{raw}' недействительна — {problem}", e.id),
+                ),
+            }
+        }
+        rows.push(AdMatrixRow {
+            ad: e.id.clone(),
+            rules: e
+                .verified_by
+                .iter()
+                .filter(|t| is_constraint_ref(t) && rule_exists(t))
+                .cloned()
+                .collect(),
+            judged_by: judged,
+            unverifiable: e
+                .unverifiable
+                .as_deref()
+                .is_some_and(|u| !u.trim().is_empty()),
+        });
+    }
+    rows
+}
+
+/// Звено «AD unverifiable → рубрика» (ADR-093): инварианты, от механики
+/// которых отказались, — охраняет ли их хотя бы суждение. Звено
+/// информационное; находка `ad-unguarded` — только при `[trace]
+/// judged_required`.
+fn judged_level(
+    matrix: &[AdMatrixRow],
+    required: crate::config::ExecutableRequired,
+    issues: &mut Vec<TraceIssue>,
+) -> LevelReport {
+    let mut level = LevelReport {
+        name: LEVEL_JUDGED,
+        total: 0,
+        covered: 0,
+        unverifiable: 0,
+        orphans: Vec::new(),
+    };
+    for row in matrix
+        .iter()
+        .filter(|r| r.unverifiable && r.rules.is_empty())
+    {
+        level.total += 1;
+        if row.judged_by.is_empty() {
+            level.orphans.push(row.ad.clone());
+        } else {
+            level.covered += 1;
+        }
+    }
+    if let Some(severity) = required.severity() {
+        let severity = if severity == "error" {
+            Severity::Error
+        } else {
+            Severity::Warn
+        };
+        for ad in &level.orphans {
+            issue(
+                issues,
+                severity,
+                "ad-unguarded",
+                format!(
+                    "{ad}: unverifiable без смысловой проверки — инвариант не охраняют ни \
+                     правило, ни суждение; добавьте `judged_by: [<рубрика>#<критерий>]`"
+                ),
+            );
+        }
+    }
+    level
 }
 
 /// Название информационного звена «AD → исполняемое правило» (ADR-050).
@@ -426,8 +613,14 @@ fn ad_level(model: &Model, constraints: &Constraints, issues: &mut Vec<TraceIssu
                 Severity::Error,
                 "ad-not-verified",
                 format!(
-                    "{}: ни одного правила CONSTRAINTS.yaml (verified_by: C-NNN) и нет unverifiable с обоснованием",
-                    e.id
+                    "{}: ни одного правила CONSTRAINTS.yaml (verified_by: C-NNN) и нет unverifiable с обоснованием{}",
+                    e.id,
+                    if e.judged_by.is_empty() {
+                        ""
+                    } else {
+                        " (judged_by — суждение, а не механика: отказ от правила всё равно \
+                         объявляется unverifiable с обоснованием, ADR-093)"
+                    }
                 ),
             );
         }
@@ -688,6 +881,29 @@ pub fn render_markdown(report: &TraceReport) -> String {
             level.name, covered, percent, orphans
         );
     }
+    if !report.ad_matrix.is_empty() {
+        let _ = writeln!(out, "\n## Матрица покрытия AD (ADR-093)");
+        let _ = writeln!(out);
+        let _ = writeln!(out, "| AD | Правила | Рубрики | Статус |");
+        let _ = writeln!(out, "|---|---|---|---|");
+        for row in &report.ad_matrix {
+            let list = |v: &[String]| {
+                if v.is_empty() {
+                    "—".to_string()
+                } else {
+                    v.join(", ")
+                }
+            };
+            let _ = writeln!(
+                out,
+                "| {} | {} | {} | {} |",
+                row.ad,
+                list(&row.rules),
+                list(&row.judged_by),
+                row.status()
+            );
+        }
+    }
     if !report.issues.is_empty() {
         let _ = writeln!(out, "\n## Находки");
         let _ = writeln!(out);
@@ -752,7 +968,12 @@ impl Tool for TraceCheckTool {
         };
         let dir = ctx.resolve(args.dir.as_deref().unwrap_or("."));
         // Требование исполняемой проверки — из `[trace]` (ADR-050).
-        match trace_check_with(&dir, ctx.config.trace.executable_required) {
+        let options = TraceOptions {
+            executable_required: ctx.config.trace.executable_required,
+            judged_required: ctx.config.trace.judged_required,
+            rubrics_dir: Some(ctx.config.paths.rubrics_dir()),
+        };
+        match trace_check_opts(&dir, &options) {
             Ok(report) => Ok(ToolOutput::ok(render_markdown(&report))),
             Err(e) => Ok(ToolOutput::err(format!("trace_check: {e}"))),
         }
@@ -838,7 +1059,11 @@ mod tests {
             "ни warn: {:?}",
             report.issues.iter().map(|i| i.rule).collect::<Vec<_>>()
         );
-        for level in report.levels.iter().filter(|l| l.name != LEVEL_EXECUTABLE) {
+        for level in report
+            .levels
+            .iter()
+            .filter(|l| l.name != LEVEL_EXECUTABLE && l.name != LEVEL_JUDGED)
+        {
             assert_eq!(level.percent(), Some(100), "{}", level.name);
         }
         assert_eq!(report.constraint_rules, Some(1));
@@ -980,7 +1205,11 @@ mod tests {
         assert!(!report.has_errors(), "{:?}", report.issues);
         // Информационное звено «AD → исполняемое правило» (ADR-050) в проверку
         // полноты цепочки не входит: у него своя метрика и своя находка.
-        for level in report.levels.iter().filter(|l| l.name != LEVEL_EXECUTABLE) {
+        for level in report
+            .levels
+            .iter()
+            .filter(|l| l.name != LEVEL_EXECUTABLE && l.name != LEVEL_JUDGED)
+        {
             assert_eq!(level.percent(), Some(100), "{}", level.name);
         }
         assert_eq!(report.entities, 6, "валидные сущности посчитаны");
@@ -1028,6 +1257,145 @@ mod tests {
             .expect("уровень");
         assert_eq!(ad.percent(), Some(100));
         assert_eq!(ad.unverifiable, 1);
+    }
+
+    /// Каталог рубрик с одной рубрикой и критерием — для сверки `judged_by`.
+    fn rubrics_dir(root: &Path) -> PathBuf {
+        let dir = root.join("rubrics");
+        std::fs::create_dir_all(&dir).expect("rubrics");
+        std::fs::write(
+            dir.join("code_invariant_conformance.yaml"),
+            crate::assets::RUBRIC_CODE_INVARIANT_CONFORMANCE,
+        )
+        .expect("рубрика");
+        dir
+    }
+
+    /// Кейс с AD-1 `unverifiable` и заданным хвостом frontmatter.
+    fn unverifiable_case(root: &Path, tail: &str) -> PathBuf {
+        let mut entities = full_entities();
+        let fm = format!(
+            "---\nid: AD-1\ntype: ad\ntitle: Инвариант\nstatus: ADOPTED\nunverifiable: проверяется ревью{tail}"
+        );
+        entities[2] = ("AD-1.md", Box::leak(fm.into_boxed_str()));
+        write_case(root, &entities, Some(CONSTRAINTS), Some(SPINE))
+    }
+
+    /// ADR-093: `unverifiable` без смысловой проверки — звено «AD unverifiable
+    /// → рубрика» называет сироту; находка `ad-unguarded` — только по
+    /// требованию `[trace] judged_required`.
+    #[test]
+    fn unverifiable_without_judged_by_is_unguarded_only_on_request() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let case = unverifiable_case(dir.path(), "");
+        let quiet = trace_check(&case).expect("trace");
+        assert!(!quiet.issues.iter().any(|i| i.rule == "ad-unguarded"));
+        let level = quiet
+            .levels
+            .iter()
+            .find(|l| l.name == LEVEL_JUDGED)
+            .expect("звено");
+        assert_eq!((level.total, level.covered), (1, 0));
+        assert_eq!(level.orphans, vec!["AD-1"]);
+        let strict = trace_check_opts(
+            &case,
+            &TraceOptions {
+                judged_required: crate::config::ExecutableRequired::Error,
+                ..TraceOptions::default()
+            },
+        )
+        .expect("trace");
+        assert!(strict.has_errors());
+        assert!(strict.issues.iter().any(|i| i.rule == "ad-unguarded"));
+        assert_eq!(strict.ad_matrix[0].status(), "без охраны");
+    }
+
+    /// Действительная ссылка `judged_by` закрывает `unverifiable` суждением;
+    /// матрица называет охрану рубрикой.
+    #[test]
+    fn judged_by_covers_unverifiable_invariant() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let case = unverifiable_case(
+            dir.path(),
+            "\njudged_by: [code_invariant_conformance#no_violation]",
+        );
+        let report = trace_check_opts(
+            &case,
+            &TraceOptions {
+                judged_required: crate::config::ExecutableRequired::Error,
+                rubrics_dir: Some(rubrics_dir(dir.path())),
+                ..TraceOptions::default()
+            },
+        )
+        .expect("trace");
+        assert!(!report.has_errors(), "{:?}", report.issues);
+        let row = &report.ad_matrix[0];
+        assert_eq!(
+            row.judged_by,
+            vec!["code_invariant_conformance#no_violation"]
+        );
+        assert_eq!(row.status(), "рубрика");
+        let md = render_markdown(&report);
+        assert!(md.contains("Матрица покрытия AD"), "{md}");
+        assert!(md.contains("| AD-1 | — | code_invariant_conformance#no_violation | рубрика |"));
+    }
+
+    /// Ссылка на несуществующий критерий или в неверном формате — error:
+    /// охрана, которой нет, хуже честного `unverifiable`.
+    #[test]
+    fn broken_judged_by_is_error() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let rubrics = rubrics_dir(dir.path());
+        for tail in [
+            "\njudged_by: [code_invariant_conformance#no_such_criterion]",
+            "\njudged_by: [no_such_rubric#x]",
+            "\njudged_by: [without_hash]",
+        ] {
+            let sub = dir.path().join(format!("c{}", tail.len()));
+            let case = unverifiable_case(&sub, tail);
+            let report = trace_check_opts(
+                &case,
+                &TraceOptions {
+                    rubrics_dir: Some(rubrics.clone()),
+                    ..TraceOptions::default()
+                },
+            )
+            .expect("trace");
+            assert!(
+                report
+                    .issues
+                    .iter()
+                    .any(|i| i.rule == "ad-judged-by-broken"),
+                "{tail}: {:?}",
+                report.issues
+            );
+            assert!(report.ad_matrix[0].judged_by.is_empty());
+        }
+    }
+
+    /// `judged_by` без правила и без `unverifiable` не заменяет механику:
+    /// по-прежнему `ad-not-verified`, но сообщение объясняет почему.
+    #[test]
+    fn judged_by_alone_does_not_replace_mechanical_link() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let mut entities = full_entities();
+        entities[2] = (
+            "AD-1.md",
+            "---\nid: AD-1\ntype: ad\ntitle: Инвариант\nstatus: ADOPTED\njudged_by: [code_invariant_conformance#no_violation]",
+        );
+        let case = write_case(dir.path(), &entities, Some(CONSTRAINTS), Some(SPINE));
+        let report = trace_check(&case).expect("trace");
+        let issue = report
+            .issues
+            .iter()
+            .find(|i| i.rule == "ad-not-verified")
+            .expect("ad-not-verified");
+        assert!(
+            issue.message.contains("judged_by — суждение"),
+            "{}",
+            issue.message
+        );
+        assert_eq!(report.ad_matrix[0].status(), "не покрыт");
     }
 
     #[test]

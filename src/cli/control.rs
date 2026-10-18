@@ -58,6 +58,12 @@ pub(crate) enum ControlCmd {
         /// выключить); приоритет над allow-файлом `rules allow`.
         #[arg(long)]
         no_exec: bool,
+        /// Записать исходы правил детекторами досье в
+        /// `reports/detectors/rules/<id>.json` (ADR-093): судья смысловых
+        /// рубрик видит измерения рядом с субъектом. Файлы детерминированы —
+        /// повторный экспорт того же исхода отчёты судьи не обесценивает.
+        #[arg(long)]
+        export_detectors: bool,
     },
     /// Линтер ARCHITECTURE-SPINE.md.
     Spine {
@@ -209,6 +215,7 @@ pub(crate) fn cmd_control(cfg: &arch_harness::config::Config, cmd: ControlCmd) -
             format,
             base,
             no_exec,
+            export_detectors,
         } => {
             let explicit = constraints.is_some();
             let c = resolve_constraints_cli(&repo, constraints);
@@ -250,6 +257,20 @@ pub(crate) fn cmd_control(cfg: &arch_harness::config::Config, cmd: ControlCmd) -
             // плюс «правило ещё существует» в любом канале, не только в gate.
             let report =
                 arch_harness::control::check_anchored(&repo, &c, &options, base.as_deref())?;
+            if export_detectors {
+                // ADR-093 волна 1: в stderr — stdout занят машинным отчётом.
+                let written = arch_harness::control::export_rule_detectors(&repo, &c, &report)?;
+                eprintln!(
+                    "детекторы правил: {} → {}{}",
+                    written.len(),
+                    arch_harness::control::RULE_DETECTORS_DIR,
+                    if report.changed_since.is_some() {
+                        " (срез --changed-since: правила вне среза записаны как skip)"
+                    } else {
+                        ""
+                    }
+                );
+            }
             let format = arch_harness::report_fmt::ReportFormat::parse(&format)
                 .map_err(anyhow::Error::msg)?;
             if json {

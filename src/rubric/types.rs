@@ -108,6 +108,97 @@ pub struct Criterion {
     /// главного критерия гейтом отвергается.
     #[serde(default)]
     pub blocking: bool,
+    /// Детерминированная половина fitness-функции (ADR-093, волна 2):
+    /// fitness-правила `CONSTRAINTS.yaml`, связанные с этим критерием. Пусто —
+    /// критерий судится без связки (поведение до 0.4.17).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bound_rules: Vec<BoundRule>,
+    /// Режим связки (ADR-093, волна 4): `advisory` — исходы правил видны
+    /// судье и гейту, но связка вердикт не решает; `blocking` — таблица
+    /// сочетаний решает вердикт. Повышение до `blocking` требует квалификации
+    /// судьи на этой рубрике.
+    #[serde(default, skip_serializing_if = "BindingMode::is_advisory")]
+    pub binding_mode: BindingMode,
+}
+
+/// Роль правила в связке с критерием (ADR-093).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BindingRole {
+    /// Необходимое условие: красное правило с подтверждёнными зубьями
+    /// проваливает критерий без судьи — суждение не может отменить измерение.
+    Necessary,
+    /// Свидетельство: исход правила идёт судье ролью `detector`; судья ищет
+    /// то, чего правило не видит (класс D11).
+    #[default]
+    Evidence,
+}
+
+impl BindingRole {
+    /// Строковое имя — как в YAML.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Necessary => "necessary",
+            Self::Evidence => "evidence",
+        }
+    }
+}
+
+/// Режим связки критерия с правилами (ADR-093).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BindingMode {
+    /// Советующий: исходы видны, вердикт связкой не решается.
+    #[default]
+    Advisory,
+    /// Блокирующий: таблица сочетаний решает вердикт.
+    Blocking,
+}
+
+impl BindingMode {
+    /// Строковое имя — как в YAML.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Advisory => "advisory",
+            Self::Blocking => "blocking",
+        }
+    }
+
+    /// Советующий ли режим (дефолт; в YAML не сериализуется).
+    #[must_use]
+    pub fn is_advisory(&self) -> bool {
+        *self == Self::Advisory
+    }
+}
+
+/// Связь критерия с fitness-правилом (ADR-093).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoundRule {
+    /// Идентификатор (`C-17`) или имя правила.
+    pub rule: String,
+    /// Роль правила в связке.
+    #[serde(default)]
+    pub role: BindingRole,
+}
+
+impl Rubric {
+    /// Ключи всех правил, привязанных к критериям рубрики, без повторов и в
+    /// порядке появления — вход отбора детекторов досье.
+    #[must_use]
+    pub fn bound_rule_keys(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for criterion in &self.criteria {
+            for bound in &criterion.bound_rules {
+                let key = bound.rule.trim().to_string();
+                if !key.is_empty() && !out.contains(&key) {
+                    out.push(key);
+                }
+            }
+        }
+        out
+    }
 }
 
 impl Criterion {

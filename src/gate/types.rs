@@ -352,6 +352,8 @@ pub struct GateOptions {
     /// `warn`/`error` составляющая `trace_check` даёт находку `ad-text-only`.
     /// Дефолт `off` — вердикт не меняется без явного решения проекта.
     pub executable_required: crate::config::ExecutableRequired,
+    /// Строгость `ad-unguarded` (ADR-093, `[trace] judged_required`).
+    pub judged_required: crate::config::ExecutableRequired,
     /// Составляющая `semantic_quality` (ADR-052): какие смысловые рубрики
     /// обязательны и на какой области субъектов.
     pub semantic_quality: crate::config::SemanticQualityConfig,
@@ -421,6 +423,7 @@ impl GateOptions {
             judge: cfg.judge.clone(),
             rubrics_dir: cfg.paths.rubrics_dir(),
             executable_required: cfg.trace.executable_required,
+            judged_required: cfg.trace.judged_required,
             semantic_quality: cfg.gate.semantic_quality.clone(),
             rule_weakened: cfg.gate.rule_weakened.clone(),
             overrides: cfg.gate.overrides.clone(),

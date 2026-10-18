@@ -669,7 +669,12 @@ fn rebuild(
         let kind = crate::rubric_pack::PackKind::parse(kind).map_err(|e| {
             RebuildError::Unavailable(format!("вид досье '{kind}' из отчёта не разбирается: {e}"))
         })?;
-        let packs = match crate::rubric_pack::build(repo, kind, subject) {
+        let packs = match crate::rubric_pack::build_with(
+            repo,
+            kind,
+            subject,
+            &crate::rubric_pack::PackOptions::for_rubric(&rubric),
+        ) {
             Ok(packs) => packs,
             Err(e) if fingerprint => {
                 return Err(RebuildError::Stale(format!(

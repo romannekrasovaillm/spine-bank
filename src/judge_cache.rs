@@ -215,6 +215,8 @@ mod tests {
                 evidence_roles: Vec::new(),
                 coverage: None,
                 blocking: false,
+                bound_rules: Vec::new(),
+                binding_mode: crate::rubric::BindingMode::default(),
             }],
             origin: "anchor".to_string(),
             pack: None,
