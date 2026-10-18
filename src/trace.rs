@@ -1369,7 +1369,7 @@ mod tests {
                 "{tail}: {:?}",
                 report.issues
             );
-            assert!(report.ad_matrix[0].judged_by.is_empty());
+            assert_eq!(report.ad_matrix[0].judged_by, [] as [String; 0]);
         }
     }
 

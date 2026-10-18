@@ -724,7 +724,7 @@ mod tests {
             &Ok(()),
             &std::collections::BTreeMap::new(),
         );
-        assert!(ok.issues.is_empty());
+        assert_eq!(ok.issues, []);
     }
 
     /// Неквалифицированный судья понижает зависящее от балла нарушение:
