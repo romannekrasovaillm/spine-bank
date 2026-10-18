@@ -500,7 +500,14 @@ fn score_one_clone(
         let fresh =
             crate::rubric_pack::PackKind::parse(artifact.pack_kind.as_deref().unwrap_or_default())
                 .ok()
-                .and_then(|kind| crate::rubric_pack::build(clone, kind, subject).ok())
+                .and_then(|kind| {
+                    // ADR-093: досье — с привязанными к рубрике правилами, как
+                    // его собирал судья; рубрики нет — без привязок.
+                    let options = load_rubric_by_name(rubrics_dir, rubric_name)
+                        .map(|r| crate::rubric_pack::PackOptions::for_rubric(&r))
+                        .unwrap_or_default();
+                    crate::rubric_pack::build_with(clone, kind, subject, &options).ok()
+                })
                 .map(|packs| packs.iter().any(|p| p.sha256 == want));
         if fresh == Some(false) {
             out.verdict = SemanticVerdict::Stale;

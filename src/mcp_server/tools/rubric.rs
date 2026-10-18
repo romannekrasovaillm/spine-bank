@@ -162,6 +162,7 @@ impl McpServe {
             args.subject,
             args.root,
             addressed_to_target,
+            crate::rubric_pack::PackOptions::for_rubric(&rub),
         )
         .await?;
         let text = match &pack {
@@ -284,6 +285,7 @@ impl McpServe {
             args.subject,
             args.root.clone(),
             addressed_to_target,
+            crate::rubric_pack::PackOptions::for_rubric(&rub),
         )
         .await?;
         let text = match &pack {
@@ -616,6 +618,7 @@ async fn rubric_pack_input(
     subject: Option<String>,
     root: Option<String>,
     addressed_to_target: bool,
+    options: crate::rubric_pack::PackOptions,
 ) -> std::result::Result<Option<crate::rubric_pack::ContextPack>, CallError> {
     match (pack, subject) {
         (None, None) => Ok(None),
@@ -630,7 +633,9 @@ async fn rubric_pack_input(
             let repo = repo.canonicalize().unwrap_or(repo);
             let packs = blocking(tool, move || {
                 let kind = crate::rubric_pack::PackKind::parse(&kind)?;
-                crate::rubric_pack::build(&repo, kind, &subject)
+                // ADR-093: привязанные к рубрике правила входят в досье — так же,
+                // как их увидит гейт, иначе `pack_sha256` разойдётся.
+                crate::rubric_pack::build_with(&repo, kind, &subject, &options)
             })
             .await?;
             if packs.len() > 1 {

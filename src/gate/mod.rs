@@ -39,6 +39,8 @@
 //! вердикта (`--verify-envelope`); `explain` — текстовый рендер.
 
 mod attest;
+/// Связки «критерий рубрики ↔ fitness-правило» (ADR-093, волна 2).
+mod binding;
 mod components;
 mod explain;
 mod git;
@@ -47,6 +49,8 @@ mod semantic;
 pub mod shadow;
 #[cfg(test)]
 mod testkit;
+#[cfg(test)]
+mod tests_binding;
 mod types;
 mod verdict;
 

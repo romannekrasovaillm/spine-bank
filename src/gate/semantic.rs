@@ -45,6 +45,7 @@ pub(super) fn component_semantic_quality(
     git: &GitProbe,
     enabled: bool,
     human_policy: crate::config::HumanPolicy,
+    rule_outcomes: Option<&[crate::control::RuleDetector]>,
 ) -> GateComponent {
     if !enabled {
         return GateComponent::skip(
@@ -71,6 +72,10 @@ pub(super) fn component_semantic_quality(
     // E3.2/E3.3: субъекты, чьё суждение механика не подтверждает по качеству
     // ответа судьи (невалидные сэмплы сверх порога, evidence_partial на Critical).
     let mut unconfirmed = 0usize;
+    // ADR-093: субъекты, решённые измерением (необходимое правило красное в
+    // блокирующей связке), и есть ли вообще связки — для детали и паспорта.
+    let mut decided_by_rule = 0usize;
+    let mut has_bindings = false;
     for name in &cfg.rubrics {
         let path = rubrics_dir.join(format!("{name}.yaml"));
         let rubric = match crate::rubric::load(&path) {
@@ -99,27 +104,48 @@ pub(super) fn component_semantic_quality(
             ));
             continue;
         };
-        let subjects = semantic_subjects(repo, kind, changed.as_ref());
+        let pack_options = crate::rubric_pack::PackOptions::for_rubric(&rubric);
+        let subjects = semantic_subjects(repo, kind, changed.as_ref(), &pack_options);
         if subjects.len() > MAX_SEMANTIC_SUBJECTS {
             truncated = true;
         }
+        has_bindings |= rubric.criteria.iter().any(|c| !c.bound_rules.is_empty());
         for subject in subjects.into_iter().take(MAX_SEMANTIC_SUBJECTS) {
+            let packs =
+                crate::rubric_pack::build_with(repo, kind, &subject.subject, &pack_options).ok();
             let state = semantic_subject_state(
                 repo,
                 &rubric,
-                kind,
+                packs.as_deref(),
                 &subject,
                 &artifacts,
                 cfg,
                 human_policy,
             );
+            let bindings = subject_bindings(
+                repo,
+                &rubric,
+                packs.as_deref(),
+                &subject,
+                &artifacts,
+                rule_outcomes,
+            );
             checked += usize::from(!matches!(state, SemanticState::Skipped));
+            unconfirmed += bindings.escalations(human_policy);
+            // Короткое замыкание (ADR-093): измерение решило субъект — отчёт
+            // судьи не нужен, «нет отчёта» и «устарел» находками не становятся.
+            if bindings.decided_fail() {
+                decided_by_rule += 1;
+                findings.extend(bindings.findings(name, &subject.subject, human_policy));
+                continue;
+            }
             match &state {
                 SemanticState::InjectionSuspected(_) => injection_suspected += 1,
                 s if s.escalates(human_policy) => unconfirmed += 1,
                 _ => {}
             }
             findings.extend(state.into_findings(name, &subject, human_policy));
+            findings.extend(bindings.findings(name, &subject.subject, human_policy));
         }
     }
     let errors = findings.iter().filter(|f| f.severity == "error").count();
@@ -150,11 +176,24 @@ pub(super) fn component_semantic_quality(
             "; субъектов в пакете больше потолка {MAX_SEMANTIC_SUBJECTS} — проверены первые"
         );
     }
-    let notes = vec![
+    if decided_by_rule > 0 {
+        let _ = write!(
+            detail,
+            "; решено измерением без судьи: {decided_by_rule}"
+        ); // игнорируется: записи в String не падают
+    }
+    let mut notes = vec![
         "балл и обвинение — суждение LLM-судьи по досье; механика сверяет хэш досье, \
          порог и подтверждённость цитат, но не качество суждения"
             .to_string(),
     ];
+    if has_bindings {
+        notes.push(
+            "связка «критерий ↔ правило» (ADR-093) переносит в вердикт исход правила, но не \
+             доказывает, что правило измеряет смысл критерия — это решение автора рубрики"
+                .to_string(),
+        );
+    }
     if injection_suspected + unconfirmed > 0 {
         // E2/E3: «проверить нельзя», а не «нечего проверять» и не «нарушено».
         // SKIP обязательной составляющей делает вердикт INCOMPLETE (exit 3) —
@@ -489,13 +528,13 @@ impl SemanticState {
 fn semantic_subject_state(
     repo: &Path,
     rubric: &crate::rubric::Rubric,
-    kind: crate::rubric_pack::PackKind,
+    packs: Option<&[crate::rubric_pack::ContextPack]>,
     subject: &SemanticSubject,
     artifacts: &[crate::rubric::RubricArtifact],
     cfg: &crate::config::SemanticQualityConfig,
     human_policy: crate::config::HumanPolicy,
 ) -> SemanticState {
-    let Ok(packs) = crate::rubric_pack::build(repo, kind, &subject.subject) else {
+    let Some(packs) = packs else {
         // Досье не собирается (секрет, лимит, битый маркер) — это не «нет
         // отчёта», а «судить нечем»; называем причину как пропуск.
         return SemanticState::Skipped;
@@ -717,6 +756,57 @@ fn decision_reasons(artifact: &crate::rubric::RubricArtifact) -> String {
     }
 }
 
+/// Связки рубрики для субъекта (ADR-093). Путь субъекта — из досье (для
+/// сущности модели это её файл, а не идентификатор); отчёт судьи — тот же,
+/// что читает состояние субъекта; допуск судьи проверяется только при
+/// блокирующих связках и только когда суждение есть (волна 4).
+fn subject_bindings(
+    repo: &Path,
+    rubric: &crate::rubric::Rubric,
+    packs: Option<&[crate::rubric_pack::ContextPack]>,
+    subject: &SemanticSubject,
+    artifacts: &[crate::rubric::RubricArtifact],
+    rule_outcomes: Option<&[crate::control::RuleDetector]>,
+) -> super::binding::BindingVerdict {
+    if rubric.criteria.iter().all(|c| c.bound_rules.is_empty()) {
+        return super::binding::BindingVerdict::default();
+    }
+    let subject_path = packs
+        .and_then(|p| p.first())
+        .and_then(|p| {
+            p.inputs
+                .iter()
+                .find(|i| i.role == crate::rubric_pack::InputRole::Subject)
+        })
+        .map_or_else(|| subject.subject.clone(), |input| input.path.clone());
+    let subject_path = subject_path
+        .split_once('#')
+        .map_or(subject_path.as_str(), |(p, _)| p)
+        .to_string();
+    let artifact = artifacts.iter().rev().find(|a| {
+        a.rubric == rubric.name && a.subject.as_deref() == Some(subject.subject.as_str())
+    });
+    let blocking = rubric.criteria.iter().any(|c| {
+        !c.bound_rules.is_empty() && c.binding_mode == crate::rubric::BindingMode::Blocking
+    });
+    let qualified = match artifact {
+        Some(a) if blocking => {
+            match crate::rubric::qualification(repo, &a.rubric, &a.judge_model) {
+                crate::rubric::Qualification::Qualified(_) => Ok(()),
+                state => Err(crate::rubric::refusal_reason(&state, &a.judge_model)),
+            }
+        }
+        _ => Ok(()),
+    };
+    super::binding::evaluate(
+        rubric,
+        rule_outcomes,
+        Some(subject_path.as_str()),
+        artifact,
+        qualified,
+    )
+}
+
 /// Какой источник досье изменился после оценки — поимённо, для сообщения.
 fn changed_source(
     artifact: &crate::rubric::RubricArtifact,
@@ -745,6 +835,7 @@ fn semantic_subjects(
     repo: &Path,
     kind: crate::rubric_pack::PackKind,
     changed: Option<&Vec<String>>,
+    pack_options: &crate::rubric_pack::PackOptions,
 ) -> Vec<SemanticSubject> {
     let mut out = Vec::new();
     let mut push = |subject: String| {
@@ -789,7 +880,7 @@ fn semantic_subjects(
     // источник его досье — правка спайна меняет вердикт о решении, хотя
     // решение не правили.
     out.retain(|s| {
-        let Ok(packs) = crate::rubric_pack::build(repo, kind, &s.subject) else {
+        let Ok(packs) = crate::rubric_pack::build_with(repo, kind, &s.subject, pack_options) else {
             return false;
         };
         packs.iter().any(|p| {
@@ -963,6 +1054,7 @@ mod tests {
             // E6.3: тесты составляющей включают допуск судьи осознанно — в
             // конфиге проекта он по умолчанию выключен.
             require_qualified_judge: true,
+            export_detectors: false,
         }
     }
 

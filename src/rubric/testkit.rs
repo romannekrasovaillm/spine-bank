@@ -87,6 +87,8 @@ pub(super) fn sample_rubric() -> Rubric {
                 evidence_roles: Vec::new(),
                 coverage: None,
                 blocking: false,
+                bound_rules: Vec::new(),
+                binding_mode: crate::rubric::BindingMode::default(),
             },
             Criterion {
                 id: "alternatives".into(),
@@ -98,6 +100,8 @@ pub(super) fn sample_rubric() -> Rubric {
                 evidence_roles: Vec::new(),
                 coverage: None,
                 blocking: false,
+                bound_rules: Vec::new(),
+                binding_mode: crate::rubric::BindingMode::default(),
             },
         ],
         origin: "anchor".into(),
@@ -136,6 +140,8 @@ pub(super) fn criterion(id: &str, weight: f64, on: EvidenceOn, roles: &[&str]) -
         evidence_roles: roles.iter().map(|r| (*r).to_string()).collect(),
         coverage: None,
         blocking: false,
+        bound_rules: Vec::new(),
+        binding_mode: crate::rubric::BindingMode::default(),
     }
 }
 

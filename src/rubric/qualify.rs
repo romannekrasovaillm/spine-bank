@@ -339,7 +339,12 @@ pub async fn run(
     let set = load_set(set_dir)?;
     let mut outcomes = Vec::with_capacity(set.cases.len());
     for case in &set.cases {
-        let packs = crate::rubric_pack::build(set_dir, kind, &case.file)?;
+        let packs = crate::rubric_pack::build_with(
+            set_dir,
+            kind,
+            &case.file,
+            &crate::rubric_pack::PackOptions::for_rubric(rubric),
+        )?;
         let pack = packs.into_iter().next().ok_or_else(|| {
             HarnessError::Rubric(format!("случай '{}' не собрался в досье", case.file))
         })?;

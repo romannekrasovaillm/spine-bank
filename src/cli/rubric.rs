@@ -282,7 +282,14 @@ pub(crate) async fn cmd_rubric(cfg: &Arc<Config>, cmd: RubricCmd) -> Result<()> 
                     let repo = root.clone().unwrap_or_else(|| PathBuf::from("."));
                     let repo = repo.canonicalize().unwrap_or(repo);
                     let kind = arch_harness::rubric_pack::PackKind::parse(kind)?;
-                    let packs = arch_harness::rubric_pack::build(&repo, kind, subject)?;
+                    // ADR-093: досье — с привязанными к рубрике правилами, как у
+                    // гейта и `rubric_prompt`.
+                    let packs = arch_harness::rubric_pack::build_with(
+                        &repo,
+                        kind,
+                        subject,
+                        &arch_harness::rubric_pack::PackOptions::for_rubric(&rub),
+                    )?;
                     if packs.len() > 1 {
                         anyhow::bail!(
                             "досье дробится на {} фрагментов — вызывайте по каждому, \

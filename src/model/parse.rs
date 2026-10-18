@@ -75,6 +75,10 @@ pub struct Entity {
     /// Обоснованный отказ от механической проверки (для `AD`, ADR-006):
     /// непустая строка — почему fitness-правило невозможно.
     pub unverifiable: Option<String>,
+    /// Смысловая проверка инварианта (для `AD`, ADR-093): критерии рубрик
+    /// `<рубрика>#<критерий>`, которые судят то, чего правило не видит.
+    /// Закрывает `unverifiable` суждением с доказательствами вместо пустоты.
+    pub judged_by: Vec<String>,
     /// Несущий инвариант (для `AD`, ADR-050): `load_bearing: true` —
     /// инвариант, на котором держится решение. Необязательный признак.
     pub load_bearing: bool,
@@ -224,6 +228,10 @@ struct Frontmatter {
     verification: Option<String>,
     /// Отказ от механической проверки с обоснованием (для `AD`, ADR-006).
     unverifiable: Option<String>,
+    /// Смысловая проверка инварианта критериями рубрик (для `AD`, ADR-093):
+    /// список `<рубрика>#<критерий>` (как `verified_by`).
+    #[serde(default)]
+    judged_by: Vec<String>,
     /// Несущий инвариант (для `AD`, ADR-050): инвариант, на котором держится
     /// решение. Необязательный признак; без него механика работает так же,
     /// но кандидаты по несущим идут первыми, а находка «инвариант без
@@ -452,6 +460,7 @@ pub fn parse_entity(file: &Path, text: &str) -> Result<Entity> {
         verified_by: fm.verified_by,
         verification: fm.verification,
         unverifiable: fm.unverifiable,
+        judged_by: fm.judged_by,
         load_bearing: fm.load_bearing,
         conditions: fm.conditions,
         latency_budget_ms: fm.latency_budget_ms,

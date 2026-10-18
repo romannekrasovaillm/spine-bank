@@ -811,6 +811,8 @@ mod tests {
                 evidence_roles: Vec::new(),
                 coverage: None,
                 blocking: false,
+                bound_rules: Vec::new(),
+                binding_mode: crate::rubric::BindingMode::default(),
             }],
         };
         let llm = RecLlm(Mutex::new(Vec::new()));

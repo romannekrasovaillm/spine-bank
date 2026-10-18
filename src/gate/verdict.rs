@@ -6,7 +6,7 @@ use std::process::Command;
 
 use super::components::{
     component_approval_conditions, component_arch_drift, component_control_plane,
-    component_decision_quality, component_delta_guard, component_evidence, component_fitness,
+    component_decision_quality, component_delta_guard, component_evidence, fitness_with_outcomes,
     component_model_drift, component_model_validate, component_nfr, component_openspec_coverage,
     component_rule_weakened, component_secrets, component_sensors, component_spine_lint,
     component_trace, evidence_bundle_dirs,
@@ -164,15 +164,18 @@ pub(super) fn run_inner(
     // обязательности, иначе warn) и блокировка `model_drift`/`arch_drift`
     // (C1/K6: error только по включению в `[gate.required]`).
     let required_names = requirements.for_route(route);
+    // ADR-093: исходы правил этого прогона — вход связок критериев рубрик с
+    // правилами в `semantic_quality` (без повторного исполнения реестра).
+    let (fitness, rule_outcomes) = fitness_with_outcomes(
+        repo,
+        &constraints,
+        &options.exec,
+        &options.overrides,
+        options.resources.clone(),
+        &options.requires,
+    );
     let mut components = vec![
-        component_fitness(
-            repo,
-            &constraints,
-            &options.exec,
-            &options.overrides,
-            options.resources.clone(),
-            &options.requires,
-        ),
+        fitness,
         // F1 (ADR-062): составляющая получает диапазон исполнителя — покрытие
         // (дельта или change OpenSpec), созданное в диапазоне, не узаконивает
         // правку (self_approved), как и ослабления для rule_weakened.
@@ -252,9 +255,29 @@ pub(super) fn run_inner(
         base.unwrap_or("HEAD"),
         &git,
     ));
+    // ADR-093 волна 1: экспорт исходов правил детекторами досье — после
+    // составляющих, читающих дерево (`delta_guard`, `secrets`): новые файлы
+    // отчётов не должны выглядеть для них изменениями. До `semantic_quality`:
+    // хэш досье считается по только что записанным измерениям.
+    let export_note = if options.semantic_quality.export_detectors {
+        rule_outcomes.as_ref().map(|rules| {
+            control::write_rule_detectors(repo, rules).map_or_else(
+                |e| format!("детекторы правил не записаны: {e}"),
+                |written| {
+                    format!(
+                        "детекторы правил: {} → {}",
+                        written.len(),
+                        control::RULE_DETECTORS_DIR
+                    )
+                },
+            )
+        })
+    } else {
+        None
+    };
     // ADR-052: смысловые рубрики — та же дисциплина, что у `decision_quality`:
     // необязательная составляющая, включается только через `[gate.required]`.
-    components.push(component_semantic_quality(
+    let mut semantic = component_semantic_quality(
         repo,
         &options.semantic_quality,
         &options.rubrics_dir,
@@ -262,7 +285,12 @@ pub(super) fn run_inner(
         &git,
         required_names.iter().any(|r| r == "semantic_quality"),
         options.decision_policy.for_route(options.route),
-    ));
+        rule_outcomes.as_deref(),
+    );
+    if let Some(note) = export_note {
+        semantic.detail = format!("{}; {note}", semantic.detail);
+    }
+    components.push(semantic);
     // K6: рёбра графа «как построено» против модели. Дорогая составляющая
     // (снимок базы + обход рабочего дерева), по умолчанию SKIP: включение —
     // [gate.required] маршрута (находки error) или [gate.arch_drift]

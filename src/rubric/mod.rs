@@ -75,7 +75,7 @@ pub(crate) use report::{EvidenceScope, build_report, parse_judge_response};
 pub use report::{InputInjection, RubricReport, scan_injections, weighted_total};
 pub use tools::tools;
 pub use types::{
-    Coverage, Criterion, CriterionFlag, CriterionScore, CriterionSnapshot, EvidenceOn,
+    BindingMode, BindingRole, BoundRule, Coverage, Criterion, CriterionFlag, CriterionScore, CriterionSnapshot, EvidenceOn,
     JudgeConfigSnapshot, MAX_TARGET_CHARS, Rubric, RubricDecision, RubricSummary, ScenarioVerdict,
     VerifiedCitation,
 };

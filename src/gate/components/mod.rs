@@ -28,6 +28,9 @@ pub(in crate::gate) use model_drift::component_model_drift;
 /// пропущенные по no-exec/untrusted правила переводят составляющую в SKIP
 /// (см. [`skip_detail`]) — «зелёный при неисполненных командах» был бы
 /// молчаливой ложью.
+/// Обёртка без исходов правил — для тестов составляющей (прод вызывает
+/// [`fitness_with_outcomes`], ADR-093).
+#[cfg(test)]
 pub(super) fn component_fitness(
     repo: &Path,
     constraints: &ConstraintsPath,
@@ -36,16 +39,37 @@ pub(super) fn component_fitness(
     resources: Option<control::requires::AvailableResources>,
     requires: &std::collections::BTreeMap<String, control::requires::RequiresProbeConfig>,
 ) -> GateComponent {
+    fitness_with_outcomes(repo, constraints, exec, overrides, resources, requires).0
+}
+
+/// Составляющая `fitness` вместе с исходами правил этого же прогона
+/// (ADR-093): по ним `semantic_quality` применяет связки критериев рубрик с
+/// правилами — без повторного исполнения реестра и без чтения файлов,
+/// оставшихся от прошлого прогона. `None` — реестр не прогонялся.
+pub(super) fn fitness_with_outcomes(
+    repo: &Path,
+    constraints: &ConstraintsPath,
+    exec: &crate::cmd_trust::ExecPolicy,
+    overrides: &crate::config::OverridesConfig,
+    resources: Option<control::requires::AvailableResources>,
+    requires: &std::collections::BTreeMap<String, control::requires::RequiresProbeConfig>,
+) -> (GateComponent, Option<Vec<control::RuleDetector>>) {
+    let outcomes = |report: &control::FitnessReport| {
+        control::rule_detectors(repo, &constraints.path, report).ok()
+    };
     // ADR-068 Am.3: реестр зондов `requires` — встроенные дефолты плюс секции
     // `[gate.requires.<имя>]`. Битая секция — красный гейт: без валидного
     // зонда ресурсный SKIP неотличим от опечатки.
     let probes = match control::requires::ProbeRegistry::from_config(requires) {
         Ok(probes) => probes,
         Err(e) => {
-            return GateComponent::fail(
-                "fitness",
-                format!("[gate.requires] невалиден: {e}"),
-                Vec::new(),
+            return (
+                GateComponent::fail(
+                    "fitness",
+                    format!("[gate.requires] невалиден: {e}"),
+                    Vec::new(),
+                ),
+                None,
             );
         }
     };
@@ -68,7 +92,7 @@ pub(super) fn component_fitness(
                 control::HANDOFF_CONSTRAINTS_PATH
             )
         };
-        return GateComponent::skip("fitness", message);
+        return (GateComponent::skip("fitness", message), None);
     }
     let label = constraints_label(repo, &constraints.path);
     // T-02: расхождение двух копий реестра — не пометка в тексте, а находка.
@@ -109,41 +133,59 @@ pub(super) fn component_fitness(
     };
     if let Some(finding) = divergence {
         let mut findings = vec![finding];
-        let summary = match control::check_with_options(repo, &constraints.path, &check_options) {
-            Ok(report) => {
-                findings.extend(report.issues.iter().map(GateFinding::lint));
-                report.summary
-            }
-            Err(e) => format!("сбой выполнения: {e}"),
-        };
-        return GateComponent::fail("fitness", detail(&summary), findings).noting(notes);
+        let (summary, rules) =
+            match control::check_with_options(repo, &constraints.path, &check_options) {
+                Ok(report) => {
+                    findings.extend(report.issues.iter().map(GateFinding::lint));
+                    let rules = outcomes(&report);
+                    (report.summary, rules)
+                }
+                Err(e) => (format!("сбой выполнения: {e}"), None),
+            };
+        return (
+            GateComponent::fail("fitness", detail(&summary), findings).noting(notes),
+            rules,
+        );
     }
     match control::check_with_options(repo, &constraints.path, &check_options) {
         Ok(report) if report.passed => {
+            let rules = outcomes(&report);
             // Пропуски исполняемых правил — не PASS («нарушений нет»), а SKIP:
             // вердикт неполон, обязательная составляющая даёт INCOMPLETE.
             // A2: отсутствующий прогонщик (error-правила); A3: запрет доверия
             // (любое severity — пропуск по решению политики).
             if let Some(skip_detail) = skip_detail(&report) {
-                return GateComponent::skip(
-                    "fitness",
-                    format!("{} — файл: {label}", detail(&skip_detail)),
-                )
-                .noting(notes);
+                return (
+                    GateComponent::skip(
+                        "fitness",
+                        format!("{} — файл: {label}", detail(&skip_detail)),
+                    )
+                    .noting(notes),
+                    rules,
+                );
             }
-            GateComponent::pass(
+            (
+                GateComponent::pass(
+                    "fitness",
+                    format!("{} — файл: {label}", detail(&report.summary)),
+                )
+                .noting(notes),
+                rules,
+            )
+        }
+        Ok(report) => (
+            GateComponent::fail(
                 "fitness",
                 format!("{} — файл: {label}", detail(&report.summary)),
+                report.issues.iter().map(GateFinding::lint).collect(),
             )
-            .noting(notes)
-        }
-        Ok(report) => GateComponent::fail(
-            "fitness",
-            format!("{} — файл: {label}", detail(&report.summary)),
-            report.issues.iter().map(GateFinding::lint).collect(),
-        )
-        .noting(notes),
-        Err(e) => GateComponent::fail("fitness", format!("сбой выполнения: {e}"), Vec::new()),
+            .noting(notes),
+            outcomes(&report),
+        ),
+        Err(e) => (
+            GateComponent::fail("fitness", format!("сбой выполнения: {e}"), Vec::new()),
+            None,
+        ),
     }
 }
 
@@ -1169,7 +1211,14 @@ pub(super) fn component_trace(repo: &Path, opts: &GateOptions) -> GateComponent 
                 .to_string(),
         );
     }
-    match trace::trace_check_with(repo, opts.executable_required) {
+    // ADR-093: ссылки `judged_by` сверяются с рубриками того же каталога,
+    // которым пользуется `semantic_quality`.
+    let trace_options = trace::TraceOptions {
+        executable_required: opts.executable_required,
+        judged_required: opts.judged_required,
+        rubrics_dir: Some(opts.rubrics_dir.clone()),
+    };
+    match trace::trace_check_opts(repo, &trace_options) {
         Ok(report) if !report.has_errors() => GateComponent::pass(
             "trace_check",
             format!(
