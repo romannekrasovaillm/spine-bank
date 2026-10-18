@@ -10,7 +10,7 @@
   <img src="https://img.shields.io/badge/rust-edition_2024-16181D?logo=rust&logoColor=white" alt="Rust edition 2024">
   <img src="https://img.shields.io/badge/license-MIT-C4F542?labelColor=16181D" alt="License MIT">
   <img src="https://img.shields.io/badge/harnesses-6_verified-E5401F?labelColor=16181D" alt="6 harnesses verified">
-  <img src="https://img.shields.io/badge/skills-66-9AA3AE?labelColor=16181D" alt="66 skills">
+  <img src="https://img.shields.io/badge/skills-78-9AA3AE?labelColor=16181D" alt="78 skills">
 </p>
 
 <p align="center">
@@ -312,7 +312,7 @@ arch-be connect claude
 ```
 
 Пишет `.mcp.json` + `.claude/settings.json` (Stop-хук-гейт) +
-`.claude/skills/` (66 скиллов) + `CLAUDE.md`. Проверка: `claude mcp list` →
+`.claude/skills/` (78 скиллов) + `CLAUDE.md`. Проверка: `claude mcp list` →
 `spine … ✔ Connected`. При первом запуске — разрешите project-сервер («Yes»).
 
 ![Подключение Claude Code](docs/screenshots/connect/01-connect.png)
@@ -578,7 +578,7 @@ Kimi Code, OpenClaw) — с матрицей, нюансами и всеми к�
 
 ### Скиллы видны агенту нативно
 
-66 архитектурных скиллов в 9 встроенных плагинах (ADR, fitness-функции,
+78 архитектурных скиллов в 10 встроенных плагинах (ADR, fitness-функции,
 saga/outbox/circuit-breaker, pptx/docx/xlsx-отчёты + плейбуки spine-*)
 раскладываются в проект и видны агенту (на кадрах с прогонов — 55: библиотека
 росла после съёмки):
@@ -698,7 +698,7 @@ arch-be mcp serve --rw    # 51 инструмент: + handoff_create, adr_new, 
   живые сессии со скриншотами.
 - [docs/mcp.md](docs/mcp.md) — контракт MCP-сервера и split-judge.
 - [docs/skills_for_architects.md](docs/skills_for_architects.md) — обзор
-  библиотеки: все 66 скиллов в 9 плагинах, с чего начать.
+  библиотеки: все 78 скиллов в 10 плагинах, с чего начать.
 - [docs/INVERSION.md](docs/INVERSION.md) — отчёт по плану инверсии: что сделано, отступления.
 - [README-full.md](README-full.md) — полный тур харнесса (RU/EN).
 
