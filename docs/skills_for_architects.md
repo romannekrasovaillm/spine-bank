@@ -7,26 +7,27 @@
 — в [plugins_and_skills.md](plugins_and_skills.md); этот документ — про
 **содержимое**: что внутри и что попробовать в первую очередь.
 
-Всего **66 скиллов в 9 встроенных плагинах** (`assets/plugins/`, MIT) —
+Всего **78 скиллов в 10 встроенных плагинах** (`assets/plugins/`, MIT) —
 раскладываются командой `arch-be init` в `~/.arch-harness/plugins`.
 
 > **Banking Edition** добавляет шесть доменных плагинов `ru-*` (39 скиллов):
 > ru-integration, ru-data, ru-compliance, ru-architecture, ru-payments,
 > ru-archify — проприетарный слой, в эту публикацию не входит (итого в полной
-> редакции 101 скилл в 15 плагинах).
+> редакции 117 скиллов в 16 плагинах).
 
 ## Карта библиотеки
 
 | Плагин | Скиллов | О чём |
 |---|---:|---|
-| arch-core | 15 | Ядро методов solution-архитектора: ADR, спайн, маршрутизация, NFR, handoff, рубрики |
+| arch-core | 22 | Ядро методов solution-архитектора: ADR, спайн, маршрутизация, NFR, handoff, рубрики, смысловое и риск-ориентированное ревью, флоты агентов |
 | arch-office | 12 | Офисные артефакты: docx/pptx/xlsx с генераторами (отчёты МД, SAD, матрицы, реестр рисков) |
+| spine-workflows | 10 | Плейбуки работы со Spine из чужого харнесса поверх MCP: quickstart, разбор, гейты, Evidence Bundle, судьи рубрик и смысла, bootstrap, Archify |
 | aws-builders-library | 9 | Дистилляты Amazon Builders' Library: таймауты, load shedding, статическая стабильность |
-| spine-workflows | 7 | Плейбуки работы со Spine из чужого харнесса поверх MCP: quickstart, разбор, гейты, судья рубрик, bootstrap, Archify |
+| arch-governance | 5 | Библиотека правил и безопасность агентов: каталог fitness-функций, антипаттерны, карта источников, моделирование угроз, защита от prompt injection |
 | patterns-integration | 5 | Pattern language Ричардсона (microservices.io): сага, outbox, CQRS, strangler+ACL |
 | patterns-resilience | 5 | Azure Cloud Design Patterns: circuit breaker, bulkhead, cache-aside, throttling |
 | aws-agentic-ai | 5 | Агентные AI-паттерны AWS PG 2026: workflow, сага-оркестрация, reflect-refine |
-| arch-governance | 3 | Управление библиотекой правил: каталог fitness-функций, антипаттерны, карта источников |
+| arch-ai-platform | 4 | Корпоративная AI/LLM-платформа: референсная архитектура, TCO, FinOps AI-шлюза, экономика токенов харнесса |
 | spine-be-docs | 1 | Справка по самому продукту из документации репозитория |
 
 ## Самое интересное — с чего начать
@@ -86,7 +87,7 @@
 
 ### Плейбуки работы со Spine из чужого харнесса (spine-workflows)
 
-Семь плейбуков `spine-*` — это готовые сценарии для агента, который живёт в
+Десять плейбуков `spine-*` — это готовые сценарии для агента, который живёт в
 кодовом харнессе (GigaCode, Claude Code, Kimi, Qwen, omp) и ходит в Spine
 поверх MCP: у самого Spine LLM нет, поэтому выводы формулирует агент-хост,
 а Spine даёт детерминированную механику.
@@ -117,27 +118,42 @@
 - **`spine-archify-viz`** — визуализация Archify из харнесса: агент пишет
   JSON IR из кода/модели/заметок, итеративно чинит его по диагностикам
   `archify_validate`, получает интерактивный HTML через `archify_show`.
+- **`spine-bundle`** — первый зелёный критического маршрута: сборка Evidence
+  Bundle от каркаса до PASS, разбор находок `evidence_stub`,
+  `review_not_ready`, `a3_not_signed`, `rehearsal_not_passed`.
+- **`spine-semantic-judge`** — смысловая оценка пакета без API-ключей у
+  сервера: список субъектов, досье, k независимых ответов, verify, гейт;
+  реакция на находки `semantic_*`.
+- **`spine-judge-handover`** — передача судейства рубрики второму харнессу и
+  приёмка результата: `rubric_handover` → ожидание → `rubric_accept` → гейт.
 
 ## Полный каталог
 
-### arch-core (15) — методы архитектора
+### arch-core (22) — методы архитектора
 
 | Скилл | Что даёт |
 |---|---|
 | `adr-authoring` | Дисциплина ADR по AI-DLC: запись до реализации, альтернативы, отрицательные последствия, обратимость |
 | `adversarial-review` | Состязательное ревью независимым контуром |
+| `agent-fleet-design` | Флоты агентов: топологии, границы контекста, права и песочницы, точки человеческого контроля, экономика |
 | `agents-md-authoring` | AGENTS.md для репозиториев команд: генерация из spine/ADR/CONSTRAINTS, двухзонность |
+| `architecture-as-context` | Архитектурное знание как многослойный машиночитаемый контекст: скиллы, CLAUDE.md/AGENTS.md, правила каталогов |
 | `c4-mermaid` | C4-уровни Context→Container→Component с рендером mermaid в терминале |
 | `delta-spec` | Дельта-спецификации brownfield (OpenSpec): ADDED/MODIFIED/REMOVED относительно истины |
 | `dsh-harness-patterns` | Паттерны устройства агентных харнессов по канону DeepSeek Harness |
 | `fitness-functions` | Fitness-функции: CONSTRAINTS.yaml, типы проверок, как писать свои |
 | `handoff-packaging` | Handoff-пакет кодовым агентам: epic-context, JSON-контракт, контроль после прогона |
+| `native-tools-discipline` | Дисциплина нативных вызовов: событие → инструмент Spine, прежде чем уходить в bash/grep/web |
 | `nfr-design` | NFR с измеримыми целями, слоистое проектирование functional→NFR→infra |
 | `readiness-gate` | Readiness-гейт перед реализацией (BMAD): PASS/CONCERNS/FAIL, поиск «сирот» |
+| `recover-review` | Ревью графа recover силами LLM хоста: только `[inferred]`, подтверждение — за детерминированным сканером |
 | `reverse-discovery` | Обратное обследование legacy: карта из кода с метками confidence/gaps |
+| `risk-tiered-review` | Уровни риска T0–T3, маршрутизация внимания, ревью дельт и плана, контроль дрейфа архитектуры |
 | `rubric-judging` | Якорные и динамические рубрики, LLM-судья со свидетельствами |
+| `semantic-review` | Смысловое ревью: решение против инварианта, ссылка «не на ту» сущность, показатель без механизма |
 | `significance-routing` | 15 триггеров значимости, маршруты Fast/Standard/Critical, A0–A5 |
 | `skill-authoring` | Мета-скилл создания скиллов и упаковки в плагины |
+| `spec-first` | Мини-спека до начала работы: цель, не-цели, ограничения, критерий готовности |
 | `spine-invariants` | Позвоночник инвариантов для параллельных исполнителей |
 
 Субагенты плагина: `repo-scout`, `adr-reviewer`, `nfr-auditor`. Хуки: блок
@@ -178,7 +194,7 @@ openpyxl), корпоративные стили и чек-лист приёмк
 | `queue-backlogs` | Бимодальность очередей, AgeOfFirstAttempt, shuffle-sharding (Янацек) |
 | `fairness-admission-control` | Квоты на тенанта, token bucket, честность в мультитенантности (Янацек) |
 
-### spine-workflows (7) — плейбуки поверх MCP
+### spine-workflows (10) — плейбуки поверх MCP
 
 | Скилл | Что даёт |
 |---|---|
@@ -189,6 +205,9 @@ openpyxl), корпоративные стили и чек-лист приёмк
 | `spine-adr-judge` | Оценка ADR/документов рубриками: split-judge без API-ключей у Spine или rubric_run |
 | `spine-content-bootstrap` | Наполнение пустого проекта: спайн, CONSTRAINTS.yaml, модель, база знаний, первый ADR |
 | `spine-archify-viz` | Диаграммы Archify из харнесса: JSON IR → validate → интерактивный HTML |
+| `spine-bundle` | Evidence Bundle критического маршрута от каркаса до PASS |
+| `spine-semantic-judge` | Смысловая оценка пакета: субъекты, досье, k ответов, verify, гейт |
+| `spine-judge-handover` | Передача судейства рубрики второму харнессу и приёмка результата |
 
 ### patterns-integration (5) — microservices.io
 
@@ -220,13 +239,24 @@ openpyxl), корпоративные стили и чек-лист приёмк
 | `multi-agent-collaboration` | Пиринговая координация равных агентов vs workflow-оркестрация |
 | `reflect-refine-loops` | Генератор + независимый оценщик, структурированная обратная связь |
 
-### arch-governance (3) — библиотека правил
+### arch-governance (5) — библиотека правил и безопасность агентов
 
 | Скилл | Что даёт |
 |---|---|
 | `fitness-function-catalog` | 20 готовых fitness-функций с regex, три волны внедрения, карточка дистилляции |
 | `rule-library-antipatterns` | 8 антипаттернов расширения + фильтр включения из пяти форм правила |
 | `architecture-sources-map` | Навигация по 15 блокам источников (168 шт.): что встроено, что кандидат |
+| `agent-threat-modeling` | Моделирование угроз AI-агентов: поверхность атаки, OWASP LLM Top 10 и OWASP Agentic |
+| `prompt-injection-defense` | Защита от прямой и непрямой prompt injection и утечки данных: архитектурные барьеры, guardrails |
+
+### arch-ai-platform (4) — корпоративная AI/LLM-платформа
+
+| Скилл | Что даёт |
+|---|---|
+| `ai-platform-reference-architecture` | Референсная архитектура AI-платформы: шлюз, каталог моделей, инференс, RAG, агентный рантайм, guardrails, эвалы |
+| `llm-tco` | TCO внешнего API против собственного инференса, точка безубыточности; калькулятор `tco_calc.py` |
+| `ai-gateway-finops` | AI-шлюз и FinOps: маршрутизация и каскады моделей, кэширование, квоты, chargeback |
+| `harness-token-economics` | Экономика токенов харнесса: cache-aware промпт, компакция, субагент как context firewall |
 
 ### spine-be-docs (1)
 
